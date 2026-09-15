@@ -1,0 +1,9 @@
+apiVersion: deps.cloudctl.io/v1alpha1
+kind: AppDependencies
+metadata:
+  labels:
+    app.kubernetes.io/name: cloudctl-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: appdependencies-sample
+spec:
+  # TODO(user): Add fields here
