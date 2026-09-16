@@ -177,8 +177,8 @@ func reconcileTopicAttributes(ctx context.Context, client snsAPI, topicArn strin
 
 	attrName := "ContentBasedDeduplication"
 	_, err = client.SetTopicAttributes(ctx, &sns.SetTopicAttributesInput{
-		TopicArn: &topicArn,
-		AttributeName: &attrName,
+		TopicArn:       &topicArn,
+		AttributeName:  &attrName,
 		AttributeValue: &desired,
 	})
 	return err

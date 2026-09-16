@@ -53,9 +53,9 @@ type fakeAWSError struct {
 	fault smithy.ErrorFault
 }
 
-func (e *fakeAWSError) Error() string                  { return e.code }
-func (e *fakeAWSError) ErrorCode() string               { return e.code }
-func (e *fakeAWSError) ErrorMessage() string            { return e.code }
+func (e *fakeAWSError) Error() string                 { return e.code }
+func (e *fakeAWSError) ErrorCode() string             { return e.code }
+func (e *fakeAWSError) ErrorMessage() string          { return e.code }
 func (e *fakeAWSError) ErrorFault() smithy.ErrorFault { return e.fault }
 
 func newFakeSNS() *fakeSNS {

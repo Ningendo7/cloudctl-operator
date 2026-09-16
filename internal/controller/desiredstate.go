@@ -43,7 +43,7 @@ const transientRequeueInterval = 30 * time.Second
 // produce, used to compute the aggregate Ready condition. Kept in sync
 // with allSections above — each entry here should have a matching
 // section constructor registered there.
-var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady"}
+var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", "S3Ready"}
 
 type section struct {
 	name      string
@@ -60,6 +60,7 @@ func allSections(awsClients *cloudctlaws.Clients) []section {
 		sqsSection(awsClients),
 		snsSection(awsClients),
 		dynamodbSection(awsClients),
+		s3Section(awsClients),
 	}
 }
 

@@ -4,8 +4,8 @@ What `AppDependencies` actually manages today. See
 [architecture.md](architecture.md) for the design decisions behind the
 behavior described here (ownership, deletion safety, naming).
 
-Planned but not yet implemented: S3, KMS, auto-derived IAM, CloudWatch
-alarms, backup policy. Their CRD shape exists in
+Planned but not yet implemented: KMS, auto-derived IAM, CloudWatch alarms,
+backup policy. Their CRD shape exists in
 `api/v1alpha1/appdependencies_types.go` as a preview of the intended
 surface, but nothing reconciles them yet — declaring them in a CR today has
 no effect.
@@ -112,6 +112,50 @@ and a deny-policy blocking new writes while a table sits in
 `PendingDeletion` (SQS/SNS both have this; DynamoDB resource-based policies
 are newer and less battle-tested, and the quiet window plus the 7-day grace
 period already cover the realistic risk without it).
+
+## S3
+
+```yaml
+spec:
+  s3:
+    resources:
+      - name: receipts
+        deletionPolicy: Retain
+        backup:
+          enabled: true
+        overrides:
+          versioningEnabled: true
+          lifecycleRules:
+            - id: archive-old-invoices
+              transitionAfterDays: 90
+              transitionStorageClass: GLACIER
+```
+
+| Field | Notes |
+|---|---|
+| `name` | Required, up to 63 characters. The actual bucket name also has an 8-character account-ID hash suffix appended — S3 bucket names are unique across *every* AWS account globally, not just this one, so the plain namespace-crName-key scheme alone isn't safe here. |
+| `deletionPolicy` | Same semantics as the other resources. A bucket's "non-empty" equivalent is having *any* object version or delete marker at all, not just current objects — a bucket with backup enabled can have zero current objects but old versions still retained for point-in-time recovery, and those count. |
+| `force` | Allows deleting a non-empty bucket. Deletion itself empties every object version and delete marker (paginated, batched 1000 at a time) and aborts in-progress multipart uploads before calling `DeleteBucket` — unlike the other resources, S3 has no single "delete everything" call. |
+| `adopt` | Same semantics as the other resources. |
+| `sharedWith` | Same semantics as the other resources; not yet IAM-enforced. |
+| `backup.enabled` | Enables versioning and a lifecycle policy that cleans up superseded (noncurrent) object versions after 30 days by default. Deliberately never expires or transitions the *current* object — backup protects live data, it doesn't put a deletion timer on it. |
+| `overrides.versioningEnabled` | Controls versioning independently of `backup` — useful for a bucket that wants versioning without backup's lifecycle policy, or vice versa. |
+| `overrides.lifecycleRules` | Replaces the default backup lifecycle policy entirely. An explicitly empty list (`[]`) opts out of any lifecycle policy, even with `backup.enabled: true` — it does not fall back to the default. |
+
+Bucket creation and tagging **aren't atomic** — `CreateBucket` doesn't accept
+tags the way SQS/SNS/DynamoDB's create calls do, so a bucket can briefly
+exist untagged right after creation. It's recorded as `TagPending` in the
+ledger and the tag write is retried on the next reconcile; an untagged
+bucket is only trusted as "ours, tagging just hasn't caught up yet" for one
+hour after creation (see [architecture.md](architecture.md)) — past that,
+it's treated the same as any other foreign, untagged bucket, requiring
+`adopt: true`.
+
+**Not yet built:** `replication` (the CRD field exists but is explicitly
+rejected at reconcile time) — cross-region replication needs a bucket and
+IAM role in a different region, which needs real multi-region client
+support this operator doesn't have yet. Same limitation as DynamoDB's
+Global Tables.
 
 ## Shared behavior
 

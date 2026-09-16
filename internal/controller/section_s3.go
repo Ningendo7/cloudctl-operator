@@ -21,44 +21,32 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
-	"github.com/Ningendo7/cloudctl-operator/internal/resources/sns"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/s3"
 )
 
-// snsSection adapts the sns package's Ensure/Cleanup to the orchestrator's
+// s3Section adapts the s3 package's Ensure/Cleanup to the orchestrator's
 // uniform section shape.
-func snsSection(awsClients *cloudctlaws.Clients) section {
+func s3Section(awsClients *cloudctlaws.Clients) section {
 	return section{
-		name: "SNSReady",
+		name: "S3Ready",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
 			declared := 0
-			if cr.Spec.SNS != nil {
-				declared = len(cr.Spec.SNS.Resources)
+			if cr.Spec.S3 != nil {
+				declared = len(cr.Spec.S3.Resources)
 			}
-			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "sns", declared)
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "s3", declared)
 			defer cancel()
 
-			ledger, ensureErr := sns.Ensure(
-				ctx,
-				awsClients.SNS,
-				cr.Namespace,
-				cr.Name,
-				string(cr.UID),
-				awsClients.Region,
-				awsClients.AccountID,
-				cr.Spec.SNS,
-				cr.Status.ManagedResources,
+			ledger, ensureErr := s3.Ensure(
+				ctx, awsClients.S3, cr.Namespace, cr.Name, string(cr.UID),
+				awsClients.Region, awsClients.AccountID,
+				cr.Spec.S3, cr.Status.ManagedResources,
 			)
 			cr.Status.ManagedResources = ledger
 
-			ledger, _, cleanupErr := sns.Cleanup(
-				ctx,
-				awsClients.SNS,
-				cr.Namespace,
-				cr.Name,
-				string(cr.UID),
-				cr.Spec.SNS,
-				cr.Status.ManagedResources,
-				false,
+			ledger, _, cleanupErr := s3.Cleanup(
+				ctx, awsClients.S3, cr.Namespace, cr.Name, string(cr.UID),
+				cr.Spec.S3, cr.Status.ManagedResources, false,
 			)
 			cr.Status.ManagedResources = ledger
 
@@ -66,34 +54,27 @@ func snsSection(awsClients *cloudctlaws.Clients) section {
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(cr, "SNSReady", err)
+			setSectionCondition(cr, "S3Ready", err)
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
 			declared := 0
-			if cr.Spec.SNS != nil {
-				declared = len(cr.Spec.SNS.Resources)
+			if cr.Spec.S3 != nil {
+				declared = len(cr.Spec.S3.Resources)
 			}
-			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "sns", declared)
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "s3", declared)
 			defer cancel()
 
-			ledger, results, err := sns.Cleanup(
-				ctx,
-				awsClients.SNS,
-				cr.Namespace,
-				cr.Name,
-				string(cr.UID),
-				cr.Spec.SNS,
-				cr.Status.ManagedResources,
-				true,
+			ledger, results, err := s3.Cleanup(
+				ctx, awsClients.S3, cr.Namespace, cr.Name, string(cr.UID),
+				cr.Spec.S3, cr.Status.ManagedResources, true,
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {
 				return false, err
 			}
-
 			for _, r := range results {
-				if r.Reason == sns.CleanupReasonPendingDeletion || r.Reason == sns.CleanupReasonStuckPendingDeletion {
+				if r.Reason == s3.CleanupReasonPendingDeletion || r.Reason == s3.CleanupReasonStuckPendingDeletion {
 					return false, nil
 				}
 			}

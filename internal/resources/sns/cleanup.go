@@ -179,7 +179,7 @@ func Cleanup(
 		}
 		status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 	}
-	
+
 	return updatedLedger, results, firstErr
 }
 

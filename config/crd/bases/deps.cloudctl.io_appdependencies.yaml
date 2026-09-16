@@ -315,6 +315,12 @@ spec:
                   resources:
                     items:
                       properties:
+                        adopt:
+                          description: |-
+                            adopt allows this CR to take ownership of a pre-existing AWS resource
+                            found under this entry's deterministic name that isn't already tagged
+                            as owned by this CR. Same semantics as sqs/sns/dynamodb's adopt field.
+                          type: boolean
                         backup:
                           description: |-
                             S3BackupSpec enables versioning + lifecycle-based point-in-time recovery.
@@ -347,14 +353,22 @@ spec:
                             lifecycleRules:
                               description: |-
                                 lifecycleRules overrides the standard lifecycle policy applied when
-                                backup is enabled.
+                                backup is enabled. An explicitly empty list opts out of the default
+                                entirely, rather than falling back to it — this only works because
+                                the field has no omitempty; a zero-length slice with omitempty would
+                                serialize identically to the field being absent, losing that
+                                distinction.
                               items:
                                 description: S3LifecycleRule overrides a single lifecycle
                                   transition/expiration rule.
                                 properties:
                                   expirationAfterDays:
-                                    description: expirationAfterDays permanently deletes
-                                      objects after this many days.
+                                    description: |-
+                                      expirationAfterDays permanently deletes the *current* version of an
+                                      object after this many days. Be careful pairing this with backup —
+                                      it deletes live data, not old versions; see
+                                      noncurrentVersionExpirationAfterDays for cleaning up superseded
+                                      versions instead.
                                     format: int32
                                     minimum: 1
                                     type: integer
@@ -363,6 +377,16 @@ spec:
                                       for this rule.
                                     maxLength: 255
                                     type: string
+                                  noncurrentVersionExpirationAfterDays:
+                                    description: |-
+                                      noncurrentVersionExpirationAfterDays permanently deletes *superseded*
+                                      (noncurrent) object versions this many days after they stop being
+                                      current. This is what actually bounds storage growth from
+                                      versioning without ever touching the live object — the default
+                                      backup lifecycle policy uses this, not expirationAfterDays.
+                                    format: int32
+                                    minimum: 1
+                                    type: integer
                                   transitionAfterDays:
                                     description: |-
                                       transitionAfterDays moves objects to transitionStorageClass after this

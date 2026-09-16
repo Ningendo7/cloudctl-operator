@@ -54,7 +54,6 @@ type queueOptions struct {
 
 // Ensure reconciles every declared SQS queue (and its DLQ, if requested)
 // against AWS, updating the ownership ledger as it goes.
-//
 func Ensure(
 	ctx context.Context,
 	client sqsAPI,
@@ -139,7 +138,7 @@ func ensureQueue(
 	contentBasedDedup := false
 	var visibilityTimeout *int32
 	if q.Overrides != nil {
-		if  q.Overrides.ContentBasedDeduplication != nil {
+		if q.Overrides.ContentBasedDeduplication != nil {
 			contentBasedDedup = *q.Overrides.ContentBasedDeduplication
 		}
 		visibilityTimeout = q.Overrides.VisibilityTimeoutSeconds

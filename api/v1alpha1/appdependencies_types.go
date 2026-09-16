@@ -276,10 +276,23 @@ type S3LifecycleRule struct {
 	// +kubebuilder:validation:Enum=STANDARD_IA;ONEZONE_IA;GLACIER;DEEP_ARCHIVE;INTELLIGENT_TIERING
 	TransitionStorageClass string `json:"transitionStorageClass,omitempty"`
 
-	// expirationAfterDays permanently deletes objects after this many days.
+	// expirationAfterDays permanently deletes the *current* version of an
+	// object after this many days. Be careful pairing this with backup —
+	// it deletes live data, not old versions; see
+	// noncurrentVersionExpirationAfterDays for cleaning up superseded
+	// versions instead.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	ExpirationAfterDays *int32 `json:"expirationAfterDays,omitempty"`
+
+	// noncurrentVersionExpirationAfterDays permanently deletes *superseded*
+	// (noncurrent) object versions this many days after they stop being
+	// current. This is what actually bounds storage growth from
+	// versioning without ever touching the live object — the default
+	// backup lifecycle policy uses this, not expirationAfterDays.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	NoncurrentVersionExpirationAfterDays *int32 `json:"noncurrentVersionExpirationAfterDays,omitempty"`
 }
 
 // S3Overrides exposes advanced, non-default S3 configuration beyond the
@@ -293,12 +306,16 @@ type S3Overrides struct {
 	VersioningEnabled *bool `json:"versioningEnabled,omitempty"`
 
 	// lifecycleRules overrides the standard lifecycle policy applied when
-	// backup is enabled.
+	// backup is enabled. An explicitly empty list opts out of the default
+	// entirely, rather than falling back to it — this only works because
+	// the field has no omitempty; a zero-length slice with omitempty would
+	// serialize identically to the field being absent, losing that
+	// distinction.
 	// +optional
 	// +kubebuilder:validation:MaxItems=10
 	// +listType=map
 	// +listMapKey=id
-	LifecycleRules []S3LifecycleRule `json:"lifecycleRules,omitempty"`
+	LifecycleRules []S3LifecycleRule `json:"lifecycleRules"`
 }
 
 type S3BucketSpec struct {
@@ -319,6 +336,12 @@ type S3BucketSpec struct {
 
 	// +optional
 	Force bool `json:"force,omitempty"`
+
+	// adopt allows this CR to take ownership of a pre-existing AWS resource
+	// found under this entry's deterministic name that isn't already tagged
+	// as owned by this CR. Same semantics as sqs/sns/dynamodb's adopt field.
+	// +optional
+	Adopt bool `json:"adopt,omitempty"`
 
 	// +optional
 	// +kubebuilder:validation:MaxItems=20

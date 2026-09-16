@@ -1,7 +1,7 @@
 # cloudctl-operator
 
 A Kubernetes operator that manages a bundle of everyday AWS dependencies —
-SNS, SQS, DynamoDB, and (planned) S3, KMS, and the IAM to go with them —
+SNS, SQS, DynamoDB, S3, and (planned) KMS and the IAM to go with them —
 behind a single opinionated `AppDependencies` CRD, instead of exposing raw
 cloud-provider config as YAML.
 
@@ -19,7 +19,7 @@ the concrete result in `status` rather than hiding it behind the defaults.
   ownership and adoption, the trust window, deletion safety, naming,
   validation strategy.
 - **[docs/resources.md](docs/resources.md)** — what's actually implemented
-  today (SQS, SNS, DynamoDB), with field-by-field behavior and known gaps.
+  today (SQS, SNS, DynamoDB, S3), with field-by-field behavior and known gaps.
 
 ## Getting Started
 
