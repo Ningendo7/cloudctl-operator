@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -87,6 +89,50 @@ func TestCleanup_RelinquishesOwnershipTagForRetainedResource(t *testing.T) {
 
 	if cloudctlaws.IsOwnedBy(client.queues[queueName].tags, "default", "checkout-service", "uid-1") {
 		t.Error("expected the ownership tag to be relinquished once a Retain resource is no longer declared")
+	}
+}
+
+func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
+	// Defensive-coding verification: Cleanup checks "!= Delete", not
+	// "== Retain", specifically so a DeletionPolicy that's somehow truly
+	// unset (Go's zero value, bypassing the CRD's own default) still falls
+	// to the safe side rather than an undefined one. Every other test
+	// exercises an explicitly-set DeletionPolicyRetain, which never
+	// actually proves this - this one constructs the ledger entry directly
+	// with the field left at its zero value.
+	client := newFakeSQS()
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	_, err := client.CreateQueue(context.Background(), &sqs.CreateQueueInput{
+		QueueName: &queueName,
+		Tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("test setup: CreateQueue() error = %v", err)
+	}
+	ledger := []depsv1alpha1.ManagedResource{
+		{
+			Type: resourceType,
+			Name: "orders",
+			ARN:  "arn:aws:sqs:us-east-1:000000000000:" + queueName,
+			// DeletionPolicy deliberately left unset (zero value).
+		},
+	}
+
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if r := findResult(results, "orders"); r == nil || r.Reason != CleanupReasonRetained {
+		t.Errorf("expected an unset DeletionPolicy to be treated as Retained, got %+v", results)
+	}
+	if _, stillExists := client.queues[queueName]; !stillExists {
+		t.Error("expected the queue to survive - an unset DeletionPolicy must never be treated as Delete")
+	}
+	if status.FindManagedResource(updated, "sqs", "orders") == nil {
+		t.Error("expected the retained entry to stay in the ledger")
 	}
 }
 
@@ -391,6 +437,50 @@ func TestCleanup_ForceDeletesNonEmptyQueue(t *testing.T) {
 	}
 	if _, stillExists := client.queues[queueName]; stillExists {
 		t.Error("expected force:true to delete the non-empty queue")
+	}
+}
+
+func TestCleanup_TreatsAlreadyGoneQueueAsSuccess(t *testing.T) {
+	// Regression-shaped test carried over from a real bug found reviewing a
+	// sibling project's S3 cleanup: without treating "already gone" as
+	// success, retrying cleanup on a queue a previous attempt had already
+	// deleted (e.g. after a transient failure removing the finalizer
+	// itself) would wrongly report a failure for a queue that was, in
+	// fact, correctly cleaned up already.
+	client := newFakeSQS()
+	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+
+	advancePastQuietWindow(t, ledger, "orders")
+	// Simulate the queue already having been deleted out from under us.
+	delete(client.queues, queueName)
+
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v — expected an already-gone queue to be treated as already cleaned up, not a failure", err)
+	}
+	if status.FindManagedResource(updated, "sqs", "orders") != nil {
+		t.Error("expected the ledger entry to be removed for an already-gone queue")
+	}
+}
+
+func TestCleanup_DoesNotForgetQueueOnTransientLookupError(t *testing.T) {
+	// Regression test for a real bug: GetQueueUrl failing for any reason
+	// (throttling, a permission gap, a network blip) must NOT be treated
+	// the same as "the queue doesn't exist" - doing so silently dropped a
+	// queue that still exists from the ledger, abandoning it without ever
+	// actually deleting or retaining it per policy.
+	client := newFakeSQS()
+	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
+	advancePastQuietWindow(t, ledger, "orders")
+	client.getQueueUrlErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultServer}
+
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err == nil {
+		t.Fatal("expected a transient GetQueueUrl failure to be reported as an error, not silently swallowed")
+	}
+	if status.FindManagedResource(updated, "sqs", "orders") == nil {
+		t.Error("expected the ledger entry to survive a transient lookup failure, not be silently forgotten")
 	}
 }
 

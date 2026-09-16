@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -67,6 +68,47 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
 	if _, stillExists := client.topics[topicArn]; !stillExists {
 		t.Error("expected Retain policy to leave the AWS topic in place")
+	}
+}
+
+func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
+	// Defensive-coding verification: Cleanup checks "!= Delete", not
+	// "== Retain", specifically so a DeletionPolicy that's somehow truly
+	// unset (Go's zero value, bypassing the CRD's own default) still falls
+	// to the safe side rather than an undefined one. Every other test
+	// exercises an explicitly-set DeletionPolicyRetain, which never
+	// actually proves this - this one constructs the ledger entry directly
+	// with the field left at its zero value.
+	client := newFakeSNS()
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	client.topics[topicArn] = &fakeTopic{
+		arn: topicArn,
+		tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-1",
+		},
+	}
+	ledger := []depsv1alpha1.ManagedResource{
+		{
+			Type: resourceType,
+			Name: "events",
+			ARN:  topicArn,
+			// DeletionPolicy deliberately left unset (zero value).
+		},
+	}
+
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if r := findResult(results, "events"); r == nil || r.Reason != CleanupReasonRetained {
+		t.Errorf("expected an unset DeletionPolicy to be treated as Retained, got %+v", results)
+	}
+	if _, stillExists := client.topics[topicArn]; !stillExists {
+		t.Error("expected the topic to survive - an unset DeletionPolicy must never be treated as Delete")
+	}
+	if status.FindManagedResource(updated, "sns", "events") == nil {
+		t.Error("expected the retained entry to stay in the ledger")
 	}
 }
 
@@ -279,6 +321,68 @@ func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 	}
 	if _, stillExists := client.topics[topicArn]; !stillExists {
 		t.Error("expected the topic to NOT be deleted when ownership can't be re-verified")
+	}
+}
+
+func TestCleanup_TreatsAlreadyDeletedTopicAsSuccess(t *testing.T) {
+	// Regression-shaped test carried over from a real bug found reviewing a
+	// sibling project's S3 cleanup: without treating "already gone" as
+	// success, retrying cleanup on a topic a previous attempt had already
+	// deleted (e.g. after a transient failure removing the finalizer
+	// itself) would wrongly report a failure for a topic that was, in
+	// fact, correctly cleaned up already.
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+
+	// First pass only enters the mandatory quiet window.
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
+	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry.PendingDeletionSince = &past
+	status.UpsertManagedResource(&ledger, *entry)
+
+	// Simulate the topic already having been deleted out from under us.
+	delete(client.topics, topicArn)
+
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v — expected an already-gone topic to be treated as already cleaned up, not a failure", err)
+	}
+	if status.FindManagedResource(updated, "sns", "events") != nil {
+		t.Error("expected the ledger entry to be removed for an already-gone topic")
+	}
+}
+
+func TestCleanup_DoesNotForgetTopicOnTransientLookupError(t *testing.T) {
+	// Regression test mirroring the equivalent sqs fix: ListTagsForResource
+	// failing for any reason other than genuinely-not-found (throttling, a
+	// permission gap, a network blip) must be reported as an error, not
+	// silently treated as "the topic is gone" - that would drop a topic
+	// that still exists from the ledger, abandoning it without ever
+	// actually deleting or retaining it per policy.
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
+	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry.PendingDeletionSince = &past
+	status.UpsertManagedResource(&ledger, *entry)
+
+	client.listTagsForResourceErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultServer}
+
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	if err == nil {
+		t.Fatal("expected a transient ListTagsForResource failure to be reported as an error, not silently swallowed")
+	}
+	if status.FindManagedResource(updated, "sns", "events") == nil {
+		t.Error("expected the ledger entry to survive a transient lookup failure, not be silently forgotten")
 	}
 }
 

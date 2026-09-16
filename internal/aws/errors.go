@@ -44,6 +44,14 @@ func IsPermissionDenied(err error) bool {
 // already retries server-fault errors internally before one ever reaches
 // us, so seeing one here means those internal retries were exhausted —
 // still worth a longer-horizon reconcile-level retry, not a hard failure.
+//
+// ResourceInUseException (DynamoDB) is a client-fault by HTTP status, but
+// semantically the same kind of transient as throttling: it means the
+// resource is mid-transition from a previous operation, not that our
+// request itself is invalid. Included here rather than special-cased per
+// call site, since every DynamoDB control-plane call (CreateTable,
+// UpdateTable, DeleteTable, UpdateContinuousBackups) can hit it, and
+// nothing about the classification is specific to any one of them.
 func IsRetryable(err error) bool {
 	var apiErr smithy.APIError
 	if !errors.As(err, &apiErr) {
@@ -53,7 +61,7 @@ func IsRetryable(err error) bool {
 		return true
 	}
 	code := apiErr.ErrorCode()
-	if code == "ThrottlingException" || code == "RequestLimitExceeded" || code == "TooManyRequestsException" {
+	if code == "ThrottlingException" || code == "RequestLimitExceeded" || code == "TooManyRequestsException" || code == "ResourceInUseException" {
 		return true
 	}
 	return strings.Contains(code, "Throttl")

@@ -68,6 +68,7 @@ func TestIsRetryable(t *testing.T) {
 		{"server fault", &fakeAPIError{code: "InternalError", fault: smithy.FaultServer}, true},
 		{"client fault, throttling code", &fakeAPIError{code: "ThrottlingException", fault: smithy.FaultClient}, true},
 		{"client fault, request limit code", &fakeAPIError{code: "RequestLimitExceeded", fault: smithy.FaultClient}, true},
+		{"client fault, DynamoDB resource-in-use code", &fakeAPIError{code: "ResourceInUseException", fault: smithy.FaultClient}, true},
 		{"client fault, contains Throttl", &fakeAPIError{code: "SomeServiceThrottlingError", fault: smithy.FaultClient}, true},
 		{"client fault, unrelated code", &fakeAPIError{code: "ValidationException", fault: smithy.FaultClient}, false},
 		{"not an APIError at all", errors.New("boom"), false},

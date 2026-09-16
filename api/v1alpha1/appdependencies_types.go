@@ -352,6 +352,40 @@ type S3Spec struct {
 type DynamoDBBackupSpec struct {
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
+
+	// retentionDays sets how far back point-in-time recovery can restore
+	// to. Only meaningful when enabled is true; AWS's own default (35
+	// days) applies when left unset.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=35
+	RetentionDays *int32 `json:"retentionDays,omitempty"`
+}
+
+// DynamoDBBillingMode is a decision, not a raw throughput configuration —
+// PayPerRequest (the default) requires zero capacity planning and fits the
+// overwhelming majority of workloads; Provisioned is the deliberate
+// opt-out for a team with a steady, predictable access pattern who wants
+// cost control via reserved capacity instead. Deliberately doesn't expose
+// raw read/write capacity unit numbers — that's exactly the kind of
+// "Terraform-in-YAML" configuration surface this CRD avoids. Provisioned
+// tables get AWS's own long-standing default capacity; scale from there
+// via Application Auto Scaling directly, not through this CRD.
+// +kubebuilder:validation:Enum=PayPerRequest;Provisioned
+type DynamoDBBillingMode string
+
+const (
+	DynamoDBBillingModePayPerRequest DynamoDBBillingMode = "PayPerRequest"
+	DynamoDBBillingModeProvisioned   DynamoDBBillingMode = "Provisioned"
+)
+
+// DynamoDBOverrides exposes advanced, non-default DynamoDB configuration.
+type DynamoDBOverrides struct {
+	// billingMode chooses between AWS's on-demand (default) and
+	// provisioned capacity modes.
+	// +optional
+	// +kubebuilder:default=PayPerRequest
+	BillingMode DynamoDBBillingMode `json:"billingMode,omitempty"`
 }
 
 type DynamoDBTableSpec struct {
@@ -385,12 +419,22 @@ type DynamoDBTableSpec struct {
 	// +optional
 	Force bool `json:"force,omitempty"`
 
+	// adopt allows this CR to take ownership of a pre-existing AWS resource
+	// found under this entry's deterministic name that isn't already tagged
+	// as owned by this CR. Same semantics as sqs/sns's adopt field.
+	// +optional
+	Adopt bool `json:"adopt,omitempty"`
+
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	// +listType=map
 	// +listMapKey=namespace
 	// +listMapKey=name
 	SharedWith []SharedWithEntry `json:"sharedWith,omitempty"`
+
+	// overrides allows tuning advanced settings beyond the opinionated default.
+	// +optional
+	Overrides *DynamoDBOverrides `json:"overrides,omitempty"`
 }
 
 type DynamoDBSpec struct {

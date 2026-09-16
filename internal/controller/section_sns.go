@@ -30,6 +30,13 @@ func snsSection(awsClients *cloudctlaws.Clients) section {
 	return section{
 		name: "SNSReady",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
+			declared := 0
+			if cr.Spec.SNS != nil {
+				declared = len(cr.Spec.SNS.Resources)
+			}
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "sns", declared)
+			defer cancel()
+
 			ledger, ensureErr := sns.Ensure(
 				ctx, 
 				awsClients.SNS, 
@@ -63,6 +70,13 @@ func snsSection(awsClients *cloudctlaws.Clients) section {
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
+			declared := 0
+			if cr.Spec.SNS != nil {
+				declared = len(cr.Spec.SNS.Resources)
+			}
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "sns", declared)
+			defer cancel()
+
 			ledger, results, err := sns.Cleanup(
 				ctx, 
 				awsClients.SNS, 

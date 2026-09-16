@@ -89,10 +89,25 @@ spec:
                   resources:
                     items:
                       properties:
+                        adopt:
+                          description: |-
+                            adopt allows this CR to take ownership of a pre-existing AWS resource
+                            found under this entry's deterministic name that isn't already tagged
+                            as owned by this CR. Same semantics as sqs/sns's adopt field.
+                          type: boolean
                         backup:
                           properties:
                             enabled:
                               type: boolean
+                            retentionDays:
+                              description: |-
+                                retentionDays sets how far back point-in-time recovery can restore
+                                to. Only meaningful when enabled is true; AWS's own default (35
+                                days) applies when left unset.
+                              format: int32
+                              maximum: 35
+                              minimum: 1
+                              type: integer
                           type: object
                         deletionPolicy:
                           default: Retain
@@ -109,6 +124,20 @@ spec:
                           maxLength: 255
                           pattern: ^[a-zA-Z0-9_.-]+$
                           type: string
+                        overrides:
+                          description: overrides allows tuning advanced settings beyond
+                            the opinionated default.
+                          properties:
+                            billingMode:
+                              default: PayPerRequest
+                              description: |-
+                                billingMode chooses between AWS's on-demand (default) and
+                                provisioned capacity modes.
+                              enum:
+                              - PayPerRequest
+                              - Provisioned
+                              type: string
+                          type: object
                         partitionKey:
                           description: |-
                             partitionKey is the table's partition key attribute name. AWS does not

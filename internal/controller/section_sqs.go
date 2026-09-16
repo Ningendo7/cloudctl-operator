@@ -30,6 +30,13 @@ func sqsSection(awsClients *cloudctlaws.Clients) section {
 	return section{
 		name: "SQSReady",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
+			declared := 0
+			if cr.Spec.SQS != nil {
+				declared = len(cr.Spec.SQS.Resources)
+			}
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "sqs", declared)
+			defer cancel()
+
 			ledger, ensureErr := sqs.Ensure(
 				ctx,
 				awsClients.SQS,
@@ -61,6 +68,13 @@ func sqsSection(awsClients *cloudctlaws.Clients) section {
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
+			declared := 0
+			if cr.Spec.SQS != nil {
+				declared = len(cr.Spec.SQS.Resources)
+			}
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "sqs", declared)
+			defer cancel()
+
 			ledger, results, err := sqs.Cleanup(
 				ctx,
 				awsClients.SQS,

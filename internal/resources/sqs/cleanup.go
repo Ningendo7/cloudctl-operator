@@ -18,6 +18,7 @@ package sqs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -155,8 +156,19 @@ func Cleanup(
 			QueueName: &queueName,
 		})
 		if uErr != nil {
-			// Already gone in AWS - just drop it from the ledger.
-			status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
+			var notFound *types.QueueDoesNotExist
+			if errors.As(uErr, &notFound) {
+				// Already gone in AWS - just drop it from the ledger.
+				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
+				continue
+			}
+			// Anything else (throttling, a permission gap, a network blip)
+			// must NOT be treated as "gone" - doing so would silently drop
+			// a queue that still exists from the ledger, abandoning it
+			// without ever actually deleting or retaining it per policy.
+			if firstErr == nil {
+				firstErr = wrapAWSError(uErr, fmt.Sprintf("resolving queue URL for %q before delete", entry.Name))
+			}
 			continue
 		}
 
