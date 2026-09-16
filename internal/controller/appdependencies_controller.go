@@ -19,38 +19,100 @@ package controller
 import (
 	"context"
 
+	apierror "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/controller/predicates"
 )
 
 // AppDependenciesReconciler reconciles a AppDependencies object
 type AppDependenciesReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme     *runtime.Scheme
+	AWSClients *cloudctlaws.Clients
 }
 
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the AppDependencies object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
 func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	var cr depsv1alpha1.AppDependencies
+	if err := r.Get(ctx, req.NamespacedName, &cr); err != nil {
+		if apierror.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
 
-	// TODO(user): your logic here
+	if !cr.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, &cr)
+	}
+	return r.reconcileNormal(ctx, &cr)
+}
 
+func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *depsv1alpha1.AppDependencies) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	if err := ensureFinalizer(ctx, r.Client, cr); err != nil {
+		return ctrl.Result{}, err
+	}
+	// Adding a finalizer only touches metadata, not spec, so it won't bump
+	// generation and re-trigger our predicate on its own - keep going in
+	// this same pass (rather than returning) or a freshly created CR would
+	// never actually get reconciled until some later spec change.
+
+	err := ensureDesiredState(ctx, r.AWSClients, cr)
+
+	if statusErr := r.Status().Update(ctx, cr); statusErr != nil {
+		log.Error(statusErr, "failed to update status")
+		if err == nil {
+			err = statusErr
+		}
+	}
+
+	if err != nil {
+		if isRetryable(err) {
+			return ctrl.Result{RequeueAfter: transientRequeueInterval}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{RequeueAfter: DriftDetectionInterval}, nil
+}
+
+func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *depsv1alpha1.AppDependencies) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	if !hasFinalizer(cr) {
+		return ctrl.Result{}, nil
+	}
+
+	done, err := finalizeDesiredState(ctx, r.AWSClients, cr)
+
+	if statusErr := r.Status().Update(ctx, cr); statusErr != nil {
+		log.Error(statusErr, "failed to update status during deletion")
+	}
+
+	if err != nil {
+		if isRetryable(err) {
+			return ctrl.Result{RequeueAfter: transientRequeueInterval}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	if !done {
+		return ctrl.Result{RequeueAfter: DriftDetectionInterval}, nil
+	}
+
+	if err := removeFinalizer(ctx, r.Client, cr); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -58,6 +120,7 @@ func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&depsv1alpha1.AppDependencies{}).
+		WithEventFilter(predicates.AppDependenciesPredicate()).
 		Named("appdependencies").
 		Complete(r)
 }

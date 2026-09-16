@@ -563,6 +563,17 @@ spec:
                       description: SQSQueueSpec declares a single SQS queue this app
                         owns.
                       properties:
+                        adopt:
+                          description: |-
+                            adopt allows this CR to take ownership of a pre-existing AWS resource
+                            found under this entry's deterministic name that isn't already tagged
+                            as owned by this CR. Existence-by-name alone is never treated as
+                            ownership — adopt:true is the explicit, deliberate opt-in required
+                            before the controller will tag and start managing something it did
+                            not create. Refused if the resource is already owned by a *different*
+                            AppDependencies CR — that's a naming collision, not an adoption
+                            target, and adopt:true must never silently paper over that.
+                          type: boolean
                         deletionPolicy:
                           default: Retain
                           description: |-
@@ -725,6 +736,21 @@ spec:
                       description: createdAt is when this controller created the resource.
                       format: date-time
                       type: string
+                    deletionPolicy:
+                      description: |-
+                        deletionPolicy captured from the spec entry at the time this resource
+                        was created/last reconciled, so cleanup still knows what policy
+                        applies even after the spec entry is removed — spec alone can't
+                        represent "used to exist, now gone," which is this ledger's whole
+                        reason for existing.
+                      enum:
+                      - Retain
+                      - Delete
+                      type: string
+                    force:
+                      description: force mirrors the spec entry's force flag at the
+                        same point.
+                      type: boolean
                     lastVerifiedAt:
                       description: |-
                         lastVerifiedAt is the last time the ownership tag was confirmed to
@@ -734,6 +760,14 @@ spec:
                     name:
                       description: name is the resource-key from spec (e.g. the queue's
                         `name`).
+                      type: string
+                    pendingDeletionSince:
+                      description: |-
+                        pendingDeletionSince is set the first time this resource was found
+                        non-empty while its deletionPolicy was Delete, so cleanup can tell
+                        how long it's been stuck rather than retrying forever silently.
+                        Cleared if the resource is re-added to spec.
+                      format: date-time
                       type: string
                     state:
                       description: state of the ownership ledger entry's trust window.
@@ -750,6 +784,7 @@ spec:
                   required:
                   - arn
                   - createdAt
+                  - deletionPolicy
                   - name
                   - state
                   - type

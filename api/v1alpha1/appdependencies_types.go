@@ -118,6 +118,17 @@ type SQSQueueSpec struct {
 	// +listMapKey=name
 	SharedWith []SharedWithEntry `json:"sharedWith,omitempty"`
 
+	// adopt allows this CR to take ownership of a pre-existing AWS resource
+	// found under this entry's deterministic name that isn't already tagged
+	// as owned by this CR. Existence-by-name alone is never treated as
+	// ownership — adopt:true is the explicit, deliberate opt-in required
+	// before the controller will tag and start managing something it did
+	// not create. Refused if the resource is already owned by a *different*
+	// AppDependencies CR — that's a naming collision, not an adoption
+	// target, and adopt:true must never silently paper over that.
+	// +optional
+	Adopt bool `json:"adopt,omitempty"`
+
 	// overrides allows tuning advanced settings beyond the opinionated default.
 	// +optional
 	Overrides *SQSOverrides `json:"overrides,omitempty"`
@@ -461,6 +472,18 @@ type ManagedResource struct {
 	// +kubebuilder:validation:Required
 	ARN string `json:"arn"`
 
+	// deletionPolicy captured from the spec entry at the time this resource
+	// was created/last reconciled, so cleanup still knows what policy
+	// applies even after the spec entry is removed — spec alone can't
+	// represent "used to exist, now gone," which is this ledger's whole
+	// reason for existing.
+	// +kubebuilder:validation:Required
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy"`
+
+	// force mirrors the spec entry's force flag at the same point.
+	// +optional
+	Force bool `json:"force,omitempty"`
+
 	// state of the ownership ledger entry's trust window.
 	// +kubebuilder:validation:Required
 	State ManagedResourceState `json:"state"`
@@ -473,6 +496,13 @@ type ManagedResource struct {
 	// still match this CR. Unset if never verified since creation.
 	// +optional
 	LastVerifiedAt *metav1.Time `json:"lastVerifiedAt,omitempty"`
+
+	// pendingDeletionSince is set the first time this resource was found
+	// non-empty while its deletionPolicy was Delete, so cleanup can tell
+	// how long it's been stuck rather than retrying forever silently.
+	// Cleared if the resource is re-added to spec.
+	// +optional
+	PendingDeletionSince *metav1.Time `json:"pendingDeletionSince,omitempty"`
 }
 
 // AppDependenciesStatus defines the observed state of AppDependencies.
