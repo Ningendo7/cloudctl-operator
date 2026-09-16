@@ -1,8 +1,25 @@
 # cloudctl-operator
-// TODO(user): Add simple overview of use/purpose
+
+A Kubernetes operator that manages a bundle of everyday AWS dependencies —
+SNS, SQS, and (planned) S3, DynamoDB, KMS, and the IAM to go with them —
+behind a single opinionated `AppDependencies` CRD, instead of exposing raw
+cloud-provider config as YAML.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+App teams provisioning AWS dependencies by hand, or via raw Terraform,
+tend to end up with hand-authored IAM policy per app (inconsistent,
+error-prone) and operational hygiene — alarms, backups, replication — that's
+opt-in and frequently skipped. `AppDependencies` lets a team declare *what
+their app needs* (a queue, a topic, a bucket) and has the controller derive
+the IAM, naming, and safety semantics that go with it, while still reporting
+the concrete result in `status` rather than hiding it behind the defaults.
+
+- **[docs/architecture.md](docs/architecture.md)** — the design decisions:
+  ownership and adoption, the trust window, deletion safety, naming,
+  validation strategy.
+- **[docs/resources.md](docs/resources.md)** — what's actually implemented
+  today (SQS, SNS), with field-by-field behavior and known gaps.
 
 ## Getting Started
 

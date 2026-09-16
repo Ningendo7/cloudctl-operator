@@ -42,13 +42,19 @@ type sqsAPI = cloudctlaws.SQSClient
 const resourceType = "sqs"
 const defaultMaxReceiveCount = int32(5)
 
+type queueOptions struct {
+	deletionPolicy            depsv1alpha1.DeletionPolicy
+	force                     bool
+	adopt                     bool
+	fifo                      bool
+	contentBasedDeduplication bool
+	visibilityTimeoutSeconds  *int32
+	redrivePolicy             *string
+}
+
 // Ensure reconciles every declared SQS queue (and its DLQ, if requested)
 // against AWS, updating the ownership ledger as it goes.
 //
-// Known gap deliberately deferred: drift correction on an existing queue's
-// attributes (we verify ownership and read the ARN, but don't yet
-// reconcile attribute changes on a queue that already exists — a DLQ's
-// redrive policy is only ever set at creation time).
 func Ensure(
 	ctx context.Context,
 	client sqsAPI,
@@ -62,15 +68,16 @@ func Ensure(
 		return ledger, nil
 	}
 
+	var firstErr error
 	for _, q := range spec.Resources {
 		var err error
 		ledger, err = ensureQueue(ctx, client, namespace, crName, crUID, q, ledger)
-		if err != nil {
-			return ledger, fmt.Errorf("queue %q: %w", q.Name, err)
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("queue %q: %w", q.Name, err)
 		}
 	}
 
-	return ledger, nil
+	return ledger, firstErr
 }
 
 // ensureQueue orchestrates a spec entry: ensures its DLQ first (if
@@ -90,7 +97,14 @@ func ensureQueue(
 	if q.DLQ {
 		dlqName := q.Name + "-dlq"
 		var err error
-		ledger, err = ensureSingleQueue(ctx, client, namespace, crName, crUID, dlqName, q.DeletionPolicy, q.Force, q.Adopt, nil, ledger)
+		// A FIFO source queue requires a FIFO DLQ - AWS rejects mismatched
+		// pairs - so fifo is inherited here, not independently configurable.
+		ledger, err = ensureSingleQueue(ctx, client, namespace, crName, crUID, dlqName, queueOptions{
+			deletionPolicy: q.DeletionPolicy,
+			force:          q.Force,
+			adopt:          q.Adopt,
+			fifo:           q.FIFO,
+		}, ledger)
 		if err != nil {
 			return ledger, fmt.Errorf("dlq: %w", err)
 		}
@@ -122,7 +136,24 @@ func ensureQueue(
 		redrivePolicy = &s
 	}
 
-	return ensureSingleQueue(ctx, client, namespace, crName, crUID, q.Name, q.DeletionPolicy, q.Force, q.Adopt, redrivePolicy, ledger)
+	contentBasedDedup := false
+	var visibilityTimeout *int32
+	if q.Overrides != nil {
+		if  q.Overrides.ContentBasedDeduplication != nil {
+			contentBasedDedup = *q.Overrides.ContentBasedDeduplication
+		}
+		visibilityTimeout = q.Overrides.VisibilityTimeoutSeconds
+	}
+
+	return ensureSingleQueue(ctx, client, namespace, crName, crUID, q.Name, queueOptions{
+		deletionPolicy:            q.DeletionPolicy,
+		force:                     q.Force,
+		adopt:                     q.Adopt,
+		fifo:                      q.FIFO,
+		contentBasedDeduplication: contentBasedDedup,
+		visibilityTimeoutSeconds:  visibilityTimeout,
+		redrivePolicy:             redrivePolicy,
+	}, ledger)
 }
 
 // ensureSingleQueue creates the named queue if it doesn't exist (tagging is
@@ -136,26 +167,52 @@ func ensureSingleQueue(
 	crName,
 	crUID string,
 	resourceName string,
-	deletionPolicy depsv1alpha1.DeletionPolicy,
-	force,
-	adopt bool,
-	redrivePolicy *string,
+	opts queueOptions,
 	ledger []depsv1alpha1.ManagedResource,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	if existing := status.FindManagedResource(ledger, resourceType, resourceName); existing != nil && !status.NeedsRevalidation(*existing) {
-		// Still within the trust window - skip the AWS round trip entirely.
-		// Local-only fields (deletionPolicy/force) can still change from a
-		// spec edit with no AWS call needed, so refresh those against the
-		// cached entry; ARN and LastVerifiedAt stay as they were until the
-		// window actually expires and a real check runs again.
+		// Still within the trust window - skip re-verifying ownership, but
+		// attribute drift correction is a different concern and must still
+		// run every reconcile regardless of the trust window. Local-only
+		// fields (deletionPolicy/force) can still change from a spec edit
+		// with no AWS call needed, so refresh those against the cached
+		// entry; ARN and LastVerifiedAt stay as they were until the window
+		// actually expires and a real ownership check runs again.
 		updated := *existing
-		updated.DeletionPolicy = deletionPolicy
-		updated.Force = force
+		updated.DeletionPolicy = opts.deletionPolicy
+		updated.Force = opts.force
 		status.UpsertManagedResource(&ledger, updated)
+
+		if len(desiredAttributes(opts)) == 0 {
+			// Nothing this package manages could have drifted - skip the
+			// AWS round trip entirely rather than resolving a URL just to
+			// find there's nothing to compare.
+			return ledger, nil
+		}
+
+		queueName, nameErr := queueNameFromARN(existing.ARN)
+		if nameErr != nil {
+			return ledger, nameErr
+		}
+		urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
+			QueueName: &queueName,
+		})
+		if err != nil {
+			return ledger, wrapAWSError(err, "resolving queue URL for drift correction")
+		}
+		if err := reconcileAttributes(ctx, client, *urlOut.QueueUrl, opts); err != nil {
+			return ledger, wrapAWSError(err, "reconciling queue attributes")
+		}
 		return ledger, nil
 	}
 
 	queueName := cloudctlaws.ResourceName(namespace, crName, resourceName)
+	if opts.fifo {
+		queueName += ".fifo"
+	}
+	if err := cloudctlaws.ValidateNameLength(queueName, 80, "SQS queue"); err != nil {
+		return ledger, err
+	}
 	ownerTags := map[string]string{
 		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
 		cloudctlaws.OwnerUIDTagKey: crUID,
@@ -168,8 +225,19 @@ func ensureSingleQueue(
 	var notFound *types.QueueDoesNotExist
 	if errors.As(err, &notFound) {
 		attrs := map[string]string{}
-		if redrivePolicy != nil {
-			attrs["RedrivePolicy"] = *redrivePolicy
+		if opts.redrivePolicy != nil {
+			attrs["RedrivePolicy"] = *opts.redrivePolicy
+		}
+		if opts.fifo {
+			attrs["FifoQueue"] = "true"
+			dedup := "false"
+			if opts.contentBasedDeduplication {
+				dedup = "true"
+			}
+			attrs["ContentBasedDeduplication"] = dedup
+		}
+		if opts.visibilityTimeoutSeconds != nil {
+			attrs["VisibilityTimeout"] = fmt.Sprintf("%d", *opts.visibilityTimeoutSeconds)
 		}
 
 		createOut, cErr := client.CreateQueue(ctx, &sqs.CreateQueueInput{
@@ -187,13 +255,15 @@ func ensureSingleQueue(
 			}
 			return ledger, wrapAWSError(cErr, "creating queue")
 		}
+		// Attributes were just set atomically at creation — nothing to
+		// drift-correct yet.
 		return recordVerified(
 			ctx,
 			client,
 			*createOut.QueueUrl,
 			resourceName,
-			deletionPolicy,
-			force,
+			opts.deletionPolicy,
+			opts.force,
 			ledger,
 		)
 	}
@@ -212,7 +282,7 @@ func ensureSingleQueue(
 		if existingOwner, ok := tagsOut.Tags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 			return ledger, fmt.Errorf("queue %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", queueName, existingOwner)
 		}
-		if !adopt {
+		if !opts.adopt {
 			return ledger, fmt.Errorf("queue %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", queueName)
 		}
 
@@ -225,15 +295,92 @@ func ensureSingleQueue(
 		}
 	}
 
+	if err := reconcileAttributes(ctx, client, queueURL, opts); err != nil {
+		return ledger, wrapAWSError(err, "reconciling queue attributes")
+	}
+
 	return recordVerified(
 		ctx,
 		client,
 		queueURL,
 		resourceName,
-		deletionPolicy,
-		force,
+		opts.deletionPolicy,
+		opts.force,
 		ledger,
 	)
+}
+
+// desiredAttributes computes the mutable attributes this package manages
+// from queueOptions, without making any AWS calls. Used both to decide
+// whether a drift-correction round trip is worth making at all (see the
+// trust-window branch in ensureSingleQueue) and, once one is, as the
+// comparison target inside reconcileAttributes.
+func desiredAttributes(opts queueOptions) map[string]string {
+	desired := map[string]string{}
+	if opts.redrivePolicy != nil {
+		desired["RedrivePolicy"] = *opts.redrivePolicy
+	}
+	if opts.fifo {
+		dedup := "false"
+		if opts.contentBasedDeduplication {
+			dedup = "true"
+		}
+		desired["ContentBasedDeduplication"] = dedup
+	}
+	if opts.visibilityTimeoutSeconds != nil {
+		desired["VisibilityTimeout"] = fmt.Sprintf("%d", *opts.visibilityTimeoutSeconds)
+	}
+	return desired
+}
+
+// reconcileAttributes corrects drift on an already-existing queue's mutable
+// attributes against desired state.
+//
+// Known limitation: it can set or update RedrivePolicy, but doesn't attempt
+// to clear it when a DLQ is removed from spec (dlq: true -> false). AWS's
+// SetQueueAttributes docs don't confirm that an empty value unsets
+// RedrivePolicy, so rather than guess at unverified behavior, this is left
+// as an explicit gap — the DLQ queue itself still gets deleted correctly
+// (that's Cleanup's job), just the main queue's RedrivePolicy attribute
+// referencing it may linger until this is verified and fixed.
+//
+// FifoQueue is never included here since it's immutable after creation
+// (enforced via CEL) — only ever set at creation time, never corrected.
+func reconcileAttributes(ctx context.Context, client sqsAPI, queueURL string, opts queueOptions) error {
+	desired := desiredAttributes(opts)
+	if len(desired) == 0 {
+		return nil
+	}
+
+	attrNames := make([]types.QueueAttributeName, 0, len(desired))
+	for k := range desired {
+		attrNames = append(attrNames, types.QueueAttributeName(k))
+	}
+
+	current, err := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl:       &queueURL,
+		AttributeNames: attrNames,
+	})
+	if err != nil {
+		return fmt.Errorf("reading current attributes: %w", err)
+	}
+
+	changed := map[string]string{}
+	for k, v := range desired {
+		if current.Attributes[k] != v {
+			changed[k] = v
+		}
+	}
+
+	if len(changed) == 0 {
+		return nil
+	}
+
+	_, err = client.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
+		QueueUrl:   &queueURL,
+		Attributes: changed,
+	})
+	return err
 }
 
 func recordVerified(

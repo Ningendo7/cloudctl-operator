@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -28,20 +30,23 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 var _ = Describe("AppDependencies Controller", func() {
 	var (
 		fakeSQS    *fakeSQSClient
+		fakeSNS    *fakeSNSClient
 		reconciler *AppDependenciesReconciler
 	)
 
 	BeforeEach(func() {
 		fakeSQS = newFakeSQSClient()
+		fakeSNS = newFakeSNSClient()
 		reconciler = &AppDependenciesReconciler{
 			Client:     k8sClient,
 			Scheme:     k8sClient.Scheme(),
-			AWSClients: &cloudctlaws.Clients{SQS: fakeSQS},
+			AWSClients: &cloudctlaws.Clients{SQS: fakeSQS, SNS: fakeSNS, Region: "us-east-1", AccountID: "123456789012"},
 		}
 	})
 
@@ -137,6 +142,27 @@ var _ = Describe("AppDependencies Controller", func() {
 			Expect(k8sClient.Get(ctx, req.NamespacedName, &created)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &created)).To(Succeed())
 
+			// First reconcile after deletion only enters the mandatory
+			// quiet window (see sqs.deletionQuietWindow) - even an empty
+			// queue isn't deleted on the very first pass it comes up for
+			// deletion, so the finalizer must still be present here.
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			var pending depsv1alpha1.AppDependencies
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &pending)).To(Succeed())
+			Expect(pending.Finalizers).To(ContainElement(finalizerName))
+
+			// Push the ledger entry's PendingDeletionSince into the past so
+			// the next reconcile evaluates the real emptiness check instead
+			// of just holding through the quiet window.
+			entry := status.FindManagedResource(pending.Status.ManagedResources, "sqs", "orders")
+			Expect(entry).NotTo(BeNil())
+			past := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+			entry.PendingDeletionSince = &past
+			status.UpsertManagedResource(&pending.Status.ManagedResources, *entry)
+			Expect(k8sClient.Status().Update(ctx, &pending)).To(Succeed())
+
 			_, err = reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -181,6 +207,79 @@ var _ = Describe("AppDependencies Controller", func() {
 			Expect(k8sClient.Get(ctx, req.NamespacedName, &stillThere)).To(Succeed())
 			Expect(stillThere.Finalizers).To(ContainElement(finalizerName))
 			Expect(fakeSQS.queues).To(HaveKey(queueName))
+		})
+	})
+
+	Context("reconciling a new CR with a declared topic", func() {
+		It("creates the topic and reports Ready via SNSReady and the aggregate condition", func() {
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "controller-sns-create-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SNS: &depsv1alpha1.SNSSpec{
+						Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			var updated depsv1alpha1.AppDependencies
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &updated)).To(Succeed())
+
+			topicArn := cloudctlaws.TopicARN("us-east-1", "123456789012", cloudctlaws.ResourceName(updated.Namespace, updated.Name, "events"))
+			Expect(fakeSNS.topics).To(HaveKey(topicArn))
+
+			snsReady := apimeta.FindStatusCondition(updated.Status.Conditions, "SNSReady")
+			Expect(snsReady).NotTo(BeNil())
+			Expect(snsReady.Status).To(Equal(metav1.ConditionTrue))
+
+			ready := apimeta.FindStatusCondition(updated.Status.Conditions, "Ready")
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	Context("deleting a CR with a topic that has active subscriptions", func() {
+		It("keeps the finalizer until the topic is safe to delete", func() {
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "controller-sns-delete-pending-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SNS: &depsv1alpha1.SNSSpec{
+						Resources: []depsv1alpha1.SNSTopicSpec{
+							{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			topicArn := cloudctlaws.TopicARN("us-east-1", "123456789012", cloudctlaws.ResourceName(cr.Namespace, cr.Name, "events"))
+			fakeSNS.topics[topicArn].subscriptions = 1
+
+			var created depsv1alpha1.AppDependencies
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &created)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &created)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			var stillThere depsv1alpha1.AppDependencies
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &stillThere)).To(Succeed())
+			Expect(stillThere.Finalizers).To(ContainElement(finalizerName))
+			Expect(fakeSNS.topics).To(HaveKey(topicArn))
 		})
 	})
 })

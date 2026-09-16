@@ -25,7 +25,6 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
-	"github.com/Ningendo7/cloudctl-operator/internal/resources/sqs"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -41,48 +40,36 @@ const DriftDetectionInterval = 5 * time.Minute
 const transientRequeueInterval = 30 * time.Second
 
 // sectionTypes lists every per-section Ready condition type this CR can
-// produce, used to compute the aggregate Ready condition. Grows as more
-// resource packages (sns, s3, dynamodb, kms, iam, alarms) get wired in
-// alongside sqs below.
-var sectionTypes = []string{"SQSReady"}
+// produce, used to compute the aggregate Ready condition. Kept in sync
+// with allSections above — each entry here should have a matching
+// section constructor registered there.
+var sectionTypes = []string{"SQSReady", "SNSReady"}
 
-// ensureDesiredState reconciles every declared section against AWS for a
-// non-deleting CR, updating status conditions and the ownership ledger as
-// it goes. Ensure and Cleanup both run regardless of each other's outcome —
-// they cover independent concerns (currently-declared resources vs.
-// resources removed from spec) — and the first error encountered is
-// returned so the caller can decide on requeue behavior.
-func ensureDesiredState(ctx context.Context, awsClients *cloudctlaws.Clients, cr *depsv1alpha1.AppDependencies) error {
-	ledger, ensureErr := sqs.Ensure(
-		ctx,
-		awsClients.SQS,
-		cr.Namespace,
-		cr.Name,
-		string(cr.UID),
-		cr.Spec.SQS,
-		cr.Status.ManagedResources,
-	)
-	cr.Status.ManagedResources = ledger
+type section struct {
+	name      string
+	reconcile func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error
+	finalize  func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (done bool, err error)
+}
 
-	ledger, _, cleanupErr := sqs.Cleanup(
-		ctx,
-		awsClients.SQS,
-		cr.Namespace,
-		cr.Name,
-		string(cr.UID),
-		cr.Spec.SQS,
-		cr.Status.ManagedResources,
-		false,
-	)
-	cr.Status.ManagedResources = ledger
-
-	sqsErr := ensureErr
-	if sqsErr == nil {
-		sqsErr = cleanupErr
+// allSections lists every resource-type section this CR reconciles.
+// Adding a new resource type means adding one file (section_<type>.go)
+// with its own constructor, and one line here — this file's size doesn't
+// grow with the number of resource types.
+func allSections(awsClients *cloudctlaws.Clients) []section {
+	return []section{
+		sqsSection(awsClients),
+		snsSection(awsClients),
 	}
-	setSectionCondition(cr, "SQSReady", sqsErr)
+}
 
-	return sqsErr
+func ensureDesiredState(ctx context.Context, awsClients *cloudctlaws.Clients, cr *depsv1alpha1.AppDependencies) error {
+	var firstErr error
+	for _, s := range allSections(awsClients) {
+		if err := s.reconcile(ctx, cr); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // finalizeDesiredState runs cleanup for a CR that's being deleted, tearing
@@ -93,28 +80,22 @@ func ensureDesiredState(ctx context.Context, awsClients *cloudctlaws.Clients, cr
 // that case, or the resource would be silently abandoned once the CR
 // disappears, with nothing left to ever check on it again.
 func finalizeDesiredState(ctx context.Context, awsClients *cloudctlaws.Clients, cr *depsv1alpha1.AppDependencies) (done bool, err error) {
-	ledger, results, err := sqs.Cleanup(
-		ctx,
-		awsClients.SQS,
-		cr.Namespace,
-		cr.Name,
-		string(cr.UID),
-		cr.Spec.SQS,
-		cr.Status.ManagedResources,
-		true,
-	)
-	cr.Status.ManagedResources = ledger
-	if err != nil {
-		return false, err
-	}
-
-	for _, r := range results {
-		if r.Reason == sqs.CleanupReasonPendingDeletion || r.Reason == sqs.CleanupReasonStuckPendingDeletion {
-			return false, nil
+	allDone := true
+	var firstErr error
+	for _, s := range allSections(awsClients) {
+		done, err := s.finalize(ctx, cr)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			allDone = false
+			continue
+		}
+		if !done {
+			allDone = false
 		}
 	}
-
-	return true, nil
+	return allDone, firstErr
 }
 
 func setSectionCondition(cr *depsv1alpha1.AppDependencies, conditionType string, err error) {

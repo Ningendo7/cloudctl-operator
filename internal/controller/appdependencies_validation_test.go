@@ -219,4 +219,88 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Expect(k8sClient.Create(ctx, obj)).NotTo(Succeed())
 		})
 	})
+
+	Context("SQS fifo immutability", func() {
+		It("rejects changing fifo on an existing queue entry", func() {
+			obj := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "validation-sqs-fifo-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SQS: &depsv1alpha1.SQSSpec{
+						Resources: []depsv1alpha1.SQSQueueSpec{
+							{Name: "orders", FIFO: true},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			obj.Spec.SQS.Resources[0].FIFO = false
+			err := k8sClient.Update(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("fifo is immutable"))
+		})
+
+		It("defaults fifo to false when omitted", func() {
+			obj := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "validation-sqs-fifo-default-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SQS: &depsv1alpha1.SQSSpec{
+						Resources: []depsv1alpha1.SQSQueueSpec{
+							{Name: "orders"},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+			Expect(obj.Spec.SQS.Resources[0].FIFO).To(BeFalse())
+		})
+	})
+
+	Context("SNS fifo immutability", func() {
+		It("rejects changing fifo on an existing topic entry", func() {
+			obj := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "validation-sns-fifo-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SNS: &depsv1alpha1.SNSSpec{
+						Resources: []depsv1alpha1.SNSTopicSpec{
+							{Name: "events", FIFO: true},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			obj.Spec.SNS.Resources[0].FIFO = false
+			err := k8sClient.Update(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("fifo is immutable"))
+		})
+
+		It("defaults fifo to false when omitted", func() {
+			obj := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "validation-sns-fifo-default-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SNS: &depsv1alpha1.SNSSpec{
+						Resources: []depsv1alpha1.SNSTopicSpec{
+							{Name: "events"},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+			Expect(obj.Spec.SNS.Resources[0].FIFO).To(BeFalse())
+		})
+	})
 })

@@ -43,13 +43,14 @@ func (e *fakeAWSError) ErrorFault() smithy.ErrorFault { return e.fault }
 // client, implementing just the sqsAPI methods this package calls, so
 // Ensure/Cleanup can be tested without hitting real AWS or the full SDK.
 type fakeQueue struct {
-	url                  string
-	arn                  string
-	tags                 map[string]string
-	approxMessages       string
-	approxMessagesHidden string
-	policy               string
-	attributes           map[string]string
+	url                   string
+	arn                   string
+	tags                  map[string]string
+	approxMessages        string
+	approxMessagesHidden  string
+	approxMessagesDelayed string
+	policy                string
+	attributes            map[string]string
 }
 
 type fakeSQS struct {
@@ -75,9 +76,10 @@ func (f *fakeSQS) CreateQueue(_ context.Context, in *sqs.CreateQueueInput, _ ...
 		url:                  url,
 		arn:                  "arn:aws:sqs:us-east-1:000000000000:" + name,
 		tags:                 in.Tags,
-		approxMessages:       "0",
-		approxMessagesHidden: "0",
-		attributes:           in.Attributes,
+		approxMessages:        "0",
+		approxMessagesHidden:  "0",
+		approxMessagesDelayed: "0",
+		attributes:            in.Attributes,
 	}
 	return &sqs.CreateQueueOutput{QueueUrl: &url}, nil
 }
@@ -98,12 +100,17 @@ func (f *fakeSQS) GetQueueAttributes(_ context.Context, in *sqs.GetQueueAttribut
 	if q == nil {
 		return nil, fmt.Errorf("queue not found: %s", *in.QueueUrl)
 	}
-	return &sqs.GetQueueAttributesOutput{Attributes: map[string]string{
+	out := map[string]string{
 		string(types.QueueAttributeNameQueueArn):                              q.arn,
 		string(types.QueueAttributeNameApproximateNumberOfMessages):           q.approxMessages,
 		string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible): q.approxMessagesHidden,
+		string(types.QueueAttributeNameApproximateNumberOfMessagesDelayed):    q.approxMessagesDelayed,
 		string(types.QueueAttributeNamePolicy):                                q.policy,
-	}}, nil
+	}
+	for k, v := range q.attributes {
+		out[k] = v
+	}
+	return &sqs.GetQueueAttributesOutput{Attributes: out}, nil
 }
 
 func (f *fakeSQS) SetQueueAttributes(_ context.Context, in *sqs.SetQueueAttributesInput, _ ...func(*sqs.Options)) (*sqs.SetQueueAttributesOutput, error) {
@@ -113,6 +120,15 @@ func (f *fakeSQS) SetQueueAttributes(_ context.Context, in *sqs.SetQueueAttribut
 	}
 	if policy, ok := in.Attributes[string(types.QueueAttributeNamePolicy)]; ok {
 		q.policy = policy
+	}
+	if q.attributes == nil {
+		q.attributes = map[string]string{}
+	}
+	for k, v := range in.Attributes {
+		if k == string(types.QueueAttributeNamePolicy) {
+			continue
+		}
+		q.attributes[k] = v
 	}
 	return &sqs.SetQueueAttributesOutput{}, nil
 }

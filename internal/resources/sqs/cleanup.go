@@ -19,6 +19,7 @@ package sqs
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -36,6 +37,17 @@ import (
 // delete once this expires — silently destroying data because a clock ran
 // out would be worse than the problem it's meant to catch.
 const PendingDeletionGracePeriod = 7 * 24 * time.Hour
+
+// deletionQuietWindow is how long a queue sits denied-and-held before we
+// ever trust an "empty" read enough to delete it. GetQueueAttributes'
+// message counters are explicitly documented by AWS as approximate/
+// eventually consistent, so a message sent moments before we decided to
+// delete could still not be reflected on the very next call. This is
+// unrelated to PendingDeletionGracePeriod, which is about giving a human
+// time to react to a queue that's genuinely still in use — this window is
+// purely about API propagation safety and applies even to queues that look
+// empty from the very first check.
+const deletionQuietWindow = 10 * time.Minute
 
 type CleanupReason string
 
@@ -57,6 +69,19 @@ const (
 type CleanupResult struct {
 	Name   string
 	Reason CleanupReason
+}
+
+// queueNameFromARN extracts the queue name (FIFO suffix included, if any)
+// from a stored ARN instead of recomputing it from namespace/crName/key —
+// more robust in general, and necessary for FIFO queues specifically,
+// since reconstructing the name would need to know fifo-ness even after
+// the spec entry (and that information) is long gone from spec.
+func queueNameFromARN(arn string) (string, error) {
+	idx := strings.LastIndex(arn, ":")
+	if idx == -1 || idx == len(arn)-1 {
+		return "", fmt.Errorf("unexpected queue ARN format: %s", arn)
+	}
+	return arn[idx+1:], nil
 }
 
 // Cleanup finds ledger entries for sqs resources no longer declared in
@@ -84,6 +109,7 @@ func Cleanup(
 	}
 
 	updatedLedger = ledger
+	var firstErr error
 	for _, entry := range ledger {
 		if entry.Type != resourceType {
 			continue
@@ -92,7 +118,10 @@ func Cleanup(
 		if declared[entry.Name] {
 			if entry.PendingDeletionSince != nil {
 				if clearErr := clearPendingDeletion(ctx, client, namespace, crName, entry); clearErr != nil {
-					return updatedLedger, results, clearErr
+					if firstErr == nil {
+						firstErr = clearErr
+					}
+					continue
 				}
 				cleared := entry
 				cleared.PendingDeletionSince = nil
@@ -103,7 +132,10 @@ func Cleanup(
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
 			if relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry); relErr != nil {
-				return updatedLedger, results, relErr
+				if firstErr == nil {
+					firstErr = relErr
+				}
+				continue
 			}
 			results = append(results, CleanupResult{
 				Name:   entry.Name,
@@ -112,7 +144,13 @@ func Cleanup(
 			continue
 		}
 
-		queueName := cloudctlaws.ResourceName(namespace, crName, entry.Name)
+		queueName, nameErr := queueNameFromARN(entry.ARN)
+		if nameErr != nil {
+			if firstErr == nil {
+				firstErr = nameErr
+			}
+			continue
+		}
 		urlOut, uErr := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 			QueueName: &queueName,
 		})
@@ -126,24 +164,69 @@ func Cleanup(
 			QueueUrl: urlOut.QueueUrl,
 		})
 		if tErr != nil {
-			return updatedLedger, results, wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of queue %q before delete", entry.Name))
+			if firstErr == nil {
+				firstErr = wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of queue %q before delete", entry.Name))
+			}
+			continue
 		}
 		if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, crUID) {
-			return updatedLedger, results, fmt.Errorf("queue %q no longer verified as owned by this CR — refusing to delete it", entry.Name)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("queue %q no longer verified as owned by this CR — refusing to delete it", entry.Name)
+			}
+			continue
 		}
 
 		if !entry.Force {
+			if entry.PendingDeletionSince == nil {
+				// First time this queue has come up for deletion. Never
+				// delete on the same pass it's first noticed, even if it
+				// looks empty right now — GetQueueAttributes' counters are
+				// approximate/eventually consistent, so a message sent
+				// moments ago could still not be reflected. Deny new sends
+				// and hold for the quiet window first.
+				if denyErr := addPendingDeletionDeny(ctx, client, *urlOut.QueueUrl, entry.ARN); denyErr != nil {
+					if firstErr == nil {
+						firstErr = wrapAWSError(denyErr, fmt.Sprintf("blocking new sends to queue %q pending deletion", entry.Name))
+					}
+					continue
+				}
+				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
+				continue
+			}
+
+			if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
+				// Still inside the quiet window — the deny is already in
+				// place from the first pass, nothing to do but keep waiting.
+				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
+				continue
+			}
+
 			attrs, aErr := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
-				QueueUrl:       urlOut.QueueUrl,
-				AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameApproximateNumberOfMessages},
+				QueueUrl: urlOut.QueueUrl,
+				AttributeNames: []types.QueueAttributeName{
+					types.QueueAttributeNameApproximateNumberOfMessages,
+					types.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
+					types.QueueAttributeNameApproximateNumberOfMessagesDelayed,
+				},
 			})
 			if aErr != nil {
-				return updatedLedger, results, wrapAWSError(aErr, fmt.Sprintf("checking queue %q is empty", entry.Name))
-			}
-			if attrs.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessages)] != "0" {
-				if denyErr := addPendingDeletionDeny(ctx, client, *urlOut.QueueUrl, entry.ARN); denyErr != nil {
-					return updatedLedger, results, wrapAWSError(denyErr, fmt.Sprintf("blocking new sends to queue %q pending deletion", entry.Name))
+				if firstErr == nil {
+					firstErr = wrapAWSError(aErr, fmt.Sprintf("checking queue %q is empty", entry.Name))
 				}
+				continue
+			}
+			// A queue can show zero visible messages while still holding
+			// in-flight messages a consumer is actively processing, or
+			// delayed messages not yet readable - these are independent
+			// counters, not aliases of each other, so all three have to be
+			// zero for the queue to actually be empty.
+			visible := attrs.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessages)]
+			inFlight := attrs.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible)]
+			delayed := attrs.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessagesDelayed)]
+			if visible != "0" || inFlight != "0" || delayed != "0" {
+				// Quiet window elapsed and it's genuinely in use — stays
+				// denied and pending, now under the long human-reaction
+				// grace period rather than the short propagation-safety one.
 				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
 				continue
 			}
@@ -152,12 +235,22 @@ func Cleanup(
 		if _, dErr := client.DeleteQueue(ctx, &sqs.DeleteQueueInput{
 			QueueUrl: urlOut.QueueUrl,
 		}); dErr != nil {
-			return updatedLedger, results, wrapAWSError(dErr, fmt.Sprintf("deleting queue %q", entry.Name))
+			if firstErr == nil {
+				firstErr = wrapAWSError(dErr, fmt.Sprintf("deleting queue %q", entry.Name))
+			}
+			continue
 		}
 		status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 	}
 
-	return updatedLedger, results, nil
+	return updatedLedger, results, firstErr
+}
+
+func pendingDeletionReason(since time.Time) CleanupReason {
+	if time.Since(since) > PendingDeletionGracePeriod {
+		return CleanupReasonStuckPendingDeletion
+	}
+	return CleanupReasonPendingDeletion
 }
 
 func markPendingDeletion(
@@ -175,13 +268,9 @@ func markPendingDeletion(
 	updated.PendingDeletionSince = since
 	status.UpsertManagedResource(&ledger, updated)
 
-	reason := CleanupReasonPendingDeletion
-	if time.Since(since.Time) > PendingDeletionGracePeriod {
-		reason = CleanupReasonStuckPendingDeletion
-	}
 	return ledger, append(results, CleanupResult{
 		Name:   entry.Name,
-		Reason: reason,
+		Reason: pendingDeletionReason(since.Time),
 	})
 }
 
@@ -190,7 +279,10 @@ func markPendingDeletion(
 // deletion — it's back in active use, nothing should still be blocking
 // sends to it.
 func clearPendingDeletion(ctx context.Context, client sqsAPI, namespace, crName string, entry depsv1alpha1.ManagedResource) error {
-	queueName := cloudctlaws.ResourceName(namespace, crName, entry.Name)
+	queueName, nameErr := queueNameFromARN(entry.ARN)
+	if nameErr != nil {
+		return nameErr
+	}
 	urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 		QueueName: &queueName,
 	})
@@ -207,7 +299,10 @@ func clearPendingDeletion(ctx context.Context, client sqsAPI, namespace, crName 
 // ledger keeps the entry for visibility; only the AWS-side ownership claim
 // is relinquished. Idempotent — safe on every reconcile pass.
 func relinquishIfStillTagged(ctx context.Context, client sqsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) error {
-	queueName := cloudctlaws.ResourceName(namespace, crName, entry.Name)
+	queueName, nameErr := queueNameFromARN(entry.ARN)
+	if nameErr != nil {
+		return nameErr
+	}
 	urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
 	if err != nil {
 		return nil // already gone, nothing to relinquish

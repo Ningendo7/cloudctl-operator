@@ -103,23 +103,60 @@ func TestCleanup_RelinquishIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestCleanup_DeletesEmptyQueueWhenPolicyIsDelete(t *testing.T) {
+func TestCleanup_HoldsNewlyEligibleQueueForQuietWindowBeforeDeleting(t *testing.T) {
+	// Regression-shaped test for the GetQueueAttributes consistency gap:
+	// AWS documents its message counters as approximate/eventually
+	// consistent, so a queue that looks empty on the very first pass it
+	// comes up for deletion must NOT be deleted immediately - only denied
+	// and held. Only once the quiet window has elapsed AND it's still
+	// confirmed empty should it actually delete.
 	client := newFakeSQS()
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
 
 	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
 	if err != nil {
-		t.Fatalf("Cleanup() error = %v", err)
+		t.Fatalf("first Cleanup() error = %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected no pending results for a clean delete, got %v", results)
+	if r := findResult(results, "orders"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+		t.Fatalf("expected orders to be held PendingDeletion on first encounter, got %+v", results)
+	}
+	if _, stillExists := client.queues[queueName]; !stillExists {
+		t.Fatal("expected the queue to survive the first pass even though it's empty right now")
+	}
+	entry := status.FindManagedResource(updated, "sqs", "orders")
+	if entry == nil || entry.PendingDeletionSince == nil {
+		t.Fatal("expected PendingDeletionSince to be recorded on first encounter")
+	}
+
+	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, updated, false)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+	if r := findResult(results, "orders"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+		t.Fatalf("expected orders to still be PendingDeletion while inside the quiet window, got %+v", results)
+	}
+	if _, stillExists := client.queues[queueName]; !stillExists {
+		t.Fatal("expected the queue to still survive while inside the quiet window")
+	}
+
+	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
+	entry = status.FindManagedResource(updated, "sqs", "orders")
+	entry.PendingDeletionSince = &past
+	status.UpsertManagedResource(&updated, *entry)
+
+	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, updated, false)
+	if err != nil {
+		t.Fatalf("third Cleanup() error = %v", err)
+	}
+	if r := findResult(results, "orders"); r != nil {
+		t.Errorf("expected no pending result once actually deleted, got %+v", results)
+	}
+	if _, stillExists := client.queues[queueName]; stillExists {
+		t.Error("expected the queue to be deleted once the quiet window elapsed and it's confirmed empty")
 	}
 	if status.FindManagedResource(updated, "sqs", "orders") != nil {
-		t.Error("expected ledger entry to be removed after deletion")
-	}
-	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
-	if _, stillExists := client.queues[queueName]; stillExists {
-		t.Error("expected the AWS queue to actually be deleted")
+		t.Error("expected the ledger entry to be removed after deletion")
 	}
 }
 
@@ -157,6 +194,20 @@ func TestCleanup_MakesNoAWSCallsForDeclaredResourceWithNoPendingMarker(t *testin
 	}
 }
 
+// advancePastQuietWindow pushes a ledger entry's PendingDeletionSince into
+// the past so a subsequent Cleanup() call evaluates the actual emptiness
+// check instead of just holding through the mandatory quiet window.
+func advancePastQuietWindow(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string) {
+	t.Helper()
+	entry := status.FindManagedResource(ledger, "sqs", name)
+	if entry == nil {
+		t.Fatalf("test setup broken: no ledger entry named %q", name)
+	}
+	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
+	entry.PendingDeletionSince = &past
+	status.UpsertManagedResource(&ledger, *entry)
+}
+
 func TestCleanup_BlocksDeletingNonEmptyQueueWithoutForce(t *testing.T) {
 	client := newFakeSQS()
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
@@ -164,9 +215,17 @@ func TestCleanup_BlocksDeletingNonEmptyQueueWithoutForce(t *testing.T) {
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
 	client.queues[queueName].approxMessages = "5"
 
+	// First pass only enters the mandatory quiet window - the counters
+	// aren't evaluated yet on first encounter.
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	advancePastQuietWindow(t, ledger, "orders")
+
 	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
 	if err != nil {
-		t.Fatalf("Cleanup() error = %v", err)
+		t.Fatalf("second Cleanup() error = %v", err)
 	}
 	if r := findResult(results, "orders"); r == nil || r.Reason != CleanupReasonPendingDeletion {
 		t.Errorf("expected orders to be PendingDeletion, got %+v", results)
@@ -176,7 +235,66 @@ func TestCleanup_BlocksDeletingNonEmptyQueueWithoutForce(t *testing.T) {
 	}
 	entry := status.FindManagedResource(updated, "sqs", "orders")
 	if entry == nil || entry.PendingDeletionSince == nil {
-		t.Error("expected PendingDeletionSince to be recorded on first non-empty encounter")
+		t.Error("expected PendingDeletionSince to remain recorded")
+	}
+}
+
+func TestCleanup_BlocksDeletingQueueWithOnlyInFlightMessages(t *testing.T) {
+	// Regression test: ApproximateNumberOfMessages (visible) can read zero
+	// while ApproximateNumberOfMessagesNotVisible (in-flight, sent to a
+	// consumer but not yet deleted or expired) is non-zero - these are
+	// independent counters. A guard checking only the first one would
+	// delete a queue a consumer is actively mid-processing on.
+	client := newFakeSQS()
+	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
+
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	client.queues[queueName].approxMessages = "0"
+	client.queues[queueName].approxMessagesHidden = "3"
+
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	advancePastQuietWindow(t, ledger, "orders")
+
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+	if r := findResult(results, "orders"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+		t.Errorf("expected orders to be PendingDeletion due to in-flight messages, got %+v", results)
+	}
+	if _, stillExists := client.queues[queueName]; !stillExists {
+		t.Error("expected the queue with in-flight messages to NOT be deleted despite zero visible messages")
+	}
+}
+
+func TestCleanup_BlocksDeletingQueueWithOnlyDelayedMessages(t *testing.T) {
+	// Same regression, for ApproximateNumberOfMessagesDelayed - messages
+	// scheduled via DelaySeconds that aren't yet readable.
+	client := newFakeSQS()
+	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
+
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	client.queues[queueName].approxMessages = "0"
+	client.queues[queueName].approxMessagesDelayed = "2"
+
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	advancePastQuietWindow(t, ledger, "orders")
+
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+	if r := findResult(results, "orders"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+		t.Errorf("expected orders to be PendingDeletion due to delayed messages, got %+v", results)
+	}
+	if _, stillExists := client.queues[queueName]; !stillExists {
+		t.Error("expected the queue with delayed messages to NOT be deleted despite zero visible messages")
 	}
 }
 
@@ -192,8 +310,15 @@ func TestCleanup_AddsDenyPolicyWhenMarkingPendingDeletion(t *testing.T) {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
-	if !strings.Contains(client.queues[queueName].policy, pendingDeletionDenySid) {
-		t.Errorf("expected a send-blocking deny policy to be attached once pending deletion, got policy=%s", client.queues[queueName].policy)
+	policy := client.queues[queueName].policy
+	if !strings.Contains(policy, pendingDeletionDenySid) {
+		t.Errorf("expected a send-blocking deny policy to be attached once pending deletion, got policy=%s", policy)
+	}
+	// Exact quoted matches - "sqs:SendMessage" alone is a literal substring
+	// of "sqs:SendMessageBatch", so an unquoted Contains check would pass
+	// even if the batch action were the only one actually denied.
+	if !strings.Contains(policy, `"sqs:SendMessage"`) || !strings.Contains(policy, `"sqs:SendMessageBatch"`) {
+		t.Errorf("expected the pending-deletion deny to block both SendMessage and SendMessageBatch, got policy=%s", policy)
 	}
 }
 
@@ -325,9 +450,15 @@ func TestCleanup_RemovesDLQWhenDLQDisabled(t *testing.T) {
 	withoutDLQ := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DLQ: false, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", withoutDLQ, ledger, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	advancePastQuietWindow(t, ledger, "orders-dlq")
+
 	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", withoutDLQ, ledger, false)
 	if err != nil {
-		t.Fatalf("Cleanup() error = %v", err)
+		t.Fatalf("second Cleanup() error = %v", err)
 	}
 
 	dlqQueueName := cloudctlaws.ResourceName("default", "checkout-service", "orders-dlq")
@@ -340,5 +471,76 @@ func TestCleanup_RemovesDLQWhenDLQDisabled(t *testing.T) {
 	mainQueueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
 	if _, stillExists := client.queues[mainQueueName]; !stillExists {
 		t.Error("expected the main queue to be untouched by disabling its DLQ")
+	}
+}
+
+func TestCleanup_DeletesFIFOQueueByARNDerivedName(t *testing.T) {
+	// Regression test: Cleanup must not recompute the AWS queue name from
+	// namespace/crName/key (which wouldn't know to append .fifo once the
+	// spec entry, and its fifo:true, is gone) - it must derive the real
+	// name from the ledger's stored ARN instead.
+	client := newFakeSQS()
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", FIFO: true, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
+	}}
+	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+
+	fifoName := cloudctlaws.ResourceName("default", "checkout-service", "orders") + ".fifo"
+	if _, exists := client.queues[fifoName]; !exists {
+		t.Fatalf("test setup broken: expected FIFO queue %q to exist", fifoName)
+	}
+
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	advancePastQuietWindow(t, ledger, "orders")
+
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected a clean delete with no pending results, got %v", results)
+	}
+	if _, stillExists := client.queues[fifoName]; stillExists {
+		t.Error("expected the FIFO queue to actually be deleted, not silently treated as already-gone due to a name mismatch")
+	}
+}
+
+func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
+	// Regression test: a failure cleaning up one ledger entry must not
+	// prevent an unrelated entry from being processed in the same pass.
+	client := newFakeSQS()
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
+		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
+	}}
+	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+
+	// Corrupt orders' ownership out-of-band so its cleanup fails.
+	ordersName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	client.queues[ordersName].tags = map[string]string{"team": "someone-else"}
+
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false)
+	if err == nil {
+		t.Fatal("expected an error reported for the corrupted-ownership queue")
+	}
+
+	// receipts is a fresh delete candidate, so this first pass only enters
+	// its mandatory quiet window rather than deleting it outright - what
+	// matters for this regression test is that it was processed at all
+	// (i.e. orders failing didn't stop the loop before reaching it).
+	if entry := status.FindManagedResource(updated, "sqs", "receipts"); entry == nil || entry.PendingDeletionSince == nil {
+		t.Error("expected receipts to still be processed into its own pending-deletion window despite orders failing")
+	}
+	if status.FindManagedResource(updated, "sqs", "orders") == nil {
+		t.Error("expected the failed orders entry to remain in the ledger for retry")
 	}
 }

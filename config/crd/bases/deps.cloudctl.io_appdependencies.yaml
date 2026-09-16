@@ -471,6 +471,12 @@ spec:
                   resources:
                     items:
                       properties:
+                        adopt:
+                          description: |-
+                            adopt allows this CR to take ownership of a pre-existing AWS resource
+                            found under this entry's deterministic name that isn't already tagged
+                            as owned by this CR. Same semantics as sqs's adopt field.
+                          type: boolean
                         deletionPolicy:
                           default: Retain
                           description: |-
@@ -480,12 +486,34 @@ spec:
                           - Retain
                           - Delete
                           type: string
+                        fifo:
+                          default: false
+                          description: |-
+                            fifo creates a FIFO topic instead of a standard one — ordered,
+                            deduplicated delivery, deliverable only to FIFO SQS subscriptions.
+                            Immutable once set; AWS does not support converting between FIFO and
+                            standard topics.
+                          type: boolean
+                          x-kubernetes-validations:
+                          - message: fifo is immutable; AWS does not support converting
+                              between FIFO and standard topics
+                            rule: self == oldSelf
                         force:
                           type: boolean
                         name:
                           maxLength: 256
                           pattern: ^[a-zA-Z0-9_-]+$
                           type: string
+                        overrides:
+                          description: overrides allows tuning advanced settings beyond
+                            the opinionated default.
+                          properties:
+                            contentBasedDeduplication:
+                              description: |-
+                                contentBasedDeduplication enables SNS FIFO's automatic
+                                content-hash-based deduplication. Only meaningful when fifo is true.
+                              type: boolean
+                          type: object
                         sharedWith:
                           items:
                             description: |-
@@ -587,6 +615,17 @@ spec:
                           description: dlq enables a dead-letter queue with a standard
                             redrive policy.
                           type: boolean
+                        fifo:
+                          default: false
+                          description: |-
+                            fifo creates a FIFO queue (and its DLQ, if requested) instead of a
+                            standard one — ordered, deduplicated delivery. Immutable once set;
+                            AWS does not support converting between FIFO and standard queues.
+                          type: boolean
+                          x-kubernetes-validations:
+                          - message: fifo is immutable; AWS does not support converting
+                              between FIFO and standard queues
+                            rule: self == oldSelf
                         force:
                           description: force allows deleting a non-empty queue when
                             deletionPolicy is Delete.
@@ -601,6 +640,12 @@ spec:
                           description: overrides allows tuning advanced settings beyond
                             the opinionated default.
                           properties:
+                            contentBasedDeduplication:
+                              description: |-
+                                contentBasedDeduplication enables SQS FIFO's automatic
+                                content-hash-based deduplication, so producers don't need to supply
+                                an explicit MessageDeduplicationId. Only meaningful when fifo is true.
+                              type: boolean
                             maxReceiveCount:
                               description: maxReceiveCount overrides the default DLQ
                                 redrive maxReceiveCount.

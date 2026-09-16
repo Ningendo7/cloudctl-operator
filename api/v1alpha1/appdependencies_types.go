@@ -88,6 +88,12 @@ type SQSOverrides struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1000
 	MaxReceiveCount *int32 `json:"maxReceiveCount,omitempty"`
+
+	// contentBasedDeduplication enables SQS FIFO's automatic
+	// content-hash-based deduplication, so producers don't need to supply
+	// an explicit MessageDeduplicationId. Only meaningful when fifo is true.
+	// +optional
+	ContentBasedDeduplication *bool `json:"contentBasedDeduplication,omitempty"`
 }
 
 // SQSQueueSpec declares a single SQS queue this app owns.
@@ -129,6 +135,14 @@ type SQSQueueSpec struct {
 	// +optional
 	Adopt bool `json:"adopt,omitempty"`
 
+	// fifo creates a FIFO queue (and its DLQ, if requested) instead of a
+	// standard one — ordered, deduplicated delivery. Immutable once set;
+	// AWS does not support converting between FIFO and standard queues.
+	// +optional
+	// +kubebuilder:default=false
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="fifo is immutable; AWS does not support converting between FIFO and standard queues"
+	FIFO bool `json:"fifo,omitempty"`
+
 	// overrides allows tuning advanced settings beyond the opinionated default.
 	// +optional
 	Overrides *SQSOverrides `json:"overrides,omitempty"`
@@ -153,6 +167,14 @@ type SQSSpec struct {
 // SNS
 // ---------------------------------------------------------------------------
 
+// SNSOverrides exposes advanced, non-default SNS configuration.
+type SNSOverrides struct {
+	// contentBasedDeduplication enables SNS FIFO's automatic
+	// content-hash-based deduplication. Only meaningful when fifo is true.
+	// +optional
+	ContentBasedDeduplication *bool `json:"contentBasedDeduplication,omitempty"`
+}
+
 type SNSTopicSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=256
@@ -172,6 +194,25 @@ type SNSTopicSpec struct {
 	// +listMapKey=namespace
 	// +listMapKey=name
 	SharedWith []SharedWithEntry `json:"sharedWith,omitempty"`
+
+	// adopt allows this CR to take ownership of a pre-existing AWS resource
+	// found under this entry's deterministic name that isn't already tagged
+	// as owned by this CR. Same semantics as sqs's adopt field.
+	// +optional
+	Adopt bool `json:"adopt,omitempty"`
+
+	// fifo creates a FIFO topic instead of a standard one — ordered,
+	// deduplicated delivery, deliverable only to FIFO SQS subscriptions.
+	// Immutable once set; AWS does not support converting between FIFO and
+	// standard topics.
+	// +optional
+	// +kubebuilder:default=false
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="fifo is immutable; AWS does not support converting between FIFO and standard topics"
+	FIFO bool `json:"fifo,omitempty"`
+
+	// overrides allows tuning advanced settings beyond the opinionated default.
+	// +optional
+	Overrides *SNSOverrides `json:"overrides,omitempty"`
 }
 
 type SNSSpec struct {

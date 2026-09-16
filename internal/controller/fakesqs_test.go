@@ -33,12 +33,13 @@ import (
 // internal/resources/sqs's own unit tests; this fake only needs to be
 // complete enough to exercise the controller's plumbing around it.
 type fakeQueue struct {
-	url                  string
-	arn                  string
-	tags                 map[string]string
-	approxMessages       string
-	approxMessagesHidden string
-	policy               string
+	url                   string
+	arn                   string
+	tags                  map[string]string
+	approxMessages        string
+	approxMessagesHidden  string
+	approxMessagesDelayed string
+	policy                string
 }
 
 type fakeSQSClient struct {
@@ -58,11 +59,12 @@ func (f *fakeSQSClient) CreateQueue(_ context.Context, in *sqs.CreateQueueInput,
 	name := *in.QueueName
 	url := "https://sqs.us-east-1.amazonaws.com/000000000000/" + name
 	f.queues[name] = &fakeQueue{
-		url:                  url,
-		arn:                  "arn:aws:sqs:us-east-1:000000000000:" + name,
-		tags:                 in.Tags,
-		approxMessages:       "0",
-		approxMessagesHidden: "0",
+		url:                   url,
+		arn:                   "arn:aws:sqs:us-east-1:000000000000:" + name,
+		tags:                  in.Tags,
+		approxMessages:        "0",
+		approxMessagesHidden:  "0",
+		approxMessagesDelayed: "0",
 	}
 	return &sqs.CreateQueueOutput{QueueUrl: &url}, nil
 }
@@ -84,6 +86,7 @@ func (f *fakeSQSClient) GetQueueAttributes(_ context.Context, in *sqs.GetQueueAt
 		string(types.QueueAttributeNameQueueArn):                              q.arn,
 		string(types.QueueAttributeNameApproximateNumberOfMessages):           q.approxMessages,
 		string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible): q.approxMessagesHidden,
+		string(types.QueueAttributeNameApproximateNumberOfMessagesDelayed):    q.approxMessagesDelayed,
 		string(types.QueueAttributeNamePolicy):                                q.policy,
 	}}, nil
 }

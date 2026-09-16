@@ -18,6 +18,7 @@ package aws
 
 import (
 	"context"
+	"fmt"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
@@ -27,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 // Clients holds one shared client per AWS service, built once at
@@ -37,14 +39,35 @@ import (
 // for concurrent use.
 type Clients struct {
 	SQS        SQSClient
-	SNS        *sns.Client
+	SNS        SNSClient
 	S3         *s3.Client
 	DynamoDB   *dynamodb.Client
 	KMS        *kms.Client
 	IAM        *iam.Client
 	CloudWatch *cloudwatch.Client
+
+	// AccountID and Region identify this controller's own AWS account,
+	// resolved once at startup. Needed anywhere a resource's name/ARN must
+	// be constructed deterministically ourselves rather than looked up by
+	// name: SNS has no "get topic by name" API (CreateTopic is the only
+	// name-to-ARN resolution, and it's idempotent in a way that hides
+	// whether a topic was just created or already existed, so the sns
+	// package constructs the expected ARN itself and checks for it
+	// directly), and S3 bucket names need an account-ID-derived suffix
+	// since they're unique across every AWS account globally, not just
+	// this one.
+	AccountID string
+	Region    string
 }
 
+// NewClients loads the default AWS config (region/credentials resolved from
+// the environment/IRSA), resolves this account's own identity via STS, and
+// builds one client per service. IAM gets a tighter retry budget than the
+// others since its rate limits are considerably stricter. Failing to
+// resolve the account ID is treated as fatal, same as a config load
+// failure — if we can't determine our own identity, something is
+// fundamentally wrong with the credentials setup, and failing fast at
+// startup beats failing deep inside a random reconcile later.
 func NewClients(ctx context.Context) (*Clients, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -54,6 +77,12 @@ func NewClients(ctx context.Context) (*Clients, error) {
 	iamCfg := cfg.Copy()
 	iamCfg.RetryMaxAttempts = 3
 
+	stsClient := sts.NewFromConfig(cfg)
+	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return nil, fmt.Errorf("resolving AWS account ID: %w", err)
+	}
+
 	return &Clients{
 		SQS:        sqs.NewFromConfig(cfg),
 		SNS:        sns.NewFromConfig(cfg),
@@ -62,5 +91,7 @@ func NewClients(ctx context.Context) (*Clients, error) {
 		KMS:        kms.NewFromConfig(cfg),
 		IAM:        iam.NewFromConfig(iamCfg),
 		CloudWatch: cloudwatch.NewFromConfig(cfg),
+		AccountID:  *identity.Account,
+		Region:     cfg.Region,
 	}, nil
 }

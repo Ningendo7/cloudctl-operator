@@ -440,3 +440,185 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
 	}
 }
+
+func TestEnsure_CreatesFIFOQueueWithSuffixAndAttribute(t *testing.T) {
+	client := newFakeSQS()
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", FIFO: true},
+	}}
+
+	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	fifoName := cloudctlaws.ResourceName("default", "checkout-service", "orders") + ".fifo"
+	q, ok := client.queues[fifoName]
+	if !ok {
+		t.Fatalf("expected queue %q to have been created with the .fifo suffix", fifoName)
+	}
+	if q.attributes["FifoQueue"] != "true" {
+		t.Errorf("expected FifoQueue attribute to be set, got attributes=%v", q.attributes)
+	}
+}
+
+func TestEnsure_FIFOQueueRespectsContentBasedDeduplicationOverride(t *testing.T) {
+	client := newFakeSQS()
+	dedup := true
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", FIFO: true, Overrides: &depsv1alpha1.SQSOverrides{ContentBasedDeduplication: &dedup}},
+	}}
+
+	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	fifoName := cloudctlaws.ResourceName("default", "checkout-service", "orders") + ".fifo"
+	if client.queues[fifoName].attributes["ContentBasedDeduplication"] != "true" {
+		t.Errorf("expected ContentBasedDeduplication attribute to be set, got attributes=%v", client.queues[fifoName].attributes)
+	}
+}
+
+func TestEnsure_DLQInheritsFIFOFromParent(t *testing.T) {
+	client := newFakeSQS()
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", FIFO: true, DLQ: true},
+	}}
+
+	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	dlqFifoName := cloudctlaws.ResourceName("default", "checkout-service", "orders-dlq") + ".fifo"
+	q, ok := client.queues[dlqFifoName]
+	if !ok {
+		t.Fatalf("expected DLQ %q to inherit fifo from its parent queue", dlqFifoName)
+	}
+	if q.attributes["FifoQueue"] != "true" {
+		t.Errorf("expected DLQ to have FifoQueue attribute set, got attributes=%v", q.attributes)
+	}
+}
+
+func TestEnsure_WiresUpVisibilityTimeoutAtCreation(t *testing.T) {
+	client := newFakeSQS()
+	timeout := int32(120)
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", Overrides: &depsv1alpha1.SQSOverrides{VisibilityTimeoutSeconds: &timeout}},
+	}}
+
+	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	if got := client.queues[queueName].attributes["VisibilityTimeout"]; got != "120" {
+		t.Errorf("expected VisibilityTimeout=120 to be set at creation, got %q", got)
+	}
+}
+
+func TestEnsure_CorrectsVisibilityTimeoutDriftOnExistingQueue(t *testing.T) {
+	client := newFakeSQS()
+	initial := int32(30)
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", Overrides: &depsv1alpha1.SQSOverrides{VisibilityTimeoutSeconds: &initial}},
+	}}
+	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+
+	// Force past the trust window so the "already exists" path (not the
+	// skip path) runs, and change the desired value.
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	entry := status.FindManagedResource(ledger, "sqs", "orders")
+	entry.LastVerifiedAt = &stale
+	status.UpsertManagedResource(&ledger, *entry)
+
+	updated := int32(300)
+	spec.Resources[0].Overrides.VisibilityTimeoutSeconds = &updated
+	_, err = Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	if got := client.queues[queueName].attributes["VisibilityTimeout"]; got != "300" {
+		t.Errorf("expected VisibilityTimeout to be corrected to 300, got %q", got)
+	}
+}
+
+func TestEnsure_CorrectsDriftEvenWithinTrustWindow(t *testing.T) {
+	// Attribute drift correction is a different concern from ownership
+	// re-verification and must not wait for the trust window to expire.
+	client := newFakeSQS()
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+	// LastVerifiedAt is fresh (just set by the setup call above) - still
+	// within the trust window.
+
+	updated := int32(90)
+	spec.Resources[0].Overrides = &depsv1alpha1.SQSOverrides{VisibilityTimeoutSeconds: &updated}
+	_, err = Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	if got := client.queues[queueName].attributes["VisibilityTimeout"]; got != "90" {
+		t.Errorf("expected VisibilityTimeout drift to be corrected even within the trust window, got %q", got)
+	}
+}
+
+func TestEnsure_ContinuesToOtherQueuesAfterOneFails(t *testing.T) {
+	// Regression test: a failure on one declared queue must not prevent an
+	// unrelated queue later in the same list from being attempted.
+	client := newFakeSQS()
+	badQueueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	_, _ = client.CreateQueue(context.Background(), &sqs.CreateQueueInput{
+		QueueName: &badQueueName,
+		Tags:      map[string]string{"team": "someone-else"},
+	})
+
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders"},   // fails: owned by nobody we recognize, no adopt
+		{Name: "receipts"}, // unrelated, should still succeed
+	}}
+
+	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err == nil {
+		t.Fatal("expected an error from the failing queue")
+	}
+
+	receiptsName := cloudctlaws.ResourceName("default", "checkout-service", "receipts")
+	if _, ok := client.queues[receiptsName]; !ok {
+		t.Error("expected the second queue to still be created despite the first one failing")
+	}
+	if status.FindManagedResource(ledger, "sqs", "receipts") == nil {
+		t.Error("expected a ledger entry for the successfully-created second queue")
+	}
+}
+
+func TestEnsure_RejectsQueueNameExceedingSQSLimit(t *testing.T) {
+	// A realistic, non-adversarial combination that happens to exceed
+	// SQS's 80-character limit: platform-engineering-production (31) +
+	// customer-notification-service (29) + order-confirmation-queue (24),
+	// joined by hyphens, is 86 characters.
+	client := newFakeSQS()
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "order-confirmation-queue"},
+	}}
+
+	_, err := Ensure(context.Background(), client, "platform-engineering-production", "customer-notification-service", "uid-1", spec, nil)
+	if err == nil {
+		t.Fatal("expected an error for a computed queue name exceeding SQS's 80-character limit")
+	}
+	if len(client.queues) != 0 {
+		t.Error("expected no AWS call to have been attempted for a name that's already known to be too long")
+	}
+}
