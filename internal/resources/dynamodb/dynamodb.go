@@ -193,6 +193,21 @@ func ensureTable(
 			return ledger, fmt.Errorf("table %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", tableName)
 		}
 
+		// Refuse the adoption outright on a key-schema mismatch, rather than
+		// adopting anyway and only failing later, opaquely, at the first
+		// PutItem/Query the workload makes. AWS never allows changing a
+		// table's key schema after creation, and the CRD's own CEL rules
+		// already block editing partitionKey/sortKey on an already-
+		// reconciled CR — so the only way this can happen is adopting a
+		// pre-existing table that happens to sit at this CR's deterministic
+		// name with a different schema.
+		if actualPartitionKey, actualSortKey := tableKeySchema(table.KeySchema); actualPartitionKey != opts.partitionKey || actualSortKey != opts.sortKey {
+			return ledger, fmt.Errorf(
+				"table %q exists with key schema (partitionKey=%q, sortKey=%q) that doesn't match this CR's declared (partitionKey=%q, sortKey=%q) — AWS doesn't support changing a table's key schema, so it can't be adopted with mismatched keys",
+				tableName, actualPartitionKey, actualSortKey, opts.partitionKey, opts.sortKey,
+			)
+		}
+
 		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
 		if _, tagErr := client.TagResource(ctx, &dynamodb.TagResourceInput{
 			ResourceArn: &tableArn,
@@ -207,6 +222,21 @@ func ensureTable(
 	}
 
 	return recordVerified(ledger, resourceName, tableArn, opts.deletionPolicy, opts.force), nil
+}
+
+// tableKeySchema extracts the partition (HASH) and sort (RANGE) key
+// attribute names from a table's key schema, as DescribeTable reports it.
+func tableKeySchema(schema []types.KeySchemaElement) (partitionKey, sortKey string) {
+	for _, e := range schema {
+		name := aws.ToString(e.AttributeName)
+		switch e.KeyType {
+		case types.KeyTypeHash:
+			partitionKey = name
+		case types.KeyTypeRange:
+			sortKey = name
+		}
+	}
+	return partitionKey, sortKey
 }
 
 func createTable(

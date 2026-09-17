@@ -25,6 +25,34 @@ import (
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
+const resourceTypeIAM = "iam"
+
+// iamWorkloadCount approximates how much work deriving this CR's IAM
+// policy actually involves, for sectionContext's timeout scaling. Unlike
+// every other section, IAM never manages more than one ledger entry (the
+// role itself) regardless of how many resources drive its policy, so
+// ledger count alone (sectionContext's other input) would never reflect a
+// CR with many owned/consumed resources needing a proportionally larger
+// timeout. Counts owned resources (each contributes a policy statement)
+// plus consumes entries (each requires a cross-namespace CR lookup to
+// check sharedWith) across every implemented resource type.
+func iamWorkloadCount(cr *depsv1alpha1.AppDependencies) int {
+	count := 0
+	if cr.Spec.SQS != nil {
+		count += len(cr.Spec.SQS.Resources) + len(cr.Spec.SQS.Consumes)
+	}
+	if cr.Spec.SNS != nil {
+		count += len(cr.Spec.SNS.Resources) + len(cr.Spec.SNS.Consumes)
+	}
+	if cr.Spec.DynamoDB != nil {
+		count += len(cr.Spec.DynamoDB.Resources) + len(cr.Spec.DynamoDB.Consumes)
+	}
+	if cr.Spec.S3 != nil {
+		count += len(cr.Spec.S3.Resources) + len(cr.Spec.S3.Consumes)
+	}
+	return count
+}
+
 // iamSection derives and reconciles this CR's IAM role, and the
 // ServiceAccount annotation that lets a workload actually assume it via
 // IRSA. Needs the whole reconciler (not just AWSClients like every other
@@ -35,6 +63,9 @@ func iamSection(r *AppDependenciesReconciler) section {
 	return section{
 		name: "IAMReady",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, resourceTypeIAM, iamWorkloadCount(cr))
+			defer cancel()
+
 			ledger, roleARN, ensureErr := iam.Ensure(
 				ctx, r.AWSClients.IAM, r.Client,
 				r.OIDCProviderARN, r.OIDCProviderURL,
@@ -52,7 +83,7 @@ func iamSection(r *AppDependenciesReconciler) section {
 			// already does - not just at CR deletion time.
 			ledger, cleanupErr := iam.Cleanup(ctx, r.AWSClients.IAM, r.Client, cr, cr.Status.ManagedResources, false)
 			cr.Status.ManagedResources = ledger
-			if status.FindManagedResource(ledger, "iam", "role") == nil {
+			if status.FindManagedResource(ledger, resourceTypeIAM, "role") == nil {
 				cr.Status.IAMRoleARN = ""
 			}
 
@@ -69,6 +100,9 @@ func iamSection(r *AppDependenciesReconciler) section {
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
+			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, resourceTypeIAM, iamWorkloadCount(cr))
+			defer cancel()
+
 			ledger, err := iam.Cleanup(ctx, r.AWSClients.IAM, r.Client, cr, cr.Status.ManagedResources, true)
 			cr.Status.ManagedResources = ledger
 			if err != nil {

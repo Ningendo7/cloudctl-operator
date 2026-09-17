@@ -218,6 +218,27 @@ func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *deps
 	}, ""
 }
 
+// ResolveConsumeARN resolves a ConsumeRef to the ARN of the resource it
+// points at, but only if the producer CR currently exists, has reconciled
+// that resource, and has actually granted this consumer access via
+// sharedWith - the exact same authorization check collectGrants applies
+// when deriving IAM policy. Returns ("", false) if any of that isn't true
+// yet, with no error (same self-resolving-forward-reference philosophy as
+// collectGrants).
+//
+// Exported so internal/resources/configmap can reuse this authorization
+// check rather than duplicate it: the ConfigMap it generates must never
+// expose a resource identifier this CR wasn't actually granted IAM access
+// to, and that has to stay in lockstep with collectGrants automatically,
+// not by two separate implementations agreeing by coincidence.
+func ResolveConsumeARN(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) (arn string, ok bool) {
+	g, reason := resolveConsume(ctx, k8sClient, consumer, resourceType, ref)
+	if reason != "" {
+		return "", false
+	}
+	return g.arn, true
+}
+
 // producerSharedWith returns the sharedWith list for one resource entry
 // within the producer's given section, regardless of resource type.
 func producerSharedWith(producer *depsv1alpha1.AppDependencies, resourceType, resourceName string) ([]depsv1alpha1.SharedWithEntry, bool) {

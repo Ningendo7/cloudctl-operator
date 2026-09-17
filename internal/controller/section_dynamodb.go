@@ -43,7 +43,7 @@ func dynamodbSection(awsClients *cloudctlaws.Clients) section {
 			if cr.Spec.DynamoDB != nil {
 				declared = len(cr.Spec.DynamoDB.Resources)
 			}
-			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "dynamodb", declared)
+			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "dynamodb", declared)
 			defer cancel()
 
 			ledger, results, err := dynamodb.Cleanup(

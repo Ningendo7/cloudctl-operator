@@ -74,7 +74,7 @@ func snsSection(awsClients *cloudctlaws.Clients) section {
 			if cr.Spec.SNS != nil {
 				declared = len(cr.Spec.SNS.Resources)
 			}
-			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "sns", declared)
+			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "sns", declared)
 			defer cancel()
 
 			ledger, results, err := sns.Cleanup(

@@ -459,9 +459,10 @@ func TestEnsure_AdoptsUntaggedTableWhenRequested(t *testing.T) {
 	client := newFakeDynamoDB()
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
 	client.tables[tableName] = &fakeTable{
-		arn:    "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
-		status: types.TableStatusActive,
-		tags:   map[string]string{"team": "someone-else"},
+		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:       types.TableStatusActive,
+		tags:         map[string]string{"team": "someone-else"},
+		partitionKey: "id",
 	}
 
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
@@ -497,6 +498,47 @@ func TestEnsure_RejectsTableOwnedByDifferentCREvenWithAdopt(t *testing.T) {
 	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to still refuse a table owned by a different AppDependencies CR")
+	}
+}
+
+func TestEnsure_RefusesAdoptingTableWithMismatchedKeySchema(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	client.tables[tableName] = &fakeTable{
+		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:       types.TableStatusActive,
+		tags:         map[string]string{"team": "someone-else"},
+		partitionKey: "userId", // spec below declares "id"
+	}
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Adopt: true},
+	}}
+	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err == nil {
+		t.Fatal("expected adopt:true to still refuse a table whose actual key schema doesn't match spec")
+	}
+	if cloudctlaws.IsOwnedBy(client.tables[tableName].tags, "default", "checkout-service", "uid-1") {
+		t.Error("expected the mismatched table to not be tagged as owned — adoption must not proceed")
+	}
+}
+
+func TestEnsure_RefusesAdoptingTableMissingASortKey(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	client.tables[tableName] = &fakeTable{
+		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:       types.TableStatusActive,
+		tags:         map[string]string{"team": "someone-else"},
+		partitionKey: "id", // matches, but spec below also declares a sort key the table doesn't have
+	}
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", SortKey: "createdAt", Adopt: true},
+	}}
+	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	if err == nil {
+		t.Fatal("expected adopt:true to still refuse a table missing a sort key the spec declares")
 	}
 }
 

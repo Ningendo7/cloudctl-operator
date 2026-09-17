@@ -94,7 +94,7 @@ spec:
 | `partitionKey` / `sortKey` | Required / optional table key schema, as attribute names (always typed as string — see the naming section below). **Immutable once set** — AWS doesn't support changing a table's key schema after creation. |
 | `deletionPolicy` | Same semantics as SQS/SNS. A table's "non-empty" equivalent is a real item count, checked via a strongly-consistent count-only `Scan` rather than `DescribeTable`'s `ItemCount` — AWS documents that field as updated only approximately every six hours, which would let a table populated minutes ago sail through as if it were still empty. |
 | `force` | Allows deleting a table that isn't empty. Unlike SQS/SNS, `DeleteTable` itself has **no non-empty guard of its own** — this check is the only thing standing between "removed from spec" and irreversible data loss. |
-| `adopt` | Same semantics as SQS/SNS. |
+| `adopt` | Same semantics as SQS/SNS, plus one DynamoDB-specific check: adoption is refused outright if the existing table's actual key schema doesn't match `partitionKey`/`sortKey` — AWS never allows changing a table's key schema, so adopting a mismatched table would otherwise succeed and only fail later, opaquely, at the workload's first `PutItem`/`Query`. |
 | `sharedWith` | Same semantics as SQS/SNS (see [IAM](#iam)). |
 | `backup.enabled` | Toggles point-in-time recovery (continuous backups). |
 | `backup.retentionDays` | 1–35. Only meaningful with `enabled: true`; AWS's own default (35 days) applies when unset. |
@@ -223,15 +223,21 @@ spec:
   `status.serviceAccountName` reports which ServiceAccount currently
   carries it.
 
+- **Connection ConfigMap**: `<cr-name>-connection` carries flat,
+  env-var-shaped keys for every owned resource (`SQS_ORDERS_URL`,
+  `S3_RECEIPTS_BUCKET`, `DYNAMODB_SESSIONS_TABLE_NAME`, `SNS_EVENTS_ARN`)
+  plus every *authorized* `consumes` entry, mirrored with the producer
+  CR's name folded into the key to avoid collisions. Regenerated every
+  reconcile, deleted outright once nothing remains to report. See
+  [architecture.md](architecture.md#resource-identity-delivery-to-workloads)
+  for the full design, including why a consumed entry is silently omitted
+  rather than exposed when the producer hasn't actually granted it.
+
 **Not yet built:**
-- A resource identifier ConfigMap (queue URLs, ARNs, bucket/table names,
-  and now the role ARN) for workloads to consume via `envFrom` — not built
-  yet either. See [architecture.md](architecture.md) for the intended
-  shape (one ConfigMap per CR, with a consuming CR's `consumes` entries
-  mirrored into its *own* ConfigMap).
-- Stale `sharedWith` entries pointing at a deleted consumer CR are never
-  pruned — harmless (nothing can act on a grant for a CR that no longer
-  exists) but left as spec clutter.
+- Stale `sharedWith` entries pointing at a deleted consumer CR aren't
+  pruned from spec (mutating a user-authored field would fight a
+  GitOps-managed manifest on its next sync), but they are surfaced —
+  see `SharedWithReferencesValid` below.
 
 ## Shared behavior
 
@@ -241,3 +247,11 @@ spec:
   see [architecture.md](architecture.md#deletion-is-a-lifecycle-not-a-single-api-call).
 - **Status conditions** — each section reports its own condition
   (`SQSReady`, `SNSReady`, ...) plus an aggregate `Ready` condition on the CR.
+- **`SharedWithReferencesValid`** — flags any `sharedWith` entry whose
+  target consumer CR no longer exists (typically because it was deleted
+  after being granted access). Deliberately excluded from the `Ready`
+  aggregate — a stale reference grants nothing on its own, so it's a
+  cleanliness signal, not a reconcile failure — and deliberately
+  status-only: `sharedWith` is user-authored spec, and silently pruning it
+  would fight a GitOps-managed manifest on its next sync rather than
+  actually resolving anything.

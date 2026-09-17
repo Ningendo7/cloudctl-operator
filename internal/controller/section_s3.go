@@ -62,7 +62,7 @@ func s3Section(awsClients *cloudctlaws.Clients) section {
 			if cr.Spec.S3 != nil {
 				declared = len(cr.Spec.S3.Resources)
 			}
-			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "s3", declared)
+			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "s3", declared)
 			defer cancel()
 
 			ledger, results, err := s3.Cleanup(

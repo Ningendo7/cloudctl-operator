@@ -104,3 +104,33 @@ func TestSectionContext_UsesDeclaredCountWhenLargerThanLedger(t *testing.T) {
 		t.Errorf("expected roughly %v driven by declared count, got %v", want, got)
 	}
 }
+
+func TestSectionDeletionContext_UsesTheLargerDeletionBudget(t *testing.T) {
+	// Deletion does strictly more work per resource than creation (S3's
+	// per-object-version cleanup being the extreme case) - its budget must
+	// never be reused from, or smaller than, provisioning's.
+	if baseSectionDeletionTimeout <= baseSectionTimeout {
+		t.Errorf("baseSectionDeletionTimeout (%v) must be greater than baseSectionTimeout (%v)", baseSectionDeletionTimeout, baseSectionTimeout)
+	}
+	if perResourceDeletionTimeout <= perResourceTimeout {
+		t.Errorf("perResourceDeletionTimeout (%v) must be greater than perResourceTimeout (%v)", perResourceDeletionTimeout, perResourceTimeout)
+	}
+
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: "s3", Name: "a"},
+		{Type: "s3", Name: "b"},
+	}
+	ctx, cancel := sectionDeletionContext(context.Background(), ledger, "s3", 0)
+	defer cancel()
+
+	want := baseSectionDeletionTimeout + 2*perResourceDeletionTimeout
+	got := timeoutOf(ctx, t)
+	if got > want || got < want-time.Second {
+		t.Errorf("expected roughly %v driven by ledger count under the deletion budget, got %v", want, got)
+	}
+
+	provisioningWant := baseSectionTimeout + 2*perResourceTimeout
+	if got <= provisioningWant {
+		t.Errorf("expected the deletion timeout (%v) to exceed the equivalent provisioning timeout (%v)", got, provisioningWant)
+	}
+}

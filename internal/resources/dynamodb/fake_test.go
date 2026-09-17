@@ -48,6 +48,12 @@ type fakeTable struct {
 	billingMode   types.BillingMode
 	pitrEnabled   bool
 	retentionDays int32
+	// partitionKey/sortKey back DescribeTable's KeySchema response, so
+	// adopt-path key-schema-mismatch checks are actually exercisable
+	// against a fake table pre-seeded with a different schema than spec
+	// declares.
+	partitionKey string
+	sortKey      string
 	// itemCount drives Scan's Count response — 0 means empty, anything
 	// else means the count-limited Scan finds at least one item.
 	itemCount int
@@ -72,11 +78,14 @@ func (f *fakeDynamoDB) CreateTable(_ context.Context, in *dynamodb.CreateTableIn
 	}
 	name := *in.TableName
 	arn := "arn:aws:dynamodb:us-east-1:123456789012:table/" + name
+	partitionKey, sortKey := tableKeySchema(in.KeySchema)
 	f.tables[name] = &fakeTable{
-		arn:         arn,
-		tags:        tagsToMap(in.Tags),
-		status:      types.TableStatusActive,
-		billingMode: in.BillingMode,
+		arn:          arn,
+		tags:         tagsToMap(in.Tags),
+		status:       types.TableStatusActive,
+		billingMode:  in.BillingMode,
+		partitionKey: partitionKey,
+		sortKey:      sortKey,
 	}
 	return &dynamodb.CreateTableOutput{
 		TableDescription: &types.TableDescription{
@@ -100,12 +109,20 @@ func (f *fakeDynamoDB) DescribeTable(_ context.Context, in *dynamodb.DescribeTab
 	if t.billingMode != "" {
 		billingSummary = &types.BillingModeSummary{BillingMode: t.billingMode}
 	}
+	var keySchema []types.KeySchemaElement
+	if t.partitionKey != "" {
+		keySchema = append(keySchema, types.KeySchemaElement{AttributeName: &t.partitionKey, KeyType: types.KeyTypeHash})
+	}
+	if t.sortKey != "" {
+		keySchema = append(keySchema, types.KeySchemaElement{AttributeName: &t.sortKey, KeyType: types.KeyTypeRange})
+	}
 	return &dynamodb.DescribeTableOutput{
 		Table: &types.TableDescription{
 			TableArn:           &t.arn,
 			TableName:          &name,
 			TableStatus:        t.status,
 			BillingModeSummary: billingSummary,
+			KeySchema:          keySchema,
 		},
 	}, nil
 }

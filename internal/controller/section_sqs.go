@@ -72,7 +72,7 @@ func sqsSection(awsClients *cloudctlaws.Clients) section {
 			if cr.Spec.SQS != nil {
 				declared = len(cr.Spec.SQS.Resources)
 			}
-			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "sqs", declared)
+			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "sqs", declared)
 			defer cancel()
 
 			ledger, results, err := sqs.Cleanup(

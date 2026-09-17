@@ -91,6 +91,43 @@ func TestEnsure_ReturnsErrorOn403WithoutAttemptingCreate(t *testing.T) {
 	if _, exists := client.buckets[bucket]; exists {
 		t.Error("expected no CreateBucket attempt on a 403")
 	}
+	// A bare HTTP 403 with no smithy error code (HeadBucket's actual shape)
+	// must still be classified correctly - this is the one call site the
+	// awshttp.ResponseError fallback in internal/aws/errors.go exists for.
+	if !cloudctlaws.IsPermissionDenied(err) {
+		t.Error("expected a bare HTTP 403 to be classified as permission-denied")
+	}
+	if cloudctlaws.IsRetryable(err) {
+		t.Error("expected a bare HTTP 403 to be classified as not retryable")
+	}
+}
+
+func TestEnsure_ClassifiesPermissionErrorsAsNotRetryable(t *testing.T) {
+	client := newFakeS3()
+	client.createBucketErr = &fakeAWSError{code: "AccessDenied", fault: smithy.FaultClient}
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
+
+	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if cloudctlaws.IsRetryable(err) {
+		t.Error("expected a permission-denied error to be classified as not retryable")
+	}
+}
+
+func TestEnsure_ClassifiesTransientErrorsAsRetryable(t *testing.T) {
+	client := newFakeS3()
+	client.createBucketErr = &fakeAWSError{code: "InternalError", fault: smithy.FaultServer}
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
+
+	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !cloudctlaws.IsRetryable(err) {
+		t.Error("expected a server-fault error to be classified as retryable")
+	}
 }
 
 func TestEnsure_ReturnsErrorOn301WithoutAttemptingCreate(t *testing.T) {

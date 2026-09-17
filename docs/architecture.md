@@ -82,6 +82,53 @@ full computed name is validated against each service's real length limit
 CRD's own field-level `MaxLength` only bounds the user-supplied key, not the
 final composed name.
 
+## Resource identity delivery to workloads
+
+Two distinct delivery problems, deliberately not solved by the same
+mechanism.
+
+**The IAM role → a ServiceAccount annotation.** `spec.serviceAccountName`
+set: the operator merges `eks.amazonaws.com/role-arn` onto that existing
+object via server-side apply, tracking that one field as its own without
+ever adopting the object itself (a human's or another tool's other
+annotations, and the object's lifecycle, are left alone). Unset: the
+operator creates and fully owns a ServiceAccount named after the CR
+(owner-referenced to it, so native GC removes it when the CR is deleted).
+Either way, this is the actual IRSA mechanism — the AWS SDK inside the pod
+auto-assumes the role via a projected token, no credential material is
+ever shipped via env var or ConfigMap.
+
+**Resource identifiers (queue URLs, ARNs, bucket/table names) → a
+generated ConfigMap**, named `<cr-name>-connection`, entirely owned by the
+operator (regenerated via server-side apply every reconcile, deleted
+outright once nothing remains to report — not left behind as a stale,
+empty artifact). Flat, env-var-shaped keys
+(`SQS_ORDERS_URL`, `S3_RECEIPTS_BUCKET`, `DYNAMODB_SESSIONS_TABLE_NAME`,
+`SNS_EVENTS_ARN`) for direct `envFrom: configMapRef` consumption with no
+app code required.
+
+A `consumes` entry is mirrored into the *consumer's own* ConfigMap using
+the same flat keys, prefixed with the producer CR's name
+(`SQS_<PRODUCER_CR_NAME>_ORDERS_URL`) to avoid two different producers'
+same-named resources colliding in one consumer's map. This isn't just a
+naming nicety — `sharedWith`/`consumes` support cross-namespace grants, and
+ConfigMaps are namespace-scoped, so a consumer's pod can never mount a
+ConfigMap living in the producer's own namespace directly. Mirroring into
+the consumer's own namespace is the only mechanism that works at all once
+sharing crosses a namespace boundary.
+
+Mirroring reuses the exact same authorization check IAM's own policy
+derivation applies (`iam.ResolveConsumeARN`, shared rather than
+duplicated) — a `consumes` entry the producer hasn't actually granted via
+`sharedWith` is silently omitted from the ConfigMap, the same way it's
+omitted from the derived IAM policy. The two are required to stay in
+lockstep by construction: a workload should never be handed a resource
+identifier for something its own IAM role can't touch.
+
+The IAM role's own ARN is deliberately *not* included in this ConfigMap —
+IRSA is meant to be fully transparent to the application; there's nothing
+for it to do with its own role ARN.
+
 ## Validation: CEL schema rules, not an admission webhook
 
 Self-contained constraints (immutability of fields AWS doesn't support

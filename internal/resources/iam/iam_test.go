@@ -267,6 +267,101 @@ func TestEnsure_ClassifiesTransientErrorsAsRetryable(t *testing.T) {
 	}
 }
 
+// TestEnsure_ClassifiesConcurrentModificationAsRetryable exercises
+// CreateRole's real documented ConcurrentModification error
+// ("multiple requests to change this object were submitted
+// simultaneously... wait and retry") end-to-end through Ensure, not just
+// in isolation against IsRetryable directly - this is the one AWS error
+// this session's error-classification audit added support for and it had
+// never been exercised against the actual role-creation path.
+func TestEnsure_ClassifiesConcurrentModificationAsRetryable(t *testing.T) {
+	client := newFakeIAM()
+	client.createRoleErr = &fakeAWSError{code: "ConcurrentModification", fault: smithy.FaultClient}
+	cr := ownedCR("checkout-service")
+
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !cloudctlaws.IsRetryable(err) {
+		t.Error("expected ConcurrentModification to be classified as retryable")
+	}
+}
+
+// The following exercise real, documented CreateRole/PutRolePolicy errors
+// that are client-fault by HTTP status and carry no special-cased
+// retryable treatment - each should surface as a hard, non-retryable
+// failure rather than being silently retried forever.
+
+func TestEnsure_ClassifiesEntityAlreadyExistsAsNotRetryable(t *testing.T) {
+	client := newFakeIAM()
+	client.createRoleErr = &fakeAWSError{code: "EntityAlreadyExists", fault: smithy.FaultClient}
+	cr := ownedCR("checkout-service")
+
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if cloudctlaws.IsRetryable(err) {
+		t.Error("expected EntityAlreadyExists to be classified as not retryable")
+	}
+}
+
+func TestEnsure_ClassifiesLimitExceededAsNotRetryable(t *testing.T) {
+	client := newFakeIAM()
+	client.createRoleErr = &fakeAWSError{code: "LimitExceeded", fault: smithy.FaultClient}
+	cr := ownedCR("checkout-service")
+
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if cloudctlaws.IsRetryable(err) {
+		t.Error("expected LimitExceeded to be classified as not retryable")
+	}
+}
+
+func TestEnsure_ClassifiesInvalidInputAsNotRetryable(t *testing.T) {
+	client := newFakeIAM()
+	client.createRoleErr = &fakeAWSError{code: "InvalidInput", fault: smithy.FaultClient}
+	cr := ownedCR("checkout-service")
+
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if cloudctlaws.IsRetryable(err) {
+		t.Error("expected InvalidInput to be classified as not retryable")
+	}
+}
+
+func TestEnsure_ClassifiesMalformedPolicyDocumentAsNotRetryable(t *testing.T) {
+	client := newFakeIAM()
+	client.putRolePolicyErr = &fakeAWSError{code: "MalformedPolicyDocument", fault: smithy.FaultClient}
+	cr := ownedCR("checkout-service")
+
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if cloudctlaws.IsRetryable(err) {
+		t.Error("expected MalformedPolicyDocument to be classified as not retryable")
+	}
+}
+
+func TestEnsure_RejectsRoleNameExceedingIAMLimit(t *testing.T) {
+	client := newFakeIAM()
+	cr := ownedCR(strings.Repeat("a", 70))
+
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	if err == nil {
+		t.Fatal("expected an error for a computed role name exceeding the length limit")
+	}
+	if len(client.roles) != 0 {
+		t.Error("expected no CreateRole call to have been made for an over-length name")
+	}
+}
+
 func TestEnsure_GrantsConsumedResourceFromAnotherCR(t *testing.T) {
 	client := newFakeIAM()
 	producer := producerCR("default", "checkout-service", []depsv1alpha1.SharedWithEntry{

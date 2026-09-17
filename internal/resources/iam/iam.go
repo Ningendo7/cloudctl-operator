@@ -367,9 +367,9 @@ func recordVerified(ledger []depsv1alpha1.ManagedResource, arn string) []depsv1a
 		createdAt = existing.CreatedAt
 	}
 	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{
-		Type:      resourceType,
-		Name:      roleLedgerName,
-		ARN:       arn,
+		Type: resourceType,
+		Name: roleLedgerName,
+		ARN:  arn,
 		// The IAM role holds no data of its own — always managed
 		// (Delete-equivalent) regardless of any other resource's
 		// retention policy. A leftover role tied to a now-gone CR's

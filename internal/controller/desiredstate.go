@@ -25,6 +25,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/configmap"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -43,7 +44,7 @@ const transientRequeueInterval = 30 * time.Second
 // produce, used to compute the aggregate Ready condition. Kept in sync
 // with allSections above — each entry here should have a matching
 // section constructor registered there.
-var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", "S3Ready", "IAMReady"}
+var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", "S3Ready", "IAMReady", "ConnectionInfoReady"}
 
 type section struct {
 	name      string
@@ -73,6 +74,17 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr *d
 		if err := s.reconcile(ctx, cr); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	checkSharedWithReferences(ctx, r.Client, cr)
+
+	// Runs last, after every section has written this pass's ARNs into the
+	// ledger: the ConfigMap it generates is only as fresh as that ledger
+	// data, so anything reconciled earlier in this same pass is already
+	// reflected in it, not lagging a full reconcile behind.
+	connErr := configmap.Ensure(ctx, r.Client, r.AWSClients.Region, r.AWSClients.AccountID, cr)
+	setSectionCondition(cr, "ConnectionInfoReady", connErr)
+	if firstErr == nil {
+		firstErr = connErr
 	}
 	return firstErr
 }
