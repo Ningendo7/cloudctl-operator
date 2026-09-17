@@ -43,7 +43,7 @@ type Clients struct {
 	S3         *s3.Client
 	DynamoDB   *dynamodb.Client
 	KMS        *kms.Client
-	IAM        *iam.Client
+	IAM        IAMClient
 	CloudWatch *cloudwatch.Client
 
 	// AccountID and Region identify this controller's own AWS account,

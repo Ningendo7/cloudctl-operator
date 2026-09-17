@@ -1,9 +1,9 @@
 # cloudctl-operator
 
 A Kubernetes operator that manages a bundle of everyday AWS dependencies —
-SNS, SQS, DynamoDB, S3, and (planned) KMS and the IAM to go with them —
-behind a single opinionated `AppDependencies` CRD, instead of exposing raw
-cloud-provider config as YAML.
+SNS, SQS, DynamoDB, S3, and auto-derived IAM (with KMS and CloudWatch alarms
+planned) — behind a single opinionated `AppDependencies` CRD, instead of
+exposing raw cloud-provider config as YAML.
 
 ## Description
 
@@ -19,120 +19,48 @@ the concrete result in `status` rather than hiding it behind the defaults.
   ownership and adoption, the trust window, deletion safety, naming,
   validation strategy.
 - **[docs/resources.md](docs/resources.md)** — what's actually implemented
-  today (SQS, SNS, DynamoDB, S3), with field-by-field behavior and known gaps.
+  today (SQS, SNS, DynamoDB, S3, IAM), with field-by-field behavior and
+  known gaps.
 
 ## Getting Started
 
 ### Prerequisites
 - go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+- docker version 17.03+
+- kubectl version v1.11.3+
+- access to a Kubernetes v1.11.3+ cluster with IRSA (IAM Roles for Service
+  Accounts) set up, i.e. an OIDC identity provider registered for the
+  cluster — required for the auto-derived IAM role's trust policy
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+### Deploy
 
 ```sh
 make docker-build docker-push IMG=<some-registry>/cloudctl-operator:tag
-```
-
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
-
-**Install the CRDs into the cluster:**
-
-```sh
-make install
-```
-
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
-
-```sh
+make install    # CRDs
 make deploy IMG=<some-registry>/cloudctl-operator:tag
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+The manager needs `--oidc-provider-arn` and `--oidc-provider-url` set to
+your cluster's IAM OIDC identity provider (see `cmd/main.go`) — every IAM
+role it derives is scoped to that provider via IRSA. Without these, the IAM
+section refuses to run rather than emitting a role nobody can assume.
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+Apply a sample CR:
 
 ```sh
 kubectl apply -k config/samples/
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+### Uninstall
 
 ```sh
 kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
+make uninstall   # CRDs
 make undeploy
 ```
 
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/cloudctl-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/cloudctl-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+Resources with `deletionPolicy: Retain` (the default) are left in AWS on CR
+deletion — see [architecture.md](docs/architecture.md) for why.
 
 ## License
 
@@ -149,4 +77,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-

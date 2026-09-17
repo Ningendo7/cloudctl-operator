@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -35,11 +36,21 @@ type AppDependenciesReconciler struct {
 	client.Client
 	Scheme     *runtime.Scheme
 	AWSClients *cloudctlaws.Clients
+
+	// OIDCProviderARN and OIDCProviderURL identify this cluster's IAM OIDC
+	// identity provider, needed to build the IRSA trust policy on every IAM
+	// role this operator derives. Left empty is valid for a deployment that
+	// never uses sharedWith/consumes — the IAM section only ever needs
+	// these when it actually has to create or update a role, and reports a
+	// clear error at that point rather than refusing to start without them.
+	OIDCProviderARN string
+	OIDCProviderURL string
 }
 
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 
 func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var cr depsv1alpha1.AppDependencies
@@ -67,7 +78,7 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	// this same pass (rather than returning) or a freshly created CR would
 	// never actually get reconciled until some later spec change.
 
-	err := ensureDesiredState(ctx, r.AWSClients, cr)
+	err := ensureDesiredState(ctx, r, cr)
 
 	if statusErr := r.Status().Update(ctx, cr); statusErr != nil {
 		log.Error(statusErr, "failed to update status")
@@ -93,7 +104,7 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 		return ctrl.Result{}, nil
 	}
 
-	done, err := finalizeDesiredState(ctx, r.AWSClients, cr)
+	done, err := finalizeDesiredState(ctx, r, cr)
 
 	if statusErr := r.Status().Update(ctx, cr); statusErr != nil {
 		log.Error(statusErr, "failed to update status during deletion")
@@ -121,6 +132,15 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&depsv1alpha1.AppDependencies{}).
 		WithEventFilter(predicates.AppDependenciesPredicate()).
+		// Self-referential watch: a producer's sharedWith change (or any
+		// spec change generation-changed already lets through) also
+		// reconciles every CR that consumes from it, so a revocation or
+		// new grant takes effect immediately instead of waiting for the
+		// periodic drift-detection interval. See mapProducerToConsumers.
+		Watches(
+			&depsv1alpha1.AppDependencies{},
+			handler.EnqueueRequestsFromMapFunc(r.mapProducerToConsumers),
+		).
 		Named("appdependencies").
 		Complete(r)
 }

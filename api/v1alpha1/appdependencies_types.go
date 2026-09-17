@@ -35,6 +35,18 @@ const (
 	DeletionPolicyDelete DeletionPolicy = "Delete"
 )
 
+// AccessLevel controls how much access a sharedWith grant confers. Decided
+// by the resource's owner via SharedWithEntry, never by the consumer's own
+// consumes entry — a consumer must never be able to grant itself more
+// access than the owner intended just by asking for it.
+// +kubebuilder:validation:Enum=ReadOnly;ReadWrite
+type AccessLevel string
+
+const (
+	AccessLevelReadOnly  AccessLevel = "ReadOnly"
+	AccessLevelReadWrite AccessLevel = "ReadWrite"
+)
+
 // SharedWithEntry grants another AppDependencies CR permission to consume a
 // resource owned by this one. Referencing a resource is not sufficient on
 // its own — the owner must explicitly list the consumer here.
@@ -48,6 +60,15 @@ type SharedWithEntry struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
+
+	// access controls how much this grant confers. ReadOnly still includes
+	// whatever's mechanically required just to consume the resource at all
+	// (e.g. deleting an SQS message once received, or subscribing to an
+	// SNS topic) — it's the ability to add new data (SendMessage, Publish,
+	// PutObject, PutItem, ...) that ReadWrite adds on top.
+	// +optional
+	// +kubebuilder:default=ReadOnly
+	Access AccessLevel `json:"access,omitempty"`
 }
 
 // ConsumeRef references a resource owned by another AppDependencies CR. The
@@ -160,6 +181,10 @@ type SQSSpec struct {
 	// consumes references queues owned by other AppDependencies CRs.
 	// +optional
 	// +kubebuilder:validation:MaxItems=50
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=name
+	// +listMapKey=resourceName
 	Consumes []ConsumeRef `json:"consumes,omitempty"`
 }
 
@@ -224,6 +249,10 @@ type SNSSpec struct {
 
 	// +optional
 	// +kubebuilder:validation:MaxItems=50
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=name
+	// +listMapKey=resourceName
 	Consumes []ConsumeRef `json:"consumes,omitempty"`
 }
 
@@ -365,6 +394,10 @@ type S3Spec struct {
 
 	// +optional
 	// +kubebuilder:validation:MaxItems=50
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=name
+	// +listMapKey=resourceName
 	Consumes []ConsumeRef `json:"consumes,omitempty"`
 }
 
@@ -469,6 +502,10 @@ type DynamoDBSpec struct {
 
 	// +optional
 	// +kubebuilder:validation:MaxItems=50
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=name
+	// +listMapKey=resourceName
 	Consumes []ConsumeRef `json:"consumes,omitempty"`
 }
 
@@ -503,6 +540,10 @@ type KMSSpec struct {
 
 	// +optional
 	// +kubebuilder:validation:MaxItems=50
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=name
+	// +listMapKey=resourceName
 	Consumes []ConsumeRef `json:"consumes,omitempty"`
 }
 
@@ -628,6 +669,23 @@ type AppDependenciesStatus struct {
 	// +listMapKey=type
 	// +listMapKey=name
 	ManagedResources []ManagedResource `json:"managedResources,omitempty"`
+
+	// iamRoleARN is the ARN of the IAM role this operator derived and
+	// manages for this CR's workload. Also present as a "iam"/"role" entry
+	// in managedResources (reusing the same ownership/trust-window
+	// machinery every other resource type uses) — this field exists for
+	// direct visibility without having to filter that list.
+	// +optional
+	IAMRoleARN string `json:"iamRoleARN,omitempty"`
+
+	// serviceAccountName is the ServiceAccount currently annotated with
+	// iamRoleARN — either spec.serviceAccountName, or, when that's unset,
+	// the operator-owned ServiceAccount named after this CR. Tracked here
+	// (rather than re-derived from spec each reconcile) so that if
+	// spec.serviceAccountName changes, the operator can find and clean up
+	// the annotation it left on the *previous* target.
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 }
 
 // +kubebuilder:object:root=true

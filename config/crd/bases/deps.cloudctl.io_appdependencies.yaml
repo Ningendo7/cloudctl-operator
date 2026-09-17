@@ -86,6 +86,11 @@ spec:
                       type: object
                     maxItems: 50
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - namespace
+                    - name
+                    - resourceName
+                    x-kubernetes-list-type: map
                   resources:
                     items:
                       properties:
@@ -156,6 +161,18 @@ spec:
                               resource owned by this one. Referencing a resource is not sufficient on
                               its own — the owner must explicitly list the consumer here.
                             properties:
+                              access:
+                                default: ReadOnly
+                                description: |-
+                                  access controls how much this grant confers. ReadOnly still includes
+                                  whatever's mechanically required just to consume the resource at all
+                                  (e.g. deleting an SQS message once received, or subscribing to an
+                                  SNS topic) — it's the ability to add new data (SendMessage, Publish,
+                                  PutObject, PutItem, ...) that ReadWrite adds on top.
+                                enum:
+                                - ReadOnly
+                                - ReadWrite
+                                type: string
                               name:
                                 description: name of the consuming AppDependencies
                                   CR.
@@ -228,6 +245,11 @@ spec:
                       type: object
                     maxItems: 50
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - namespace
+                    - name
+                    - resourceName
+                    x-kubernetes-list-type: map
                   resources:
                     items:
                       properties:
@@ -251,6 +273,18 @@ spec:
                               resource owned by this one. Referencing a resource is not sufficient on
                               its own — the owner must explicitly list the consumer here.
                             properties:
+                              access:
+                                default: ReadOnly
+                                description: |-
+                                  access controls how much this grant confers. ReadOnly still includes
+                                  whatever's mechanically required just to consume the resource at all
+                                  (e.g. deleting an SQS message once received, or subscribing to an
+                                  SNS topic) — it's the ability to add new data (SendMessage, Publish,
+                                  PutObject, PutItem, ...) that ReadWrite adds on top.
+                                enum:
+                                - ReadOnly
+                                - ReadWrite
+                                type: string
                               name:
                                 description: name of the consuming AppDependencies
                                   CR.
@@ -312,6 +346,11 @@ spec:
                       type: object
                     maxItems: 50
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - namespace
+                    - name
+                    - resourceName
+                    x-kubernetes-list-type: map
                   resources:
                     items:
                       properties:
@@ -451,6 +490,18 @@ spec:
                               resource owned by this one. Referencing a resource is not sufficient on
                               its own — the owner must explicitly list the consumer here.
                             properties:
+                              access:
+                                default: ReadOnly
+                                description: |-
+                                  access controls how much this grant confers. ReadOnly still includes
+                                  whatever's mechanically required just to consume the resource at all
+                                  (e.g. deleting an SQS message once received, or subscribing to an
+                                  SNS topic) — it's the ability to add new data (SendMessage, Publish,
+                                  PutObject, PutItem, ...) that ReadWrite adds on top.
+                                enum:
+                                - ReadOnly
+                                - ReadWrite
+                                type: string
                               name:
                                 description: name of the consuming AppDependencies
                                   CR.
@@ -521,6 +572,11 @@ spec:
                       type: object
                     maxItems: 50
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - namespace
+                    - name
+                    - resourceName
+                    x-kubernetes-list-type: map
                   resources:
                     items:
                       properties:
@@ -574,6 +630,18 @@ spec:
                               resource owned by this one. Referencing a resource is not sufficient on
                               its own — the owner must explicitly list the consumer here.
                             properties:
+                              access:
+                                default: ReadOnly
+                                description: |-
+                                  access controls how much this grant confers. ReadOnly still includes
+                                  whatever's mechanically required just to consume the resource at all
+                                  (e.g. deleting an SQS message once received, or subscribing to an
+                                  SNS topic) — it's the ability to add new data (SendMessage, Publish,
+                                  PutObject, PutItem, ...) that ReadWrite adds on top.
+                                enum:
+                                - ReadOnly
+                                - ReadWrite
+                                type: string
                               name:
                                 description: name of the consuming AppDependencies
                                   CR.
@@ -638,6 +706,11 @@ spec:
                       type: object
                     maxItems: 50
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - namespace
+                    - name
+                    - resourceName
+                    x-kubernetes-list-type: map
                   resources:
                     description: resources this app owns.
                     items:
@@ -723,6 +796,18 @@ spec:
                               resource owned by this one. Referencing a resource is not sufficient on
                               its own — the owner must explicitly list the consumer here.
                             properties:
+                              access:
+                                default: ReadOnly
+                                description: |-
+                                  access controls how much this grant confers. ReadOnly still includes
+                                  whatever's mechanically required just to consume the resource at all
+                                  (e.g. deleting an SQS message once received, or subscribing to an
+                                  SNS topic) — it's the ability to add new data (SendMessage, Publish,
+                                  PutObject, PutItem, ...) that ReadWrite adds on top.
+                                enum:
+                                - ReadOnly
+                                - ReadWrite
+                                type: string
                               name:
                                 description: name of the consuming AppDependencies
                                   CR.
@@ -818,6 +903,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              iamRoleARN:
+                description: |-
+                  iamRoleARN is the ARN of the IAM role this operator derived and
+                  manages for this CR's workload. Also present as a "iam"/"role" entry
+                  in managedResources (reusing the same ownership/trust-window
+                  machinery every other resource type uses) — this field exists for
+                  direct visibility without having to filter that list.
+                type: string
               managedResources:
                 description: managedResources is the ownership ledger described above.
                 items:
@@ -892,6 +985,15 @@ spec:
                 - type
                 - name
                 x-kubernetes-list-type: map
+              serviceAccountName:
+                description: |-
+                  serviceAccountName is the ServiceAccount currently annotated with
+                  iamRoleARN — either spec.serviceAccountName, or, when that's unset,
+                  the operator-owned ServiceAccount named after this CR. Tracked here
+                  (rather than re-derived from spec each reconcile) so that if
+                  spec.serviceAccountName changes, the operator can find and clean up
+                  the annotation it left on the *previous* target.
+                type: string
             type: object
         required:
         - spec

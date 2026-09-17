@@ -37,16 +37,20 @@ var _ = Describe("AppDependencies Controller", func() {
 	var (
 		fakeSQS    *fakeSQSClient
 		fakeSNS    *fakeSNSClient
+		fakeIAM    *fakeIAMClient
 		reconciler *AppDependenciesReconciler
 	)
 
 	BeforeEach(func() {
 		fakeSQS = newFakeSQSClient()
 		fakeSNS = newFakeSNSClient()
+		fakeIAM = newFakeIAMClient()
 		reconciler = &AppDependenciesReconciler{
-			Client:     k8sClient,
-			Scheme:     k8sClient.Scheme(),
-			AWSClients: &cloudctlaws.Clients{SQS: fakeSQS, SNS: fakeSNS, Region: "us-east-1", AccountID: "123456789012"},
+			Client:          k8sClient,
+			Scheme:          k8sClient.Scheme(),
+			AWSClients:      &cloudctlaws.Clients{SQS: fakeSQS, SNS: fakeSNS, IAM: fakeIAM, Region: "us-east-1", AccountID: "123456789012"},
+			OIDCProviderARN: "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+			OIDCProviderURL: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
 		}
 	})
 

@@ -43,7 +43,7 @@ const transientRequeueInterval = 30 * time.Second
 // produce, used to compute the aggregate Ready condition. Kept in sync
 // with allSections above — each entry here should have a matching
 // section constructor registered there.
-var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", "S3Ready"}
+var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", "S3Ready", "IAMReady"}
 
 type section struct {
 	name      string
@@ -51,22 +51,25 @@ type section struct {
 	finalize  func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (done bool, err error)
 }
 
-// allSections lists every resource-type section this CR reconciles.
-// Adding a new resource type means adding one file (section_<type>.go)
-// with its own constructor, and one line here — this file's size doesn't
-// grow with the number of resource types.
-func allSections(awsClients *cloudctlaws.Clients) []section {
+// allSections lists every resource-type section this CR reconciles, in
+// dependency order — iamSection must run last, since deriving this CR's
+// IAM policy reads the ARNs the other sections just wrote into this same
+// reconcile pass's ledger. Adding a new resource type means adding one file
+// (section_<type>.go) with its own constructor, and one line here — this
+// file's size doesn't grow with the number of resource types.
+func allSections(r *AppDependenciesReconciler) []section {
 	return []section{
-		sqsSection(awsClients),
-		snsSection(awsClients),
-		dynamodbSection(awsClients),
-		s3Section(awsClients),
+		sqsSection(r.AWSClients),
+		snsSection(r.AWSClients),
+		dynamodbSection(r.AWSClients),
+		s3Section(r.AWSClients),
+		iamSection(r),
 	}
 }
 
-func ensureDesiredState(ctx context.Context, awsClients *cloudctlaws.Clients, cr *depsv1alpha1.AppDependencies) error {
+func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependencies) error {
 	var firstErr error
-	for _, s := range allSections(awsClients) {
+	for _, s := range allSections(r) {
 		if err := s.reconcile(ctx, cr); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -81,10 +84,10 @@ func ensureDesiredState(ctx context.Context, awsClients *cloudctlaws.Clients, cr
 // StuckPendingDeletion) — the caller must keep the finalizer in place in
 // that case, or the resource would be silently abandoned once the CR
 // disappears, with nothing left to ever check on it again.
-func finalizeDesiredState(ctx context.Context, awsClients *cloudctlaws.Clients, cr *depsv1alpha1.AppDependencies) (done bool, err error) {
+func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependencies) (done bool, err error) {
 	allDone := true
 	var firstErr error
-	for _, s := range allSections(awsClients) {
+	for _, s := range allSections(r) {
 		done, err := s.finalize(ctx, cr)
 		if err != nil {
 			if firstErr == nil {

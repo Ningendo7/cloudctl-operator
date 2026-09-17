@@ -19,9 +19,12 @@ package aws
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"testing"
 
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // fakeAPIError is a minimal smithy.APIError implementation for exercising
@@ -36,6 +39,17 @@ func (e *fakeAPIError) ErrorCode() string             { return e.code }
 func (e *fakeAPIError) ErrorMessage() string          { return e.code }
 func (e *fakeAPIError) ErrorFault() smithy.ErrorFault { return e.fault }
 
+// fakeHTTPStatusError mimics a bare HTTP-status error with no error code at
+// all (S3's HeadBucket is the confirmed real case) — it does not implement
+// smithy.APIError, only the raw HTTP status.
+func fakeHTTPStatusError(status int) error {
+	return &awshttp.ResponseError{
+		ResponseError: &smithyhttp.ResponseError{
+			Response: &smithyhttp.Response{Response: &http.Response{StatusCode: status}},
+		},
+	}
+}
+
 func TestIsPermissionDenied(t *testing.T) {
 	cases := []struct {
 		name string
@@ -46,8 +60,12 @@ func TestIsPermissionDenied(t *testing.T) {
 		{"AccessDeniedException", &fakeAPIError{code: "AccessDeniedException"}, true},
 		{"UnauthorizedException", &fakeAPIError{code: "UnauthorizedException"}, true},
 		{"UnauthorizedOperation", &fakeAPIError{code: "UnauthorizedOperation"}, true},
+		{"NotAuthorized (SQS/DynamoDB/IAM common error)", &fakeAPIError{code: "NotAuthorized"}, true},
+		{"AuthorizationError (SNS-specific)", &fakeAPIError{code: "AuthorizationError"}, true},
 		{"unrelated code", &fakeAPIError{code: "ThrottlingException"}, false},
 		{"not an APIError at all", errors.New("boom"), false},
+		{"bare HTTP 403, no error code (S3 HeadBucket)", fakeHTTPStatusError(403), true},
+		{"bare HTTP 404, no error code", fakeHTTPStatusError(404), false},
 		{"nil", nil, false},
 	}
 	for _, tc := range cases {
@@ -69,9 +87,13 @@ func TestIsRetryable(t *testing.T) {
 		{"client fault, throttling code", &fakeAPIError{code: "ThrottlingException", fault: smithy.FaultClient}, true},
 		{"client fault, request limit code", &fakeAPIError{code: "RequestLimitExceeded", fault: smithy.FaultClient}, true},
 		{"client fault, DynamoDB resource-in-use code", &fakeAPIError{code: "ResourceInUseException", fault: smithy.FaultClient}, true},
+		{"client fault, IAM concurrent-modification code", &fakeAPIError{code: "ConcurrentModification", fault: smithy.FaultClient}, true},
 		{"client fault, contains Throttl", &fakeAPIError{code: "SomeServiceThrottlingError", fault: smithy.FaultClient}, true},
 		{"client fault, unrelated code", &fakeAPIError{code: "ValidationException", fault: smithy.FaultClient}, false},
 		{"not an APIError at all", errors.New("boom"), false},
+		{"bare HTTP 429, no error code", fakeHTTPStatusError(429), true},
+		{"bare HTTP 503, no error code", fakeHTTPStatusError(503), true},
+		{"bare HTTP 403, no error code", fakeHTTPStatusError(403), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
