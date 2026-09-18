@@ -1,66 +1,99 @@
 # cloudctl-operator
 
-A Kubernetes operator that manages a bundle of everyday AWS dependencies —
-SNS, SQS, DynamoDB, S3, and auto-derived IAM (with KMS and CloudWatch alarms
-planned) — behind a single opinionated `AppDependencies` CRD, instead of
-exposing raw cloud-provider config as YAML.
+A Kubernetes operator for everyday AWS application dependencies. Declare
+*what your app needs* — a queue, a topic, a bucket, a table — and get back
+a derived least-privilege IAM role, safe deletion semantics, and
+connection details wired straight into your pods. No hand-authored IAM
+policy, no raw Terraform-in-YAML.
 
-## Description
+## Why
 
-App teams provisioning AWS dependencies by hand, or via raw Terraform,
-tend to end up with hand-authored IAM policy per app (inconsistent,
-error-prone) and operational hygiene — alarms, backups, replication — that's
-opt-in and frequently skipped. `AppDependencies` lets a team declare *what
-their app needs* (a queue, a topic, a bucket) and has the controller derive
-the IAM, naming, and safety semantics that go with it, while still reporting
-the concrete result in `status` rather than hiding it behind the defaults.
+Teams provisioning AWS dependencies by hand, or via raw Terraform, tend to
+end up with inconsistent, error-prone hand-authored IAM policy per app, and
+operational hygiene — encryption, backups, cross-team access — that's
+opt-in and frequently skipped. `AppDependencies` is a single CRD that
+captures intent rather than raw provider config, and the controller
+reconciles everything that intent implies: the resource itself, ownership
+tagging, least-privilege IAM, and the IRSA wiring to use it — while still
+reporting the concrete result in `status` rather than hiding it behind a
+default.
+
+```yaml
+apiVersion: deps.cloudctl.io/v1alpha1
+kind: AppDependencies
+metadata:
+  name: checkout-service
+spec:
+  sqs:
+    resources:
+      - name: orders
+        dlq: true
+        encryption:
+          enabled: true
+  s3:
+    resources:
+      - name: receipts
+        backup:
+          enabled: true
+```
+
+No ARNs, no IAM JSON, no bucket-naming logic. This reconciles to: the
+queue and its dead-letter queue, a dedicated KMS key protecting both, a
+versioned bucket with a backup lifecycle policy, an IAM role scoped to
+exactly these resources, and a ConfigMap the app consumes via `envFrom`
+for the queue URL and bucket name.
+
+## Cross-team resource sharing
+
+A resource is owned by exactly one `AppDependencies` CR. Other apps
+reference it by name, but access is never automatic — the owner has to
+explicitly allow it, the same opt-in pattern as Gateway API's
+`ReferenceGrant`:
+
+```yaml
+# owner CR
+spec:
+  sqs:
+    resources:
+      - name: orders
+        sharedWith:
+          - namespace: fulfillment
+            name: fulfillment-service
+
+# consumer CR
+spec:
+  sqs:
+    consumes:
+      - namespace: checkout
+        name: checkout-service
+        resourceName: orders
+```
+
+IAM, the connection ConfigMap, and status conditions all resolve
+consistently from that one grant — nothing gets wired twice, and an
+ungranted reference is reported, not silently dropped or silently allowed.
+
+## What it manages
+
+SQS, SNS, DynamoDB, S3, KMS, and auto-derived IAM — with CloudWatch alarms
+next.
 
 - **[docs/architecture.md](docs/architecture.md)** — the design decisions:
   ownership and adoption, the trust window, deletion safety, naming,
   validation strategy.
-- **[docs/resources.md](docs/resources.md)** — what's actually implemented
-  today (SQS, SNS, DynamoDB, S3, IAM), with field-by-field behavior and
-  known gaps.
+- **[docs/resources.md](docs/resources.md)** — field-by-field behavior and
+  known gaps for every resource type currently implemented.
 
-## Getting Started
+Resources default to `deletionPolicy: Retain` — removing one from spec, or
+deleting the CR, leaves the AWS resource in place rather than risking data
+loss on a typo. See [architecture.md](docs/architecture.md) for the full
+deletion-safety model.
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+
-- kubectl version v1.11.3+
-- access to a Kubernetes v1.11.3+ cluster with IRSA (IAM Roles for Service
-  Accounts) set up, i.e. an OIDC identity provider registered for the
-  cluster — required for the auto-derived IAM role's trust policy
+## Status
 
-### Deploy
-
-```sh
-make docker-build docker-push IMG=<some-registry>/cloudctl-operator:tag
-make install    # CRDs
-make deploy IMG=<some-registry>/cloudctl-operator:tag
-```
-
-The manager needs `--oidc-provider-arn` and `--oidc-provider-url` set to
-your cluster's IAM OIDC identity provider (see `cmd/main.go`) — every IAM
-role it derives is scoped to that provider via IRSA. Without these, the IAM
-section refuses to run rather than emitting a role nobody can assume.
-
-Apply a sample CR:
-
-```sh
-kubectl apply -k config/samples/
-```
-
-### Uninstall
-
-```sh
-kubectl delete -k config/samples/
-make uninstall   # CRDs
-make undeploy
-```
-
-Resources with `deletionPolicy: Retain` (the default) are left in AWS on CR
-deletion — see [architecture.md](docs/architecture.md) for why.
+Pre-1.0, under active development. SQS, SNS, DynamoDB, S3, KMS, and IAM
+are implemented and covered by unit and envtest suites; CloudWatch alarms
+and RDS support are next.
 
 ## License
 

@@ -4,10 +4,10 @@ What `AppDependencies` actually manages today. See
 [architecture.md](architecture.md) for the design decisions behind the
 behavior described here (ownership, deletion safety, naming).
 
-Planned but not yet implemented: KMS, CloudWatch alarms, backup policy.
-Their CRD shape exists in `api/v1alpha1/appdependencies_types.go` as a
-preview of the intended surface, but nothing reconciles them yet —
-declaring them in a CR today has no effect.
+Planned but not yet implemented: CloudWatch alarms. Its CRD shape exists in
+`api/v1alpha1/appdependencies_types.go` as a preview of the intended
+surface, but nothing reconciles it yet — declaring `spec.alarms` in a CR
+today has no effect.
 
 ## SQS
 
@@ -37,6 +37,7 @@ spec:
 | `overrides.visibilityTimeoutSeconds` | 0–43200. Drift-corrected on every reconcile if it diverges from spec. |
 | `overrides.maxReceiveCount` | 1–1000. Only meaningful with `dlq: true`. |
 | `overrides.contentBasedDeduplication` | Only meaningful with `fifo: true`. |
+| `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. The DLQ shares the main queue's key rather than getting its own. |
 
 **Known gap:** if `dlq` is toggled from `true` to `false`, the DLQ itself is
 deleted correctly, but the main queue's `RedrivePolicy` attribute pointing
@@ -66,6 +67,7 @@ spec:
 | `adopt` | Same semantics as SQS. |
 | `sharedWith` | Same semantics as SQS (see [IAM](#iam)). |
 | `overrides.contentBasedDeduplication` | Only meaningful with `fifo: true`. Drift-corrected on every reconcile. |
+| `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. |
 
 **Not yet built:** subscription management (`Subscribe`/`Unsubscribe` from
 this operator's side) and the same trust-window read-skip optimization SQS
@@ -99,6 +101,7 @@ spec:
 | `backup.enabled` | Toggles point-in-time recovery (continuous backups). |
 | `backup.retentionDays` | 1–35. Only meaningful with `enabled: true`; AWS's own default (35 days) applies when unset. |
 | `overrides.billingMode` | `PayPerRequest` (default) or `Provisioned`. A decision, not raw throughput config — `Provisioned` tables get AWS's own long-standing default capacity (5/5 RCU/WCU) rather than exposing tunable numbers. |
+| `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. |
 
 Table creation is **asynchronous** (`CreateTable` returns while the table is
 still `CREATING`), unlike SQS/SNS. A newly created table sits in a
@@ -140,6 +143,7 @@ spec:
 | `backup.enabled` | Enables versioning and a lifecycle policy that cleans up superseded (noncurrent) object versions after 30 days by default. Deliberately never expires or transitions the *current* object — backup protects live data, it doesn't put a deletion timer on it. |
 | `overrides.versioningEnabled` | Controls versioning independently of `backup` — useful for a bucket that wants versioning without backup's lifecycle policy, or vice versa. |
 | `overrides.lifecycleRules` | Replaces the default backup lifecycle policy entirely. An explicitly empty list (`[]`) opts out of any lifecycle policy, even with `backup.enabled: true` — it does not fall back to the default. |
+| `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. |
 
 Bucket creation and tagging **aren't atomic** — `CreateBucket` doesn't accept
 tags the way SQS/SNS/DynamoDB's create calls do, so a bucket can briefly
@@ -155,6 +159,56 @@ rejected at reconcile time) — cross-region replication needs a bucket and
 IAM role in a different region, which needs real multi-region client
 support this operator doesn't have yet. Same limitation as DynamoDB's
 Global Tables.
+
+## KMS
+
+Every resource type above (SQS, SNS, DynamoDB, S3) exposes an
+`encryption` field, offered as two mutually exclusive modes rather than a
+spectrum:
+
+```yaml
+spec:
+  sqs:
+    resources:
+      - name: orders
+        encryption:
+          enabled: true          # dedicated key, owned and named after this resource
+
+  sns:
+    resources:
+      - name: events
+        encryption:
+          kmsKeyRef:             # reuse an existing key instead
+            namespace: platform
+            name: shared-keys
+            resourceName: general-purpose
+
+  kms:
+    resources:
+      - name: general-purpose
+        sharedWith:
+          - namespace: checkout
+            name: checkout-service
+```
+
+| Field | Notes |
+|---|---|
+| `encryption.enabled` | Provisions a dedicated key just for this resource (ledger name `<resource>-key`), created and tagged the same as every other owned resource. No `spec.kms` section needs to be touched — this is the common case. |
+| `encryption.kmsKeyRef` | Points at an explicitly declared `kms.resources` entry — this CR's own, or another CR's — for deliberate reuse of one key across multiple resources. Resolved through the exact same `sharedWith`/`consumes` authorization path as any other cross-CR reference: an unauthorized or not-yet-existing reference is a retryable, self-resolving condition, not a permanent failure. |
+
+A standalone `kms.resources` entry (as used by `kmsKeyRef` above) supports
+`deletionPolicy` and `adopt` like every other resource type, and
+`sharedWith` for granting other CRs `kms:Decrypt`/`kms:GenerateDataKey` —
+but deliberately **no `force`**: unlike a queue or a bucket, a key isn't
+"non-empty" in a way force could legitimately override, since deleting one
+while anything still uses it to encrypt data makes that data permanently
+unrecoverable elsewhere, not just gone from this CR. `ScheduleKeyDeletion`
+uses AWS's maximum 30-day window for the same reason.
+
+**Known gap:** drift correction only ever moves in the "enable, or point
+at a different key" direction — removing `encryption` from spec doesn't
+proactively revert an already-encrypted resource back to its unencrypted
+(or default SSE-S3, for S3) state.
 
 ## IAM
 

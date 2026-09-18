@@ -20,13 +20,14 @@ import (
 	"context"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
-	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/s3"
 )
 
 // s3Section adapts the s3 package's Ensure/Cleanup to the orchestrator's
-// uniform section shape.
-func s3Section(awsClients *cloudctlaws.Clients) section {
+// uniform section shape. Takes the whole reconciler (not just AWSClients,
+// unlike before) because encryption.kmsKeyRef resolution needs r.Client to
+// look up the producer CR a shared key belongs to.
+func s3Section(r *AppDependenciesReconciler) section {
 	return section{
 		name: "S3Ready",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
@@ -38,14 +39,14 @@ func s3Section(awsClients *cloudctlaws.Clients) section {
 			defer cancel()
 
 			ledger, ensureErr := s3.Ensure(
-				ctx, awsClients.S3, cr.Namespace, cr.Name, string(cr.UID),
-				awsClients.Region, awsClients.AccountID,
+				ctx, r.AWSClients.S3, r.AWSClients.KMS, r.Client, cr.Namespace, cr.Name, string(cr.UID),
+				r.AWSClients.Region, r.AWSClients.AccountID,
 				cr.Spec.S3, cr.Status.ManagedResources,
 			)
 			cr.Status.ManagedResources = ledger
 
 			ledger, _, cleanupErr := s3.Cleanup(
-				ctx, awsClients.S3, cr.Namespace, cr.Name, string(cr.UID),
+				ctx, r.AWSClients.S3, cr.Namespace, cr.Name, string(cr.UID),
 				cr.Spec.S3, cr.Status.ManagedResources, false,
 			)
 			cr.Status.ManagedResources = ledger
@@ -66,7 +67,7 @@ func s3Section(awsClients *cloudctlaws.Clients) section {
 			defer cancel()
 
 			ledger, results, err := s3.Cleanup(
-				ctx, awsClients.S3, cr.Namespace, cr.Name, string(cr.UID),
+				ctx, r.AWSClients.S3, cr.Namespace, cr.Name, string(cr.UID),
 				cr.Spec.S3, cr.Status.ManagedResources, true,
 			)
 			cr.Status.ManagedResources = ledger

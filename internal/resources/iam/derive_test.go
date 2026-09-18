@@ -63,6 +63,183 @@ func TestCollectGrants_OwnedResourceAlwaysGrantedRegardlessOfSharing(t *testing.
 	}
 }
 
+func TestCollectGrants_EncryptedOwnedSQSResourceAlsoGrantsItsDedicatedKey(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+				{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders"},
+				{Type: "kms", Name: "orders-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
+			},
+		},
+	}
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped entries, got %v", skipped)
+	}
+	if len(grants) != 2 {
+		t.Fatalf("expected an sqs grant and a kms grant, got %+v", grants)
+	}
+
+	var kmsGrant *grant
+	for i := range grants {
+		if grants[i].resourceType == "kms" {
+			kmsGrant = &grants[i]
+		}
+	}
+	if kmsGrant == nil {
+		t.Fatal("expected a kms grant for the dedicated key")
+	}
+	if kmsGrant.arn != "arn:aws:kms:us-east-1:123456789012:key/dedicated-id" {
+		t.Errorf("kms grant arn = %q, want the dedicated key's ARN", kmsGrant.arn)
+	}
+	if !kmsGrant.readWrite {
+		t.Error("expected the kms grant to be full access, matching the owned queue it protects")
+	}
+
+	policy, err := buildPolicyDocument(grants)
+	if err != nil {
+		t.Fatalf("buildPolicyDocument: %v", err)
+	}
+	for _, action := range []string{"kms:Decrypt", "kms:GenerateDataKey"} {
+		if !strings.Contains(policy, action) {
+			t.Errorf("expected derived policy to include %q, got %s", action, policy)
+		}
+	}
+}
+
+func TestCollectGrants_EncryptedOwnedSNSResourceAlsoGrantsItsDedicatedKey(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SNS: &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
+				{Name: "events", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sns", Name: "events", ARN: "arn:aws:sns:us-east-1:123456789012:default-checkout-service-events"},
+				{Type: "kms", Name: "events-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
+			},
+		},
+	}
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped entries, got %v", skipped)
+	}
+
+	var kmsGrant *grant
+	for i := range grants {
+		if grants[i].resourceType == "kms" {
+			kmsGrant = &grants[i]
+		}
+	}
+	if kmsGrant == nil {
+		t.Fatal("expected a kms grant for the dedicated key")
+	}
+	if kmsGrant.arn != "arn:aws:kms:us-east-1:123456789012:key/dedicated-id" {
+		t.Errorf("kms grant arn = %q, want the dedicated key's ARN", kmsGrant.arn)
+	}
+}
+
+func TestCollectGrants_EncryptedOwnedS3ResourceAlsoGrantsItsDedicatedKey(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			S3: &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+				{Name: "receipts", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "s3", Name: "receipts", ARN: "arn:aws:s3:::default-checkout-service-receipts-ab12cd34"},
+				{Type: "kms", Name: "receipts-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
+			},
+		},
+	}
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped entries, got %v", skipped)
+	}
+
+	var kmsGrant *grant
+	for i := range grants {
+		if grants[i].resourceType == "kms" {
+			kmsGrant = &grants[i]
+		}
+	}
+	if kmsGrant == nil {
+		t.Fatal("expected a kms grant for the dedicated key")
+	}
+	if kmsGrant.arn != "arn:aws:kms:us-east-1:123456789012:key/dedicated-id" {
+		t.Errorf("kms grant arn = %q, want the dedicated key's ARN", kmsGrant.arn)
+	}
+}
+
+func TestCollectGrants_EncryptedOwnedDynamoDBResourceAlsoGrantsItsDedicatedKey(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			DynamoDB: &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+				{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "dynamodb", Name: "sessions", ARN: "arn:aws:dynamodb:us-east-1:123456789012:table/default-checkout-service-sessions"},
+				{Type: "kms", Name: "sessions-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
+			},
+		},
+	}
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped entries, got %v", skipped)
+	}
+
+	var kmsGrant *grant
+	for i := range grants {
+		if grants[i].resourceType == "kms" {
+			kmsGrant = &grants[i]
+		}
+	}
+	if kmsGrant == nil {
+		t.Fatal("expected a kms grant for the dedicated key")
+	}
+	if kmsGrant.arn != "arn:aws:kms:us-east-1:123456789012:key/dedicated-id" {
+		t.Errorf("kms grant arn = %q, want the dedicated key's ARN", kmsGrant.arn)
+	}
+}
+
+func TestCollectGrants_UnencryptedOwnedSQSResourceGrantsNoKMSAccess(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders"},
+			},
+		},
+	}
+
+	grants, _ := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	for _, g := range grants {
+		if g.resourceType == "kms" {
+			t.Fatalf("expected no kms grant for a queue with no encryption declared, got %+v", g)
+		}
+	}
+}
+
 func TestCollectGrants_OwnedResourceWithoutLedgerEntryIsSkippedWithReason(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},

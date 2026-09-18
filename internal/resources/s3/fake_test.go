@@ -77,6 +77,11 @@ type fakeBucket struct {
 	lifecycleRules   []types.LifecycleRule
 	versions         []fakeObjectVersion
 	uploads          []fakeUpload
+	// kmsKeyARN backs GetBucketEncryption's response - empty means no
+	// PutBucketEncryption call has ever been made for this bucket, the
+	// same "not found" state a real, never-explicitly-configured bucket
+	// reports despite already using default SSE-S3 encryption.
+	kmsKeyARN string
 }
 
 type fakeS3 struct {
@@ -170,6 +175,40 @@ func (f *fakeS3) GetBucketVersioning(_ context.Context, in *s3sdk.GetBucketVersi
 		return nil, &types.NoSuchBucket{}
 	}
 	return &s3sdk.GetBucketVersioningOutput{Status: b.versioningStatus}, nil
+}
+
+func (f *fakeS3) PutBucketEncryption(_ context.Context, in *s3sdk.PutBucketEncryptionInput, _ ...func(*s3sdk.Options)) (*s3sdk.PutBucketEncryptionOutput, error) {
+	b, ok := f.buckets[*in.Bucket]
+	if !ok {
+		return nil, &types.NoSuchBucket{}
+	}
+	for _, rule := range in.ServerSideEncryptionConfiguration.Rules {
+		if rule.ApplyServerSideEncryptionByDefault != nil && rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID != nil {
+			b.kmsKeyARN = *rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID
+		}
+	}
+	return &s3sdk.PutBucketEncryptionOutput{}, nil
+}
+
+func (f *fakeS3) GetBucketEncryption(_ context.Context, in *s3sdk.GetBucketEncryptionInput, _ ...func(*s3sdk.Options)) (*s3sdk.GetBucketEncryptionOutput, error) {
+	b, ok := f.buckets[*in.Bucket]
+	if !ok {
+		return nil, &types.NoSuchBucket{}
+	}
+	if b.kmsKeyARN == "" {
+		return nil, &fakeAWSError{code: "ServerSideEncryptionConfigurationNotFoundError"}
+	}
+	keyARN := b.kmsKeyARN
+	return &s3sdk.GetBucketEncryptionOutput{
+		ServerSideEncryptionConfiguration: &types.ServerSideEncryptionConfiguration{
+			Rules: []types.ServerSideEncryptionRule{
+				{ApplyServerSideEncryptionByDefault: &types.ServerSideEncryptionByDefault{
+					SSEAlgorithm:   types.ServerSideEncryptionAwsKms,
+					KMSMasterKeyID: &keyARN,
+				}},
+			},
+		},
+	}, nil
 }
 
 func (f *fakeS3) PutBucketLifecycleConfiguration(_ context.Context, in *s3sdk.PutBucketLifecycleConfigurationInput, _ ...func(*s3sdk.Options)) (*s3sdk.PutBucketLifecycleConfigurationOutput, error) {

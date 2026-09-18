@@ -4,11 +4,14 @@ import (
 	"context"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
-	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/dynamodb"
 )
 
-func dynamodbSection(awsClients *cloudctlaws.Clients) section {
+// dynamodbSection adapts the dynamodb package's Ensure/Cleanup to the
+// orchestrator's uniform section shape. Takes the whole reconciler (not just
+// AWSClients, unlike before) because encryption.kmsKeyRef resolution needs
+// r.Client to look up the producer CR a shared key belongs to.
+func dynamodbSection(r *AppDependenciesReconciler) section {
 	return section{
 		name: "DynamoDBReady",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
@@ -20,13 +23,13 @@ func dynamodbSection(awsClients *cloudctlaws.Clients) section {
 			defer cancel()
 
 			ledger, ensureErr := dynamodb.Ensure(
-				ctx, awsClients.DynamoDB, cr.Namespace, cr.Name, string(cr.UID),
+				ctx, r.AWSClients.DynamoDB, r.AWSClients.KMS, r.Client, cr.Namespace, cr.Name, string(cr.UID),
 				cr.Spec.DynamoDB, cr.Status.ManagedResources,
 			)
 			cr.Status.ManagedResources = ledger
 
 			ledger, _, cleanupErr := dynamodb.Cleanup(
-				ctx, awsClients.DynamoDB, cr.Namespace, cr.Name, string(cr.UID),
+				ctx, r.AWSClients.DynamoDB, cr.Namespace, cr.Name, string(cr.UID),
 				cr.Spec.DynamoDB, cr.Status.ManagedResources, false,
 			)
 			cr.Status.ManagedResources = ledger
@@ -47,7 +50,7 @@ func dynamodbSection(awsClients *cloudctlaws.Clients) section {
 			defer cancel()
 
 			ledger, results, err := dynamodb.Cleanup(
-				ctx, awsClients.DynamoDB, cr.Namespace, cr.Name, string(cr.UID),
+				ctx, r.AWSClients.DynamoDB, cr.Namespace, cr.Name, string(cr.UID),
 				cr.Spec.DynamoDB, cr.Status.ManagedResources, true,
 			)
 			cr.Status.ManagedResources = ledger

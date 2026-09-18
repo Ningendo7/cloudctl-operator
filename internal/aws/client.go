@@ -42,7 +42,7 @@ type Clients struct {
 	SNS        SNSClient
 	S3         *s3.Client
 	DynamoDB   *dynamodb.Client
-	KMS        *kms.Client
+	KMS        KMSClient
 	IAM        IAMClient
 	CloudWatch *cloudwatch.Client
 

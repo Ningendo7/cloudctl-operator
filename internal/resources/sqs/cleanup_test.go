@@ -37,7 +37,7 @@ func setupQueue(t *testing.T, client *fakeSQS, namespace, crName, name string, d
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: name, DeletionPolicy: deletionPolicy, Force: force},
 	}}
-	ledger, err := Ensure(context.Background(), client, namespace, crName, "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, namespace, crName, "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -508,7 +508,7 @@ func TestCleanup_KeepsDLQWhenStillDeclared(t *testing.T) {
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DLQ: true, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -531,7 +531,7 @@ func TestCleanup_RemovesDLQWhenDLQDisabled(t *testing.T) {
 	withDLQ := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DLQ: true, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", withDLQ, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", withDLQ, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -573,7 +573,7 @@ func TestCleanup_DeletesFIFOQueueByARNDerivedName(t *testing.T) {
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", FIFO: true, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -609,7 +609,7 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}

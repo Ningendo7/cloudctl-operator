@@ -25,9 +25,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -78,6 +80,7 @@ type tableOptions struct {
 	backupEnabled  bool
 	retentionDays  *int32
 	billingMode    depsv1alpha1.DynamoDBBillingMode
+	kmsKeyARN      *string
 }
 
 // billingModeFor maps the CRD's decision-level billing mode to the SDK's
@@ -91,10 +94,14 @@ func billingModeFor(m depsv1alpha1.DynamoDBBillingMode) types.BillingMode {
 }
 
 // Ensure reconciles every declared DynamoDB table against AWS, updating the
-// ownership ledger as it goes.
+// ownership ledger as it goes. kmsClient is only ever touched when a
+// resource actually declares encryption.enabled — a CR that never uses it
+// can pass nil.
 func Ensure(
 	ctx context.Context,
 	client dynamodbAPI,
+	kmsClient cloudctlaws.KMSClient,
+	k8sClient client.Client,
 	namespace,
 	crName,
 	crUID string,
@@ -120,6 +127,32 @@ func Ensure(
 		}
 		if t.Overrides != nil {
 			opts.billingMode = t.Overrides.BillingMode
+		}
+		if t.Encryption != nil {
+			if t.Encryption.KMSKeyRef != nil {
+				arn, ok := kms.ResolveSharedKeyARN(ctx, k8sClient, namespace, crName, *t.Encryption.KMSKeyRef)
+				if !ok {
+					if firstErr == nil {
+						firstErr = &cloudctlaws.ReconcileError{
+							Err:       fmt.Errorf("table %q: encryption.kmsKeyRef %s/%s/%s is not yet authorized (producer must list this CR in the key's sharedWith) or does not exist yet", t.Name, t.Encryption.KMSKeyRef.Namespace, t.Encryption.KMSKeyRef.Name, t.Encryption.KMSKeyRef.ResourceName),
+							Retryable: true,
+						}
+					}
+					continue
+				}
+				opts.kmsKeyARN = &arn
+			}
+			if t.Encryption.Enabled {
+				arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, t.Name, t.DeletionPolicy, ledger)
+				ledger = updatedLedger
+				if err != nil {
+					if firstErr == nil {
+						firstErr = fmt.Errorf("table %q: encryption key: %w", t.Name, err)
+					}
+					continue
+				}
+				opts.kmsKeyARN = &arn
+			}
 		}
 
 		var err error
@@ -270,6 +303,13 @@ func createTable(
 			WriteCapacityUnits: aws.Int64(provisionedDefaultCapacityUnits),
 		}
 	}
+	if opts.kmsKeyARN != nil {
+		input.SSESpecification = &types.SSESpecification{
+			Enabled:        aws.Bool(true),
+			SSEType:        types.SSETypeKms,
+			KMSMasterKeyId: opts.kmsKeyARN,
+		}
+	}
 
 	createOut, err := client.CreateTable(ctx, input)
 	if err != nil {
@@ -335,6 +375,29 @@ func reconcileTableAttributes(ctx context.Context, client dynamodbAPI, tableName
 		}
 		if _, err := client.UpdateTable(ctx, updateInput); err != nil {
 			return fmt.Errorf("correcting billing mode: %w", err)
+		}
+	}
+
+	// Only ever corrects the "enable, or point at a different key" direction
+	// — same accepted gap as SQS/SNS's own encryption drift correction:
+	// removing encryption from spec doesn't proactively disable it on an
+	// already-encrypted table.
+	if opts.kmsKeyARN != nil {
+		currentKeyARN := ""
+		if describeOut.Table.SSEDescription != nil {
+			currentKeyARN = aws.ToString(describeOut.Table.SSEDescription.KMSMasterKeyArn)
+		}
+		if currentKeyARN != *opts.kmsKeyARN {
+			if _, err := client.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+				TableName: &tableName,
+				SSESpecification: &types.SSESpecification{
+					Enabled:        aws.Bool(true),
+					SSEType:        types.SSETypeKms,
+					KMSMasterKeyId: opts.kmsKeyARN,
+				},
+			}); err != nil {
+				return fmt.Errorf("correcting server-side encryption key: %w", err)
+			}
 		}
 	}
 

@@ -92,6 +92,24 @@ type ConsumeRef struct {
 	ResourceName string `json:"resourceName"`
 }
 
+// EncryptionSpec configures server-side encryption with a KMS key for one
+// resource. enabled provisions a dedicated, operator-owned key just for
+// this resource — the common case, no kms section ever needs to be
+// touched. kmsKeyRef instead points at an explicitly declared kms
+// resource (this CR's own, or another CR's, shared via its sharedWith,
+// resolved through the exact same authorization path as any other
+// consumes reference) for deliberate reuse of one key across multiple
+// resources. The two are mutually exclusive: reusing a key and owning a
+// dedicated one are different decisions, not a spectrum.
+// +kubebuilder:validation:XValidation:rule="!(self.enabled == true && has(self.kmsKeyRef))",message="enabled and kmsKeyRef are mutually exclusive"
+type EncryptionSpec struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// +optional
+	KMSKeyRef *ConsumeRef `json:"kmsKeyRef,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // SQS
 // ---------------------------------------------------------------------------
@@ -167,6 +185,11 @@ type SQSQueueSpec struct {
 	// overrides allows tuning advanced settings beyond the opinionated default.
 	// +optional
 	Overrides *SQSOverrides `json:"overrides,omitempty"`
+
+	// encryption enables server-side encryption with a KMS key. See
+	// EncryptionSpec.
+	// +optional
+	Encryption *EncryptionSpec `json:"encryption,omitempty"`
 }
 
 // SQSSpec is the sqs section of an AppDependencies spec.
@@ -238,6 +261,11 @@ type SNSTopicSpec struct {
 	// overrides allows tuning advanced settings beyond the opinionated default.
 	// +optional
 	Overrides *SNSOverrides `json:"overrides,omitempty"`
+
+	// encryption enables server-side encryption with a KMS key. See
+	// EncryptionSpec.
+	// +optional
+	Encryption *EncryptionSpec `json:"encryption,omitempty"`
 }
 
 type SNSSpec struct {
@@ -383,6 +411,11 @@ type S3BucketSpec struct {
 	// rules) beyond the opinionated backup/replication defaults.
 	// +optional
 	Overrides *S3Overrides `json:"overrides,omitempty"`
+
+	// encryption enables server-side encryption with a KMS key. See
+	// EncryptionSpec.
+	// +optional
+	Encryption *EncryptionSpec `json:"encryption,omitempty"`
 }
 
 type S3Spec struct {
@@ -491,6 +524,11 @@ type DynamoDBTableSpec struct {
 	// overrides allows tuning advanced settings beyond the opinionated default.
 	// +optional
 	Overrides *DynamoDBOverrides `json:"overrides,omitempty"`
+
+	// encryption enables server-side encryption with a KMS key. See
+	// EncryptionSpec.
+	// +optional
+	Encryption *EncryptionSpec `json:"encryption,omitempty"`
 }
 
 type DynamoDBSpec struct {
@@ -522,6 +560,17 @@ type KMSKeySpec struct {
 	// +optional
 	// +kubebuilder:default=Retain
 	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
+
+	// adopt allows this CR to take ownership of a pre-existing AWS resource
+	// found under this entry's deterministic alias that isn't already
+	// tagged as owned by this CR. Same semantics as every other resource
+	// type's adopt field. No force field: unlike every other resource
+	// type, a KMS key isn't "non-empty" in a way force could ever
+	// legitimately override — deleting one while anything still uses it to
+	// encrypt data makes that data permanently unrecoverable elsewhere,
+	// not just gone from this CR.
+	// +optional
+	Adopt bool `json:"adopt,omitempty"`
 
 	// +optional
 	// +kubebuilder:validation:MaxItems=20

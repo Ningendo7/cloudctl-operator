@@ -54,6 +54,10 @@ type fakeTable struct {
 	// declares.
 	partitionKey string
 	sortKey      string
+	// kmsKeyARN backs DescribeTable's SSEDescription response - empty
+	// means AWS-owned-key encryption (the default), matching how a real
+	// table with no customer key looks.
+	kmsKeyARN string
 	// itemCount drives Scan's Count response — 0 means empty, anything
 	// else means the count-limited Scan finds at least one item.
 	itemCount int
@@ -79,6 +83,10 @@ func (f *fakeDynamoDB) CreateTable(_ context.Context, in *dynamodb.CreateTableIn
 	name := *in.TableName
 	arn := "arn:aws:dynamodb:us-east-1:123456789012:table/" + name
 	partitionKey, sortKey := tableKeySchema(in.KeySchema)
+	var kmsKeyARN string
+	if in.SSESpecification != nil && in.SSESpecification.KMSMasterKeyId != nil {
+		kmsKeyARN = *in.SSESpecification.KMSMasterKeyId
+	}
 	f.tables[name] = &fakeTable{
 		arn:          arn,
 		tags:         tagsToMap(in.Tags),
@@ -86,6 +94,7 @@ func (f *fakeDynamoDB) CreateTable(_ context.Context, in *dynamodb.CreateTableIn
 		billingMode:  in.BillingMode,
 		partitionKey: partitionKey,
 		sortKey:      sortKey,
+		kmsKeyARN:    kmsKeyARN,
 	}
 	return &dynamodb.CreateTableOutput{
 		TableDescription: &types.TableDescription{
@@ -116,6 +125,10 @@ func (f *fakeDynamoDB) DescribeTable(_ context.Context, in *dynamodb.DescribeTab
 	if t.sortKey != "" {
 		keySchema = append(keySchema, types.KeySchemaElement{AttributeName: &t.sortKey, KeyType: types.KeyTypeRange})
 	}
+	var sseDesc *types.SSEDescription
+	if t.kmsKeyARN != "" {
+		sseDesc = &types.SSEDescription{KMSMasterKeyArn: &t.kmsKeyARN, SSEType: types.SSETypeKms}
+	}
 	return &dynamodb.DescribeTableOutput{
 		Table: &types.TableDescription{
 			TableArn:           &t.arn,
@@ -123,6 +136,7 @@ func (f *fakeDynamoDB) DescribeTable(_ context.Context, in *dynamodb.DescribeTab
 			TableStatus:        t.status,
 			BillingModeSummary: billingSummary,
 			KeySchema:          keySchema,
+			SSEDescription:     sseDesc,
 		},
 	}, nil
 }
@@ -137,6 +151,9 @@ func (f *fakeDynamoDB) UpdateTable(_ context.Context, in *dynamodb.UpdateTableIn
 	}
 	if in.BillingMode != "" {
 		t.billingMode = in.BillingMode
+	}
+	if in.SSESpecification != nil && in.SSESpecification.KMSMasterKeyId != nil {
+		t.kmsKeyARN = *in.SSESpecification.KMSMasterKeyId
 	}
 	return &dynamodb.UpdateTableOutput{}, nil
 }

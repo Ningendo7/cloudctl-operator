@@ -49,6 +49,19 @@ var actionSets = map[string]actionSet{
 		baseline:  []string{"dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem"},
 		readWrite: []string{"dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"},
 	},
+	// kms grants are for a resource's own encryption key (dedicated or
+	// shared via kmsKeyRef), never a standalone kms.resources entry
+	// consumed on its own - AWS's own SQS SSE docs confirm this exact
+	// split: a consumer only ever needs Decrypt (to verify a cached data
+	// key's integrity on receive), a producer additionally needs
+	// GenerateDataKey (to mint a new one on send). Since an owned resource
+	// always gets full baseline+readWrite regardless of sharedWith, an
+	// owned encrypted queue's own role gets both - the same "producer"
+	// requirement set - which is correct since it can always send.
+	"kms": {
+		baseline:  []string{"kms:Decrypt"},
+		readWrite: []string{"kms:GenerateDataKey"},
+	},
 }
 
 // S3 is handled separately from actionSets: it needs two different ARN
@@ -104,6 +117,13 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	if cr.Spec.SQS != nil {
 		for _, q := range cr.Spec.SQS.Resources {
 			grants, skipped = recordOwned(grants, skipped, "sqs", q.Name, findLedgerEntry(cr, "sqs", q.Name))
+			if q.Encryption != nil && q.Encryption.Enabled {
+				// The dedicated key is owned by this CR exactly as much as
+				// the queue it protects - same "always full access to what
+				// you own" rule, via the same recordOwned helper, keyed to
+				// the same ledger name kms.EnsureDedicatedKey uses.
+				grants, skipped = recordOwned(grants, skipped, "kms", q.Name+"-key", findLedgerEntry(cr, "kms", q.Name+"-key"))
+			}
 		}
 		for _, ref := range cr.Spec.SQS.Consumes {
 			if g, reason := resolveConsume(ctx, k8sClient, cr, "sqs", ref); reason != "" {
@@ -116,6 +136,9 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	if cr.Spec.SNS != nil {
 		for _, t := range cr.Spec.SNS.Resources {
 			grants, skipped = recordOwned(grants, skipped, "sns", t.Name, findLedgerEntry(cr, "sns", t.Name))
+			if t.Encryption != nil && t.Encryption.Enabled {
+				grants, skipped = recordOwned(grants, skipped, "kms", t.Name+"-key", findLedgerEntry(cr, "kms", t.Name+"-key"))
+			}
 		}
 		for _, ref := range cr.Spec.SNS.Consumes {
 			if g, reason := resolveConsume(ctx, k8sClient, cr, "sns", ref); reason != "" {
@@ -128,6 +151,9 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	if cr.Spec.DynamoDB != nil {
 		for _, tbl := range cr.Spec.DynamoDB.Resources {
 			grants, skipped = recordOwned(grants, skipped, "dynamodb", tbl.Name, findLedgerEntry(cr, "dynamodb", tbl.Name))
+			if tbl.Encryption != nil && tbl.Encryption.Enabled {
+				grants, skipped = recordOwned(grants, skipped, "kms", tbl.Name+"-key", findLedgerEntry(cr, "kms", tbl.Name+"-key"))
+			}
 		}
 		for _, ref := range cr.Spec.DynamoDB.Consumes {
 			if g, reason := resolveConsume(ctx, k8sClient, cr, "dynamodb", ref); reason != "" {
@@ -140,9 +166,30 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	if cr.Spec.S3 != nil {
 		for _, b := range cr.Spec.S3.Resources {
 			grants, skipped = recordOwned(grants, skipped, "s3", b.Name, findLedgerEntry(cr, "s3", b.Name))
+			if b.Encryption != nil && b.Encryption.Enabled {
+				grants, skipped = recordOwned(grants, skipped, "kms", b.Name+"-key", findLedgerEntry(cr, "kms", b.Name+"-key"))
+			}
 		}
 		for _, ref := range cr.Spec.S3.Consumes {
 			if g, reason := resolveConsume(ctx, k8sClient, cr, "s3", ref); reason != "" {
+				skipped = append(skipped, reason)
+			} else {
+				grants = append(grants, g)
+			}
+		}
+	}
+	if cr.Spec.KMS != nil {
+		// A standalone kms.resources entry (as opposed to a dedicated key
+		// EnsureDedicatedKey provisions for another section's own
+		// resource) gets an owned grant exactly like every other resource
+		// type - and its consumes entries resolve exactly the same way,
+		// via the same sharedWith authorization every other cross-CR
+		// reference already uses (see producerSharedWith's "kms" case).
+		for _, k := range cr.Spec.KMS.Resources {
+			grants, skipped = recordOwned(grants, skipped, "kms", k.Name, findLedgerEntry(cr, "kms", k.Name))
+		}
+		for _, ref := range cr.Spec.KMS.Consumes {
+			if g, reason := resolveConsume(ctx, k8sClient, cr, "kms", ref); reason != "" {
 				skipped = append(skipped, reason)
 			} else {
 				grants = append(grants, g)
@@ -277,6 +324,15 @@ func producerSharedWith(producer *depsv1alpha1.AppDependencies, resourceType, re
 		for _, b := range producer.Spec.S3.Resources {
 			if b.Name == resourceName {
 				return b.SharedWith, true
+			}
+		}
+	case "kms":
+		if producer.Spec.KMS == nil {
+			return nil, false
+		}
+		for _, k := range producer.Spec.KMS.Resources {
+			if k.Name == resourceName {
+				return k.SharedWith, true
 			}
 		}
 	}

@@ -38,6 +38,7 @@ var _ = Describe("AppDependencies Controller", func() {
 		fakeSQS    *fakeSQSClient
 		fakeSNS    *fakeSNSClient
 		fakeIAM    *fakeIAMClient
+		fakeKMS    *fakeKMSClient
 		reconciler *AppDependenciesReconciler
 	)
 
@@ -45,10 +46,11 @@ var _ = Describe("AppDependencies Controller", func() {
 		fakeSQS = newFakeSQSClient()
 		fakeSNS = newFakeSNSClient()
 		fakeIAM = newFakeIAMClient()
+		fakeKMS = newFakeKMSClient()
 		reconciler = &AppDependenciesReconciler{
 			Client:          k8sClient,
 			Scheme:          k8sClient.Scheme(),
-			AWSClients:      &cloudctlaws.Clients{SQS: fakeSQS, SNS: fakeSNS, IAM: fakeIAM, Region: "us-east-1", AccountID: "123456789012"},
+			AWSClients:      &cloudctlaws.Clients{SQS: fakeSQS, SNS: fakeSNS, IAM: fakeIAM, KMS: fakeKMS, Region: "us-east-1", AccountID: "123456789012"},
 			OIDCProviderARN: "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
 			OIDCProviderURL: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
 		}
@@ -87,6 +89,46 @@ var _ = Describe("AppDependencies Controller", func() {
 			sqsReady := apimeta.FindStatusCondition(updated.Status.Conditions, "SQSReady")
 			Expect(sqsReady).NotTo(BeNil())
 			Expect(sqsReady.Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	Context("reconciling a new CR with a declared KMS key", func() {
+		It("creates the key, aliases it, enables rotation, and reports Ready", func() {
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "controller-kms-create-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					KMS: &depsv1alpha1.KMSSpec{
+						Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			var updated depsv1alpha1.AppDependencies
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &updated)).To(Succeed())
+
+			alias := "alias/" + cloudctlaws.ResourceName(updated.Namespace, updated.Name, "primary")
+			Expect(fakeKMS.aliases).To(HaveKey(alias))
+
+			entry := status.FindManagedResource(updated.Status.ManagedResources, "kms", "primary")
+			Expect(entry).NotTo(BeNil())
+			Expect(entry.State).To(Equal(depsv1alpha1.ManagedResourceStateVerified))
+			Expect(fakeKMS.aliases[alias]).To(Equal(entry.ARN))
+
+			kmsReady := apimeta.FindStatusCondition(updated.Status.Conditions, "KMSReady")
+			Expect(kmsReady).NotTo(BeNil())
+			Expect(kmsReady.Status).To(Equal(metav1.ConditionTrue))
+
+			ready := apimeta.FindStatusCondition(updated.Status.Conditions, "Ready")
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		})
 	})
 

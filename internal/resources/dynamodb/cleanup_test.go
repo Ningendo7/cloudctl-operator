@@ -34,12 +34,12 @@ func setupTable(t *testing.T, client *fakeDynamoDB, namespace, crName, name stri
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: name, PartitionKey: "id", DeletionPolicy: deletionPolicy, Force: force},
 	}}
-	ledger, err := Ensure(context.Background(), client, namespace, crName, "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, namespace, crName, "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
 	// Move past Creating to Verified, same as a real second reconcile would.
-	ledger, err = Ensure(context.Background(), client, namespace, crName, "uid-1", spec, ledger)
+	ledger, err = Ensure(context.Background(), client, nil, nil, namespace, crName, "uid-1", spec, ledger)
 	if err != nil {
 		t.Fatalf("setup second Ensure() error = %v", err)
 	}
@@ -294,11 +294,11 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 		{Name: "orders", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
-	ledger, err = Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger)
+	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
 	if err != nil {
 		t.Fatalf("setup second Ensure() error = %v", err)
 	}

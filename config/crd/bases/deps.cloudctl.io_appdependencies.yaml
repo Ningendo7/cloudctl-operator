@@ -123,6 +123,44 @@ spec:
                           - Retain
                           - Delete
                           type: string
+                        encryption:
+                          description: |-
+                            encryption enables server-side encryption with a KMS key. See
+                            EncryptionSpec.
+                          properties:
+                            enabled:
+                              type: boolean
+                            kmsKeyRef:
+                              description: |-
+                                ConsumeRef references a resource owned by another AppDependencies CR. The
+                                owning CR must list this CR in the target resource's sharedWith grants, or
+                                the reference is reported as unauthorized rather than silently honored.
+                              properties:
+                                name:
+                                  description: name of the AppDependencies CR that
+                                    owns the resource.
+                                  maxLength: 253
+                                  type: string
+                                namespace:
+                                  description: namespace of the AppDependencies CR
+                                    that owns the resource.
+                                  maxLength: 63
+                                  type: string
+                                resourceName:
+                                  description: |-
+                                    resourceName is the `name` of the specific resource entry within the
+                                    owning CR's section (e.g. the queue name under its sqs.resources list).
+                                  maxLength: 80
+                                  type: string
+                              required:
+                              - name
+                              - namespace
+                              - resourceName
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                          - message: enabled and kmsKeyRef are mutually exclusive
+                            rule: '!(self.enabled == true && has(self.kmsKeyRef))'
                         force:
                           type: boolean
                         name:
@@ -253,6 +291,17 @@ spec:
                   resources:
                     items:
                       properties:
+                        adopt:
+                          description: |-
+                            adopt allows this CR to take ownership of a pre-existing AWS resource
+                            found under this entry's deterministic alias that isn't already
+                            tagged as owned by this CR. Same semantics as every other resource
+                            type's adopt field. No force field: unlike every other resource
+                            type, a KMS key isn't "non-empty" in a way force could ever
+                            legitimately override — deleting one while anything still uses it to
+                            encrypt data makes that data permanently unrecoverable elsewhere,
+                            not just gone from this CR.
+                          type: boolean
                         deletionPolicy:
                           default: Retain
                           description: |-
@@ -378,6 +427,44 @@ spec:
                           - Retain
                           - Delete
                           type: string
+                        encryption:
+                          description: |-
+                            encryption enables server-side encryption with a KMS key. See
+                            EncryptionSpec.
+                          properties:
+                            enabled:
+                              type: boolean
+                            kmsKeyRef:
+                              description: |-
+                                ConsumeRef references a resource owned by another AppDependencies CR. The
+                                owning CR must list this CR in the target resource's sharedWith grants, or
+                                the reference is reported as unauthorized rather than silently honored.
+                              properties:
+                                name:
+                                  description: name of the AppDependencies CR that
+                                    owns the resource.
+                                  maxLength: 253
+                                  type: string
+                                namespace:
+                                  description: namespace of the AppDependencies CR
+                                    that owns the resource.
+                                  maxLength: 63
+                                  type: string
+                                resourceName:
+                                  description: |-
+                                    resourceName is the `name` of the specific resource entry within the
+                                    owning CR's section (e.g. the queue name under its sqs.resources list).
+                                  maxLength: 80
+                                  type: string
+                              required:
+                              - name
+                              - namespace
+                              - resourceName
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                          - message: enabled and kmsKeyRef are mutually exclusive
+                            rule: '!(self.enabled == true && has(self.kmsKeyRef))'
                         force:
                           type: boolean
                         name:
@@ -595,6 +682,44 @@ spec:
                           - Retain
                           - Delete
                           type: string
+                        encryption:
+                          description: |-
+                            encryption enables server-side encryption with a KMS key. See
+                            EncryptionSpec.
+                          properties:
+                            enabled:
+                              type: boolean
+                            kmsKeyRef:
+                              description: |-
+                                ConsumeRef references a resource owned by another AppDependencies CR. The
+                                owning CR must list this CR in the target resource's sharedWith grants, or
+                                the reference is reported as unauthorized rather than silently honored.
+                              properties:
+                                name:
+                                  description: name of the AppDependencies CR that
+                                    owns the resource.
+                                  maxLength: 253
+                                  type: string
+                                namespace:
+                                  description: namespace of the AppDependencies CR
+                                    that owns the resource.
+                                  maxLength: 63
+                                  type: string
+                                resourceName:
+                                  description: |-
+                                    resourceName is the `name` of the specific resource entry within the
+                                    owning CR's section (e.g. the queue name under its sqs.resources list).
+                                  maxLength: 80
+                                  type: string
+                              required:
+                              - name
+                              - namespace
+                              - resourceName
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                          - message: enabled and kmsKeyRef are mutually exclusive
+                            rule: '!(self.enabled == true && has(self.kmsKeyRef))'
                         fifo:
                           default: false
                           description: |-
@@ -741,6 +866,44 @@ spec:
                           description: dlq enables a dead-letter queue with a standard
                             redrive policy.
                           type: boolean
+                        encryption:
+                          description: |-
+                            encryption enables server-side encryption with a KMS key. See
+                            EncryptionSpec.
+                          properties:
+                            enabled:
+                              type: boolean
+                            kmsKeyRef:
+                              description: |-
+                                ConsumeRef references a resource owned by another AppDependencies CR. The
+                                owning CR must list this CR in the target resource's sharedWith grants, or
+                                the reference is reported as unauthorized rather than silently honored.
+                              properties:
+                                name:
+                                  description: name of the AppDependencies CR that
+                                    owns the resource.
+                                  maxLength: 253
+                                  type: string
+                                namespace:
+                                  description: namespace of the AppDependencies CR
+                                    that owns the resource.
+                                  maxLength: 63
+                                  type: string
+                                resourceName:
+                                  description: |-
+                                    resourceName is the `name` of the specific resource entry within the
+                                    owning CR's section (e.g. the queue name under its sqs.resources list).
+                                  maxLength: 80
+                                  type: string
+                              required:
+                              - name
+                              - namespace
+                              - resourceName
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                          - message: enabled and kmsKeyRef are mutually exclusive
+                            rule: '!(self.enabled == true && has(self.kmsKeyRef))'
                         fifo:
                           default: false
                           description: |-

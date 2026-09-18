@@ -35,7 +35,7 @@ func setupBucket(t *testing.T, client *fakeS3, namespace, crName, name string, d
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 		{Name: name, DeletionPolicy: deletionPolicy, Force: force},
 	}}
-	ledger, err := Ensure(context.Background(), client, namespace, crName, "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, namespace, crName, "uid-1", testRegion, testAccountID, spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -390,7 +390,7 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 		{Name: "logs", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}

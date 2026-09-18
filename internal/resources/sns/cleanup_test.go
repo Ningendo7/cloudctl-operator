@@ -35,7 +35,7 @@ func setupTopic(t *testing.T, client *fakeSNS, namespace, crName, name string, d
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: name, DeletionPolicy: deletionPolicy, Force: force},
 	}}
-	ledger, err := Ensure(context.Background(), client, namespace, crName, "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, namespace, crName, "uid-1", testRegion, testAccountID, spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -426,7 +426,7 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 		{Name: "orders-events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 		{Name: "user-events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}

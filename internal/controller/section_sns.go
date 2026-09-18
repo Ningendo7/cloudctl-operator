@@ -20,13 +20,14 @@ import (
 	"context"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
-	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/sns"
 )
 
 // snsSection adapts the sns package's Ensure/Cleanup to the orchestrator's
-// uniform section shape.
-func snsSection(awsClients *cloudctlaws.Clients) section {
+// uniform section shape. Takes the whole reconciler (not just AWSClients,
+// unlike before) because encryption.kmsKeyRef resolution needs r.Client to
+// look up the producer CR a shared key belongs to.
+func snsSection(r *AppDependenciesReconciler) section {
 	return section{
 		name: "SNSReady",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
@@ -39,12 +40,14 @@ func snsSection(awsClients *cloudctlaws.Clients) section {
 
 			ledger, ensureErr := sns.Ensure(
 				ctx,
-				awsClients.SNS,
+				r.AWSClients.SNS,
+				r.AWSClients.KMS,
+				r.Client,
 				cr.Namespace,
 				cr.Name,
 				string(cr.UID),
-				awsClients.Region,
-				awsClients.AccountID,
+				r.AWSClients.Region,
+				r.AWSClients.AccountID,
 				cr.Spec.SNS,
 				cr.Status.ManagedResources,
 			)
@@ -52,7 +55,7 @@ func snsSection(awsClients *cloudctlaws.Clients) section {
 
 			ledger, _, cleanupErr := sns.Cleanup(
 				ctx,
-				awsClients.SNS,
+				r.AWSClients.SNS,
 				cr.Namespace,
 				cr.Name,
 				string(cr.UID),
@@ -79,7 +82,7 @@ func snsSection(awsClients *cloudctlaws.Clients) section {
 
 			ledger, results, err := sns.Cleanup(
 				ctx,
-				awsClients.SNS,
+				r.AWSClients.SNS,
 				cr.Namespace,
 				cr.Name,
 				string(cr.UID),

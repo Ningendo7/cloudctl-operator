@@ -24,9 +24,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sns/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -41,7 +43,9 @@ type snsAPI = cloudctlaws.SNSClient
 const resourceType = "sns"
 
 // Ensure reconciles every declared SNS topic against AWS, updating the
-// ownership ledger as it goes.
+// ownership ledger as it goes. kmsClient is only ever touched when a
+// resource actually declares encryption.enabled — a CR that never uses it
+// can pass nil.
 //
 // Known gaps, deliberately deferred (same pattern as sqs's initial pass):
 // drift correction on an existing topic's attributes, and the trust-window
@@ -49,6 +53,8 @@ const resourceType = "sns"
 func Ensure(
 	ctx context.Context,
 	client snsAPI,
+	kmsClient cloudctlaws.KMSClient,
+	k8sClient client.Client,
 	namespace,
 	crName,
 	crUID,
@@ -64,7 +70,7 @@ func Ensure(
 	var firstErr error
 	for _, t := range spec.Resources {
 		var err error
-		ledger, err = ensureTopic(ctx, client, namespace, crName, crUID, region, accountID, t, ledger)
+		ledger, err = ensureTopic(ctx, client, kmsClient, k8sClient, namespace, crName, crUID, region, accountID, t, ledger)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("topic %q: %w", t.Name, err)
 		}
@@ -75,6 +81,8 @@ func Ensure(
 func ensureTopic(
 	ctx context.Context,
 	client snsAPI,
+	kmsClient cloudctlaws.KMSClient,
+	k8sClient client.Client,
 	namespace,
 	crName,
 	crUID,
@@ -92,6 +100,28 @@ func ensureTopic(
 	}
 	topicArn := cloudctlaws.TopicARN(region, accountID, topicName)
 
+	var kmsKeyARN *string
+	if t.Encryption != nil {
+		if t.Encryption.KMSKeyRef != nil {
+			arn, ok := kms.ResolveSharedKeyARN(ctx, k8sClient, namespace, crName, *t.Encryption.KMSKeyRef)
+			if !ok {
+				return ledger, &cloudctlaws.ReconcileError{
+					Err:       fmt.Errorf("encryption.kmsKeyRef %s/%s/%s is not yet authorized (producer must list this CR in the key's sharedWith) or does not exist yet", t.Encryption.KMSKeyRef.Namespace, t.Encryption.KMSKeyRef.Name, t.Encryption.KMSKeyRef.ResourceName),
+					Retryable: true,
+				}
+			}
+			kmsKeyARN = &arn
+		}
+		if t.Encryption.Enabled {
+			arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, t.Name, t.DeletionPolicy, ledger)
+			ledger = updatedLedger
+			if err != nil {
+				return ledger, fmt.Errorf("encryption key: %w", err)
+			}
+			kmsKeyARN = &arn
+		}
+	}
+
 	ownerTags := map[string]string{
 		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
 		cloudctlaws.OwnerUIDTagKey: crUID,
@@ -103,14 +133,9 @@ func ensureTopic(
 
 	var notFound *types.NotFoundException
 	if errors.As(err, &notFound) {
-		attrs := map[string]string{}
+		attrs := desiredTopicAttributes(t, kmsKeyARN)
 		if t.FIFO {
 			attrs["FifoTopic"] = "true"
-			dedup := "false"
-			if t.Overrides != nil && t.Overrides.ContentBasedDeduplication != nil && *t.Overrides.ContentBasedDeduplication {
-				dedup = "true"
-			}
-			attrs["ContentBasedDeduplication"] = dedup
 		}
 
 		createOut, cErr := client.CreateTopic(ctx, &sns.CreateTopicInput{
@@ -144,44 +169,71 @@ func ensureTopic(
 		}
 	}
 
-	if err := reconcileTopicAttributes(ctx, client, topicArn, t); err != nil {
+	if err := reconcileTopicAttributes(ctx, client, topicArn, t, kmsKeyARN); err != nil {
 		return ledger, wrapAWSError(err, "reconciling topic attributes")
 	}
 
 	return recordVerified(ledger, t.Name, topicArn, t.DeletionPolicy, t.Force), nil
 }
 
-// reconcileTopicAttributes corrects drift on ContentBasedDeduplication, the
-// only mutable attribute this package currently exposes (confirmed
-// mutable via SetTopicAttributes per AWS's docs). Only meaningful for FIFO
-// topics — standard topics don't have this attribute at all.
-func reconcileTopicAttributes(ctx context.Context, client snsAPI, topicArn string, t depsv1alpha1.SNSTopicSpec) error {
-	if !t.FIFO {
+// desiredTopicAttributes computes the mutable attributes this package
+// manages, without making any AWS call — used both at creation and as the
+// comparison target inside reconcileTopicAttributes. FifoTopic is never
+// included here since it's immutable after creation (enforced via CEL) —
+// only ever set at creation time, in ensureTopic's own create path.
+func desiredTopicAttributes(t depsv1alpha1.SNSTopicSpec, kmsKeyARN *string) map[string]string {
+	desired := map[string]string{}
+	if t.FIFO {
+		dedup := "false"
+		if t.Overrides != nil && t.Overrides.ContentBasedDeduplication != nil && *t.Overrides.ContentBasedDeduplication {
+			dedup = "true"
+		}
+		desired["ContentBasedDeduplication"] = dedup
+	}
+	if kmsKeyARN != nil {
+		desired["KmsMasterKeyId"] = *kmsKeyARN
+	}
+	return desired
+}
+
+// reconcileTopicAttributes corrects drift on ContentBasedDeduplication and
+// KmsMasterKeyId, the only mutable attributes this package currently
+// exposes (both confirmed mutable via SetTopicAttributes per AWS's docs).
+// Unlike SQS's bulk SetQueueAttributes, SNS's SetTopicAttributes takes
+// exactly one attribute name/value per call, so a changed attribute is set
+// individually rather than in one batched request.
+func reconcileTopicAttributes(ctx context.Context, client snsAPI, topicArn string, t depsv1alpha1.SNSTopicSpec, kmsKeyARN *string) error {
+	desired := desiredTopicAttributes(t, kmsKeyARN)
+	if len(desired) == 0 {
 		return nil
 	}
 
-	desired := "false"
-	if t.Overrides != nil && t.Overrides.ContentBasedDeduplication != nil && *t.Overrides.ContentBasedDeduplication {
-		desired = "true"
+	attrNames := make([]string, 0, len(desired))
+	for name := range desired {
+		attrNames = append(attrNames, name)
 	}
-
 	current, err := client.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{
 		TopicArn: &topicArn,
 	})
 	if err != nil {
 		return fmt.Errorf("reading current attributes: %w", err)
 	}
-	if current.Attributes["ContentBasedDeduplication"] == desired {
-		return nil
-	}
 
-	attrName := "ContentBasedDeduplication"
-	_, err = client.SetTopicAttributes(ctx, &sns.SetTopicAttributesInput{
-		TopicArn:       &topicArn,
-		AttributeName:  &attrName,
-		AttributeValue: &desired,
-	})
-	return err
+	for _, name := range attrNames {
+		value := desired[name]
+		if current.Attributes[name] == value {
+			continue
+		}
+		n, v := name, value
+		if _, err := client.SetTopicAttributes(ctx, &sns.SetTopicAttributesInput{
+			TopicArn:       &topicArn,
+			AttributeName:  &n,
+			AttributeValue: &v,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn string, deletionPolicy depsv1alpha1.DeletionPolicy, force bool) []depsv1alpha1.ManagedResource {

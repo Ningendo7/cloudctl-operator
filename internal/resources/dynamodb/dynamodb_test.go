@@ -24,11 +24,23 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
+
+func newSchemeForKMSKeyRefTest(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := depsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	return scheme
+}
 
 func TestEnsure_CreatesTableWithOwnerTagsAndOnDemandBilling(t *testing.T) {
 	client := newFakeDynamoDB()
@@ -36,7 +48,7 @@ func TestEnsure_CreatesTableWithOwnerTagsAndOnDemandBilling(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id"},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -71,7 +83,7 @@ func TestEnsure_CreatesCompositeKeyWhenSortKeySet(t *testing.T) {
 		{Name: "events", PartitionKey: "pk", SortKey: "sk"},
 	}}
 
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -96,7 +108,7 @@ func TestEnsure_MovesToVerifiedOnceTableIsActive(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id"},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
@@ -104,7 +116,7 @@ func TestEnsure_MovesToVerifiedOnceTableIsActive(t *testing.T) {
 		t.Fatalf("test setup broken: expected Creating after first Ensure(), got %+v", entry)
 	}
 
-	ledger, err = Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger)
+	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -128,7 +140,7 @@ func TestEnsure_ReturnsRetryableErrorWhileTableIsStillCreating(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id"},
 	}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error while the table is still CREATING")
 	}
@@ -141,18 +153,127 @@ func TestEnsure_ReturnsRetryableErrorWhileTableIsStillCreating(t *testing.T) {
 	}
 }
 
+func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
+	client := newFakeDynamoDB()
+	kmsClient := newFakeKMSClient()
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+	}}
+
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	keyEntry := status.FindManagedResource(ledger, "kms", "sessions-key")
+	if keyEntry == nil {
+		t.Fatal("expected a dedicated KMS key ledger entry named \"sessions-key\"")
+	}
+
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	table, ok := client.tables[tableName]
+	if !ok {
+		t.Fatal("expected the table to have been created")
+	}
+	if table.kmsKeyARN != keyEntry.ARN {
+		t.Errorf("table's KMS key ARN = %q, want %q (set atomically at CreateTable)", table.kmsKeyARN, keyEntry.ARN)
+	}
+}
+
+func TestEnsure_CorrectsKMSKeyDriftOnActiveTable(t *testing.T) {
+	client := newFakeDynamoDB()
+	kmsClient := newFakeKMSClient()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	client.tables[tableName] = &fakeTable{
+		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:       types.TableStatusActive,
+		tags:         map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+		partitionKey: "id",
+	}
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+	}}
+
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	keyEntry := status.FindManagedResource(ledger, "kms", "sessions-key")
+	if client.tables[tableName].kmsKeyARN != keyEntry.ARN {
+		t.Errorf("expected drift correction to set the table's KMS key to %q, got %q", keyEntry.ARN, client.tables[tableName].kmsKeyARN)
+	}
+}
+
+func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
+	client := newFakeDynamoDB()
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{
+			KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+		}},
+	}}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
+
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil)
+	if err == nil {
+		t.Fatal("expected an error - the producer CR doesn't exist yet")
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable ReconcileError (self-resolving forward reference), got %v", err)
+	}
+}
+
+func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
+	client := newFakeDynamoDB()
+	producer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
+				{Name: "shared-key", SharedWith: []depsv1alpha1.SharedWithEntry{
+					{Namespace: "default", Name: "checkout-service"},
+				}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"},
+			},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{
+			KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+		}},
+	}}
+
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	table, ok := client.tables[tableName]
+	if !ok {
+		t.Fatal("expected the table to have been created")
+	}
+	if table.kmsKeyARN != "arn:aws:kms:us-east-1:123456789012:key/shared-id" {
+		t.Errorf("table's KMS key ARN = %q, want the shared key's ARN", table.kmsKeyARN)
+	}
+}
+
 func TestEnsure_EnablesPointInTimeRecoveryWhenBackupRequested(t *testing.T) {
 	client := newFakeDynamoDB()
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Backup: &depsv1alpha1.DynamoDBBackupSpec{Enabled: true}},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 	// Second pass: table is now ACTIVE, so PITR reconciliation actually runs.
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
@@ -171,11 +292,11 @@ func TestEnsure_SetsCustomRetentionDaysWhenBackupEnabled(t *testing.T) {
 		}},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
@@ -195,11 +316,11 @@ func TestEnsure_DefaultsToThirtyFiveDayRetentionWhenUnset(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id", Backup: &depsv1alpha1.DynamoDBBackupSpec{Enabled: true}},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
@@ -230,7 +351,7 @@ func TestEnsure_CorrectsRetentionDaysDriftOnAlreadyEnabledTable(t *testing.T) {
 			Enabled: true, RetentionDays: &retentionDays,
 		}},
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -264,7 +385,7 @@ func TestEnsure_DoesNotTouchContinuousBackupsWhenNothingChanged(t *testing.T) {
 			Enabled: true, RetentionDays: &retentionDays,
 		}},
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v — expected no UpdateContinuousBackups call when nothing changed", err)
 	}
 }
@@ -290,7 +411,7 @@ func TestEnsure_DoesNotCompareRetentionDaysWhilePITRDisabled(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id"}, // no Backup at all - disabled
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v — expected no UpdateContinuousBackups call while PITR stays disabled", err)
 	}
 }
@@ -311,7 +432,7 @@ func TestEnsure_CorrectsBillingModeDriftOnExistingTable(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id"},
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -328,7 +449,7 @@ func TestEnsure_CreatesTableWithProvisionedBillingModeWhenRequested(t *testing.T
 		}},
 	}}
 
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -356,7 +477,7 @@ func TestEnsure_CorrectsBillingModeDriftToProvisionedOnExistingTable(t *testing.
 			BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned,
 		}},
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -390,7 +511,7 @@ func TestEnsure_TreatsNilBillingModeSummaryAsAlreadyProvisioned(t *testing.T) {
 			BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned,
 		}},
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -425,7 +546,7 @@ func TestReconcileTableAttributes_TreatsResourceInUseAsRetryable(t *testing.T) {
 			BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned,
 		}},
 	}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error from the failing UpdateTable call")
 	}
@@ -449,7 +570,7 @@ func TestEnsure_RefusesUnownedTableWithoutAdopt(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id"},
 	}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error for an untagged pre-existing table without adopt:true")
 	}
@@ -468,7 +589,7 @@ func TestEnsure_AdoptsUntaggedTableWhenRequested(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Adopt: true},
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -495,7 +616,7 @@ func TestEnsure_RejectsTableOwnedByDifferentCREvenWithAdopt(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Adopt: true},
 	}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to still refuse a table owned by a different AppDependencies CR")
 	}
@@ -514,7 +635,7 @@ func TestEnsure_RefusesAdoptingTableWithMismatchedKeySchema(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Adopt: true},
 	}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to still refuse a table whose actual key schema doesn't match spec")
 	}
@@ -536,7 +657,7 @@ func TestEnsure_RefusesAdoptingTableMissingASortKey(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", SortKey: "createdAt", Adopt: true},
 	}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to still refuse a table missing a sort key the spec declares")
 	}
@@ -549,7 +670,7 @@ func TestEnsure_RejectsTableNameExceedingDynamoDBLimit(t *testing.T) {
 		{Name: longKey, PartitionKey: "id"},
 	}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error for a computed table name exceeding the length limit")
 	}
@@ -565,7 +686,7 @@ func TestEnsure_ClassifiesPermissionErrorsAsNotRetryable(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id"},
 	}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -587,7 +708,7 @@ func TestEnsure_ContinuesToOtherTablesAfterOneFails(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id"}, // fails: untagged, no adopt
 		{Name: "orders", PartitionKey: "id"},   // should still succeed
 	}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error reported for the unowned sessions table")
 	}

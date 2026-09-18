@@ -29,9 +29,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -53,6 +55,8 @@ type s3API interface {
 	DeleteObjects(ctx context.Context, in *s3sdk.DeleteObjectsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteObjectsOutput, error)
 	ListMultipartUploads(ctx context.Context, in *s3sdk.ListMultipartUploadsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.ListMultipartUploadsOutput, error)
 	AbortMultipartUpload(ctx context.Context, in *s3sdk.AbortMultipartUploadInput, optFns ...func(*s3sdk.Options)) (*s3sdk.AbortMultipartUploadOutput, error)
+	GetBucketEncryption(ctx context.Context, in *s3sdk.GetBucketEncryptionInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketEncryptionOutput, error)
+	PutBucketEncryption(ctx context.Context, in *s3sdk.PutBucketEncryptionInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketEncryptionOutput, error)
 }
 
 const resourceType = "s3"
@@ -78,6 +82,7 @@ type bucketOptions struct {
 	versioningOverride   *bool
 	lifecycleOverride    []depsv1alpha1.S3LifecycleRule
 	lifecycleOverrideSet bool
+	kmsKeyARN            *string
 }
 
 // bucketName derives the actual AWS bucket name. Unlike SQS/SNS/DynamoDB,
@@ -95,10 +100,14 @@ func bucketName(namespace, crName, resourceKey, accountID string) string {
 }
 
 // Ensure reconciles every declared S3 bucket against AWS, updating the
-// ownership ledger as it goes.
+// ownership ledger as it goes. kmsClient is only ever touched when a
+// resource actually declares encryption.enabled — a CR that never uses it
+// can pass nil.
 func Ensure(
 	ctx context.Context,
 	client s3API,
+	kmsClient cloudctlaws.KMSClient,
+	k8sClient client.Client,
 	namespace, crName, crUID, region, accountID string,
 	spec *depsv1alpha1.S3Spec,
 	ledger []depsv1alpha1.ManagedResource,
@@ -125,6 +134,32 @@ func Ensure(
 			if b.Overrides.LifecycleRules != nil {
 				opts.lifecycleOverride = b.Overrides.LifecycleRules
 				opts.lifecycleOverrideSet = true
+			}
+		}
+		if b.Encryption != nil {
+			if b.Encryption.KMSKeyRef != nil {
+				arn, ok := kms.ResolveSharedKeyARN(ctx, k8sClient, namespace, crName, *b.Encryption.KMSKeyRef)
+				if !ok {
+					if firstErr == nil {
+						firstErr = &cloudctlaws.ReconcileError{
+							Err:       fmt.Errorf("bucket %q: encryption.kmsKeyRef %s/%s/%s is not yet authorized (producer must list this CR in the key's sharedWith) or does not exist yet", b.Name, b.Encryption.KMSKeyRef.Namespace, b.Encryption.KMSKeyRef.Name, b.Encryption.KMSKeyRef.ResourceName),
+							Retryable: true,
+						}
+					}
+					continue
+				}
+				opts.kmsKeyARN = &arn
+			}
+			if b.Encryption.Enabled {
+				arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, b.Name, b.DeletionPolicy, ledger)
+				ledger = updatedLedger
+				if err != nil {
+					if firstErr == nil {
+						firstErr = fmt.Errorf("bucket %q: encryption key: %w", b.Name, err)
+					}
+					continue
+				}
+				opts.kmsKeyARN = &arn
 			}
 		}
 
@@ -262,6 +297,49 @@ func reconcileBucketAttributes(ctx context.Context, client s3API, bucket string,
 		}
 	}
 
+	// Checked before the lifecycle block below, which has its own early
+	// return on the (very common) "no lifecycle rules configured" path -
+	// placing this after it would silently skip encryption reconciliation
+	// for exactly that common case.
+	//
+	// Only ever corrects the "enable, or point at a different key"
+	// direction — same accepted gap as every other resource type's
+	// encryption drift correction: removing encryption from spec doesn't
+	// proactively revert an already-encrypted bucket back to the default
+	// SSE-S3 key.
+	if opts.kmsKeyARN != nil {
+		currentKeyARN := ""
+		encOut, encErr := client.GetBucketEncryption(ctx, &s3sdk.GetBucketEncryptionInput{Bucket: &bucket})
+		if encErr != nil && !isServerSideEncryptionConfigurationNotFound(encErr) {
+			return fmt.Errorf("reading encryption configuration: %w", encErr)
+		}
+		if encOut != nil && encOut.ServerSideEncryptionConfiguration != nil {
+			for _, rule := range encOut.ServerSideEncryptionConfiguration.Rules {
+				if rule.ApplyServerSideEncryptionByDefault != nil && rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID != nil {
+					currentKeyARN = *rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID
+					break
+				}
+			}
+		}
+		if currentKeyARN != *opts.kmsKeyARN {
+			if _, err := client.PutBucketEncryption(ctx, &s3sdk.PutBucketEncryptionInput{
+				Bucket: &bucket,
+				ServerSideEncryptionConfiguration: &types.ServerSideEncryptionConfiguration{
+					Rules: []types.ServerSideEncryptionRule{
+						{
+							ApplyServerSideEncryptionByDefault: &types.ServerSideEncryptionByDefault{
+								SSEAlgorithm:   types.ServerSideEncryptionAwsKms,
+								KMSMasterKeyID: opts.kmsKeyARN,
+							},
+						},
+					},
+				},
+			}); err != nil {
+				return fmt.Errorf("correcting server-side encryption key: %w", err)
+			}
+		}
+	}
+
 	rules := desiredLifecycleRules(opts)
 	if len(rules) == 0 {
 		_, err := client.DeleteBucketLifecycle(ctx, &s3sdk.DeleteBucketLifecycleInput{Bucket: &bucket})
@@ -281,6 +359,17 @@ func reconcileBucketAttributes(ctx context.Context, client s3API, bucket string,
 		return fmt.Errorf("setting lifecycle policy: %w", err)
 	}
 	return nil
+}
+
+// isServerSideEncryptionConfigurationNotFound reports whether err is S3's
+// "no default encryption configuration has ever been explicitly set"
+// response — a real, expected state for any bucket PutBucketEncryption was
+// never called on (every bucket is still SSE-S3-encrypted by default
+// regardless), not an error condition. No typed exception exists for this
+// one in the SDK — same as isNoSuchTagSet's own string-code check below.
+func isServerSideEncryptionConfigurationNotFound(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "ServerSideEncryptionConfigurationNotFoundError"
 }
 
 // desiredLifecycleRules resolves which rules to apply this reconcile: an

@@ -20,13 +20,14 @@ import (
 	"context"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
-	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/sqs"
 )
 
 // sqsSection adapts the sqs package's Ensure/Cleanup to the orchestrator's
-// uniform section shape.
-func sqsSection(awsClients *cloudctlaws.Clients) section {
+// uniform section shape. Takes the whole reconciler (not just AWSClients,
+// unlike before) because encryption.kmsKeyRef resolution needs r.Client to
+// look up the producer CR a shared key belongs to.
+func sqsSection(r *AppDependenciesReconciler) section {
 	return section{
 		name: "SQSReady",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
@@ -39,7 +40,9 @@ func sqsSection(awsClients *cloudctlaws.Clients) section {
 
 			ledger, ensureErr := sqs.Ensure(
 				ctx,
-				awsClients.SQS,
+				r.AWSClients.SQS,
+				r.AWSClients.KMS,
+				r.Client,
 				cr.Namespace,
 				cr.Name,
 				string(cr.UID),
@@ -50,7 +53,7 @@ func sqsSection(awsClients *cloudctlaws.Clients) section {
 
 			ledger, _, cleanupErr := sqs.Cleanup(
 				ctx,
-				awsClients.SQS,
+				r.AWSClients.SQS,
 				cr.Namespace,
 				cr.Name,
 				string(cr.UID),
@@ -77,7 +80,7 @@ func sqsSection(awsClients *cloudctlaws.Clients) section {
 
 			ledger, results, err := sqs.Cleanup(
 				ctx,
-				awsClients.SQS,
+				r.AWSClients.SQS,
 				cr.Namespace,
 				cr.Name,
 				string(cr.UID),

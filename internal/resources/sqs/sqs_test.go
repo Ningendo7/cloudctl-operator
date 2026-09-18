@@ -27,11 +27,22 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
+
+func newSchemeForKMSKeyRefTest(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := depsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	return scheme
+}
 
 func TestEnsure_CreatesNewQueue(t *testing.T) {
 	client := newFakeSQS()
@@ -41,7 +52,7 @@ func TestEnsure_CreatesNewQueue(t *testing.T) {
 		},
 	}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -63,17 +74,162 @@ func TestEnsure_CreatesNewQueue(t *testing.T) {
 	}
 }
 
+func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
+	client := newFakeSQS()
+	kmsClient := newFakeKMSClient()
+	spec := &depsv1alpha1.SQSSpec{
+		Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+		},
+	}
+
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	keyEntry := status.FindManagedResource(ledger, "kms", "orders-key")
+	if keyEntry == nil {
+		t.Fatal("expected a dedicated KMS key ledger entry named \"orders-key\"")
+	}
+
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	queue, ok := client.queues[queueName]
+	if !ok {
+		t.Fatal("expected the queue to have been created")
+	}
+	if queue.attributes["KmsMasterKeyId"] != keyEntry.ARN {
+		t.Errorf("KmsMasterKeyId = %q, want %q", queue.attributes["KmsMasterKeyId"], keyEntry.ARN)
+	}
+}
+
+func TestEnsure_DLQSharesMainQueuesDedicatedKey(t *testing.T) {
+	client := newFakeSQS()
+	kmsClient := newFakeKMSClient()
+	spec := &depsv1alpha1.SQSSpec{
+		Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: "orders", DLQ: true, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+		},
+	}
+
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if len(kmsClient.keys) != 1 {
+		t.Fatalf("expected exactly one dedicated key to be created for a queue+DLQ pair, got %d", len(kmsClient.keys))
+	}
+
+	keyEntry := status.FindManagedResource(ledger, "kms", "orders-key")
+	dlqName := cloudctlaws.ResourceName("default", "checkout-service", "orders-dlq")
+	dlq, ok := client.queues[dlqName]
+	if !ok {
+		t.Fatal("expected the DLQ to have been created")
+	}
+	if dlq.attributes["KmsMasterKeyId"] != keyEntry.ARN {
+		t.Errorf("DLQ KmsMasterKeyId = %q, want the same key as the main queue (%q)", dlq.attributes["KmsMasterKeyId"], keyEntry.ARN)
+	}
+}
+
+func TestEnsure_CorrectsKmsMasterKeyIdDriftOnExistingQueue(t *testing.T) {
+	client := newFakeSQS()
+	kmsClient := newFakeKMSClient()
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	client.queues[queueName] = &fakeQueue{
+		url:        "https://sqs.us-east-1.amazonaws.com/123456789012/" + queueName,
+		arn:        "arn:aws:sqs:us-east-1:123456789012:" + queueName,
+		tags:       map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+		attributes: map[string]string{},
+	}
+	spec := &depsv1alpha1.SQSSpec{
+		Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+		},
+	}
+
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	keyEntry := status.FindManagedResource(ledger, "kms", "orders-key")
+	if client.queues[queueName].attributes["KmsMasterKeyId"] != keyEntry.ARN {
+		t.Errorf("expected drift correction to set KmsMasterKeyId to %q, got %q", keyEntry.ARN, client.queues[queueName].attributes["KmsMasterKeyId"])
+	}
+}
+
+func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
+	client := newFakeSQS()
+	spec := &depsv1alpha1.SQSSpec{
+		Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{
+				KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+			}},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
+
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil)
+	if err == nil {
+		t.Fatal("expected an error - the producer CR doesn't exist yet")
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable ReconcileError (self-resolving forward reference), got %v", err)
+	}
+}
+
+func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
+	client := newFakeSQS()
+	producer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
+				{Name: "shared-key", SharedWith: []depsv1alpha1.SharedWithEntry{
+					{Namespace: "default", Name: "checkout-service"},
+				}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"},
+			},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	spec := &depsv1alpha1.SQSSpec{
+		Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{
+				KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+			}},
+		},
+	}
+
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	queue, ok := client.queues[queueName]
+	if !ok {
+		t.Fatal("expected the queue to have been created")
+	}
+	if got := queue.attributes["KmsMasterKeyId"]; got != "arn:aws:kms:us-east-1:123456789012:key/shared-id" {
+		t.Errorf("KmsMasterKeyId = %q, want the shared key's ARN", got)
+	}
+}
+
 func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	client := newFakeSQS()
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 	firstCreatedAt := status.FindManagedResource(ledger, "sqs", "orders").CreatedAt
 
-	ledger, err = Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger)
+	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -97,7 +253,7 @@ func TestEnsure_RefusesUnownedExistingQueue(t *testing.T) {
 	})
 
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error when a same-named queue exists without our ownership tag")
 	}
@@ -112,7 +268,7 @@ func TestEnsure_AdoptsUntaggedEmptyQueue(t *testing.T) {
 	client.queues[queueName].tags = nil
 
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", Adopt: true}}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -137,7 +293,7 @@ func TestEnsure_AdoptsQueueWithUnrelatedExistingTags(t *testing.T) {
 	})
 
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", Adopt: true}}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("expected adoption to succeed for a queue with only unrelated organizational tags, got error: %v", err)
 	}
@@ -163,7 +319,7 @@ func TestEnsure_AdoptsQueueEvenWithMessagesInFlight(t *testing.T) {
 	client.queues[queueName].approxMessages = "3"
 
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", Adopt: true}}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("expected adoption to succeed regardless of message activity, got error: %v", err)
 	}
@@ -184,7 +340,7 @@ func TestEnsure_RefusesAdoptingQueueOwnedByDifferentCR(t *testing.T) {
 	})
 
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", Adopt: true}}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to never override a resource already owned by a different AppDependencies CR")
 	}
@@ -195,7 +351,7 @@ func TestEnsure_ClassifiesTransientAWSErrorsAsRetryable(t *testing.T) {
 	client.getQueueUrlErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
 
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error when the queue lookup fails")
 	}
@@ -214,7 +370,7 @@ func TestEnsure_ClassifiesPermissionErrorsAsNotRetryable(t *testing.T) {
 	client.getQueueUrlErr = &fakeAWSError{code: "AccessDenied", fault: smithy.FaultClient}
 
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error when the queue lookup fails")
 	}
@@ -233,7 +389,7 @@ func TestEnsure_TreatsQueueDeletedRecentlyAsRetryable(t *testing.T) {
 	client.createQueueErr = &types.QueueDeletedRecently{}
 
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error when the queue was deleted too recently to recreate")
 	}
@@ -253,7 +409,7 @@ func TestEnsure_CreatesDLQAndSetsRedrivePolicy(t *testing.T) {
 		{Name: "orders", DLQ: true},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -302,7 +458,7 @@ func TestEnsure_DLQRespectsMaxReceiveCountOverride(t *testing.T) {
 		{Name: "orders", DLQ: true, Overrides: &depsv1alpha1.SQSOverrides{MaxReceiveCount: &override}},
 	}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -323,7 +479,7 @@ func TestEnsure_NoDLQMeansNoRedrivePolicy(t *testing.T) {
 	client := newFakeSQS()
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -363,7 +519,7 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
 	}}
-	updatedLedger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger)
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v — expected the trust window to skip the AWS call entirely", err)
 	}
@@ -403,7 +559,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	updatedLedger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger)
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -420,7 +576,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	client := newFakeSQS()
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -430,7 +586,7 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	entry.LastVerifiedAt = &stale
 	status.UpsertManagedResource(&ledger, *entry)
 
-	updatedLedger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger)
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -447,7 +603,7 @@ func TestEnsure_CreatesFIFOQueueWithSuffixAndAttribute(t *testing.T) {
 		{Name: "orders", FIFO: true},
 	}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -469,7 +625,7 @@ func TestEnsure_FIFOQueueRespectsContentBasedDeduplicationOverride(t *testing.T)
 		{Name: "orders", FIFO: true, Overrides: &depsv1alpha1.SQSOverrides{ContentBasedDeduplication: &dedup}},
 	}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -486,7 +642,7 @@ func TestEnsure_DLQInheritsFIFOFromParent(t *testing.T) {
 		{Name: "orders", FIFO: true, DLQ: true},
 	}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -508,7 +664,7 @@ func TestEnsure_WiresUpVisibilityTimeoutAtCreation(t *testing.T) {
 		{Name: "orders", Overrides: &depsv1alpha1.SQSOverrides{VisibilityTimeoutSeconds: &timeout}},
 	}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -525,7 +681,7 @@ func TestEnsure_CorrectsVisibilityTimeoutDriftOnExistingQueue(t *testing.T) {
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", Overrides: &depsv1alpha1.SQSOverrides{VisibilityTimeoutSeconds: &initial}},
 	}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -539,7 +695,7 @@ func TestEnsure_CorrectsVisibilityTimeoutDriftOnExistingQueue(t *testing.T) {
 
 	updated := int32(300)
 	spec.Resources[0].Overrides.VisibilityTimeoutSeconds = &updated
-	_, err = Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger)
+	_, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -555,7 +711,7 @@ func TestEnsure_CorrectsDriftEvenWithinTrustWindow(t *testing.T) {
 	// re-verification and must not wait for the trust window to expire.
 	client := newFakeSQS()
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -564,7 +720,7 @@ func TestEnsure_CorrectsDriftEvenWithinTrustWindow(t *testing.T) {
 
 	updated := int32(90)
 	spec.Resources[0].Overrides = &depsv1alpha1.SQSOverrides{VisibilityTimeoutSeconds: &updated}
-	_, err = Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger)
+	_, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -590,7 +746,7 @@ func TestEnsure_ContinuesToOtherQueuesAfterOneFails(t *testing.T) {
 		{Name: "receipts"}, // unrelated, should still succeed
 	}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error from the failing queue")
 	}
@@ -614,7 +770,7 @@ func TestEnsure_RejectsQueueNameExceedingSQSLimit(t *testing.T) {
 		{Name: "order-confirmation-queue"},
 	}}
 
-	_, err := Ensure(context.Background(), client, "platform-engineering-production", "customer-notification-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "platform-engineering-production", "customer-notification-service", "uid-1", spec, nil)
 	if err == nil {
 		t.Fatal("expected an error for a computed queue name exceeding SQS's 80-character limit")
 	}

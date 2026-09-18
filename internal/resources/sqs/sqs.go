@@ -25,9 +25,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -50,13 +52,20 @@ type queueOptions struct {
 	contentBasedDeduplication bool
 	visibilityTimeoutSeconds  *int32
 	redrivePolicy             *string
+	kmsKeyARN                 *string
 }
 
 // Ensure reconciles every declared SQS queue (and its DLQ, if requested)
-// against AWS, updating the ownership ledger as it goes.
+// against AWS, updating the ownership ledger as it goes. kmsClient is only
+// ever touched when a resource actually declares encryption.enabled — a
+// CR that never uses it can pass nil. k8sClient is only ever touched when a
+// resource declares encryption.kmsKeyRef (the shared-key half of the
+// hybrid design) — a CR that never uses it can pass nil too.
 func Ensure(
 	ctx context.Context,
 	client sqsAPI,
+	kmsClient cloudctlaws.KMSClient,
+	k8sClient client.Client,
 	namespace,
 	crName,
 	crUID string,
@@ -70,7 +79,7 @@ func Ensure(
 	var firstErr error
 	for _, q := range spec.Resources {
 		var err error
-		ledger, err = ensureQueue(ctx, client, namespace, crName, crUID, q, ledger)
+		ledger, err = ensureQueue(ctx, client, kmsClient, k8sClient, namespace, crName, crUID, q, ledger)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("queue %q: %w", q.Name, err)
 		}
@@ -79,30 +88,61 @@ func Ensure(
 	return ledger, firstErr
 }
 
-// ensureQueue orchestrates a spec entry: ensures its DLQ first (if
-// requested), computes the resulting redrive policy, then ensures the main
-// queue itself. Both the DLQ and the main queue go through the same
-// ensureSingleQueue path — a DLQ is just another queue we own.
+// ensureQueue orchestrates a spec entry: resolves its encryption key (if
+// any) once so the same key protects both halves of a DLQ pair, ensures
+// the DLQ first (if requested), computes the resulting redrive policy,
+// then ensures the main queue itself. Both the DLQ and the main queue go
+// through the same ensureSingleQueue path — a DLQ is just another queue
+// we own.
 func ensureQueue(
 	ctx context.Context,
 	client sqsAPI,
+	kmsClient cloudctlaws.KMSClient,
+	k8sClient client.Client,
 	namespace,
 	crName,
 	crUID string,
 	q depsv1alpha1.SQSQueueSpec,
 	ledger []depsv1alpha1.ManagedResource,
 ) ([]depsv1alpha1.ManagedResource, error) {
+	var kmsKeyARN *string
+	if q.Encryption != nil {
+		if q.Encryption.KMSKeyRef != nil {
+			arn, ok := kms.ResolveSharedKeyARN(ctx, k8sClient, namespace, crName, *q.Encryption.KMSKeyRef)
+			if !ok {
+				return ledger, &cloudctlaws.ReconcileError{
+					Err:       fmt.Errorf("encryption.kmsKeyRef %s/%s/%s is not yet authorized (producer must list this CR in the key's sharedWith) or does not exist yet", q.Encryption.KMSKeyRef.Namespace, q.Encryption.KMSKeyRef.Name, q.Encryption.KMSKeyRef.ResourceName),
+					Retryable: true,
+				}
+			}
+			kmsKeyARN = &arn
+		}
+		if q.Encryption.Enabled {
+			arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, q.Name, q.DeletionPolicy, ledger)
+			ledger = updatedLedger
+			if err != nil {
+				return ledger, fmt.Errorf("encryption key: %w", err)
+			}
+			kmsKeyARN = &arn
+		}
+	}
+
 	var dlqArn string
 	if q.DLQ {
 		dlqName := q.Name + "-dlq"
 		var err error
 		// A FIFO source queue requires a FIFO DLQ - AWS rejects mismatched
 		// pairs - so fifo is inherited here, not independently configurable.
+		// The DLQ shares the main queue's own key rather than getting its
+		// own dedicated one - it holds a copy of the exact same sensitive
+		// data, so a second key would add cost and complexity with no
+		// actual isolation benefit.
 		ledger, err = ensureSingleQueue(ctx, client, namespace, crName, crUID, dlqName, queueOptions{
 			deletionPolicy: q.DeletionPolicy,
 			force:          q.Force,
 			adopt:          q.Adopt,
 			fifo:           q.FIFO,
+			kmsKeyARN:      kmsKeyARN,
 		}, ledger)
 		if err != nil {
 			return ledger, fmt.Errorf("dlq: %w", err)
@@ -152,6 +192,7 @@ func ensureQueue(
 		contentBasedDeduplication: contentBasedDedup,
 		visibilityTimeoutSeconds:  visibilityTimeout,
 		redrivePolicy:             redrivePolicy,
+		kmsKeyARN:                 kmsKeyARN,
 	}, ledger)
 }
 
@@ -223,20 +264,13 @@ func ensureSingleQueue(
 
 	var notFound *types.QueueDoesNotExist
 	if errors.As(err, &notFound) {
-		attrs := map[string]string{}
-		if opts.redrivePolicy != nil {
-			attrs["RedrivePolicy"] = *opts.redrivePolicy
-		}
+		// Reuses desiredAttributes rather than building a second, separate
+		// map here - FifoQueue is the one attribute desiredAttributes
+		// deliberately excludes (immutable after creation, so it's only
+		// ever relevant on this create path, never drift-corrected).
+		attrs := desiredAttributes(opts)
 		if opts.fifo {
 			attrs["FifoQueue"] = "true"
-			dedup := "false"
-			if opts.contentBasedDeduplication {
-				dedup = "true"
-			}
-			attrs["ContentBasedDeduplication"] = dedup
-		}
-		if opts.visibilityTimeoutSeconds != nil {
-			attrs["VisibilityTimeout"] = fmt.Sprintf("%d", *opts.visibilityTimeoutSeconds)
 		}
 
 		createOut, cErr := client.CreateQueue(ctx, &sqs.CreateQueueInput{
@@ -328,6 +362,9 @@ func desiredAttributes(opts queueOptions) map[string]string {
 	}
 	if opts.visibilityTimeoutSeconds != nil {
 		desired["VisibilityTimeout"] = fmt.Sprintf("%d", *opts.visibilityTimeoutSeconds)
+	}
+	if opts.kmsKeyARN != nil {
+		desired["KmsMasterKeyId"] = *opts.kmsKeyARN
 	}
 	return desired
 }

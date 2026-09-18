@@ -164,7 +164,7 @@ func buildConnectionData(
 			if err := addConsumed(ctx, k8sClient, data, cr, "s3", ref, region, accountID); err != nil {
 				return nil, err
 			}
-		} 
+		}
 	}
 
 	return data, nil

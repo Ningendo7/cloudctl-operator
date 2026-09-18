@@ -18,6 +18,7 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -25,11 +26,22 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
+
+func newSchemeForKMSKeyRefTest(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := depsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	return scheme
+}
 
 const (
 	testRegion    = "us-east-1"
@@ -40,7 +52,7 @@ func TestEnsure_CreatesBucketWithAccountHashSuffix(t *testing.T) {
 	client := newFakeS3()
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -62,6 +74,112 @@ func TestEnsure_CreatesBucketWithAccountHashSuffix(t *testing.T) {
 	}
 }
 
+func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
+	client := newFakeS3()
+	kmsClient := newFakeKMSClient()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+	}}
+
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	keyEntry := status.FindManagedResource(ledger, "kms", "receipts-key")
+	if keyEntry == nil {
+		t.Fatal("expected a dedicated KMS key ledger entry named \"receipts-key\"")
+	}
+
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	b, ok := client.buckets[bucket]
+	if !ok {
+		t.Fatal("expected the bucket to have been created")
+	}
+	if b.kmsKeyARN != keyEntry.ARN {
+		t.Errorf("bucket's KMS key ARN = %q, want %q", b.kmsKeyARN, keyEntry.ARN)
+	}
+}
+
+func TestEnsure_CorrectsKMSKeyDriftOnExistingBucket(t *testing.T) {
+	client := newFakeS3()
+	kmsClient := newFakeKMSClient()
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	client.buckets[bucket] = &fakeBucket{
+		tags: map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+	}
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+	}}
+
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	keyEntry := status.FindManagedResource(ledger, "kms", "receipts-key")
+	if client.buckets[bucket].kmsKeyARN != keyEntry.ARN {
+		t.Errorf("expected drift correction to set the bucket's KMS key to %q, got %q", keyEntry.ARN, client.buckets[bucket].kmsKeyARN)
+	}
+}
+
+func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
+	client := newFakeS3()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Encryption: &depsv1alpha1.EncryptionSpec{
+			KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+		}},
+	}}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
+
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	if err == nil {
+		t.Fatal("expected an error - the producer CR doesn't exist yet")
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable ReconcileError (self-resolving forward reference), got %v", err)
+	}
+}
+
+func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
+	client := newFakeS3()
+	producer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
+				{Name: "shared-key", SharedWith: []depsv1alpha1.SharedWithEntry{
+					{Namespace: "default", Name: "checkout-service"},
+				}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"},
+			},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Encryption: &depsv1alpha1.EncryptionSpec{
+			KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+		}},
+	}}
+
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	b, ok := client.buckets[bucket]
+	if !ok {
+		t.Fatal("expected the bucket to have been created")
+	}
+	if b.kmsKeyARN != "arn:aws:kms:us-east-1:123456789012:key/shared-id" {
+		t.Errorf("bucket's KMS key ARN = %q, want the shared key's ARN", b.kmsKeyARN)
+	}
+}
+
 func TestEnsure_CreatesBucketOnGenericHTTP404(t *testing.T) {
 	// HeadBucket's own docs confirm it doesn't always return a typed
 	// NotFound - a generic HTTP 404 with no message body is a documented,
@@ -70,7 +188,7 @@ func TestEnsure_CreatesBucketOnGenericHTTP404(t *testing.T) {
 	client.headBucketErr = fakeHTTPStatusError(404)
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
 
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v — expected a generic HTTP 404 to be treated the same as a typed NotFound", err)
 	}
 }
@@ -83,7 +201,7 @@ func TestEnsure_ReturnsErrorOn403WithoutAttemptingCreate(t *testing.T) {
 	client.headBucketErr = fakeHTTPStatusError(403)
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected 403 to be reported as an error")
 	}
@@ -107,7 +225,7 @@ func TestEnsure_ClassifiesPermissionErrorsAsNotRetryable(t *testing.T) {
 	client.createBucketErr = &fakeAWSError{code: "AccessDenied", fault: smithy.FaultClient}
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -121,7 +239,7 @@ func TestEnsure_ClassifiesTransientErrorsAsRetryable(t *testing.T) {
 	client.createBucketErr = &fakeAWSError{code: "InternalError", fault: smithy.FaultServer}
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -137,7 +255,7 @@ func TestEnsure_ReturnsErrorOn301WithoutAttemptingCreate(t *testing.T) {
 	client.headBucketErr = fakeHTTPStatusError(301)
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected 301 to be reported as an error")
 	}
@@ -151,7 +269,7 @@ func TestEnsure_TagsBucketAfterCreationNotAtomically(t *testing.T) {
 	client := newFakeS3()
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -171,7 +289,7 @@ func TestEnsure_RecordsTagPendingWhenTaggingFailsAfterCreate(t *testing.T) {
 	client.putBucketTaggingErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultServer}
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected an error when tagging fails after creation")
 	}
@@ -191,13 +309,13 @@ func TestEnsure_RetriesTaggingOnNextReconcileWithinClaimWindow(t *testing.T) {
 	client.putBucketTaggingErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultServer}
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected the first Ensure() to fail while tagging is broken")
 	}
 
 	client.putBucketTaggingErr = nil // simulate the transient failure clearing up
-	ledger, err = Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -229,7 +347,7 @@ func TestEnsure_RefusesStaleTagPendingClaimAfterWindowExpires(t *testing.T) {
 	}
 
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
 	if err == nil {
 		t.Fatal("expected Ensure to refuse claiming an untagged bucket once the claim window has expired")
 	}
@@ -241,7 +359,7 @@ func TestEnsure_RefusesUnownedBucketWithoutAdopt(t *testing.T) {
 	client.buckets[bucket] = &fakeBucket{tags: map[string]string{"team": "someone-else"}}
 
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected an error for a pre-existing, differently-tagged bucket without adopt:true")
 	}
@@ -253,7 +371,7 @@ func TestEnsure_AdoptsUntaggedBucketWhenRequested(t *testing.T) {
 	client.buckets[bucket] = &fakeBucket{tags: map[string]string{"team": "someone-else"}}
 
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts", Adopt: true}}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -274,7 +392,7 @@ func TestEnsure_RejectsBucketOwnedByDifferentCREvenWithAdopt(t *testing.T) {
 	}}
 
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts", Adopt: true}}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to still refuse a bucket owned by a different AppDependencies CR")
 	}
@@ -285,7 +403,7 @@ func TestEnsure_RejectsReplicationAsNotYetSupported(t *testing.T) {
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 		{Name: "receipts", Replication: &depsv1alpha1.S3ReplicationSpec{Enabled: true, Region: "us-west-2"}},
 	}}
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected replication to be explicitly rejected as unsupported")
 	}
@@ -296,7 +414,7 @@ func TestEnsure_EnablesVersioningWhenBackupEnabled(t *testing.T) {
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 		{Name: "receipts", Backup: &depsv1alpha1.S3BackupSpec{Enabled: true}},
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -311,7 +429,7 @@ func TestEnsure_AppliesDefaultLifecycleWhenBackupEnabledWithNoOverride(t *testin
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 		{Name: "receipts", Backup: &depsv1alpha1.S3BackupSpec{Enabled: true}},
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -342,7 +460,7 @@ func TestEnsure_UsesOverrideLifecycleRulesInsteadOfDefault(t *testing.T) {
 			},
 		},
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -376,7 +494,7 @@ func TestEnsure_EmptyOverrideListDisablesLifecycleEvenWithBackupEnabled(t *testi
 			Overrides: &depsv1alpha1.S3Overrides{LifecycleRules: []depsv1alpha1.S3LifecycleRule{}},
 		},
 	}}
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -390,7 +508,7 @@ func TestEnsure_RejectsBucketNameExceedingS3Limit(t *testing.T) {
 	longKey := strings.Repeat("a", 60)
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: longKey}}}
 
-	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected an error for a computed bucket name exceeding S3's 63-character limit")
 	}
@@ -405,7 +523,7 @@ func TestEnsure_ContinuesToOtherBucketsAfterOneFails(t *testing.T) {
 		{Name: "receipts"}, // fails: untagged, no adopt
 		{Name: "logs"},     // should still succeed
 	}}
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
 	if err == nil {
 		t.Fatal("expected an error reported for the unowned receipts bucket")
 	}
