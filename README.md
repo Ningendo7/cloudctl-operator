@@ -75,8 +75,7 @@ ungranted reference is reported, not silently dropped or silently allowed.
 
 ## What it manages
 
-SQS, SNS, DynamoDB, S3, KMS, and auto-derived IAM — with CloudWatch alarms
-next.
+SQS, SNS, DynamoDB, S3, KMS, CloudWatch alarms, and auto-derived IAM.
 
 - **[docs/architecture.md](docs/architecture.md)** — the design decisions:
   ownership and adoption, the trust window, deletion safety, naming,
@@ -91,9 +90,9 @@ deletion-safety model.
 
 ## Status
 
-Pre-1.0, under active development. SQS, SNS, DynamoDB, S3, KMS, and IAM
-are implemented and covered by unit and envtest suites; CloudWatch alarms
-and RDS support are next.
+Pre-1.0, under active development. SQS, SNS, DynamoDB, S3, KMS, CloudWatch
+alarms, and IAM are implemented and covered by unit and envtest suites;
+RDS support is next.
 
 ## License
 

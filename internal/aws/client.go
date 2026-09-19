@@ -44,7 +44,7 @@ type Clients struct {
 	DynamoDB   *dynamodb.Client
 	KMS        KMSClient
 	IAM        IAMClient
-	CloudWatch *cloudwatch.Client
+	CloudWatch CloudWatchClient
 
 	// AccountID and Region identify this controller's own AWS account,
 	// resolved once at startup. Needed anywhere a resource's name/ARN must

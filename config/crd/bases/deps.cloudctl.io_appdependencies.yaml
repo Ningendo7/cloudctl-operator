@@ -49,10 +49,42 @@ spec:
               alarms:
                 description: |-
                   AlarmsSpec turns on standard CloudWatch alarms (queue depth/age, error
-                  rates, throttling) for whatever resources are declared in this CR.
+                  rates, throttling) for whatever SQS/SNS/DynamoDB resources are declared
+                  in this CR. A single CR-wide switch, not per-resource — a team declaring
+                  resources in one CR almost always wants uniform alerting across them.
                 properties:
                   enabled:
                     type: boolean
+                  snsTopicRef:
+                    description: |-
+                      snsTopicRef points at an SNS topic to notify when an alarm fires (and
+                      clears), resolved through the exact same sharedWith/consumes
+                      authorization path as any other cross-CR reference — the referenced
+                      topic's owner must list this CR in its sharedWith. Left unset, alarms
+                      are still created (visible in CloudWatch, e.g. for a dashboard) but
+                      have no actions, so nothing pages anyone.
+                    properties:
+                      name:
+                        description: name of the AppDependencies CR that owns the
+                          resource.
+                        maxLength: 253
+                        type: string
+                      namespace:
+                        description: namespace of the AppDependencies CR that owns
+                          the resource.
+                        maxLength: 63
+                        type: string
+                      resourceName:
+                        description: |-
+                          resourceName is the `name` of the specific resource entry within the
+                          owning CR's section (e.g. the queue name under its sqs.resources list).
+                        maxLength: 80
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    - resourceName
+                    type: object
                 type: object
               dynamodb:
                 properties:

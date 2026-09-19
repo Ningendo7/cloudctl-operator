@@ -4,11 +4,6 @@ What `AppDependencies` actually manages today. See
 [architecture.md](architecture.md) for the design decisions behind the
 behavior described here (ownership, deletion safety, naming).
 
-Planned but not yet implemented: CloudWatch alarms. Its CRD shape exists in
-`api/v1alpha1/appdependencies_types.go` as a preview of the intended
-surface, but nothing reconciles it yet — declaring `spec.alarms` in a CR
-today has no effect.
-
 ## SQS
 
 ```yaml
@@ -209,6 +204,58 @@ uses AWS's maximum 30-day window for the same reason.
 at a different key" direction — removing `encryption` from spec doesn't
 proactively revert an already-encrypted resource back to its unencrypted
 (or default SSE-S3, for S3) state.
+
+## Alarms
+
+A single CR-wide switch — not per-resource — that provisions opinionated
+CloudWatch alarms for whatever SQS/SNS/DynamoDB resources this CR
+declares:
+
+```yaml
+spec:
+  alarms:
+    enabled: true
+    snsTopicRef:            # optional
+      namespace: platform
+      name: platform-alerts
+      resourceName: pagerduty-bridge
+```
+
+| Field | Notes |
+|---|---|
+| `enabled` | One switch for the whole CR — a team declaring resources together almost always wants uniform alerting across them. |
+| `snsTopicRef` | Points at an SNS topic to notify when an alarm fires or clears, resolved through the same `sharedWith`/`consumes` authorization as any other cross-CR reference — the topic's owner must list this CR in its `sharedWith`. Left unset, alarms are still created (visible in CloudWatch, e.g. for a dashboard) but have no actions, so nothing pages anyone. |
+
+What gets created, per resource type:
+
+| Resource | Alarm | Threshold |
+|---|---|---|
+| SQS queue | `ApproximateAgeOfOldestMessage` | > 15 minutes for 3 consecutive 5-minute periods |
+| SQS DLQ (`dlq: true`) | `ApproximateNumberOfMessagesVisible` | > 0 — a poison message existing at all is the signal, not its age |
+| SNS topic | `NumberOfNotificationsFailed` | > 0 |
+| DynamoDB table | `ReadThrottleEvents` and `WriteThrottleEvents` | > 0, one alarm each |
+
+S3 and KMS deliberately have no alarms: S3 has no free per-request
+CloudWatch metrics (they require opting into paid request metrics), and a
+KMS key has no operationally meaningful metric of its own.
+
+Unlike every other resource type in this operator, alarms carry **no
+`status.managedResources` ledger entry, no `adopt`/`force`, and no quiet
+window before deletion**. Two things make that safe here in a way it isn't
+elsewhere: `PutMetricAlarm` is a genuine create-or-update by alarm name
+(no "already exists" race the way `CreateQueue`/`CreateTopic` have), and
+an alarm holds no data — deleting one is trivially reversible, since it's
+recreated on the next reconcile if still desired. Every reconcile is a
+plain declarative diff: compute the desired set from spec, list what
+currently exists under this CR's deterministic name prefix, create or
+update what's desired, and delete whatever this CR owns that no longer
+is — all still gated on the same ownership-tag-before-mutate check every
+other resource type uses, so this never silently overwrites or deletes an
+alarm a human (or another tool) created at the same name. There's no
+`adopt` escape hatch for that conflict specifically, unlike every other
+resource type — given alarms are pure derived config with next to no
+blast radius, an unresolvable naming collision isn't worth a whole
+adoption workflow.
 
 ## IAM
 

@@ -35,11 +35,12 @@ import (
 
 var _ = Describe("AppDependencies Controller", func() {
 	var (
-		fakeSQS    *fakeSQSClient
-		fakeSNS    *fakeSNSClient
-		fakeIAM    *fakeIAMClient
-		fakeKMS    *fakeKMSClient
-		reconciler *AppDependenciesReconciler
+		fakeSQS        *fakeSQSClient
+		fakeSNS        *fakeSNSClient
+		fakeIAM        *fakeIAMClient
+		fakeKMS        *fakeKMSClient
+		fakeCloudWatch *fakeCloudWatchClient
+		reconciler     *AppDependenciesReconciler
 	)
 
 	BeforeEach(func() {
@@ -47,10 +48,11 @@ var _ = Describe("AppDependencies Controller", func() {
 		fakeSNS = newFakeSNSClient()
 		fakeIAM = newFakeIAMClient()
 		fakeKMS = newFakeKMSClient()
+		fakeCloudWatch = newFakeCloudWatchClient()
 		reconciler = &AppDependenciesReconciler{
 			Client:          k8sClient,
 			Scheme:          k8sClient.Scheme(),
-			AWSClients:      &cloudctlaws.Clients{SQS: fakeSQS, SNS: fakeSNS, IAM: fakeIAM, KMS: fakeKMS, Region: "us-east-1", AccountID: "123456789012"},
+			AWSClients:      &cloudctlaws.Clients{SQS: fakeSQS, SNS: fakeSNS, IAM: fakeIAM, KMS: fakeKMS, CloudWatch: fakeCloudWatch, Region: "us-east-1", AccountID: "123456789012"},
 			OIDCProviderARN: "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
 			OIDCProviderURL: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
 		}

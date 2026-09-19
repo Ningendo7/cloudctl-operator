@@ -601,10 +601,21 @@ type KMSSpec struct {
 // ---------------------------------------------------------------------------
 
 // AlarmsSpec turns on standard CloudWatch alarms (queue depth/age, error
-// rates, throttling) for whatever resources are declared in this CR.
+// rates, throttling) for whatever SQS/SNS/DynamoDB resources are declared
+// in this CR. A single CR-wide switch, not per-resource — a team declaring
+// resources in one CR almost always wants uniform alerting across them.
 type AlarmsSpec struct {
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
+
+	// snsTopicRef points at an SNS topic to notify when an alarm fires (and
+	// clears), resolved through the exact same sharedWith/consumes
+	// authorization path as any other cross-CR reference — the referenced
+	// topic's owner must list this CR in its sharedWith. Left unset, alarms
+	// are still created (visible in CloudWatch, e.g. for a dashboard) but
+	// have no actions, so nothing pages anyone.
+	// +optional
+	SnsTopicRef *ConsumeRef `json:"snsTopicRef,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

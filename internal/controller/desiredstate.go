@@ -44,7 +44,7 @@ const transientRequeueInterval = 30 * time.Second
 // produce, used to compute the aggregate Ready condition. Kept in sync
 // with allSections above — each entry here should have a matching
 // section constructor registered there.
-var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", "S3Ready", "KMSReady", "IAMReady", "ConnectionInfoReady"}
+var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", "S3Ready", "KMSReady", "AlarmsReady", "IAMReady", "ConnectionInfoReady"}
 
 type section struct {
 	name      string
@@ -65,6 +65,7 @@ func allSections(r *AppDependenciesReconciler) []section {
 		dynamodbSection(r),
 		s3Section(r),
 		kmsSection(r.AWSClients),
+		alarmsSection(r),
 		iamSection(r),
 	}
 }
