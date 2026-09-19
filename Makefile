@@ -94,6 +94,41 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+# Integration tests run the real AWS SDK against a LocalStack container
+# instead of each resource package's own hand-written fakes - see
+# docs/testing.md for why this tier exists and what it does and doesn't
+# cover. Gated behind the "integration" build tag so a bare `go test ./...`
+# (and `make test` above) never touches Docker or a network dependency;
+# add new integration-tested packages to INTEGRATION_TEST_PACKAGES as they
+# gain _integration_test.go files.
+LOCALSTACK_CONTAINER ?= cloudctl-operator-test-localstack
+LOCALSTACK_PORT ?= 4566
+INTEGRATION_TEST_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/s3/...
+
+.PHONY: setup-test-integration
+setup-test-integration: ## Start a LocalStack container for integration tests if one isn't already running
+	@command -v $(CONTAINER_TOOL) >/dev/null 2>&1 || { \
+		echo "$(CONTAINER_TOOL) is not installed. Please install it manually."; \
+		exit 1; \
+	}
+	@if [ -z "$$($(CONTAINER_TOOL) ps -q -f name=^$(LOCALSTACK_CONTAINER)$$)" ]; then \
+		echo "Starting LocalStack container '$(LOCALSTACK_CONTAINER)'..."; \
+		$(CONTAINER_TOOL) run -d --name $(LOCALSTACK_CONTAINER) -p $(LOCALSTACK_PORT):4566 -e SERVICES=sqs,s3 localstack/localstack:3.8; \
+		echo "Waiting for LocalStack to report SQS/S3 ready..."; \
+		timeout 60 bash -c 'until curl -sf http://localhost:$(LOCALSTACK_PORT)/_localstack/health 2>/dev/null | grep -q "\"sqs\""; do sleep 2; done'; \
+	else \
+		echo "LocalStack container '$(LOCALSTACK_CONTAINER)' already running. Skipping."; \
+	fi
+
+.PHONY: test-integration
+test-integration: setup-test-integration ## Run integration tests against a local LocalStack container
+	go test -tags=integration $(INTEGRATION_TEST_PACKAGES) -v
+	$(MAKE) cleanup-test-integration
+
+.PHONY: cleanup-test-integration
+cleanup-test-integration: ## Tear down the LocalStack container used for integration tests
+	@$(CONTAINER_TOOL) rm -f $(LOCALSTACK_CONTAINER) >/dev/null 2>&1 || true
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run

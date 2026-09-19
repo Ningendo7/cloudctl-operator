@@ -1,0 +1,43 @@
+name: Integration Tests
+
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  integration:
+    permissions:
+      contents: read
+    name: Run on Ubuntu
+    runs-on: ubuntu-latest
+
+    services:
+      localstack:
+        image: localstack/localstack:3.8
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: sqs,s3
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health | grep -q '\"sqs\"'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Running integration tests against LocalStack
+        run: |
+          go mod tidy
+          go test -tags=integration ./internal/resources/sqs/... ./internal/resources/s3/... -v

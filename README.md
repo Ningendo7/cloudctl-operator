@@ -82,6 +82,8 @@ SQS, SNS, DynamoDB, S3, KMS, CloudWatch alarms, and auto-derived IAM.
   validation strategy.
 - **[docs/resources.md](docs/resources.md)** — field-by-field behavior and
   known gaps for every resource type currently implemented.
+- **[docs/testing.md](docs/testing.md)** — the test tiers: unit (always),
+  integration (LocalStack, CI-gated), and what's deliberately deferred.
 
 Resources default to `deletionPolicy: Retain` — removing one from spec, or
 deleting the CR, leaves the AWS resource in place rather than risking data
