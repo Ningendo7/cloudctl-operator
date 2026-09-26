@@ -82,6 +82,10 @@ type fakeBucket struct {
 	// same "not found" state a real, never-explicitly-configured bucket
 	// reports despite already using default SSE-S3 encryption.
 	kmsKeyARN string
+	// policy backs GetBucketPolicy's response - empty means no
+	// PutBucketPolicy call has ever been made, matching a real bucket's
+	// NoSuchBucketPolicy response.
+	policy string
 }
 
 type fakeS3 struct {
@@ -158,6 +162,36 @@ func (f *fakeS3) PutBucketTagging(_ context.Context, in *s3sdk.PutBucketTaggingI
 	}
 	b.tags = tagsToMap(in.Tagging.TagSet)
 	return &s3sdk.PutBucketTaggingOutput{}, nil
+}
+
+func (f *fakeS3) GetBucketPolicy(_ context.Context, in *s3sdk.GetBucketPolicyInput, _ ...func(*s3sdk.Options)) (*s3sdk.GetBucketPolicyOutput, error) {
+	b, ok := f.buckets[*in.Bucket]
+	if !ok {
+		return nil, &types.NoSuchBucket{}
+	}
+	if b.policy == "" {
+		return nil, &fakeAWSError{code: "NoSuchBucketPolicy"}
+	}
+	policy := b.policy
+	return &s3sdk.GetBucketPolicyOutput{Policy: &policy}, nil
+}
+
+func (f *fakeS3) PutBucketPolicy(_ context.Context, in *s3sdk.PutBucketPolicyInput, _ ...func(*s3sdk.Options)) (*s3sdk.PutBucketPolicyOutput, error) {
+	b, ok := f.buckets[*in.Bucket]
+	if !ok {
+		return nil, &types.NoSuchBucket{}
+	}
+	b.policy = *in.Policy
+	return &s3sdk.PutBucketPolicyOutput{}, nil
+}
+
+func (f *fakeS3) DeleteBucketPolicy(_ context.Context, in *s3sdk.DeleteBucketPolicyInput, _ ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketPolicyOutput, error) {
+	b, ok := f.buckets[*in.Bucket]
+	if !ok {
+		return nil, &types.NoSuchBucket{}
+	}
+	b.policy = ""
+	return &s3sdk.DeleteBucketPolicyOutput{}, nil
 }
 
 func (f *fakeS3) PutBucketVersioning(_ context.Context, in *s3sdk.PutBucketVersioningInput, _ ...func(*s3sdk.Options)) (*s3sdk.PutBucketVersioningOutput, error) {

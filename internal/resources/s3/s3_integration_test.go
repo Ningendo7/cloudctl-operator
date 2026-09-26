@@ -28,6 +28,7 @@ package s3
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -224,6 +225,43 @@ func TestIntegration_Cleanup_DeletesRealBucketImmediatelyWhenForced(t *testing.T
 
 	if _, err := client.HeadBucket(ctx, &s3sdk.HeadBucketInput{Bucket: &bucket}); err == nil {
 		t.Error("expected the real bucket to be gone after Cleanup, but HeadBucket succeeded")
+	}
+}
+
+func TestIntegration_Cleanup_BlocksRealWritesWhilePendingDeletion(t *testing.T) {
+	client := newIntegrationClient(t)
+	ctx := context.Background()
+	namespace, crName := "integration", "bucket-pending"
+	bucket := bucketName(namespace, crName, "receipts", integrationAccountID)
+	t.Cleanup(func() {
+		_, _ = client.DeleteBucketPolicy(ctx, &s3sdk.DeleteBucketPolicyInput{Bucket: &bucket})
+		deleteBucketIfExists(t, client, bucket)
+	})
+
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		// Not force, and Retain would never enter the pending-deletion path
+		// at all — Delete without force is required to exercise it.
+		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: false},
+	}}
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	// Removing it from spec (empty S3Spec) makes it eligible for deletion;
+	// the first Cleanup pass should hold it for the quiet window rather
+	// than deleting outright, and block new writes in the meantime.
+	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	if _, err := client.HeadBucket(ctx, &s3sdk.HeadBucketInput{Bucket: &bucket}); err != nil {
+		t.Fatalf("expected the bucket to still exist during the quiet window, HeadBucket error = %v", err)
+	}
+
+	_, putErr := client.PutObject(ctx, &s3sdk.PutObjectInput{Bucket: &bucket, Key: aws.String("sneaky.txt"), Body: strings.NewReader("data")})
+	if putErr == nil {
+		t.Fatal("expected the real bucket policy to deny this PutObject while pending deletion, but it succeeded")
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
@@ -714,5 +715,117 @@ func TestEnsure_ContinuesToOtherTablesAfterOneFails(t *testing.T) {
 	}
 	if status.FindManagedResource(ledger, "dynamodb", "orders") == nil {
 		t.Error("expected orders to still be created despite sessions failing")
+	}
+}
+
+func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableArn := "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName
+	client.tables[tableName] = &fakeTable{
+		arn:          tableArn,
+		status:       types.TableStatusActive,
+		tags:         map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+		partitionKey: "id",
+	}
+	// DescribeTable must still succeed (status is checked regardless of the
+	// trust window), but ListTagsOfResource - the ownership re-verification
+	// call - must never be reached if the skip actually happens.
+	client.listTagsOfResourceErr = errors.New("should not be called: trust window should have skipped this")
+
+	fresh := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{
+		{
+			Type:           resourceType,
+			Name:           "sessions",
+			ARN:            tableArn,
+			State:          depsv1alpha1.ManagedResourceStateVerified,
+			DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			CreatedAt:      fresh,
+			LastVerifiedAt: &fresh,
+		},
+	}
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
+	}}
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v — expected the trust window to skip the ownership tag check", err)
+	}
+
+	entry := status.FindManagedResource(updatedLedger, "dynamodb", "sessions")
+	if entry == nil {
+		t.Fatal("expected the ledger entry to survive the skip path")
+	}
+	if entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Equal(&fresh) {
+		t.Error("expected LastVerifiedAt to stay unchanged since no real verification occurred")
+	}
+}
+
+func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableArn := "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName
+	client.tables[tableName] = &fakeTable{
+		arn:          tableArn,
+		status:       types.TableStatusActive,
+		tags:         map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+		partitionKey: "id",
+	}
+	client.listTagsOfResourceErr = errors.New("should not be called: trust window should have skipped this")
+
+	fresh := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{
+		{
+			Type:           resourceType,
+			Name:           "sessions",
+			ARN:            tableArn,
+			State:          depsv1alpha1.ManagedResourceStateVerified,
+			DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			Force:          false,
+			CreatedAt:      fresh,
+			LastVerifiedAt: &fresh,
+		},
+	}
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	entry := status.FindManagedResource(updatedLedger, "dynamodb", "sessions")
+	if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
+		t.Errorf("expected deletionPolicy to update to Delete even while skipping revalidation, got %s", entry.DeletionPolicy)
+	}
+	if !entry.Force {
+		t.Error("expected force to update to true even while skipping revalidation")
+	}
+}
+
+func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
+	client := newFakeDynamoDB()
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id"}}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	entry := status.FindManagedResource(ledger, "dynamodb", "sessions")
+	entry.LastVerifiedAt = &stale
+	status.UpsertManagedResource(&ledger, *entry)
+
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	updatedEntry := status.FindManagedResource(updatedLedger, "dynamodb", "sessions")
+	if updatedEntry.LastVerifiedAt.Equal(&stale) {
+		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
 	}
 }

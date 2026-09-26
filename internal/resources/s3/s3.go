@@ -57,6 +57,9 @@ type s3API interface {
 	AbortMultipartUpload(ctx context.Context, in *s3sdk.AbortMultipartUploadInput, optFns ...func(*s3sdk.Options)) (*s3sdk.AbortMultipartUploadOutput, error)
 	GetBucketEncryption(ctx context.Context, in *s3sdk.GetBucketEncryptionInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketEncryptionOutput, error)
 	PutBucketEncryption(ctx context.Context, in *s3sdk.PutBucketEncryptionInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketEncryptionOutput, error)
+	GetBucketPolicy(ctx context.Context, in *s3sdk.GetBucketPolicyInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketPolicyOutput, error)
+	PutBucketPolicy(ctx context.Context, in *s3sdk.PutBucketPolicyInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketPolicyOutput, error)
+	DeleteBucketPolicy(ctx context.Context, in *s3sdk.DeleteBucketPolicyInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketPolicyOutput, error)
 }
 
 const resourceType = "s3"
@@ -196,6 +199,28 @@ func ensureBucket(
 		return ledger, err
 	}
 	bucketArn := "arn:aws:s3:::" + bucket
+
+	if existing := status.FindManagedResource(ledger, resourceType, resourceName); existing != nil && !status.NeedsRevalidation(*existing) {
+		// Still within the trust window - skip re-verifying existence and
+		// ownership (HeadBucket + GetBucketTagging), but attribute drift
+		// correction is a different concern and still runs every reconcile
+		// regardless of the trust window - versioning and lifecycle are
+		// always evaluated, so unlike SQS there's no legitimate case where
+		// this whole round trip could be skipped outright. Local-only
+		// fields (deletionPolicy/force) can still change from a spec edit
+		// with no AWS call needed, so refresh those against the cached
+		// entry; LastVerifiedAt stays as it was until the window actually
+		// expires and a real ownership check runs again.
+		updated := *existing
+		updated.DeletionPolicy = opts.deletionPolicy
+		updated.Force = opts.force
+		status.UpsertManagedResource(&ledger, updated)
+
+		if err := reconcileBucketAttributes(ctx, client, bucket, opts); err != nil {
+			return ledger, wrapAWSError(err, "reconciling bucket attributes")
+		}
+		return ledger, nil
+	}
 
 	_, err := client.HeadBucket(ctx, &s3sdk.HeadBucketInput{
 		Bucket: &bucket,

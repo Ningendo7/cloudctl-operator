@@ -65,8 +65,8 @@ spec:
 | `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. |
 
 **Not yet built:** subscription management (`Subscribe`/`Unsubscribe` from
-this operator's side) and the same trust-window read-skip optimization SQS
-has — both deliberately deferred past core lifecycle management.
+this operator's side) — deliberately deferred past core lifecycle
+management.
 
 ## DynamoDB
 
@@ -104,11 +104,16 @@ still `CREATING`), unlike SQS/SNS. A newly created table sits in a
 verification, tagging drift, billing mode, and PITR are all deferred until
 then.
 
-**Not yet built:** the same trust-window read-skip optimization SQS has,
-and a deny-policy blocking new writes while a table sits in
-`PendingDeletion` (SQS/SNS both have this; DynamoDB resource-based policies
-are newer and less battle-tested, and the quiet window plus the 7-day grace
-period already cover the realistic risk without it).
+The trust-window read-skip optimization (see [architecture.md](architecture.md))
+skips the ownership tag re-check within the window, but — unlike
+SQS/SNS/S3 — always re-runs `DescribeTable` regardless, since a table's
+status (`ACTIVE`/`CREATING`/`DELETING`) has to be read fresh every
+reconcile before anything else can safely proceed.
+
+**Not yet built:** a deny-policy blocking new writes while a table sits in
+`PendingDeletion` (SQS/SNS/S3 all have this; DynamoDB resource-based
+policies are newer and less battle-tested, and the quiet window plus the
+7-day grace period already cover the realistic risk without it).
 
 ## S3
 
@@ -148,6 +153,14 @@ bucket is only trusted as "ours, tagging just hasn't caught up yet" for one
 hour after creation (see [architecture.md](architecture.md)) — past that,
 it's treated the same as any other foreign, untagged bucket, requiring
 `adopt: true`.
+
+Deletion safety matches SQS/SNS in full: a bucket policy Deny on
+`s3:PutObject` (which alone covers every write path, including all three
+multipart upload calls) blocks new writes the moment a bucket enters
+`PendingDeletion`, and the trust-window read-skip optimization applies
+here too — within the window, `HeadBucket`/`GetBucketTagging` are skipped
+entirely, though attribute drift correction (versioning, lifecycle) still
+runs every reconcile regardless, since S3 always has something to compare.
 
 **Not yet built:** `replication` (the CRD field exists but is explicitly
 rejected at reconcile time) — cross-region replication needs a bucket and

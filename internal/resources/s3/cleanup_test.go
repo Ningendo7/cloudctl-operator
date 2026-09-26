@@ -19,6 +19,7 @@ package s3
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,6 +157,48 @@ func TestCleanup_HoldsNewlyEligibleBucketForQuietWindowBeforeDeleting(t *testing
 	}
 	if status.FindManagedResource(updated, "s3", "receipts") != nil {
 		t.Error("expected the ledger entry to be removed after deletion")
+	}
+}
+
+func TestCleanup_AddsDenyPolicyWhenMarkingPendingDeletion(t *testing.T) {
+	client := newFakeS3()
+	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyDelete, false)
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+
+	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	policy := client.buckets[bucket].policy
+	if !strings.Contains(policy, pendingDeletionDenySid) {
+		t.Errorf("expected a write-blocking deny policy to be attached once pending deletion, got policy=%s", policy)
+	}
+	if !strings.Contains(policy, `"s3:PutObject"`) {
+		t.Errorf("expected the pending-deletion deny to block s3:PutObject, got policy=%s", policy)
+	}
+}
+
+func TestCleanup_RemovesDenyPolicyWhenResourceReturnsToSpec(t *testing.T) {
+	client := newFakeS3()
+	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyDelete, false)
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	if !strings.Contains(client.buckets[bucket].policy, pendingDeletionDenySid) {
+		t.Fatal("test setup broken: expected the deny policy to be attached after the first pass")
+	}
+
+	backInSpec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete}}}
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false); err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+
+	if strings.Contains(client.buckets[bucket].policy, pendingDeletionDenySid) {
+		t.Errorf("expected the deny policy to be removed once the resource is declared again, got policy=%s", client.buckets[bucket].policy)
 	}
 }
 

@@ -81,6 +81,14 @@ func Cleanup(
 
 		if declared[entry.Name] {
 			if entry.PendingDeletionSince != nil {
+				if bucket, nameErr := bucketNameFromARN(entry.ARN); nameErr == nil {
+					if clearErr := removePendingDeletionDeny(ctx, client, bucket); clearErr != nil {
+						if firstErr == nil {
+							firstErr = wrapAWSError(clearErr, fmt.Sprintf("removing pending-deletion deny from bucket %q", entry.Name))
+						}
+						continue
+					}
+				}
 				cleared := entry
 				cleared.PendingDeletionSince = nil
 				status.UpsertManagedResource(&updatedLedger, cleared)
@@ -136,6 +144,18 @@ func Cleanup(
 
 		if !entry.Force {
 			if entry.PendingDeletionSince == nil {
+				// Never delete on the same pass a bucket is first noticed as
+				// eligible, even if it looks empty right now - a moment-old
+				// write might not be reflected yet. Deny new writes and hold
+				// for the quiet window first, the same active-enforcement
+				// mechanism SQS/SNS already use for their own equivalent
+				// window.
+				if denyErr := addPendingDeletionDeny(ctx, client, bucket); denyErr != nil {
+					if firstErr == nil {
+						firstErr = wrapAWSError(denyErr, fmt.Sprintf("blocking new writes to bucket %q pending deletion", entry.Name))
+					}
+					continue
+				}
 				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
 				continue
 			}

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/smithy-go"
 
@@ -428,5 +429,106 @@ func TestEnsure_RejectsTopicNameExceedingSNSLimit(t *testing.T) {
 	}
 	if len(client.topics) != 0 {
 		t.Error("expected no AWS call to have been attempted for a name that's already known to be too long")
+	}
+}
+
+func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
+	client := newFakeSNS()
+	// Never register the topic in the fake, and force ListTagsForResource
+	// to error - proving the skip happened by making the ownership-check
+	// call unmistakably visible as a failure if it's ever made.
+	client.listTagsForResourceErr = errors.New("should not be called: trust window should have skipped this")
+
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	fresh := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{
+		{
+			Type:           resourceType,
+			Name:           "events",
+			ARN:            topicArn,
+			State:          depsv1alpha1.ManagedResourceStateVerified,
+			DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			CreatedAt:      fresh,
+			LastVerifiedAt: &fresh,
+		},
+	}
+
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
+		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
+	}}
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v — expected the trust window to skip the AWS call entirely", err)
+	}
+
+	entry := status.FindManagedResource(updatedLedger, "sns", "events")
+	if entry == nil {
+		t.Fatal("expected the ledger entry to survive the skip path")
+	}
+	if entry.ARN != topicArn {
+		t.Errorf("expected the cached ARN to be preserved, got %s", entry.ARN)
+	}
+	if entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Equal(&fresh) {
+		t.Error("expected LastVerifiedAt to stay unchanged since no real verification occurred")
+	}
+}
+
+func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
+	client := newFakeSNS()
+	client.listTagsForResourceErr = errors.New("should not be called: trust window should have skipped this")
+
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	fresh := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{
+		{
+			Type:           resourceType,
+			Name:           "events",
+			ARN:            topicArn,
+			State:          depsv1alpha1.ManagedResourceStateVerified,
+			DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			Force:          false,
+			CreatedAt:      fresh,
+			LastVerifiedAt: &fresh,
+		},
+	}
+
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
+		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	entry := status.FindManagedResource(updatedLedger, "sns", "events")
+	if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
+		t.Errorf("expected deletionPolicy to update to Delete even while skipping revalidation, got %s", entry.DeletionPolicy)
+	}
+	if !entry.Force {
+		t.Error("expected force to update to true even while skipping revalidation")
+	}
+}
+
+func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
+	client := newFakeSNS()
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry.LastVerifiedAt = &stale
+	status.UpsertManagedResource(&ledger, *entry)
+
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	updatedEntry := status.FindManagedResource(updatedLedger, "sns", "events")
+	if updatedEntry.LastVerifiedAt.Equal(&stale) {
+		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
 	}
 }

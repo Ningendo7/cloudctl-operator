@@ -212,6 +212,29 @@ func ensureTable(
 	// same as ACTIVE rather than blocking on an exhaustive switch).
 	tableArn := *table.TableArn
 
+	if existing := status.FindManagedResource(ledger, resourceType, resourceName); existing != nil && !status.NeedsRevalidation(*existing) {
+		// Still within the trust window - skip re-verifying ownership via
+		// tags (a paginated ListTagsOfResource call), but attribute drift
+		// correction is a different concern and still runs every reconcile
+		// regardless of the trust window - unlike SQS/SNS, DynamoDB always
+		// has something to compare (billing mode and PITR are never both
+		// "unconfigured"), so there's no legitimate case where this whole
+		// round trip could be skipped outright. Local-only fields
+		// (deletionPolicy/force) can still change from a spec edit with no
+		// AWS call needed, so refresh those against the cached entry;
+		// LastVerifiedAt stays as it was until the window actually expires
+		// and a real ownership check runs again.
+		updated := *existing
+		updated.DeletionPolicy = opts.deletionPolicy
+		updated.Force = opts.force
+		status.UpsertManagedResource(&ledger, updated)
+
+		if err := reconcileTableAttributes(ctx, client, tableName, opts); err != nil {
+			return ledger, wrapAWSError(err, "reconciling table attributes")
+		}
+		return ledger, nil
+	}
+
 	tags, tErr := listAllTags(ctx, client, tableArn)
 	if tErr != nil {
 		return ledger, wrapAWSError(tErr, "reading table tags")

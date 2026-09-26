@@ -531,3 +531,111 @@ func TestEnsure_ContinuesToOtherBucketsAfterOneFails(t *testing.T) {
 		t.Error("expected logs to still be created despite receipts failing")
 	}
 }
+
+func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
+	client := newFakeS3()
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	// The bucket must actually exist for reconcileBucketAttributes' own
+	// calls (GetBucketVersioning etc.) to succeed - what's under test is
+	// that HeadBucket/GetBucketTagging specifically are never called, not
+	// that no AWS calls happen at all.
+	client.buckets[bucket] = &fakeBucket{}
+	client.headBucketErr = errors.New("should not be called: trust window should have skipped this")
+	client.getBucketTaggingErr = errors.New("should not be called: trust window should have skipped this")
+
+	bucketArn := "arn:aws:s3:::" + bucket
+	fresh := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{
+		{
+			Type:           resourceType,
+			Name:           "receipts",
+			ARN:            bucketArn,
+			State:          depsv1alpha1.ManagedResourceStateVerified,
+			DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			CreatedAt:      fresh,
+			LastVerifiedAt: &fresh,
+		},
+	}
+
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
+	}}
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v — expected the trust window to skip the AWS calls entirely", err)
+	}
+
+	entry := status.FindManagedResource(updatedLedger, "s3", "receipts")
+	if entry == nil {
+		t.Fatal("expected the ledger entry to survive the skip path")
+	}
+	if entry.ARN != bucketArn {
+		t.Errorf("expected the cached ARN to be preserved, got %s", entry.ARN)
+	}
+	if entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Equal(&fresh) {
+		t.Error("expected LastVerifiedAt to stay unchanged since no real verification occurred")
+	}
+}
+
+func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
+	client := newFakeS3()
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	client.buckets[bucket] = &fakeBucket{}
+	client.headBucketErr = errors.New("should not be called: trust window should have skipped this")
+	client.getBucketTaggingErr = errors.New("should not be called: trust window should have skipped this")
+
+	bucketArn := "arn:aws:s3:::" + bucket
+	fresh := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{
+		{
+			Type:           resourceType,
+			Name:           "receipts",
+			ARN:            bucketArn,
+			State:          depsv1alpha1.ManagedResourceStateVerified,
+			DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			Force:          false,
+			CreatedAt:      fresh,
+			LastVerifiedAt: &fresh,
+		},
+	}
+
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	entry := status.FindManagedResource(updatedLedger, "s3", "receipts")
+	if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
+		t.Errorf("expected deletionPolicy to update to Delete even while skipping revalidation, got %s", entry.DeletionPolicy)
+	}
+	if !entry.Force {
+		t.Error("expected force to update to true even while skipping revalidation")
+	}
+}
+
+func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
+	client := newFakeS3()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	entry := status.FindManagedResource(ledger, "s3", "receipts")
+	entry.LastVerifiedAt = &stale
+	status.UpsertManagedResource(&ledger, *entry)
+
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	updatedEntry := status.FindManagedResource(updatedLedger, "s3", "receipts")
+	if updatedEntry.LastVerifiedAt.Equal(&stale) {
+		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
+	}
+}

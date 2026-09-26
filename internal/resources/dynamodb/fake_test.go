@@ -70,6 +70,7 @@ type fakeDynamoDB struct {
 	describeTableErr           error
 	updateTableErr             error
 	updateContinuousBackupsErr error
+	listTagsOfResourceErr      error
 }
 
 func newFakeDynamoDB() *fakeDynamoDB {
@@ -167,6 +168,9 @@ func (f *fakeDynamoDB) DeleteTable(_ context.Context, in *dynamodb.DeleteTableIn
 }
 
 func (f *fakeDynamoDB) ListTagsOfResource(_ context.Context, in *dynamodb.ListTagsOfResourceInput, _ ...func(*dynamodb.Options)) (*dynamodb.ListTagsOfResourceOutput, error) {
+	if f.listTagsOfResourceErr != nil {
+		return nil, f.listTagsOfResourceErr
+	}
 	t := f.findByARN(*in.ResourceArn)
 	if t == nil {
 		return nil, &types.ResourceNotFoundException{}

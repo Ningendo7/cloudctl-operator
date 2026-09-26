@@ -122,6 +122,30 @@ func ensureTopic(
 		}
 	}
 
+	if existing := status.FindManagedResource(ledger, resourceType, t.Name); existing != nil && !status.NeedsRevalidation(*existing) {
+		// Still within the trust window - skip re-verifying ownership, but
+		// attribute drift correction is a different concern and must still
+		// run every reconcile regardless of the trust window. Local-only
+		// fields (deletionPolicy/force) can still change from a spec edit
+		// with no AWS call needed, so refresh those against the cached
+		// entry; ARN and LastVerifiedAt stay as they were until the window
+		// actually expires and a real ownership check runs again.
+		updated := *existing
+		updated.DeletionPolicy = t.DeletionPolicy
+		updated.Force = t.Force
+		status.UpsertManagedResource(&ledger, updated)
+
+		if len(desiredTopicAttributes(t, kmsKeyARN)) == 0 {
+			// Nothing this package manages could have drifted - skip the
+			// AWS round trip entirely.
+			return ledger, nil
+		}
+		if err := reconcileTopicAttributes(ctx, client, topicArn, t, kmsKeyARN); err != nil {
+			return ledger, wrapAWSError(err, "reconciling topic attributes")
+		}
+		return ledger, nil
+	}
+
 	ownerTags := map[string]string{
 		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
 		cloudctlaws.OwnerUIDTagKey: crUID,
