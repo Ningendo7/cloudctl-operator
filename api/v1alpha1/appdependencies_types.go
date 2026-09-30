@@ -104,6 +104,7 @@ type ConsumeRef struct {
 // +kubebuilder:validation:XValidation:rule="!(self.enabled == true && has(self.kmsKeyRef))",message="enabled and kmsKeyRef are mutually exclusive"
 type EncryptionSpec struct {
 	// +optional
+	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
 	// +optional
@@ -712,6 +713,12 @@ type ManagedResource struct {
 	// Cleared if the resource is re-added to spec.
 	// +optional
 	PendingDeletionSince *metav1.Time `json:"pendingDeletionSince,omitempty"`
+
+	// lastEmptyCheckAt is the last time a real AWS "is it empty yet" call
+	// was made while this resource sat pending deletion. Cleared alongside
+	// pendingDeletionSince.
+	// +optional
+	LastEmptyCheckAt *metav1.Time `json:"lastEmptyCheckAt,omitempty"`
 }
 
 // AppDependenciesStatus defines the observed state of AppDependencies.

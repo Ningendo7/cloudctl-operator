@@ -107,6 +107,8 @@ func Ensure(
 	crUID string,
 	spec *depsv1alpha1.DynamoDBSpec,
 	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	if spec == nil {
 		return ledger, nil
@@ -143,7 +145,7 @@ func Ensure(
 				opts.kmsKeyARN = &arn
 			}
 			if t.Encryption.Enabled {
-				arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, t.Name, t.DeletionPolicy, ledger)
+				arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, resourceType, t.Name, t.DeletionPolicy, ledger, checkpoint, recordEvent)
 				ledger = updatedLedger
 				if err != nil {
 					if firstErr == nil {
@@ -156,7 +158,7 @@ func Ensure(
 		}
 
 		var err error
-		ledger, err = ensureTable(ctx, client, namespace, crName, crUID, t.Name, opts, ledger)
+		ledger, err = ensureTable(ctx, client, namespace, crName, crUID, t.Name, opts, ledger, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("table %q: %w", t.Name, err)
 		}
@@ -173,11 +175,9 @@ func ensureTable(
 	resourceName string,
 	opts tableOptions,
 	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	tableName := cloudctlaws.ResourceName(namespace, crName, resourceName)
-	if err := cloudctlaws.ValidateNameLength(tableName, 255, "DynamoDB table"); err != nil {
-		return ledger, err
-	}
+	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, 255)
 
 	describeOut, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: &tableName,
@@ -185,7 +185,7 @@ func ensureTable(
 
 	var notFound *types.ResourceNotFoundException
 	if errors.As(err, &notFound) {
-		return createTable(ctx, client, namespace, crName, crUID, tableName, resourceName, opts, ledger)
+		return createTable(ctx, client, namespace, crName, crUID, tableName, resourceName, opts, ledger, recordEvent)
 	}
 	if err != nil {
 		return ledger, wrapAWSError(err, "looking up table")
@@ -212,7 +212,14 @@ func ensureTable(
 	// same as ACTIVE rather than blocking on an exhaustive switch).
 	tableArn := *table.TableArn
 
-	if existing := status.FindManagedResource(ledger, resourceType, resourceName); existing != nil && !status.NeedsRevalidation(*existing) {
+	// Captured before the trust-window check so it's still available further
+	// down to distinguish "our own table just finished CREATING" (fires
+	// TableActive) from "a foreign table being adopted for the first time"
+	// (fires TableAdopted) - the trust-window branch below re-derives its
+	// own copy since Go scopes the if-statement's own existing to that block.
+	existingBeforeCheck := status.FindManagedResource(ledger, resourceType, resourceName)
+
+	if existing := existingBeforeCheck; existing != nil && !status.NeedsRevalidation(*existing) {
 		// Still within the trust window - skip re-verifying ownership via
 		// tags (a paginated ListTagsOfResource call), but attribute drift
 		// correction is a different concern and still runs every reconcile
@@ -271,10 +278,17 @@ func ensureTable(
 		}); tagErr != nil {
 			return ledger, wrapAWSError(tagErr, "adopting table (tagging)")
 		}
+		if recordEvent != nil {
+			recordEvent("Normal", "TableAdopted", fmt.Sprintf("Adopted existing DynamoDB table %s under management", tableArn))
+		}
 	}
 
 	if err := reconcileTableAttributes(ctx, client, tableName, opts); err != nil {
 		return ledger, wrapAWSError(err, "reconciling table attributes")
+	}
+
+	if recordEvent != nil && existingBeforeCheck != nil && existingBeforeCheck.State == depsv1alpha1.ManagedResourceStateCreating {
+		recordEvent("Normal", "TableActive", fmt.Sprintf("DynamoDB table %s is now ACTIVE", tableArn))
 	}
 
 	return recordVerified(ledger, resourceName, tableArn, opts.deletionPolicy, opts.force), nil
@@ -301,6 +315,7 @@ func createTable(
 	namespace, crName, crUID, tableName, resourceName string,
 	opts tableOptions,
 	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	attrDefs := []types.AttributeDefinition{
 		{AttributeName: aws.String(opts.partitionKey), AttributeType: keyAttributeType},
@@ -341,6 +356,9 @@ func createTable(
 		// classification wrapAWSError uses below, same as every other
 		// DynamoDB control-plane call in this package.
 		return ledger, wrapAWSError(err, "creating table")
+	}
+	if recordEvent != nil {
+		recordEvent("Normal", "TableCreating", fmt.Sprintf("Creating DynamoDB table %s (waiting for ACTIVE)", *createOut.TableDescription.TableArn))
 	}
 
 	now := metav1.Now()

@@ -64,6 +64,7 @@ func Cleanup(
 	spec *depsv1alpha1.S3Spec,
 	ledger []depsv1alpha1.ManagedResource,
 	deleting bool,
+	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, results []CleanupResult, err error) {
 	declared := map[string]bool{}
 	if spec != nil && !deleting {
@@ -91,17 +92,25 @@ func Cleanup(
 				}
 				cleared := entry
 				cleared.PendingDeletionSince = nil
+				cleared.LastEmptyCheckAt = nil
 				status.UpsertManagedResource(&updatedLedger, cleared)
+				if recordEvent != nil {
+					recordEvent("Normal", "BucketDeletionCancelled", fmt.Sprintf("Canceled pending deletion of bucket %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
+				}
 			}
 			continue
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			if relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry); relErr != nil {
+			relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+			if relErr != nil {
 				if firstErr == nil {
 					firstErr = relErr
 				}
 				continue
+			}
+			if relinquished && recordEvent != nil {
+				recordEvent("Normal", "BucketOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained bucket %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
 			}
 			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
 			continue
@@ -157,9 +166,17 @@ func Cleanup(
 					continue
 				}
 				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
+				if recordEvent != nil {
+					recordEvent("Warning", "BucketDeletionPending", fmt.Sprintf("Bucket %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
+				}
 				continue
 			}
 			if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
+				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
+				continue
+			}
+
+			if !status.NeedsEmptyCheck(entry) {
 				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
 				continue
 			}
@@ -172,7 +189,10 @@ func Cleanup(
 				continue
 			}
 			if !empty {
-				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
+				checked := entry
+				now := metav1.Now()
+				checked.LastEmptyCheckAt = &now
+				updatedLedger, results = markPendingDeletion(updatedLedger, results, checked)
 				continue
 			}
 		}
@@ -200,6 +220,8 @@ func Cleanup(
 				}
 				continue
 			}
+		} else if recordEvent != nil {
+			recordEvent("Warning", "BucketDeleted", fmt.Sprintf("Deleted bucket %s (%s)", entry.Name, entry.ARN))
 		}
 		status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 	}
@@ -347,22 +369,22 @@ func bucketNameFromARN(arn string) (string, error) {
 // relinquishIfStillTagged removes our ownership tag from a resource whose
 // deletionPolicy is Retain and is no longer declared. Idempotent - safe on
 // every reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, client s3API, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) error {
+func relinquishIfStillTagged(ctx context.Context, client s3API, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished bool, err error) {
 	bucket, nameErr := bucketNameFromARN(entry.ARN)
 	if nameErr != nil {
-		return nameErr
+		return false, nameErr
 	}
 
 	tagsOut, tErr := client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
 	if tErr != nil {
 		if isNotFoundError(tErr) || isNoSuchTagSet(tErr) {
-			return nil // already gone, or nothing to relinquish
+			return false, nil // already gone, or nothing to relinquish
 		}
-		return wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained bucket %q", entry.Name))
+		return false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained bucket %q", entry.Name))
 	}
 	currentTags := tagsToMap(tagsOut.TagSet)
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		return nil // already relinquished, or never verified as ours
+		return false, nil // already relinquished, or never verified as ours
 	}
 
 	remaining := map[string]string{}
@@ -380,16 +402,16 @@ func relinquishIfStillTagged(ctx context.Context, client s3API, namespace, crNam
 			Tagging: &types.Tagging{TagSet: []types.Tag{}},
 		})
 		if err != nil {
-			return wrapAWSError(err, fmt.Sprintf("relinquishing ownership tag on retained bucket %q", entry.Name))
+			return false, wrapAWSError(err, fmt.Sprintf("relinquishing ownership tag on retained bucket %q", entry.Name))
 		}
-		return nil
+		return true, nil
 	}
 
 	if _, err := client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
 		Bucket:  &bucket,
 		Tagging: &types.Tagging{TagSet: mapToTags(remaining)},
 	}); err != nil {
-		return wrapAWSError(err, fmt.Sprintf("relinquishing ownership tag on retained bucket %q", entry.Name))
+		return false, wrapAWSError(err, fmt.Sprintf("relinquishing ownership tag on retained bucket %q", entry.Name))
 	}
-	return nil
+	return true, nil
 }

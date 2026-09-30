@@ -53,7 +53,7 @@ const iamRoleNameMaxLen = 64
 // unique per AWS account, not per Kubernetes namespace, so two same-named
 // CRs in different namespaces would otherwise collide on one shared role.
 func roleName(namespace, crName string) string {
-	return cloudctlaws.ResourceName(namespace, crName, "role")
+	return cloudctlaws.ResourceName(namespace, crName, resourceType, roleLedgerName, iamRoleNameMaxLen)
 }
 
 // Ensure derives this CR's least-privilege IAM policy from its owned and
@@ -85,10 +85,7 @@ func Ensure(
 		return ledger, "", skippedToError(skipped)
 	}
 
-	name, err := validatedRoleName(cr)
-	if err != nil {
-		return ledger, "", err
-	}
+	name := roleName(cr.Namespace, cr.Name)
 
 	trustPolicy, err := ensureTrustPolicy(oidcProviderARN, oidcProviderURL, cr)
 	if err != nil {
@@ -111,16 +108,6 @@ func Ensure(
 
 	updatedLedger = recordVerified(ledger, arn)
 	return updatedLedger, arn, skippedToError(skipped)
-}
-
-// validatedRoleName derives this CR's IAM role name and checks it against
-// AWS's length limit up front, before any AWS call is made on its behalf.
-func validatedRoleName(cr *depsv1alpha1.AppDependencies) (string, error) {
-	name := roleName(cr.Namespace, cr.Name)
-	if err := cloudctlaws.ValidateNameLength(name, iamRoleNameMaxLen, "IAM role"); err != nil {
-		return "", err
-	}
-	return name, nil
 }
 
 // ensureTrustPolicy builds the IRSA trust policy this CR's role needs,

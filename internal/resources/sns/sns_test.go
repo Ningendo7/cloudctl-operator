@@ -31,6 +31,8 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/kmstest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -56,7 +58,7 @@ func TestEnsure_CreatesNewTopic(t *testing.T) {
 		},
 	}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -69,7 +71,7 @@ func TestEnsure_CreatesNewTopic(t *testing.T) {
 		t.Errorf("expected Verified state, got %s", entry.State)
 	}
 
-	wantName := cloudctlaws.ResourceName("default", "checkout-service", "events")
+	wantName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)
 	wantArn := cloudctlaws.TopicARN(testRegion, testAccountID, wantName)
 	if _, ok := client.topics[wantArn]; !ok {
 		t.Errorf("expected topic %q to have been created", wantArn)
@@ -81,24 +83,24 @@ func TestEnsure_CreatesNewTopic(t *testing.T) {
 
 func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 	client := newFakeSNS()
-	kmsClient := newFakeKMSClient()
+	kmsClient := kmstest.NewFakeKMSClient()
 	spec := &depsv1alpha1.SNSSpec{
 		Resources: []depsv1alpha1.SNSTopicSpec{
 			{Name: "events", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
 		},
 	}
 
-	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", "events-key")
+	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sns", "events"))
 	if keyEntry == nil {
 		t.Fatal("expected a dedicated KMS key ledger entry named \"events-key\"")
 	}
 
-	wantName := cloudctlaws.ResourceName("default", "checkout-service", "events")
+	wantName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)
 	wantArn := cloudctlaws.TopicARN(testRegion, testAccountID, wantName)
 	topic, ok := client.topics[wantArn]
 	if !ok {
@@ -111,8 +113,8 @@ func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 
 func TestEnsure_CorrectsKmsMasterKeyIdDriftOnExistingTopic(t *testing.T) {
 	client := newFakeSNS()
-	kmsClient := newFakeKMSClient()
-	topicName := cloudctlaws.ResourceName("default", "checkout-service", "events")
+	kmsClient := kmstest.NewFakeKMSClient()
+	topicName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)
 	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, topicName)
 	client.topics[topicArn] = &fakeTopic{
 		arn:        topicArn,
@@ -125,12 +127,12 @@ func TestEnsure_CorrectsKmsMasterKeyIdDriftOnExistingTopic(t *testing.T) {
 		},
 	}
 
-	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", "events-key")
+	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sns", "events"))
 	if client.topics[topicArn].attributes["KmsMasterKeyId"] != keyEntry.ARN {
 		t.Errorf("expected drift correction to set KmsMasterKeyId to %q, got %q", keyEntry.ARN, client.topics[topicArn].attributes["KmsMasterKeyId"])
 	}
@@ -147,7 +149,7 @@ func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error - the producer CR doesn't exist yet")
 	}
@@ -183,11 +185,11 @@ func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
 		},
 	}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
-	wantName := cloudctlaws.ResourceName("default", "checkout-service", "events")
+	wantName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)
 	wantArn := cloudctlaws.TopicARN(testRegion, testAccountID, wantName)
 	topic, ok := client.topics[wantArn]
 	if !ok {
@@ -202,13 +204,13 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 	firstCreatedAt := status.FindManagedResource(ledger, "sns", "events").CreatedAt
 
-	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -223,12 +225,12 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 
 func TestEnsure_RefusesUnownedExistingTopic(t *testing.T) {
 	client := newFakeSNS()
-	topicName := cloudctlaws.ResourceName("default", "checkout-service", "events")
+	topicName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)
 	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, topicName)
 	client.topics[topicArn] = &fakeTopic{arn: topicArn, tags: map[string]string{"team": "someone-else"}}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when a same-named topic exists without our ownership tag")
 	}
@@ -236,12 +238,12 @@ func TestEnsure_RefusesUnownedExistingTopic(t *testing.T) {
 
 func TestEnsure_AdoptsUntaggedTopic(t *testing.T) {
 	client := newFakeSNS()
-	topicName := cloudctlaws.ResourceName("default", "checkout-service", "events")
+	topicName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)
 	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, topicName)
 	client.topics[topicArn] = &fakeTopic{arn: topicArn, tags: map[string]string{"cost-center": "1234"}}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", Adopt: true}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("expected adoption to succeed, got error: %v", err)
 	}
@@ -257,7 +259,7 @@ func TestEnsure_AdoptsUntaggedTopic(t *testing.T) {
 
 func TestEnsure_RefusesAdoptingTopicOwnedByDifferentCR(t *testing.T) {
 	client := newFakeSNS()
-	topicName := cloudctlaws.ResourceName("default", "checkout-service", "events")
+	topicName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)
 	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, topicName)
 	client.topics[topicArn] = &fakeTopic{arn: topicArn, tags: map[string]string{
 		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "some-other-cr"),
@@ -265,7 +267,7 @@ func TestEnsure_RefusesAdoptingTopicOwnedByDifferentCR(t *testing.T) {
 	}}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", Adopt: true}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to never override a topic already owned by a different AppDependencies CR")
 	}
@@ -275,12 +277,12 @@ func TestEnsure_CreatesFIFOTopicWithSuffixAndAttribute(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", FIFO: true}}}
 
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	fifoName := cloudctlaws.ResourceName("default", "checkout-service", "events") + ".fifo"
+	fifoName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256) + ".fifo"
 	fifoArn := cloudctlaws.TopicARN(testRegion, testAccountID, fifoName)
 	topic, ok := client.topics[fifoArn]
 	if !ok {
@@ -296,7 +298,7 @@ func TestEnsure_ClassifiesTransientAWSErrorsAsRetryable(t *testing.T) {
 	client.listTagsForResourceErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when the tag lookup fails")
 	}
@@ -315,7 +317,7 @@ func TestEnsure_ClassifiesPermissionErrorsAsNotRetryable(t *testing.T) {
 	client.listTagsForResourceErr = &fakeAWSError{code: "AccessDenied", fault: smithy.FaultClient}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when the tag lookup fails")
 	}
@@ -334,7 +336,7 @@ func TestEnsure_PropagatesCreateTopicErrors(t *testing.T) {
 	client.createTopicErr = &fakeAWSError{code: "InternalError", fault: smithy.FaultServer}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when topic creation fails")
 	}
@@ -351,19 +353,19 @@ func TestEnsure_PropagatesCreateTopicErrors(t *testing.T) {
 func TestEnsure_CorrectsContentBasedDeduplicationDriftOnExistingFIFOTopic(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", FIFO: true}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
 
-	fifoArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events")+".fifo")
+	fifoArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)+".fifo")
 	if got := client.topics[fifoArn].attributes["ContentBasedDeduplication"]; got != "false" {
 		t.Fatalf("test setup broken: expected ContentBasedDeduplication=false initially, got %q", got)
 	}
 
 	dedup := true
 	spec.Resources[0].Overrides = &depsv1alpha1.SNSOverrides{ContentBasedDeduplication: &dedup}
-	_, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -377,12 +379,12 @@ func TestEnsure_SkipsAttributeDriftForNonFIFOTopics(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
 
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	if _, ok := client.topics[topicArn].attributes["ContentBasedDeduplication"]; ok {
 		t.Error("expected no ContentBasedDeduplication attribute to be touched for a non-FIFO topic")
 	}
@@ -392,7 +394,7 @@ func TestEnsure_ContinuesToOtherTopicsAfterOneFails(t *testing.T) {
 	// Regression test: a failure on one declared topic must not prevent an
 	// unrelated topic later in the same list from being attempted.
 	client := newFakeSNS()
-	badTopicName := cloudctlaws.ResourceName("default", "checkout-service", "orders-events")
+	badTopicName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "orders-events", 256)
 	badArn := cloudctlaws.TopicARN(testRegion, testAccountID, badTopicName)
 	client.topics[badArn] = &fakeTopic{arn: badArn, tags: map[string]string{"team": "someone-else"}}
 
@@ -401,12 +403,12 @@ func TestEnsure_ContinuesToOtherTopicsAfterOneFails(t *testing.T) {
 		{Name: "user-events"},   // unrelated, should still succeed
 	}}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error from the failing topic")
 	}
 
-	goodArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "user-events"))
+	goodArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "user-events", 256))
 	if _, ok := client.topics[goodArn]; !ok {
 		t.Error("expected the second topic to still be created despite the first one failing")
 	}
@@ -415,20 +417,17 @@ func TestEnsure_ContinuesToOtherTopicsAfterOneFails(t *testing.T) {
 	}
 }
 
-func TestEnsure_RejectsTopicNameExceedingSNSLimit(t *testing.T) {
-	// SNS's 256-character limit is generous enough that realistic names
-	// won't hit it the way SQS's 80-character limit does - this needs a
-	// deliberately long resource key to actually exercise the check.
+func TestEnsure_TruncatesTopicNameExceedingSNSLimit(t *testing.T) {
 	client := newFakeSNS()
 	tooLongKey := strings.Repeat("a", 250)
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: tooLongKey}}}
 
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
-	if err == nil {
-		t.Fatal("expected an error for a computed topic name exceeding SNS's 256-character limit")
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
 	}
-	if len(client.topics) != 0 {
-		t.Error("expected no AWS call to have been attempted for a name that's already known to be too long")
+	if len(client.topics) != 1 {
+		t.Error("expected the topic to have been created with a truncated name")
 	}
 }
 
@@ -439,7 +438,7 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 	// call unmistakably visible as a failure if it's ever made.
 	client.listTagsForResourceErr = errors.New("should not be called: trust window should have skipped this")
 
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	fresh := metav1.Now()
 	ledger := []depsv1alpha1.ManagedResource{
 		{
@@ -456,7 +455,7 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
 	}}
-	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v — expected the trust window to skip the AWS call entirely", err)
 	}
@@ -477,7 +476,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 	client := newFakeSNS()
 	client.listTagsForResourceErr = errors.New("should not be called: trust window should have skipped this")
 
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	fresh := metav1.Now()
 	ledger := []depsv1alpha1.ManagedResource{
 		{
@@ -495,7 +494,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -512,7 +511,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -522,7 +521,7 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	entry.LastVerifiedAt = &stale
 	status.UpsertManagedResource(&ledger, *entry)
 
-	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger)
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -530,5 +529,47 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	updatedEntry := status.FindManagedResource(updatedLedger, "sns", "events")
 	if updatedEntry.LastVerifiedAt.Equal(&stale) {
 		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
+	}
+}
+
+type recordedEvent struct {
+	eventType, reason, message string
+}
+
+func newEventCollector() (status.EventRecorder, *[]recordedEvent) {
+	events := []recordedEvent{}
+	return func(eventType, reason, message string) {
+		events = append(events, recordedEvent{eventType, reason, message})
+	}, &events
+}
+
+func TestEnsure_CreatingTopic_EmitsCreatedEvent(t *testing.T) {
+	client := newFakeSNS()
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
+	recordEvent, events := newEventCollector()
+
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, recordEvent); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "TopicCreated" {
+		t.Errorf("expected exactly one TopicCreated event, got %+v", *events)
+	}
+}
+
+func TestEnsure_AdoptingTopic_EmitsAdoptedEvent(t *testing.T) {
+	client := newFakeSNS()
+	topicName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, topicName)
+	client.topics[topicArn] = &fakeTopic{arn: topicArn, tags: map[string]string{"cost-center": "1234"}}
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", Adopt: true}}}
+	recordEvent, events := newEventCollector()
+
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, recordEvent); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "TopicAdopted" {
+		t.Errorf("expected exactly one TopicAdopted event, got %+v", *events)
 	}
 }

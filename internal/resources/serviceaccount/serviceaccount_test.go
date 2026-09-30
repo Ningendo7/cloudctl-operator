@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 )
 
 func newScheme(t *testing.T) *runtime.Scheme {
@@ -149,6 +150,102 @@ func TestEnsure_PreExisting_MergesWithoutClobberingOtherAnnotations(t *testing.T
 	// A pre-existing object is never adopted, even at the default name.
 	if owner := metav1.GetControllerOf(sa); owner != nil {
 		t.Errorf("expected no owner reference on a pre-existing ServiceAccount, got %+v", owner)
+	}
+}
+
+// TestEnsure_DifferentCROwnsTarget_Refused guards against two CRs sharing
+// one serviceAccountName silently taking turns owning its IRSA role.
+func TestEnsure_DifferentCROwnsTarget_Refused(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	owner := newCR("ns", "checkout", "shared-sa")
+	if _, err := Ensure(context.Background(), c, owner, "arn:aws:iam::123456789012:role/checkout"); err != nil {
+		t.Fatalf("Ensure (establish ownership): %v", err)
+	}
+
+	intruder := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "fraud-detector", UID: "intruder-uid"},
+		Spec:       depsv1alpha1.AppDependenciesSpec{ServiceAccountName: "shared-sa"},
+	}
+	_, err := Ensure(context.Background(), c, intruder, "arn:aws:iam::123456789012:role/fraud-detector")
+	if err == nil {
+		t.Fatal("expected Ensure to refuse attaching a different CR's role to an already-claimed ServiceAccount")
+	}
+
+	sa := getSA(t, c, "ns", "shared-sa")
+	if sa.Annotations[RoleARNAnnotation] != "arn:aws:iam::123456789012:role/checkout" {
+		t.Errorf("expected the original owner's role-arn to survive the refused claim, got %q", sa.Annotations[RoleARNAnnotation])
+	}
+	if sa.Annotations[cloudctlaws.OwnerTagKey] != cloudctlaws.OwnerTagValue("ns", "checkout") {
+		t.Errorf("expected ownership to remain with the original claimant, got %q", sa.Annotations[cloudctlaws.OwnerTagKey])
+	}
+}
+
+// TestEnsure_DefaultName_StaleOwnerFromRecreatedCR_Refused guards against
+// name-match-alone counting as ownership: a deleted-and-recreated CR
+// reusing the same name has a different UID.
+func TestEnsure_DefaultName_StaleOwnerFromRecreatedCR_Refused(t *testing.T) {
+	existing := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      "checkout",
+			Annotations: map[string]string{
+				cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("ns", "checkout"),
+				cloudctlaws.OwnerUIDTagKey: "old-uid",
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
+	cr := newCR("ns", "checkout", "") // newCR's UID ("test-uid") differs from "old-uid"
+
+	_, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/x")
+	if err == nil {
+		t.Fatal("expected Ensure to refuse claiming a ServiceAccount still owned (by UID) by a stale, deleted-and-recreated CR identity")
+	}
+}
+
+// TestEnsure_SameCRReconcilingAgain_UpdatesOwnRoleARN confirms the
+// ownership check only blocks a *different* CR, not the owner reconciling.
+func TestEnsure_SameCRReconcilingAgain_UpdatesOwnRoleARN(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	cr := newCR("ns", "checkout", "shared-sa")
+
+	if _, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/v1"); err != nil {
+		t.Fatalf("Ensure (first): %v", err)
+	}
+	if _, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/v2"); err != nil {
+		t.Fatalf("Ensure (second, same CR): %v", err)
+	}
+
+	sa := getSA(t, c, "ns", "shared-sa")
+	if sa.Annotations[RoleARNAnnotation] != "arn:aws:iam::123456789012:role/v2" {
+		t.Errorf("expected the same CR's own reconcile to update its role-arn, got %q", sa.Annotations[RoleARNAnnotation])
+	}
+}
+
+// TestEnsure_PreExistingForeignSA_StampsOwnershipOnFirstClaim confirms an
+// unclaimed ServiceAccount (no cloudctl marker yet) can still be claimed.
+func TestEnsure_PreExistingForeignSA_StampsOwnershipOnFirstClaim(t *testing.T) {
+	existing := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "ns",
+			Name:        "checkout",
+			Annotations: map[string]string{"team.example.com/owner": "payments"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
+	cr := newCR("ns", "checkout", "")
+
+	if _, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/x"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	sa := getSA(t, c, "ns", "checkout")
+	if sa.Annotations[cloudctlaws.OwnerTagKey] != cloudctlaws.OwnerTagValue("ns", "checkout") {
+		t.Errorf("expected ownership annotation stamped on first claim, got %q", sa.Annotations[cloudctlaws.OwnerTagKey])
+	}
+	if sa.Annotations[cloudctlaws.OwnerUIDTagKey] != string(cr.UID) {
+		t.Errorf("expected owner-uid annotation stamped on first claim, got %q", sa.Annotations[cloudctlaws.OwnerUIDTagKey])
 	}
 }
 

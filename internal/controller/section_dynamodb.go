@@ -11,7 +11,7 @@ import (
 // orchestrator's uniform section shape. Takes the whole reconciler (not just
 // AWSClients, unlike before) because encryption.kmsKeyRef resolution needs
 // r.Client to look up the producer CR a shared key belongs to.
-func dynamodbSection(r *AppDependenciesReconciler) section {
+func dynamodbSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	return section{
 		name: "DynamoDBReady",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
@@ -24,13 +24,13 @@ func dynamodbSection(r *AppDependenciesReconciler) section {
 
 			ledger, ensureErr := dynamodb.Ensure(
 				ctx, r.AWSClients.DynamoDB, r.AWSClients.KMS, r.Client, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.DynamoDB, cr.Status.ManagedResources,
+				cr.Spec.DynamoDB, cr.Status.ManagedResources, checkpointFor(r, cr, original), eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
 			ledger, _, cleanupErr := dynamodb.Cleanup(
 				ctx, r.AWSClients.DynamoDB, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.DynamoDB, cr.Status.ManagedResources, false,
+				cr.Spec.DynamoDB, cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
@@ -38,7 +38,7 @@ func dynamodbSection(r *AppDependenciesReconciler) section {
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(cr, "DynamoDBReady", err)
+			setSectionCondition(ctx, cr, "DynamoDBReady", err)
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
@@ -51,7 +51,7 @@ func dynamodbSection(r *AppDependenciesReconciler) section {
 
 			ledger, results, err := dynamodb.Cleanup(
 				ctx, r.AWSClients.DynamoDB, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.DynamoDB, cr.Status.ManagedResources, true,
+				cr.Spec.DynamoDB, cr.Status.ManagedResources, true, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {

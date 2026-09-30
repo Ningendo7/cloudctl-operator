@@ -27,7 +27,7 @@ import (
 // uniform section shape. Takes the whole reconciler (not just AWSClients,
 // unlike before) because encryption.kmsKeyRef resolution needs r.Client to
 // look up the producer CR a shared key belongs to.
-func s3Section(r *AppDependenciesReconciler) section {
+func s3Section(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	return section{
 		name: "S3Ready",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
@@ -41,13 +41,13 @@ func s3Section(r *AppDependenciesReconciler) section {
 			ledger, ensureErr := s3.Ensure(
 				ctx, r.AWSClients.S3, r.AWSClients.KMS, r.Client, cr.Namespace, cr.Name, string(cr.UID),
 				r.AWSClients.Region, r.AWSClients.AccountID,
-				cr.Spec.S3, cr.Status.ManagedResources,
+				cr.Spec.S3, cr.Status.ManagedResources, checkpointFor(r, cr, original), eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
 			ledger, _, cleanupErr := s3.Cleanup(
 				ctx, r.AWSClients.S3, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.S3, cr.Status.ManagedResources, false,
+				cr.Spec.S3, cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
@@ -55,7 +55,7 @@ func s3Section(r *AppDependenciesReconciler) section {
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(cr, "S3Ready", err)
+			setSectionCondition(ctx, cr, "S3Ready", err)
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
@@ -68,7 +68,7 @@ func s3Section(r *AppDependenciesReconciler) section {
 
 			ledger, results, err := s3.Cleanup(
 				ctx, r.AWSClients.S3, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.S3, cr.Status.ManagedResources, true,
+				cr.Spec.S3, cr.Status.ManagedResources, true, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {

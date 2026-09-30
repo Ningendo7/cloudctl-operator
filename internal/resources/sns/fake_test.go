@@ -44,6 +44,11 @@ type fakeSNS struct {
 
 	createTopicErr         error
 	listTagsForResourceErr error
+
+	// listSubscriptionsByTopicCalls is a plain, unconditional call counter -
+	// unlike fakeTopic's own listSubsCallCount, resetting this one doesn't
+	// also reset the simulated pagination behavior above.
+	listSubscriptionsByTopicCalls int
 }
 
 // fakeAWSError is a minimal smithy.APIError implementation for injecting
@@ -150,6 +155,7 @@ func (f *fakeSNS) DeleteTopic(_ context.Context, in *sns.DeleteTopicInput, _ ...
 }
 
 func (f *fakeSNS) ListSubscriptionsByTopic(_ context.Context, in *sns.ListSubscriptionsByTopicInput, _ ...func(*sns.Options)) (*sns.ListSubscriptionsByTopicOutput, error) {
+	f.listSubscriptionsByTopicCalls++
 	topic, ok := f.topics[*in.TopicArn]
 	if !ok {
 		return nil, &types.NotFoundException{}

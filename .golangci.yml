@@ -8,15 +8,18 @@ linters:
     - depguard
     - dupl
     - errcheck
+    - errorlint
     - ginkgolinter
     - goconst
     - gocyclo
+    - gosec
     - govet
     - ineffassign
     - lll
     - modernize
     - misspell
     - nakedret
+    - nilerr
     - prealloc
     - revive
     - staticcheck

@@ -15,7 +15,9 @@ jobs:
 
     services:
       localstack:
-        image: localstack/localstack:3.8
+        # Pinned by digest, not just the :3.8 tag - see Makefile's
+        # LOCALSTACK_IMAGE comment for why. Bump both together deliberately.
+        image: localstack/localstack:3.8@sha256:b279c01f4cfb8f985a482e4014cabc1e2697b9d7a6c8c8db2e40f4d9f93687c7
         ports:
           - 4566:4566
         env:

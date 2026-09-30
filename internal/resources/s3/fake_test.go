@@ -97,6 +97,13 @@ type fakeS3 struct {
 	putBucketTaggingErr     error
 	abortMultipartUploadErr error
 	deleteObjectsErr        error
+
+	// getBucketTaggingCalls/putBucketTaggingCalls let tests assert that the
+	// atomic-tag-on-create path never triggers the separate tagging round
+	// trip that only adopting a pre-existing bucket still needs.
+	getBucketTaggingCalls   int
+	putBucketTaggingCalls   int
+	listObjectVersionsCalls int
 	// failToDeleteKey, if set, makes DeleteObjects report that one key
 	// failed (via Errors) while leaving it in place, simulating S3's
 	// documented partial-failure behavior within an otherwise-successful call.
@@ -121,8 +128,11 @@ func (f *fakeS3) CreateBucket(_ context.Context, in *s3sdk.CreateBucketInput, _ 
 	if f.createBucketErr != nil {
 		return nil, f.createBucketErr
 	}
-	// No tags here - CreateBucket doesn't accept them, matching real S3.
-	f.buckets[*in.Bucket] = &fakeBucket{}
+	b := &fakeBucket{}
+	if in.CreateBucketConfiguration != nil && len(in.CreateBucketConfiguration.Tags) > 0 {
+		b.tags = tagsToMap(in.CreateBucketConfiguration.Tags)
+	}
+	f.buckets[*in.Bucket] = b
 	return &s3sdk.CreateBucketOutput{}, nil
 }
 
@@ -139,6 +149,7 @@ func (f *fakeS3) DeleteBucket(_ context.Context, in *s3sdk.DeleteBucketInput, _ 
 }
 
 func (f *fakeS3) GetBucketTagging(_ context.Context, in *s3sdk.GetBucketTaggingInput, _ ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+	f.getBucketTaggingCalls++
 	if f.getBucketTaggingErr != nil {
 		return nil, f.getBucketTaggingErr
 	}
@@ -153,6 +164,7 @@ func (f *fakeS3) GetBucketTagging(_ context.Context, in *s3sdk.GetBucketTaggingI
 }
 
 func (f *fakeS3) PutBucketTagging(_ context.Context, in *s3sdk.PutBucketTaggingInput, _ ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+	f.putBucketTaggingCalls++
 	if f.putBucketTaggingErr != nil {
 		return nil, f.putBucketTaggingErr
 	}
@@ -266,6 +278,7 @@ func (f *fakeS3) DeleteBucketLifecycle(_ context.Context, in *s3sdk.DeleteBucket
 }
 
 func (f *fakeS3) ListObjectVersions(_ context.Context, in *s3sdk.ListObjectVersionsInput, _ ...func(*s3sdk.Options)) (*s3sdk.ListObjectVersionsOutput, error) {
+	f.listObjectVersionsCalls++
 	b, ok := f.buckets[*in.Bucket]
 	if !ok {
 		return nil, &types.NoSuchBucket{}

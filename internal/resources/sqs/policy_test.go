@@ -29,7 +29,7 @@ import (
 
 func TestAddPendingDeletionDeny_CreatesPolicyFromScratch(t *testing.T) {
 	client := newFakeSQS()
-	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	_, _ = client.CreateQueue(context.Background(), &sqs.CreateQueueInput{QueueName: &queueName})
 	q := client.queues[queueName]
 
@@ -47,7 +47,7 @@ func TestAddPendingDeletionDeny_CreatesPolicyFromScratch(t *testing.T) {
 
 func TestAddPendingDeletionDeny_PreservesExistingStatements(t *testing.T) {
 	client := newFakeSQS()
-	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	_, _ = client.CreateQueue(context.Background(), &sqs.CreateQueueInput{QueueName: &queueName})
 	q := client.queues[queueName]
 	q.policy = `{"Version":"2012-10-17","Statement":[{"Sid":"cross-account-read","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:root"},"Action":"sqs:ReceiveMessage","Resource":"` + q.arn + `"}]}`
@@ -66,7 +66,7 @@ func TestAddPendingDeletionDeny_PreservesExistingStatements(t *testing.T) {
 
 func TestAddPendingDeletionDeny_IsIdempotent(t *testing.T) {
 	client := newFakeSQS()
-	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	_, _ = client.CreateQueue(context.Background(), &sqs.CreateQueueInput{QueueName: &queueName})
 	q := client.queues[queueName]
 
@@ -94,7 +94,7 @@ func TestAddPendingDeletionDeny_IsIdempotent(t *testing.T) {
 
 func TestRemovePendingDeletionDeny_ClearsPolicyWhenNothingElseRemains(t *testing.T) {
 	client := newFakeSQS()
-	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	_, _ = client.CreateQueue(context.Background(), &sqs.CreateQueueInput{QueueName: &queueName})
 	q := client.queues[queueName]
 
@@ -112,7 +112,7 @@ func TestRemovePendingDeletionDeny_ClearsPolicyWhenNothingElseRemains(t *testing
 
 func TestRemovePendingDeletionDeny_PreservesOtherStatements(t *testing.T) {
 	client := newFakeSQS()
-	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	_, _ = client.CreateQueue(context.Background(), &sqs.CreateQueueInput{QueueName: &queueName})
 	q := client.queues[queueName]
 	q.policy = `{"Version":"2012-10-17","Statement":[{"Sid":"cross-account-read","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:root"},"Action":"sqs:ReceiveMessage","Resource":"` + q.arn + `"}]}`
@@ -134,7 +134,7 @@ func TestRemovePendingDeletionDeny_PreservesOtherStatements(t *testing.T) {
 
 func TestRemovePendingDeletionDeny_NoOpWhenAbsent(t *testing.T) {
 	client := newFakeSQS()
-	queueName := cloudctlaws.ResourceName("default", "checkout-service", "orders")
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	_, _ = client.CreateQueue(context.Background(), &sqs.CreateQueueInput{QueueName: &queueName})
 	q := client.queues[queueName]
 

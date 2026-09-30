@@ -35,7 +35,7 @@ func setupTopic(t *testing.T, client *fakeSNS, namespace, crName, name string, d
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: name, DeletionPolicy: deletionPolicy, Force: force},
 	}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, namespace, crName, "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, namespace, crName, "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -51,11 +51,48 @@ func findResult(results []CleanupResult, name string) *CleanupResult {
 	return nil
 }
 
+func advancePastQuietWindow(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string) {
+	t.Helper()
+	entry := status.FindManagedResource(ledger, "sns", name)
+	if entry == nil {
+		t.Fatalf("test setup broken: no ledger entry named %q", name)
+	}
+	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
+	entry.PendingDeletionSince = &past
+	status.UpsertManagedResource(&ledger, *entry)
+}
+
+// advancePastEmptyCheckBackoffStart pushes PendingDeletionSince back far
+// enough that status.NeedsEmptyCheck's backoff window has started.
+func advancePastEmptyCheckBackoffStart(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string) {
+	t.Helper()
+	entry := status.FindManagedResource(ledger, "sns", name)
+	if entry == nil {
+		t.Fatalf("test setup broken: no ledger entry named %q", name)
+	}
+	past := metav1.NewTime(time.Now().Add(-status.EmptyCheckBackoffStartAfter - time.Minute))
+	entry.PendingDeletionSince = &past
+	status.UpsertManagedResource(&ledger, *entry)
+}
+
+// pushLastEmptyCheckIntoThePast backdates a ledger entry's LastEmptyCheckAt
+// by d, so a subsequent Cleanup() call sees the backoff interval as elapsed.
+func pushLastEmptyCheckIntoThePast(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string, d time.Duration) {
+	t.Helper()
+	entry := status.FindManagedResource(ledger, "sns", name)
+	if entry == nil {
+		t.Fatalf("test setup broken: no ledger entry named %q", name)
+	}
+	past := metav1.NewTime(time.Now().Add(-d))
+	entry.LastEmptyCheckAt = &past
+	status.UpsertManagedResource(&ledger, *entry)
+}
+
 func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyRetain, false)
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -65,7 +102,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	if status.FindManagedResource(updated, "sns", "events") == nil {
 		t.Error("expected retained entry to stay in the ledger")
 	}
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	if _, stillExists := client.topics[topicArn]; !stillExists {
 		t.Error("expected Retain policy to leave the AWS topic in place")
 	}
@@ -80,7 +117,7 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 	// actually proves this - this one constructs the ledger entry directly
 	// with the field left at its zero value.
 	client := newFakeSNS()
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	client.topics[topicArn] = &fakeTopic{
 		arn: topicArn,
 		tags: map[string]string{
@@ -97,7 +134,7 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 		},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -115,13 +152,13 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 func TestCleanup_RelinquishesOwnershipTagForRetainedResource(t *testing.T) {
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyRetain, false)
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 
 	if !cloudctlaws.IsOwnedBy(client.topics[topicArn].tags, "default", "checkout-service", "uid-1") {
 		t.Fatal("test setup broken: expected the topic to start out owned by us")
 	}
 
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -139,9 +176,9 @@ func TestCleanup_HoldsNewlyEligibleTopicForQuietWindowBeforeDeleting(t *testing.
 	// should it actually delete.
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -156,7 +193,7 @@ func TestCleanup_HoldsNewlyEligibleTopicForQuietWindowBeforeDeleting(t *testing.
 		t.Fatal("expected PendingDeletionSince to be recorded on first encounter")
 	}
 
-	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, updated, false)
+	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, updated, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -172,7 +209,7 @@ func TestCleanup_HoldsNewlyEligibleTopicForQuietWindowBeforeDeleting(t *testing.
 	entry.PendingDeletionSince = &past
 	status.UpsertManagedResource(&updated, *entry)
 
-	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, updated, false)
+	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, updated, false, nil)
 	if err != nil {
 		t.Fatalf("third Cleanup() error = %v", err)
 	}
@@ -190,12 +227,12 @@ func TestCleanup_HoldsNewlyEligibleTopicForQuietWindowBeforeDeleting(t *testing.
 func TestCleanup_BlocksDeletingTopicWithActiveSubscriptions(t *testing.T) {
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	client.topics[topicArn].subscriptions = 1
 
 	// First pass only enters the mandatory quiet window - subscriptions
 	// aren't evaluated yet on first encounter.
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -205,7 +242,7 @@ func TestCleanup_BlocksDeletingTopicWithActiveSubscriptions(t *testing.T) {
 	entry.PendingDeletionSince = &past
 	status.UpsertManagedResource(&ledger, *entry)
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -220,13 +257,138 @@ func TestCleanup_BlocksDeletingTopicWithActiveSubscriptions(t *testing.T) {
 	}
 }
 
+func TestCleanup_PendingDeletion_FirstCheckPastBackoffStartStillRunsAndStamps(t *testing.T) {
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
+	client.topics[topicArn].subscriptions = 1
+
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	advancePastEmptyCheckBackoffStart(t, ledger, "events")
+
+	client.listSubscriptionsByTopicCalls = 0
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+	if client.listSubscriptionsByTopicCalls < 1 {
+		t.Errorf("expected a real check on first encounter past the backoff start, got %d calls", client.listSubscriptionsByTopicCalls)
+	}
+	entry := status.FindManagedResource(updated, "sns", "events")
+	if entry == nil || entry.LastEmptyCheckAt == nil {
+		t.Error("expected LastEmptyCheckAt to be stamped after a real check")
+	}
+}
+
+func TestCleanup_PendingDeletion_SkipsRealCheckWhileBackoffIntervalNotElapsed(t *testing.T) {
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
+	client.topics[topicArn].subscriptions = 1
+
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	advancePastEmptyCheckBackoffStart(t, ledger, "events")
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+
+	client.listSubscriptionsByTopicCalls = 0
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("third Cleanup() error = %v", err)
+	}
+	if client.listSubscriptionsByTopicCalls != 0 {
+		t.Errorf("expected the backoff interval to skip the real check, got %d calls", client.listSubscriptionsByTopicCalls)
+	}
+	if r := findResult(results, "events"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+		t.Errorf("expected events to keep reporting PendingDeletion while backed off, got %+v", results)
+	}
+}
+
+func TestCleanup_PendingDeletion_ChecksAndDeletesOnceBackoffIntervalElapses(t *testing.T) {
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
+	client.topics[topicArn].subscriptions = 1
+
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	advancePastEmptyCheckBackoffStart(t, ledger, "events")
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+
+	client.topics[topicArn].subscriptions = 0
+	pushLastEmptyCheckIntoThePast(t, ledger, "events", status.EmptyCheckBaseInterval+time.Minute)
+
+	client.listSubscriptionsByTopicCalls = 0
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("third Cleanup() error = %v", err)
+	}
+	if client.listSubscriptionsByTopicCalls < 1 {
+		t.Errorf("expected the elapsed backoff interval to allow a real check, got %d calls", client.listSubscriptionsByTopicCalls)
+	}
+	if _, stillExists := client.topics[topicArn]; stillExists {
+		t.Error("expected the now-empty topic to be deleted once backoff allowed a re-check")
+	}
+	if r := findResult(results, "events"); r != nil {
+		t.Errorf("expected no pending-deletion result for a topic that was actually deleted, got %+v", r)
+	}
+}
+
+func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
+	client.topics[topicArn].subscriptions = 1
+
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	advancePastEmptyCheckBackoffStart(t, ledger, "events")
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+	if entry := status.FindManagedResource(ledger, "sns", "events"); entry == nil || entry.LastEmptyCheckAt == nil {
+		t.Fatal("test setup broken: expected LastEmptyCheckAt to be stamped before the reappearance check")
+	}
+
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
+		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
+	}}
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup (reappeared) error = %v", err)
+	}
+	entry := status.FindManagedResource(updated, "sns", "events")
+	if entry == nil {
+		t.Fatal("expected the ledger entry to survive reappearance")
+	}
+	if entry.LastEmptyCheckAt != nil {
+		t.Error("expected LastEmptyCheckAt cleared alongside PendingDeletionSince on reappearance")
+	}
+}
+
 func TestCleanup_AddsDenyPolicyWhenMarkingPendingDeletion(t *testing.T) {
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	client.topics[topicArn].subscriptions = 1
 
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -243,10 +405,10 @@ func TestCleanup_AddsDenyPolicyWhenMarkingPendingDeletion(t *testing.T) {
 func TestCleanup_RemovesDenyPolicyWhenTopicReturnsToSpec(t *testing.T) {
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	client.topics[topicArn].subscriptions = 1
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -255,7 +417,7 @@ func TestCleanup_RemovesDenyPolicyWhenTopicReturnsToSpec(t *testing.T) {
 	}
 
 	backInSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete}}}
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false)
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -271,7 +433,7 @@ func TestCleanup_RemovesDenyPolicyWhenTopicReturnsToSpec(t *testing.T) {
 func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	client.topics[topicArn].subscriptions = 1
 
 	longAgo := metav1.NewTime(time.Now().Add(-2 * PendingDeletionGracePeriod))
@@ -279,7 +441,7 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 	entry.PendingDeletionSince = &longAgo
 	status.UpsertManagedResource(&ledger, *entry)
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -294,10 +456,10 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 func TestCleanup_ForceDeletesTopicWithActiveSubscriptions(t *testing.T) {
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, true)
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	client.topics[topicArn].subscriptions = 1
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -312,10 +474,10 @@ func TestCleanup_ForceDeletesTopicWithActiveSubscriptions(t *testing.T) {
 func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	client.topics[topicArn].tags = map[string]string{"team": "someone-else"}
 
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err == nil {
 		t.Fatal("expected Cleanup to refuse deleting a topic whose ownership tags no longer verify")
 	}
@@ -333,10 +495,10 @@ func TestCleanup_TreatsAlreadyDeletedTopicAsSuccess(t *testing.T) {
 	// fact, correctly cleaned up already.
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
-	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "events"))
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 
 	// First pass only enters the mandatory quiet window.
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -348,7 +510,7 @@ func TestCleanup_TreatsAlreadyDeletedTopicAsSuccess(t *testing.T) {
 	// Simulate the topic already having been deleted out from under us.
 	delete(client.topics, topicArn)
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v — expected an already-gone topic to be treated as already cleaned up, not a failure", err)
 	}
@@ -366,7 +528,7 @@ func TestCleanup_DoesNotForgetTopicOnTransientLookupError(t *testing.T) {
 	// actually deleting or retaining it per policy.
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -377,7 +539,7 @@ func TestCleanup_DoesNotForgetTopicOnTransientLookupError(t *testing.T) {
 
 	client.listTagsForResourceErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultServer}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err == nil {
 		t.Fatal("expected a transient ListTagsForResource failure to be reported as an error, not silently swallowed")
 	}
@@ -426,16 +588,16 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 		{Name: "orders-events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 		{Name: "user-events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
 
 	// Corrupt orders-events' ownership out-of-band so its cleanup fails.
-	badArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "orders-events"))
+	badArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "orders-events", 256))
 	client.topics[badArn].tags = map[string]string{"team": "someone-else"}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
 	if err == nil {
 		t.Fatal("expected an error reported for the corrupted-ownership topic")
 	}
@@ -449,5 +611,76 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 	}
 	if status.FindManagedResource(updated, "sns", "orders-events") == nil {
 		t.Error("expected the failed orders-events entry to remain in the ledger for retry")
+	}
+}
+
+func TestCleanup_RelinquishingTopic_EmitsEvent(t *testing.T) {
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyRetain, false)
+	recordEvent, events := newEventCollector()
+
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, recordEvent); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "TopicOwnershipRelinquished" {
+		t.Errorf("expected exactly one TopicOwnershipRelinquished event, got %+v", *events)
+	}
+}
+
+func TestCleanup_FirstNoticedForDeletion_EmitsPendingEvent(t *testing.T) {
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
+	recordEvent, events := newEventCollector()
+
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, recordEvent); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "TopicDeletionPending" {
+		t.Errorf("expected exactly one TopicDeletionPending event, got %+v", *events)
+	}
+}
+
+func TestCleanup_RedeclaredWhilePending_EmitsCancelledEvent(t *testing.T) {
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
+
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+
+	recordEvent, events := newEventCollector()
+	backInSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete}}}
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false, recordEvent); err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "TopicDeletionCancelled" {
+		t.Errorf("expected exactly one TopicDeletionCancelled event, got %+v", *events)
+	}
+}
+
+func TestCleanup_DeletingTopic_EmitsDeletedEvent(t *testing.T) {
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
+
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
+	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry.PendingDeletionSince = &past
+	status.UpsertManagedResource(&ledger, *entry)
+
+	recordEvent, events := newEventCollector()
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, recordEvent); err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "TopicDeleted" {
+		t.Errorf("expected exactly one TopicDeleted event, got %+v", *events)
 	}
 }

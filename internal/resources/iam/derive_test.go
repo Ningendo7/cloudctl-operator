@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 )
 
 func newFakeK8sClient(objs ...client.Object) client.Client {
@@ -74,7 +75,7 @@ func TestCollectGrants_EncryptedOwnedSQSResourceAlsoGrantsItsDedicatedKey(t *tes
 		Status: depsv1alpha1.AppDependenciesStatus{
 			ManagedResources: []depsv1alpha1.ManagedResource{
 				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders"},
-				{Type: "kms", Name: "orders-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
+				{Type: "kms", Name: cloudctlaws.DedicatedKeyLedgerName("sqs", "orders"), ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
 			},
 		},
 	}
@@ -125,7 +126,7 @@ func TestCollectGrants_EncryptedOwnedSNSResourceAlsoGrantsItsDedicatedKey(t *tes
 		Status: depsv1alpha1.AppDependenciesStatus{
 			ManagedResources: []depsv1alpha1.ManagedResource{
 				{Type: "sns", Name: "events", ARN: "arn:aws:sns:us-east-1:123456789012:default-checkout-service-events"},
-				{Type: "kms", Name: "events-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
+				{Type: "kms", Name: cloudctlaws.DedicatedKeyLedgerName("sns", "events"), ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
 			},
 		},
 	}
@@ -160,7 +161,7 @@ func TestCollectGrants_EncryptedOwnedS3ResourceAlsoGrantsItsDedicatedKey(t *test
 		Status: depsv1alpha1.AppDependenciesStatus{
 			ManagedResources: []depsv1alpha1.ManagedResource{
 				{Type: "s3", Name: "receipts", ARN: "arn:aws:s3:::default-checkout-service-receipts-ab12cd34"},
-				{Type: "kms", Name: "receipts-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
+				{Type: "kms", Name: cloudctlaws.DedicatedKeyLedgerName("s3", "receipts"), ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
 			},
 		},
 	}
@@ -195,7 +196,7 @@ func TestCollectGrants_EncryptedOwnedDynamoDBResourceAlsoGrantsItsDedicatedKey(t
 		Status: depsv1alpha1.AppDependenciesStatus{
 			ManagedResources: []depsv1alpha1.ManagedResource{
 				{Type: "dynamodb", Name: "sessions", ARN: "arn:aws:dynamodb:us-east-1:123456789012:table/default-checkout-service-sessions"},
-				{Type: "kms", Name: "sessions-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
+				{Type: "kms", Name: cloudctlaws.DedicatedKeyLedgerName("dynamodb", "sessions"), ARN: "arn:aws:kms:us-east-1:123456789012:key/dedicated-id"},
 			},
 		},
 	}

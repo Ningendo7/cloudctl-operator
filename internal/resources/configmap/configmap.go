@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	applycorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 	applymetav1 "k8s.io/client-go/applyconfigurations/meta/v1"
@@ -54,16 +55,10 @@ func ConfigMapName(crName string) string {
 }
 
 // Ensure regenerates this CR's connection ConfigMap from its current
-// owned-resource ledger and authorized consumes. Deletes the ConfigMap
-// (if one exists) when there's nothing left to report, rather than
-// leaving a stale, pointless empty object behind - the same "no
-// pointless artifact" rule IAM already applies to an empty CR's role.
-//
-// Owned via an owner reference back to the CR (set only when this call
-// itself creates the object - see the package-level comment above; unlike
-// ServiceAccount, this object is never anything but ours, so there's no
-// adopt-vs-merge branch to worry about here), so native GC removes it
-// when the CR is deleted - no explicit cleanup path is needed.
+// owned-resource ledger and authorized consumes, deleting it once there's
+// nothing left to report. Refuses to touch a same-named ConfigMap this CR
+// doesn't already own (checked via its owner reference) - the same
+// name-match-isn't-ownership rule every AWS resource here follows.
 func Ensure(ctx context.Context, k8sClient client.Client, region, accountID string, cr *depsv1alpha1.AppDependencies) error {
 	data, err := buildConnectionData(ctx, k8sClient, region, accountID, cr)
 	if err != nil {
@@ -71,8 +66,24 @@ func Ensure(ctx context.Context, k8sClient client.Client, region, accountID stri
 	}
 
 	name := ConfigMapName(cr.Name)
+	existing := &corev1.ConfigMap{}
+	getErr := k8sClient.Get(ctx, client.ObjectKey{Namespace: cr.Namespace, Name: name}, existing)
+	exists := getErr == nil
+	if getErr != nil && !apierrors.IsNotFound(getErr) {
+		return getErr
+	}
+
+	if exists {
+		if owner := metav1.GetControllerOf(existing); owner == nil || owner.UID != cr.UID {
+			return fmt.Errorf("ConfigMap %q already exists and is not owned by this CR - refusing to manage it", name)
+		}
+	}
+
 	if len(data) == 0 {
-		return deleteIfExists(ctx, k8sClient, cr.Namespace, name)
+		if !exists {
+			return nil
+		}
+		return client.IgnoreNotFound(k8sClient.Delete(ctx, existing))
 	}
 
 	gvk, err := apiutil.GVKForObject(cr, k8sClient.Scheme())
@@ -96,14 +107,6 @@ func Ensure(ctx context.Context, k8sClient client.Client, region, accountID stri
 		fieldOwner,
 		client.ForceOwnership,
 	)
-}
-
-func deleteIfExists(ctx context.Context, k8sClient client.Client, namespace, name string) error {
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-		Namespace: namespace,
-		Name:      name,
-	}}
-	return client.IgnoreNotFound(k8sClient.Delete(ctx, cm))
 }
 
 // buildConnectionData walks every implemented resource type's owned

@@ -71,6 +71,8 @@ func Ensure(
 	crUID string,
 	spec *depsv1alpha1.SQSSpec,
 	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	if spec == nil {
 		return ledger, nil
@@ -79,7 +81,7 @@ func Ensure(
 	var firstErr error
 	for _, q := range spec.Resources {
 		var err error
-		ledger, err = ensureQueue(ctx, client, kmsClient, k8sClient, namespace, crName, crUID, q, ledger)
+		ledger, err = ensureQueue(ctx, client, kmsClient, k8sClient, namespace, crName, crUID, q, ledger, checkpoint, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("queue %q: %w", q.Name, err)
 		}
@@ -104,6 +106,8 @@ func ensureQueue(
 	crUID string,
 	q depsv1alpha1.SQSQueueSpec,
 	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	var kmsKeyARN *string
 	if q.Encryption != nil {
@@ -118,7 +122,7 @@ func ensureQueue(
 			kmsKeyARN = &arn
 		}
 		if q.Encryption.Enabled {
-			arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, q.Name, q.DeletionPolicy, ledger)
+			arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, resourceType, q.Name, q.DeletionPolicy, ledger, checkpoint, recordEvent)
 			ledger = updatedLedger
 			if err != nil {
 				return ledger, fmt.Errorf("encryption key: %w", err)
@@ -129,7 +133,7 @@ func ensureQueue(
 
 	var dlqArn string
 	if q.DLQ {
-		dlqName := q.Name + "-dlq"
+		dlqName := cloudctlaws.DerivedKey(q.Name, "dlq")
 		var err error
 		// A FIFO source queue requires a FIFO DLQ - AWS rejects mismatched
 		// pairs - so fifo is inherited here, not independently configurable.
@@ -143,7 +147,7 @@ func ensureQueue(
 			adopt:          q.Adopt,
 			fifo:           q.FIFO,
 			kmsKeyARN:      kmsKeyARN,
-		}, ledger)
+		}, ledger, recordEvent)
 		if err != nil {
 			return ledger, fmt.Errorf("dlq: %w", err)
 		}
@@ -193,7 +197,7 @@ func ensureQueue(
 		visibilityTimeoutSeconds:  visibilityTimeout,
 		redrivePolicy:             redrivePolicy,
 		kmsKeyARN:                 kmsKeyARN,
-	}, ledger)
+	}, ledger, recordEvent)
 }
 
 // ensureSingleQueue creates the named queue if it doesn't exist (tagging is
@@ -209,6 +213,7 @@ func ensureSingleQueue(
 	resourceName string,
 	opts queueOptions,
 	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	if existing := status.FindManagedResource(ledger, resourceType, resourceName); existing != nil && !status.NeedsRevalidation(*existing) {
 		// Still within the trust window - skip re-verifying ownership, but
@@ -246,12 +251,15 @@ func ensureSingleQueue(
 		return ledger, nil
 	}
 
-	queueName := cloudctlaws.ResourceName(namespace, crName, resourceName)
+	const sqsNameMaxLen = 80
+	const fifoSuffix = ".fifo"
+	budget := sqsNameMaxLen
 	if opts.fifo {
-		queueName += ".fifo"
+		budget -= len(fifoSuffix)
 	}
-	if err := cloudctlaws.ValidateNameLength(queueName, 80, "SQS queue"); err != nil {
-		return ledger, err
+	queueName := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, budget)
+	if opts.fifo {
+		queueName += fifoSuffix
 	}
 	ownerTags := map[string]string{
 		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
@@ -287,6 +295,9 @@ func ensureSingleQueue(
 				}
 			}
 			return ledger, wrapAWSError(cErr, "creating queue")
+		}
+		if recordEvent != nil {
+			recordEvent("Normal", "QueueCreated", fmt.Sprintf("Created SQS queue %s", queueName))
 		}
 		// Attributes were just set atomically at creation — nothing to
 		// drift-correct yet.
@@ -325,6 +336,9 @@ func ensureSingleQueue(
 			Tags:     merged,
 		}); tagErr != nil {
 			return ledger, wrapAWSError(tagErr, "adopting queue (tagging)")
+		}
+		if recordEvent != nil {
+			recordEvent("Normal", "QueueAdopted", fmt.Sprintf("Adopted existing SQS queue %s under management", queueName))
 		}
 	}
 
@@ -372,20 +386,22 @@ func desiredAttributes(opts queueOptions) map[string]string {
 // reconcileAttributes corrects drift on an already-existing queue's mutable
 // attributes against desired state.
 //
-// Known limitation: it can set or update RedrivePolicy, but doesn't attempt
-// to clear it when a DLQ is removed from spec (dlq: true -> false). AWS's
-// SetQueueAttributes docs don't confirm that an empty value unsets
-// RedrivePolicy, so rather than guess at unverified behavior, this is left
-// as an explicit gap — the DLQ queue itself still gets deleted correctly
-// (that's Cleanup's job), just the main queue's RedrivePolicy attribute
-// referencing it may linger until this is verified and fixed.
+// RedrivePolicy is always included here, even when desiredAttributes leaves
+// it out entirely (no DLQ requested) - an empty string is a valid value
+// that clears the attribute, so a DLQ being removed from spec is corrected
+// here rather than left lingering forever. This only runs once this
+// function is actually called, though: ensureSingleQueue's own trust-window
+// fast path still skips the round trip entirely when desiredAttributes(opts)
+// is empty, so a DLQ removal with no other attribute override present won't
+// self-correct until the trust window expires (same cadence as ownership
+// re-verification), not on the very next reconcile.
 //
 // FifoQueue is never included here since it's immutable after creation
 // (enforced via CEL) — only ever set at creation time, never corrected.
 func reconcileAttributes(ctx context.Context, client sqsAPI, queueURL string, opts queueOptions) error {
 	desired := desiredAttributes(opts)
-	if len(desired) == 0 {
-		return nil
+	if opts.redrivePolicy == nil {
+		desired["RedrivePolicy"] = ""
 	}
 
 	attrNames := make([]types.QueueAttributeName, 0, len(desired))

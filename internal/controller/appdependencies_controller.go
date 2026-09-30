@@ -18,9 +18,11 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	apierror "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -36,6 +38,7 @@ type AppDependenciesReconciler struct {
 	client.Client
 	Scheme     *runtime.Scheme
 	AWSClients *cloudctlaws.Clients
+	Recorder   record.EventRecorder
 
 	// OIDCProviderARN and OIDCProviderURL identify this cluster's IAM OIDC
 	// identity provider, needed to build the IRSA trust policy on every IAM
@@ -52,6 +55,7 @@ type AppDependenciesReconciler struct {
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var cr depsv1alpha1.AppDependencies
@@ -70,8 +74,12 @@ func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *depsv1alpha1.AppDependencies) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	start := time.Now()
+	log.Info("Starting reconcile")
+	original := cr.DeepCopy()
 
 	if err := ensureFinalizer(ctx, r.Client, cr); err != nil {
+		log.Error(err, "Reconcile failed", "duration", time.Since(start))
 		return ctrl.Result{}, err
 	}
 	// Adding a finalizer only touches metadata, not spec, so it won't bump
@@ -79,9 +87,9 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	// this same pass (rather than returning) or a freshly created CR would
 	// never actually get reconciled until some later spec change.
 
-	err := ensureDesiredState(ctx, r, cr)
+	err := ensureDesiredState(ctx, r, cr, original)
 
-	if statusErr := r.Status().Update(ctx, cr); statusErr != nil {
+	if statusErr := r.Status().Patch(ctx, cr, client.MergeFrom(original)); statusErr != nil {
 		log.Error(statusErr, "failed to update status")
 		if err == nil {
 			err = statusErr
@@ -90,11 +98,14 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 
 	if err != nil {
 		if isRetryable(err) {
+			log.Info("Reconcile hit a transient error, requeuing", "error", err.Error(), "requeueAfter", transientRequeueInterval, "duration", time.Since(start))
 			return ctrl.Result{RequeueAfter: transientRequeueInterval}, nil
 		}
+		log.Error(err, "Reconcile failed", "duration", time.Since(start))
 		return ctrl.Result{}, err
 	}
 
+	log.Info("Reconcile succeeded", "requeueAfter", DriftDetectionInterval, "duration", time.Since(start))
 	return ctrl.Result{RequeueAfter: DriftDetectionInterval}, nil
 }
 
@@ -104,27 +115,35 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 	if !hasFinalizer(cr) {
 		return ctrl.Result{}, nil
 	}
+	start := time.Now()
+	log.Info("Starting deletion reconcile")
+	original := cr.DeepCopy()
 
 	done, err := finalizeDesiredState(ctx, r, cr)
 
-	if statusErr := r.Status().Update(ctx, cr); statusErr != nil {
+	if statusErr := r.Status().Patch(ctx, cr, client.MergeFrom(original)); statusErr != nil {
 		log.Error(statusErr, "failed to update status during deletion")
 	}
 
 	if err != nil {
 		if isRetryable(err) {
+			log.Info("Deletion reconcile hit a transient error, requeuing", "error", err.Error(), "requeueAfter", transientRequeueInterval, "duration", time.Since(start))
 			return ctrl.Result{RequeueAfter: transientRequeueInterval}, nil
 		}
+		log.Error(err, "Deletion reconcile failed", "duration", time.Since(start))
 		return ctrl.Result{}, err
 	}
 
 	if !done {
+		log.Info("Deletion reconcile still waiting on resources to drain", "requeueAfter", DriftDetectionInterval, "duration", time.Since(start))
 		return ctrl.Result{RequeueAfter: DriftDetectionInterval}, nil
 	}
 
 	if err := removeFinalizer(ctx, r.Client, cr); err != nil {
+		log.Error(err, "Failed to remove finalizer", "duration", time.Since(start))
 		return ctrl.Result{}, err
 	}
+	log.Info("Deletion reconcile succeeded, finalizer removed", "duration", time.Since(start))
 	return ctrl.Result{}, nil
 }
 

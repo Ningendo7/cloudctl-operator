@@ -197,6 +197,7 @@ func main() {
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		AWSClients:      awsClients,
+		Recorder:        mgr.GetEventRecorderFor("appdependencies-controller"),
 		OIDCProviderARN: oidcProviderARN,
 		OIDCProviderURL: oidcProviderURL,
 	}).SetupWithManager(mgr); err != nil {

@@ -166,9 +166,9 @@ func desiredAlarms(
 
 	if sqsSpec != nil {
 		for _, q := range sqsSpec.Resources {
-			queueName := awsResourceNameWithFIFO(namespace, crName, q.Name, q.FIFO)
+			queueName := awsResourceNameWithFIFO(namespace, crName, "sqs", q.Name, q.FIFO, sqsNameMaxLen)
 			defs = append(defs, alarmDef{
-				name:               cloudctlaws.ResourceName(namespace, crName, q.Name) + "-" + sqsAgeAlarmSuffix,
+				name:               cloudctlaws.ResourceName(namespace, crName, "sqs", cloudctlaws.DerivedKey(q.Name, sqsAgeAlarmSuffix), alarmNameMaxLen),
 				description:        fmt.Sprintf("Queue %q has a message older than 15 minutes - processing is falling behind.", q.Name),
 				namespace:          "AWS/SQS",
 				metricName:         "ApproximateAgeOfOldestMessage",
@@ -187,9 +187,10 @@ func desiredAlarms(
 			})
 
 			if q.DLQ {
-				dlqName := awsResourceNameWithFIFO(namespace, crName, q.Name+"-dlq", q.FIFO)
+				dlqKey := cloudctlaws.DerivedKey(q.Name, "dlq")
+				dlqName := awsResourceNameWithFIFO(namespace, crName, "sqs", dlqKey, q.FIFO, sqsNameMaxLen)
 				defs = append(defs, alarmDef{
-					name:               cloudctlaws.ResourceName(namespace, crName, q.Name+"-dlq") + "-" + sqsDLQBackLogAlarmSuffix,
+					name:               cloudctlaws.ResourceName(namespace, crName, "sqs", cloudctlaws.DerivedKey(dlqKey, sqsDLQBackLogAlarmSuffix), alarmNameMaxLen),
 					description:        fmt.Sprintf("Queue %q's dead-letter queue has at least one message - something is failing repeatedly.", q.Name),
 					namespace:          "AWS/SQS",
 					metricName:         "ApproximateNumberOfMessagesVisible",
@@ -208,9 +209,9 @@ func desiredAlarms(
 
 	if snsSpec != nil {
 		for _, t := range snsSpec.Resources {
-			topicName := awsResourceNameWithFIFO(namespace, crName, t.Name, t.FIFO)
+			topicName := awsResourceNameWithFIFO(namespace, crName, "sns", t.Name, t.FIFO, snsNameMaxLen)
 			defs = append(defs, alarmDef{
-				name:               cloudctlaws.ResourceName(namespace, crName, t.Name) + "-" + snsDeliveryFailedSuffix,
+				name:               cloudctlaws.ResourceName(namespace, crName, "sns", cloudctlaws.DerivedKey(t.Name, snsDeliveryFailedSuffix), alarmNameMaxLen),
 				description:        fmt.Sprintf("Topic %q failed to deliver at least one notification.", t.Name),
 				namespace:          "AWS/SNS",
 				metricName:         "NumberOfNotificationsFailed",
@@ -228,13 +229,13 @@ func desiredAlarms(
 
 	if dynamodbSpec != nil {
 		for _, tbl := range dynamodbSpec.Resources {
-			tableName := cloudctlaws.ResourceName(namespace, crName, tbl.Name)
+			tableName := cloudctlaws.ResourceName(namespace, crName, "dynamodb", tbl.Name, dynamoNameMaxLen)
 			// TreatMissingData is left unset for both: AWS/DynamoDB metrics
 			// always ignore missing data regardless of what's configured, so
 			// setting it here would be a no-op AWS silently overrides anyway.
 			defs = append(defs,
 				alarmDef{
-					name:               tableName + "-" + dynamoReadThrottleSuffix,
+					name:               cloudctlaws.ResourceName(namespace, crName, "dynamodb", cloudctlaws.DerivedKey(tbl.Name, dynamoReadThrottleSuffix), alarmNameMaxLen),
 					description:        fmt.Sprintf("Table %q is being read-throttled.", tbl.Name),
 					namespace:          "AWS/DynamoDB",
 					metricName:         "ReadThrottleEvents",
@@ -247,7 +248,7 @@ func desiredAlarms(
 					period:             300,
 				},
 				alarmDef{
-					name:               tableName + "-" + dynamoWriteThrottleSuffix,
+					name:               cloudctlaws.ResourceName(namespace, crName, "dynamodb", cloudctlaws.DerivedKey(tbl.Name, dynamoWriteThrottleSuffix), alarmNameMaxLen),
 					description:        fmt.Sprintf("Table %q is being write-throttled.", tbl.Name),
 					namespace:          "AWS/DynamoDB",
 					metricName:         "WriteThrottleEvents",
@@ -266,14 +267,26 @@ func desiredAlarms(
 	return defs
 }
 
+const (
+	sqsNameMaxLen    = 80
+	snsNameMaxLen    = 256
+	dynamoNameMaxLen = 255
+	alarmNameMaxLen  = 255
+	fifoSuffix       = ".fifo"
+)
+
 // awsResourceNameWithFIFO mirrors the sqs/sns packages' own
 // name-plus-".fifo"-suffix construction — the CloudWatch dimension value
 // must match the real AWS-side resource name exactly, FIFO suffix
 // included, or the alarm will never see any data.
-func awsResourceNameWithFIFO(namespace, crName, resourceKey string, fifo bool) string {
-	name := cloudctlaws.ResourceName(namespace, crName, resourceKey)
+func awsResourceNameWithFIFO(namespace, crName, resourceType, resourceKey string, fifo bool, maxLen int) string {
+	budget := maxLen
 	if fifo {
-		name += ".fifo"
+		budget -= len(fifoSuffix)
+	}
+	name := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceKey, budget)
+	if fifo {
+		name += fifoSuffix
 	}
 	return name
 }
@@ -298,7 +311,10 @@ func reconcileAlarms(
 	desired []alarmDef,
 	alarmActions []string,
 ) error {
-	prefix := cloudctlaws.ResourceName(own.namespace, own.crName, "")
+	// A plain literal, not run through ResourceName's hashing — this is
+	// only a narrowing filter for DescribeAlarms; isAlarmOwnedByUs below is
+	// what actually gates any create, update, or delete.
+	prefix := own.namespace + "-" + own.crName + "-"
 	existing, err := listAlarmsByPrefix(ctx, client, prefix)
 	if err != nil {
 		return wrapAWSError(err, "listing alarms")

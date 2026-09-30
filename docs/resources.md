@@ -34,12 +34,6 @@ spec:
 | `overrides.contentBasedDeduplication` | Only meaningful with `fifo: true`. |
 | `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. The DLQ shares the main queue's key rather than getting its own. |
 
-**Known gap:** if `dlq` is toggled from `true` to `false`, the DLQ itself is
-deleted correctly, but the main queue's `RedrivePolicy` attribute pointing
-at it isn't cleared — AWS's `SetQueueAttributes` docs don't confirm that an
-empty value unsets it, so this is left unaddressed pending verification
-rather than guessed at.
-
 ## SNS
 
 ```yaml
@@ -359,6 +353,32 @@ spec:
   [architecture.md](architecture.md#ownership-a-resource-is-owned-by-exactly-one-cr).
 - **Deletion safety, the quiet window, and `PendingDeletion`/`StuckPendingDeletion`** —
   see [architecture.md](architecture.md#deletion-is-a-lifecycle-not-a-single-api-call).
+- **Emptiness-check backoff** — once a resource has sat `PendingDeletion`
+  for more than a day, the real "is it empty yet" AWS call (message count,
+  subscriptions, bucket objects, table rows) backs off exponentially from
+  10 minutes up to a 20-hour ceiling, rather than firing on every
+  reconcile forever. Protects the shared per-service AWS rate-limit budget
+  from a fleet of long-neglected, never-emptied resources; a resource
+  actively being drained within that first day is never affected. Doesn't
+  apply to KMS, which has no emptiness concept at all (see below).
+
+### Lifecycle comparison across resource types
+
+| | SQS | SNS | DynamoDB | S3 | KMS |
+|---|---|---|---|---|---|
+| Create + tag atomic? | Yes | Yes | Yes | Yes | Yes |
+| "Non-empty" signal | message count (3 counters) | active subscriptions | item count (count-only `Scan`) | any object version/delete marker | *(no concept — see below)* |
+| Async create lifecycle | No | No | Yes (`Creating`→`Active`) | No | No |
+| `force` bypasses non-empty guard | Yes | Yes | Yes | Yes | No — deletion is irreversible for anyone else still using the key, so there's nothing to force |
+| Deny-policy on `PendingDeletion` | Yes | Yes | No (see DynamoDB section) | Yes | N/A — uses `ScheduleKeyDeletion`'s own AWS-side wait instead |
+| `StuckPendingDeletion` escalation (7-day grace) | Yes | Yes | Yes | Yes | No — no self-imposed grace period; AWS's own 30-day `ScheduleKeyDeletion` window is the wait |
+| Emptiness-check backoff applies | Yes | Yes | Yes | Yes | No (nothing to back off) |
+
+Covered by the shared cross-resource-type test suite in
+`internal/resources/lifecycletest` (create, adopt, foreign-resource
+refusal, retain/relinquish, delete-safety, pending-deletion cancellation) —
+run via each package's own `TestSharedLifecycleScenarios`, so the five
+packages' coverage of this common lifecycle can't silently drift apart.
 - **Status conditions** — each section reports its own condition
   (`SQSReady`, `SNSReady`, ...) plus an aggregate `Ready` condition on the CR.
 - **`SharedWithReferencesValid`** — flags any `sharedWith` entry whose

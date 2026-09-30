@@ -21,13 +21,56 @@ import (
 	"errors"
 	"time"
 
+	equality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/configmap"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
+
+// checkpointFor returns a Checkpoint that writes ledger onto cr and persists
+// it immediately, rather than waiting for this whole reconcile pass's single
+// trailing write — closing the gap where a crash between two AWS calls of a
+// multi-step create (KMS's CreateKey/CreateAlias, S3's
+// CreateBucket/PutBucketTagging) would otherwise lose the in-memory record
+// of the first call's result.
+//
+// # Patches rather than updates
+//
+// original must be the object as it stood at the very start of this
+// reconcile, captured once and shared by every section — not a fresh
+// DeepCopy taken when this particular section starts. A per-section
+// snapshot would already contain earlier sections' in-memory-only condition
+// changes (nothing's reached the server yet on a brand new CR), making them
+// look unchanged to this diff and dropping them from the patch; the
+// Patch() response then overwrites cr with the server's version, silently
+// erasing conditions that were never actually persisted.
+func checkpointFor(r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) status.Checkpoint {
+	return func(ctx context.Context, ledger []depsv1alpha1.ManagedResource) error {
+		cr.Status.ManagedResources = ledger
+		return r.Status().Patch(ctx, cr, client.MergeFrom(original))
+	}
+}
+
+// eventRecorderFor adapts r.Recorder into a status.EventRecorder bound to
+// cr - the one place a resource package's plain (eventType, reason, message)
+// report becomes an actual Kubernetes Event, so packages like kms don't need
+// to depend on corev1/record themselves. Returns nil if r.Recorder is unset
+// (test fixtures that build a reconciler directly, bypassing cmd/main.go's
+// mgr.GetEventRecorderFor call) - callers already treat a nil
+// status.EventRecorder as "don't report events."
+func eventRecorderFor(r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependencies) status.EventRecorder {
+	if r.Recorder == nil {
+		return nil
+	}
+	return func(eventType, reason, message string) {
+		r.Recorder.Event(cr, eventType, reason, message)
+	}
+}
 
 // DriftDetectionInterval is how often a healthy CR is re-reconciled even
 // without a spec change, to catch out-of-band AWS-side drift (e.g. someone
@@ -58,23 +101,31 @@ type section struct {
 // reconcile pass's ledger. Adding a new resource type means adding one file
 // (section_<type>.go) with its own constructor, and one line here — this
 // file's size doesn't grow with the number of resource types.
-func allSections(r *AppDependenciesReconciler) []section {
+func allSections(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) []section {
 	return []section{
-		sqsSection(r),
-		snsSection(r),
-		dynamodbSection(r),
-		s3Section(r),
-		kmsSection(r.AWSClients),
+		sqsSection(r, original),
+		snsSection(r, original),
+		dynamodbSection(r, original),
+		s3Section(r, original),
+		kmsSection(r, original),
 		alarmsSection(r),
 		iamSection(r),
 	}
 }
 
-func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependencies) error {
+func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) error {
+	checkpoint := checkpointFor(r, cr, original)
+	lastCheckpointed := cr.Status.DeepCopy()
 	var firstErr error
-	for _, s := range allSections(r) {
+	for _, s := range allSections(r, original) {
 		if err := s.reconcile(ctx, cr); err != nil && firstErr == nil {
 			firstErr = err
+		}
+		if !equality.Semantic.DeepEqual(cr.Status, *lastCheckpointed) {
+			if err := checkpoint(ctx, cr.Status.ManagedResources); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			lastCheckpointed = cr.Status.DeepCopy()
 		}
 	}
 	checkSharedWithReferences(ctx, r.Client, cr)
@@ -84,7 +135,7 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr *d
 	// data, so anything reconciled earlier in this same pass is already
 	// reflected in it, not lagging a full reconcile behind.
 	connErr := configmap.Ensure(ctx, r.Client, r.AWSClients.Region, r.AWSClients.AccountID, cr)
-	setSectionCondition(cr, "ConnectionInfoReady", connErr)
+	setSectionCondition(ctx, cr, "ConnectionInfoReady", connErr)
 	if firstErr == nil {
 		firstErr = connErr
 	}
@@ -101,7 +152,9 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr *d
 func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependencies) (done bool, err error) {
 	allDone := true
 	var firstErr error
-	for _, s := range allSections(r) {
+	// original is nil here: finalize closures only ever call Cleanup, never
+	// checkpointFor, so there's nothing that would dereference it.
+	for _, s := range allSections(r, nil) {
 		done, err := s.finalize(ctx, cr)
 		if err != nil {
 			if firstErr == nil {
@@ -117,7 +170,7 @@ func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr 
 	return allDone, firstErr
 }
 
-func setSectionCondition(cr *depsv1alpha1.AppDependencies, conditionType string, err error) {
+func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, conditionType string, err error) {
 	if err == nil {
 		status.SetSectionCondition(
 			&cr.Status.Conditions,
@@ -137,6 +190,8 @@ func setSectionCondition(cr *depsv1alpha1.AppDependencies, conditionType string,
 	case isRetryable(err):
 		reason = "TransientError"
 	}
+
+	logf.FromContext(ctx).Error(err, "Section failed to reconcile", "section", conditionType, "reason", reason)
 
 	status.SetSectionCondition(
 		&cr.Status.Conditions,

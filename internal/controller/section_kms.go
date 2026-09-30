@@ -20,7 +20,6 @@ import (
 	"context"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
-	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 )
 
@@ -40,28 +39,28 @@ func dedicatedKMSKeyNames(cr *depsv1alpha1.AppDependencies) []string {
 	if cr.Spec.SQS != nil {
 		for _, q := range cr.Spec.SQS.Resources {
 			if q.Encryption != nil && q.Encryption.Enabled {
-				names = append(names, q.Name+"-key")
+				names = append(names, kms.DedicatedKeyLedgerName("sqs", q.Name))
 			}
 		}
 	}
 	if cr.Spec.SNS != nil {
 		for _, t := range cr.Spec.SNS.Resources {
 			if t.Encryption != nil && t.Encryption.Enabled {
-				names = append(names, t.Name+"-key")
+				names = append(names, kms.DedicatedKeyLedgerName("sns", t.Name))
 			}
 		}
 	}
 	if cr.Spec.DynamoDB != nil {
 		for _, tbl := range cr.Spec.DynamoDB.Resources {
 			if tbl.Encryption != nil && tbl.Encryption.Enabled {
-				names = append(names, tbl.Name+"-key")
+				names = append(names, kms.DedicatedKeyLedgerName("dynamodb", tbl.Name))
 			}
 		}
 	}
 	if cr.Spec.S3 != nil {
 		for _, b := range cr.Spec.S3.Resources {
 			if b.Encryption != nil && b.Encryption.Enabled {
-				names = append(names, b.Name+"-key")
+				names = append(names, kms.DedicatedKeyLedgerName("s3", b.Name))
 			}
 		}
 	}
@@ -75,7 +74,8 @@ func dedicatedKMSKeyNames(cr *depsv1alpha1.AppDependencies) []string {
 // encryption field), but keeping it ahead of iamSection now means a
 // dedicated-key grant will already have somewhere to plug in without
 // reordering sections later.
-func kmsSection(awsClients *cloudctlaws.Clients) section {
+func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
+	awsClients := r.AWSClients
 	return section{
 		name: "KMSReady",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
@@ -88,13 +88,13 @@ func kmsSection(awsClients *cloudctlaws.Clients) section {
 
 			ledger, ensureErr := kms.Ensure(
 				ctx, awsClients.KMS, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.KMS, cr.Status.ManagedResources,
+				cr.Spec.KMS, cr.Status.ManagedResources, checkpointFor(r, cr, original), eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
 			ledger, _, cleanupErr := kms.Cleanup(
 				ctx, awsClients.KMS, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.KMS, dedicatedKMSKeyNames(cr), cr.Status.ManagedResources, false,
+				cr.Spec.KMS, dedicatedKMSKeyNames(cr), cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
@@ -102,7 +102,7 @@ func kmsSection(awsClients *cloudctlaws.Clients) section {
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(cr, "KMSReady", err)
+			setSectionCondition(ctx, cr, "KMSReady", err)
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
@@ -118,7 +118,7 @@ func kmsSection(awsClients *cloudctlaws.Clients) section {
 			// regardless, the same as every other resource type's finalize.
 			ledger, results, err := kms.Cleanup(
 				ctx, awsClients.KMS, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.KMS, nil, cr.Status.ManagedResources, true,
+				cr.Spec.KMS, nil, cr.Status.ManagedResources, true, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {

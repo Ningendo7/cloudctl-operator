@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"time"
 
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -64,19 +63,6 @@ type s3API interface {
 
 const resourceType = "s3"
 
-// tagRetryClaimWindow bounds how long a TagPending ledger entry is trusted
-// as proof we created this bucket ourselves, for retrying the tag write
-// after a transient failure. S3 is the one AWS service among the ones this
-// operator manages where creation and tagging aren't atomic — CreateBucket
-// doesn't accept a Tags parameter, unlike SQS/SNS/DynamoDB's CreateX calls.
-// Bounded so this can only ever recover from a transient tag-write failure
-// shortly after creation, never stand in as a permanent claim on the name —
-// a bucket that was deleted and its name later reused by something else
-// entirely (S3 names are globally released back to AWS on deletion) would
-// otherwise be silently reclaimed. Matches the value a sibling project's
-// own S3 controller settled on for the identical problem.
-const tagRetryClaimWindow = time.Hour
-
 type bucketOptions struct {
 	deletionPolicy       depsv1alpha1.DeletionPolicy
 	force, adopt         bool
@@ -96,10 +82,13 @@ type bucketOptions struct {
 // appended — not just on overflow — to stay effectively unique to this
 // account while remaining fully deterministic (no persisted random state
 // needed to recompute it, which the ownership/ledger model depends on).
+const s3NameMaxLen = 63
+const accountHashLen = 8
+
 func bucketName(namespace, crName, resourceKey, accountID string) string {
-	base := cloudctlaws.ResourceName(namespace, crName, resourceKey)
+	base := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceKey, s3NameMaxLen-accountHashLen-1)
 	sum := sha256.Sum256([]byte(accountID))
-	return fmt.Sprintf("%s-%s", base, hex.EncodeToString(sum[:])[:8])
+	return fmt.Sprintf("%s-%s", base, hex.EncodeToString(sum[:])[:accountHashLen])
 }
 
 // Ensure reconciles every declared S3 bucket against AWS, updating the
@@ -114,6 +103,8 @@ func Ensure(
 	namespace, crName, crUID, region, accountID string,
 	spec *depsv1alpha1.S3Spec,
 	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	if spec == nil {
 		return ledger, nil
@@ -154,7 +145,7 @@ func Ensure(
 				opts.kmsKeyARN = &arn
 			}
 			if b.Encryption.Enabled {
-				arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, b.Name, b.DeletionPolicy, ledger)
+				arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, resourceType, b.Name, b.DeletionPolicy, ledger, checkpoint, recordEvent)
 				ledger = updatedLedger
 				if err != nil {
 					if firstErr == nil {
@@ -167,7 +158,7 @@ func Ensure(
 		}
 
 		var err error
-		ledger, err = ensureBucket(ctx, client, namespace, crName, crUID, region, accountID, b.Name, opts, ledger)
+		ledger, err = ensureBucket(ctx, client, namespace, crName, crUID, region, accountID, b.Name, opts, ledger, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("bucket %q: %w", b.Name, err)
 		}
@@ -189,15 +180,13 @@ func ensureBucket(
 	namespace, crName, crUID, region, accountID, resourceName string,
 	opts bucketOptions,
 	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	if opts.replicationRequested {
 		return ledger, ErrReplicationNotSupported
 	}
 
 	bucket := bucketName(namespace, crName, resourceName, accountID)
-	if err := cloudctlaws.ValidateNameLength(bucket, 63, "S3 bucket"); err != nil {
-		return ledger, err
-	}
 	bucketArn := "arn:aws:s3:::" + bucket
 
 	if existing := status.FindManagedResource(ledger, resourceType, resourceName); existing != nil && !status.NeedsRevalidation(*existing) {
@@ -232,29 +221,27 @@ func ensureBucket(
 
 		input := &s3sdk.CreateBucketInput{
 			Bucket: &bucket,
+			CreateBucketConfiguration: &types.CreateBucketConfiguration{
+				Tags: mapToTags(ownerTags(namespace, crName, crUID)),
+			},
 		}
 		if region != "us-east-1" {
-			// us-east-1 is the one region where CreateBucketConfiguration
-			// must NOT be set at all - specifying it (even naming
-			// us-east-1 explicitly) is rejected.
-			input.CreateBucketConfiguration = &types.CreateBucketConfiguration{
-				LocationConstraint: types.BucketLocationConstraint(region),
-			}
+			// us-east-1 is the one region where an explicit
+			// LocationConstraint is rejected - Tags alone on
+			// CreateBucketConfiguration is fine there.
+			input.CreateBucketConfiguration.LocationConstraint = types.BucketLocationConstraint(region)
 		}
 		if _, cErr := client.CreateBucket(ctx, input); cErr != nil {
 			return ledger, wrapAWSError(cErr, "creating bucket")
 		}
-		// Tagging isn't atomic with creation here (unlike SQS/SNS/DynamoDB) -
-		// record this durably before attempting to tag, so a transient
-		// failure in that next step is recoverable (retry against a bucket
-		// the ledger already proves is ours) rather than ambiguous.
-		ledger = recordTagPending(ledger, resourceName, bucketArn, opts.deletionPolicy, opts.force)
+		if recordEvent != nil {
+			recordEvent("Normal", "BucketCreated", fmt.Sprintf("Created S3 bucket %s", bucket))
+		}
 	}
 
-	// Whether just created above or already existing, both paths converge
-	// here: read current tags, and either confirm ownership or decide
-	// whether claiming it is justified (adopt:true for a foreign bucket,
-	// or our own recent TagPending record for one we just created).
+	// Whether just created above (already tagged as ours) or pre-existing,
+	// both paths converge here: read current tags, and either confirm
+	// ownership or decide whether adopting a foreign bucket is justified.
 	tagsOut, tErr := client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
 	currentTags := map[string]string{}
 	if tErr != nil {
@@ -271,7 +258,7 @@ func ensureBucket(
 		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 			return ledger, fmt.Errorf("bucket %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", bucket, existingOwner)
 		}
-		if !opts.adopt && !recentlyCreatedByUs(ledger, resourceName) {
+		if !opts.adopt {
 			return ledger, fmt.Errorf("bucket %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", bucket)
 		}
 
@@ -281,6 +268,9 @@ func ensureBucket(
 			Tagging: &types.Tagging{TagSet: mapToTags(merged)},
 		}); tagErr != nil {
 			return ledger, wrapAWSError(tagErr, "tagging bucket")
+		}
+		if recordEvent != nil {
+			recordEvent("Normal", "BucketAdopted", fmt.Sprintf("Adopted existing S3 bucket %s under management", bucket))
 		}
 	}
 
@@ -458,20 +448,6 @@ func buildLifecycleRules(rules []depsv1alpha1.S3LifecycleRule) []types.Lifecycle
 	return out
 }
 
-func recordTagPending(ledger []depsv1alpha1.ManagedResource, ledgerName, arn string, deletionPolicy depsv1alpha1.DeletionPolicy, force bool) []depsv1alpha1.ManagedResource {
-	now := metav1.Now()
-	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{
-		Type:           resourceType,
-		Name:           ledgerName,
-		ARN:            arn,
-		State:          depsv1alpha1.ManagedResourceStateTagPending,
-		DeletionPolicy: deletionPolicy,
-		Force:          force,
-		CreatedAt:      now,
-	})
-	return ledger
-}
-
 func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn string, deletionPolicy depsv1alpha1.DeletionPolicy, force bool) []depsv1alpha1.ManagedResource {
 	now := metav1.Now()
 	createdAt := now
@@ -489,18 +465,6 @@ func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn strin
 		LastVerifiedAt: &now,
 	})
 	return ledger
-}
-
-// recentlyCreatedByUs reports whether the ledger durably records this
-// operator creating this exact bucket recently enough (within
-// tagRetryClaimWindow) that a still-untagged bucket found under its name
-// should be trusted as "ours, the tag write just hasn't succeeded yet"
-// rather than treated as a foreign resource requiring adopt:true.
-func recentlyCreatedByUs(ledger []depsv1alpha1.ManagedResource, ledgerName string) bool {
-	existing := status.FindManagedResource(ledger, resourceType, ledgerName)
-	return existing != nil &&
-		existing.State == depsv1alpha1.ManagedResourceStateTagPending &&
-		time.Since(existing.CreatedAt.Time) < tagRetryClaimWindow
 }
 
 // isNotFoundError checks for a missing-bucket error across its several AWS

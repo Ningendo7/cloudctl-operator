@@ -27,7 +27,7 @@ import (
 // uniform section shape. Takes the whole reconciler (not just AWSClients,
 // unlike before) because encryption.kmsKeyRef resolution needs r.Client to
 // look up the producer CR a shared key belongs to.
-func snsSection(r *AppDependenciesReconciler) section {
+func snsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	return section{
 		name: "SNSReady",
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
@@ -50,6 +50,8 @@ func snsSection(r *AppDependenciesReconciler) section {
 				r.AWSClients.AccountID,
 				cr.Spec.SNS,
 				cr.Status.ManagedResources,
+				checkpointFor(r, cr, original),
+				eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
@@ -62,6 +64,7 @@ func snsSection(r *AppDependenciesReconciler) section {
 				cr.Spec.SNS,
 				cr.Status.ManagedResources,
 				false,
+				eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
@@ -69,7 +72,7 @@ func snsSection(r *AppDependenciesReconciler) section {
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(cr, "SNSReady", err)
+			setSectionCondition(ctx, cr, "SNSReady", err)
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
@@ -89,6 +92,7 @@ func snsSection(r *AppDependenciesReconciler) section {
 				cr.Spec.SNS,
 				cr.Status.ManagedResources,
 				true,
+				eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {

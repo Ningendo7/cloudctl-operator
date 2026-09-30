@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 )
 
 // actionSet enumerates the AWS IAM actions granted for one resource type,
@@ -122,7 +123,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 				// the queue it protects - same "always full access to what
 				// you own" rule, via the same recordOwned helper, keyed to
 				// the same ledger name kms.EnsureDedicatedKey uses.
-				grants, skipped = recordOwned(grants, skipped, "kms", q.Name+"-key", findLedgerEntry(cr, "kms", q.Name+"-key"))
+				grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("sqs", q.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("sqs", q.Name)))
 			}
 		}
 		for _, ref := range cr.Spec.SQS.Consumes {
@@ -137,7 +138,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 		for _, t := range cr.Spec.SNS.Resources {
 			grants, skipped = recordOwned(grants, skipped, "sns", t.Name, findLedgerEntry(cr, "sns", t.Name))
 			if t.Encryption != nil && t.Encryption.Enabled {
-				grants, skipped = recordOwned(grants, skipped, "kms", t.Name+"-key", findLedgerEntry(cr, "kms", t.Name+"-key"))
+				grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("sns", t.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("sns", t.Name)))
 			}
 		}
 		for _, ref := range cr.Spec.SNS.Consumes {
@@ -152,7 +153,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 		for _, tbl := range cr.Spec.DynamoDB.Resources {
 			grants, skipped = recordOwned(grants, skipped, "dynamodb", tbl.Name, findLedgerEntry(cr, "dynamodb", tbl.Name))
 			if tbl.Encryption != nil && tbl.Encryption.Enabled {
-				grants, skipped = recordOwned(grants, skipped, "kms", tbl.Name+"-key", findLedgerEntry(cr, "kms", tbl.Name+"-key"))
+				grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("dynamodb", tbl.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("dynamodb", tbl.Name)))
 			}
 		}
 		for _, ref := range cr.Spec.DynamoDB.Consumes {
@@ -167,7 +168,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 		for _, b := range cr.Spec.S3.Resources {
 			grants, skipped = recordOwned(grants, skipped, "s3", b.Name, findLedgerEntry(cr, "s3", b.Name))
 			if b.Encryption != nil && b.Encryption.Enabled {
-				grants, skipped = recordOwned(grants, skipped, "kms", b.Name+"-key", findLedgerEntry(cr, "kms", b.Name+"-key"))
+				grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("s3", b.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("s3", b.Name)))
 			}
 		}
 		for _, ref := range cr.Spec.S3.Consumes {

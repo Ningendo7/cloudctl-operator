@@ -80,10 +80,17 @@ SQS, SNS, DynamoDB, S3, KMS, CloudWatch alarms, and auto-derived IAM.
 - **[docs/architecture.md](docs/architecture.md)** — the design decisions:
   ownership and adoption, the trust window, deletion safety, naming,
   validation strategy.
-- **[docs/resources.md](docs/resources.md)** — field-by-field behavior and
-  known gaps for every resource type currently implemented.
+- **[docs/resources.md](docs/resources.md)** — field-by-field behavior,
+  known gaps, and a cross-resource-type lifecycle comparison for every
+  resource type currently implemented.
 - **[docs/testing.md](docs/testing.md)** — the test tiers: unit (always),
   integration (LocalStack, CI-gated), and what's deliberately deferred.
+- **[docs/aws-assumptions.md](docs/aws-assumptions.md)** — which AWS API
+  behaviors this code depends on have been verified against a real account
+  (and when) versus assumed from documentation.
+- **[docs/threat-model.md](docs/threat-model.md)** — what a multi-tenant
+  fleet of `AppDependencies` CRs can and can't cause this operator to do,
+  given it runs with one set of broad AWS credentials.
 
 Resources default to `deletionPolicy: Retain` — removing one from spec, or
 deleting the CR, leaves the AWS resource in place rather than risking data

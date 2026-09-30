@@ -31,6 +31,8 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/kmstest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -49,12 +51,12 @@ func TestEnsure_CreatesTableWithOwnerTagsAndOnDemandBilling(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id"},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	table, ok := client.tables[tableName]
 	if !ok {
 		t.Fatalf("expected table %q to be created", tableName)
@@ -84,7 +86,7 @@ func TestEnsure_CreatesCompositeKeyWhenSortKeySet(t *testing.T) {
 		{Name: "events", PartitionKey: "pk", SortKey: "sk"},
 	}}
 
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -94,7 +96,7 @@ func TestEnsure_CreatesCompositeKeyWhenSortKeySet(t *testing.T) {
 	// AttributeDefinitions/KeySchema pairing would surface as an error from
 	// a real AWS call, which this package's own logic must construct
 	// correctly regardless of what the fake checks.
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "events")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "events", 255)
 	if _, ok := client.tables[tableName]; !ok {
 		t.Fatalf("expected table %q to be created", tableName)
 	}
@@ -109,7 +111,7 @@ func TestEnsure_MovesToVerifiedOnceTableIsActive(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id"},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
@@ -117,7 +119,7 @@ func TestEnsure_MovesToVerifiedOnceTableIsActive(t *testing.T) {
 		t.Fatalf("test setup broken: expected Creating after first Ensure(), got %+v", entry)
 	}
 
-	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
+	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -132,7 +134,7 @@ func TestEnsure_MovesToVerifiedOnceTableIsActive(t *testing.T) {
 
 func TestEnsure_ReturnsRetryableErrorWhileTableIsStillCreating(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:    "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status: types.TableStatusCreating,
@@ -141,7 +143,7 @@ func TestEnsure_ReturnsRetryableErrorWhileTableIsStillCreating(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id"},
 	}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error while the table is still CREATING")
 	}
@@ -156,22 +158,22 @@ func TestEnsure_ReturnsRetryableErrorWhileTableIsStillCreating(t *testing.T) {
 
 func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 	client := newFakeDynamoDB()
-	kmsClient := newFakeKMSClient()
+	kmsClient := kmstest.NewFakeKMSClient()
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", "sessions-key")
+	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("dynamodb", "sessions"))
 	if keyEntry == nil {
 		t.Fatal("expected a dedicated KMS key ledger entry named \"sessions-key\"")
 	}
 
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	table, ok := client.tables[tableName]
 	if !ok {
 		t.Fatal("expected the table to have been created")
@@ -183,8 +185,8 @@ func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 
 func TestEnsure_CorrectsKMSKeyDriftOnActiveTable(t *testing.T) {
 	client := newFakeDynamoDB()
-	kmsClient := newFakeKMSClient()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	kmsClient := kmstest.NewFakeKMSClient()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:       types.TableStatusActive,
@@ -195,12 +197,12 @@ func TestEnsure_CorrectsKMSKeyDriftOnActiveTable(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", "sessions-key")
+	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("dynamodb", "sessions"))
 	if client.tables[tableName].kmsKeyARN != keyEntry.ARN {
 		t.Errorf("expected drift correction to set the table's KMS key to %q, got %q", keyEntry.ARN, client.tables[tableName].kmsKeyARN)
 	}
@@ -215,7 +217,7 @@ func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
 	}}
 	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error - the producer CR doesn't exist yet")
 	}
@@ -249,11 +251,11 @@ func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
 		}},
 	}}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	table, ok := client.tables[tableName]
 	if !ok {
 		t.Fatal("expected the table to have been created")
@@ -269,16 +271,16 @@ func TestEnsure_EnablesPointInTimeRecoveryWhenBackupRequested(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id", Backup: &depsv1alpha1.DynamoDBBackupSpec{Enabled: true}},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 	// Second pass: table is now ACTIVE, so PITR reconciliation actually runs.
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	if !client.tables[tableName].pitrEnabled {
 		t.Error("expected point-in-time recovery to be enabled")
 	}
@@ -293,15 +295,15 @@ func TestEnsure_SetsCustomRetentionDaysWhenBackupEnabled(t *testing.T) {
 		}},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	table := client.tables[tableName]
 	if !table.pitrEnabled {
 		t.Fatal("expected PITR to be enabled")
@@ -317,15 +319,15 @@ func TestEnsure_DefaultsToThirtyFiveDayRetentionWhenUnset(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id", Backup: &depsv1alpha1.DynamoDBBackupSpec{Enabled: true}},
 	}}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	if got := client.tables[tableName].retentionDays; got != 35 {
 		t.Errorf("expected AWS's default 35-day retention when unset, got %d", got)
 	}
@@ -333,7 +335,7 @@ func TestEnsure_DefaultsToThirtyFiveDayRetentionWhenUnset(t *testing.T) {
 
 func TestEnsure_CorrectsRetentionDaysDriftOnAlreadyEnabledTable(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:           "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:        types.TableStatusActive,
@@ -352,7 +354,7 @@ func TestEnsure_CorrectsRetentionDaysDriftOnAlreadyEnabledTable(t *testing.T) {
 			Enabled: true, RetentionDays: &retentionDays,
 		}},
 	}}
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -366,7 +368,7 @@ func TestEnsure_DoesNotTouchContinuousBackupsWhenNothingChanged(t *testing.T) {
 	// retention, a repeat reconcile must not call UpdateContinuousBackups
 	// at all - proven here by making any such call an unmistakable failure.
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:           "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:        types.TableStatusActive,
@@ -386,7 +388,7 @@ func TestEnsure_DoesNotTouchContinuousBackupsWhenNothingChanged(t *testing.T) {
 			Enabled: true, RetentionDays: &retentionDays,
 		}},
 	}}
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v — expected no UpdateContinuousBackups call when nothing changed", err)
 	}
 }
@@ -396,7 +398,7 @@ func TestEnsure_DoesNotCompareRetentionDaysWhilePITRDisabled(t *testing.T) {
 	// disabled, so it must never be compared (and never trigger a spurious
 	// UpdateContinuousBackups call) in that state.
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:         "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:      types.TableStatusActive,
@@ -412,14 +414,14 @@ func TestEnsure_DoesNotCompareRetentionDaysWhilePITRDisabled(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id"}, // no Backup at all - disabled
 	}}
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v — expected no UpdateContinuousBackups call while PITR stays disabled", err)
 	}
 }
 
 func TestEnsure_CorrectsBillingModeDriftOnExistingTable(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:         "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:      types.TableStatusActive,
@@ -433,7 +435,7 @@ func TestEnsure_CorrectsBillingModeDriftOnExistingTable(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id"},
 	}}
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -450,11 +452,11 @@ func TestEnsure_CreatesTableWithProvisionedBillingModeWhenRequested(t *testing.T
 		}},
 	}}
 
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	if client.tables[tableName].billingMode != types.BillingModeProvisioned {
 		t.Errorf("expected billing mode Provisioned, got %s", client.tables[tableName].billingMode)
 	}
@@ -462,7 +464,7 @@ func TestEnsure_CreatesTableWithProvisionedBillingModeWhenRequested(t *testing.T
 
 func TestEnsure_CorrectsBillingModeDriftToProvisionedOnExistingTable(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:         "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:      types.TableStatusActive,
@@ -478,7 +480,7 @@ func TestEnsure_CorrectsBillingModeDriftToProvisionedOnExistingTable(t *testing.
 			BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned,
 		}},
 	}}
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -495,7 +497,7 @@ func TestEnsure_TreatsNilBillingModeSummaryAsAlreadyProvisioned(t *testing.T) {
 	// UpdateTable every single reconcile because nil was misread as "not
 	// yet PayPerRequest" (the bug this replaced) or "not yet Provisioned".
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:    "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status: types.TableStatusActive,
@@ -512,7 +514,7 @@ func TestEnsure_TreatsNilBillingModeSummaryAsAlreadyProvisioned(t *testing.T) {
 			BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned,
 		}},
 	}}
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -530,7 +532,7 @@ func TestReconcileTableAttributes_TreatsResourceInUseAsRetryable(t *testing.T) {
 	// surface as retryable, not a hard failure, the same way CreateTable's
 	// own ResourceInUseException already does.
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:         "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:      types.TableStatusActive,
@@ -547,7 +549,7 @@ func TestReconcileTableAttributes_TreatsResourceInUseAsRetryable(t *testing.T) {
 			BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned,
 		}},
 	}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error from the failing UpdateTable call")
 	}
@@ -562,7 +564,7 @@ func TestReconcileTableAttributes_TreatsResourceInUseAsRetryable(t *testing.T) {
 
 func TestEnsure_RefusesUnownedTableWithoutAdopt(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:    "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status: types.TableStatusActive,
@@ -571,7 +573,7 @@ func TestEnsure_RefusesUnownedTableWithoutAdopt(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id"},
 	}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error for an untagged pre-existing table without adopt:true")
 	}
@@ -579,7 +581,7 @@ func TestEnsure_RefusesUnownedTableWithoutAdopt(t *testing.T) {
 
 func TestEnsure_AdoptsUntaggedTableWhenRequested(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:       types.TableStatusActive,
@@ -590,7 +592,7 @@ func TestEnsure_AdoptsUntaggedTableWhenRequested(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Adopt: true},
 	}}
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -604,7 +606,7 @@ func TestEnsure_AdoptsUntaggedTableWhenRequested(t *testing.T) {
 
 func TestEnsure_RejectsTableOwnedByDifferentCREvenWithAdopt(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:    "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status: types.TableStatusActive,
@@ -617,7 +619,7 @@ func TestEnsure_RejectsTableOwnedByDifferentCREvenWithAdopt(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Adopt: true},
 	}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to still refuse a table owned by a different AppDependencies CR")
 	}
@@ -625,7 +627,7 @@ func TestEnsure_RejectsTableOwnedByDifferentCREvenWithAdopt(t *testing.T) {
 
 func TestEnsure_RefusesAdoptingTableWithMismatchedKeySchema(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:       types.TableStatusActive,
@@ -636,7 +638,7 @@ func TestEnsure_RefusesAdoptingTableWithMismatchedKeySchema(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Adopt: true},
 	}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to still refuse a table whose actual key schema doesn't match spec")
 	}
@@ -647,7 +649,7 @@ func TestEnsure_RefusesAdoptingTableWithMismatchedKeySchema(t *testing.T) {
 
 func TestEnsure_RefusesAdoptingTableMissingASortKey(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
 		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:       types.TableStatusActive,
@@ -658,25 +660,25 @@ func TestEnsure_RefusesAdoptingTableMissingASortKey(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", SortKey: "createdAt", Adopt: true},
 	}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to still refuse a table missing a sort key the spec declares")
 	}
 }
 
-func TestEnsure_RejectsTableNameExceedingDynamoDBLimit(t *testing.T) {
+func TestEnsure_TruncatesTableNameExceedingDynamoDBLimit(t *testing.T) {
 	client := newFakeDynamoDB()
 	longKey := strings.Repeat("a", 250)
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: longKey, PartitionKey: "id"},
 	}}
 
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
-	if err == nil {
-		t.Fatal("expected an error for a computed table name exceeding the length limit")
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
 	}
-	if _, ok := client.tables[cloudctlaws.ResourceName("default", "checkout-service", longKey)]; ok {
-		t.Error("expected no CreateTable call to have been made for an over-length name")
+	if status.FindManagedResource(ledger, resourceType, longKey) == nil {
+		t.Error("expected a ledger entry for the table despite the over-length name")
 	}
 }
 
@@ -687,7 +689,7 @@ func TestEnsure_ClassifiesPermissionErrorsAsNotRetryable(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id"},
 	}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -698,7 +700,7 @@ func TestEnsure_ClassifiesPermissionErrorsAsNotRetryable(t *testing.T) {
 
 func TestEnsure_ContinuesToOtherTablesAfterOneFails(t *testing.T) {
 	client := newFakeDynamoDB()
-	badTableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	badTableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[badTableName] = &fakeTable{
 		arn:    "arn:aws:dynamodb:us-east-1:123456789012:table/" + badTableName,
 		status: types.TableStatusActive,
@@ -709,7 +711,7 @@ func TestEnsure_ContinuesToOtherTablesAfterOneFails(t *testing.T) {
 		{Name: "sessions", PartitionKey: "id"}, // fails: untagged, no adopt
 		{Name: "orders", PartitionKey: "id"},   // should still succeed
 	}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error reported for the unowned sessions table")
 	}
@@ -720,7 +722,7 @@ func TestEnsure_ContinuesToOtherTablesAfterOneFails(t *testing.T) {
 
 func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	tableArn := "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName
 	client.tables[tableName] = &fakeTable{
 		arn:          tableArn,
@@ -749,7 +751,7 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
 	}}
-	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v — expected the trust window to skip the ownership tag check", err)
 	}
@@ -765,7 +767,7 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 
 func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 	client := newFakeDynamoDB()
-	tableName := cloudctlaws.ResourceName("default", "checkout-service", "sessions")
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	tableArn := "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName
 	client.tables[tableName] = &fakeTable{
 		arn:          tableArn,
@@ -792,7 +794,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -809,7 +811,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	client := newFakeDynamoDB()
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id"}}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -819,7 +821,7 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	entry.LastVerifiedAt = &stale
 	status.UpsertManagedResource(&ledger, *entry)
 
-	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger)
+	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -827,5 +829,91 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	updatedEntry := status.FindManagedResource(updatedLedger, "dynamodb", "sessions")
 	if updatedEntry.LastVerifiedAt.Equal(&stale) {
 		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
+	}
+}
+
+type recordedEvent struct {
+	eventType, reason, message string
+}
+
+func newEventCollector() (status.EventRecorder, *[]recordedEvent) {
+	events := []recordedEvent{}
+	return func(eventType, reason, message string) {
+		events = append(events, recordedEvent{eventType, reason, message})
+	}, &events
+}
+
+func TestEnsure_CreatingTable_EmitsCreatingEvent(t *testing.T) {
+	client := newFakeDynamoDB()
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id"},
+	}}
+	recordEvent, events := newEventCollector()
+
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, recordEvent); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "TableCreating" {
+		t.Errorf("expected exactly one TableCreating event, got %+v", *events)
+	}
+}
+
+// The fake's CreateTable puts a table straight into ACTIVE (unlike real
+// DynamoDB), so the second Ensure() call here exercises the exact same
+// Creating-to-Verified transition TestEnsure_MovesToVerifiedOnceTableIsActive
+// covers - this test only adds the event assertion on top of it.
+func TestEnsure_TableBecomesActive_EmitsActiveEventOnlyOnTransition(t *testing.T) {
+	client := newFakeDynamoDB()
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id"},
+	}}
+
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	recordEvent, events := newEventCollector()
+	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, recordEvent)
+	if err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if len(*events) != 1 || (*events)[0].reason != "TableActive" {
+		t.Errorf("expected exactly one TableActive event on the Creating-to-Verified transition, got %+v", *events)
+	}
+
+	// A third call, now already Verified and within the trust window, must
+	// not re-fire TableActive - it's a one-time transition event, not a
+	// steady-state health signal.
+	recordEvent, events = newEventCollector()
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, recordEvent); err != nil {
+		t.Fatalf("third Ensure() error = %v", err)
+	}
+	if len(*events) != 0 {
+		t.Errorf("expected no event once already Verified, got %+v", *events)
+	}
+}
+
+func TestEnsure_AdoptingTable_EmitsAdoptedEvent(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	client.tables[tableName] = &fakeTable{
+		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:       types.TableStatusActive,
+		tags:         map[string]string{"team": "someone-else"},
+		partitionKey: "id",
+	}
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Adopt: true},
+	}}
+	recordEvent, events := newEventCollector()
+
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, recordEvent); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "TableAdopted" {
+		t.Errorf("expected exactly one TableAdopted event, got %+v", *events)
 	}
 }

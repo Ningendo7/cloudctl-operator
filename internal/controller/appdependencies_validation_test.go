@@ -303,4 +303,148 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Expect(obj.Spec.SNS.Resources[0].FIFO).To(BeFalse())
 		})
 	})
+
+	Context("EncryptionSpec mutual exclusivity", func() {
+		It("rejects enabled and kmsKeyRef set together", func() {
+			obj := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "validation-encryption-exclusive-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SQS: &depsv1alpha1.SQSSpec{
+						Resources: []depsv1alpha1.SQSQueueSpec{
+							{
+								Name: "orders",
+								Encryption: &depsv1alpha1.EncryptionSpec{
+									Enabled:   true,
+									KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "default", Name: "checkout-service", ResourceName: "primary"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("enabled and kmsKeyRef are mutually exclusive"))
+		})
+
+		It("accepts enabled alone", func() {
+			obj := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "validation-encryption-enabled-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SQS: &depsv1alpha1.SQSSpec{
+						Resources: []depsv1alpha1.SQSQueueSpec{
+							{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+		})
+
+		It("accepts kmsKeyRef alone", func() {
+			obj := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "validation-encryption-ref-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SQS: &depsv1alpha1.SQSSpec{
+						Resources: []depsv1alpha1.SQSQueueSpec{
+							{
+								Name: "orders",
+								Encryption: &depsv1alpha1.EncryptionSpec{
+									KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "default", Name: "checkout-service", ResourceName: "primary"},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+		})
+	})
+
+	Context("S3 lifecycle rule transition fields", func() {
+		It("rejects transitionStorageClass set without transitionAfterDays", func() {
+			obj := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "validation-s3-lifecycle-notransition-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					S3: &depsv1alpha1.S3Spec{
+						Resources: []depsv1alpha1.S3BucketSpec{
+							{
+								Name: "receipts",
+								Overrides: &depsv1alpha1.S3Overrides{
+									LifecycleRules: []depsv1alpha1.S3LifecycleRule{
+										{ID: "archive", TransitionStorageClass: "GLACIER"},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("transitionAfterDays is required when transitionStorageClass is set"))
+		})
+
+		It("accepts transitionStorageClass paired with transitionAfterDays", func() {
+			days := int32(30)
+			obj := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "validation-s3-lifecycle-withtransition-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					S3: &depsv1alpha1.S3Spec{
+						Resources: []depsv1alpha1.S3BucketSpec{
+							{
+								Name: "receipts",
+								Overrides: &depsv1alpha1.S3Overrides{
+									LifecycleRules: []depsv1alpha1.S3LifecycleRule{
+										{ID: "archive", TransitionStorageClass: "GLACIER", TransitionAfterDays: &days},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+		})
+
+		It("accepts a rule with neither transition field set", func() {
+			days := int32(90)
+			obj := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "validation-s3-lifecycle-expironly-",
+					Namespace:    "default",
+				},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					S3: &depsv1alpha1.S3Spec{
+						Resources: []depsv1alpha1.S3BucketSpec{
+							{
+								Name: "receipts",
+								Overrides: &depsv1alpha1.S3Overrides{
+									LifecycleRules: []depsv1alpha1.S3LifecycleRule{
+										{ID: "expire", ExpirationAfterDays: &days},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+		})
+	})
 })

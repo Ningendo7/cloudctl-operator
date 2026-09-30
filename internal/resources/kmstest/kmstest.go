@@ -14,7 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package dynamodb
+// Package kmstest is a shared test fixture, not production code: a minimal
+// in-memory stand-in for the real KMS client, implementing
+// cloudctlaws.KMSClient, so sqs/sns/s3/dynamodb's own encryption.enabled
+// and kmsKeyRef wiring (calling into kms.EnsureDedicatedKey) can be tested
+// without hitting real AWS. Detailed KMS behavior itself is already
+// covered by internal/resources/kms's own unit tests; this fake only needs
+// to be complete enough to exercise the dedicated-key/shared-key call from
+// each of those four packages - previously copy-pasted identically into
+// each one as its own fakekms_test.go, since a _test.go file's symbols
+// aren't importable across package boundaries. Must never be imported by
+// production code.
+package kmstest
 
 import (
 	"context"
@@ -24,31 +35,32 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 )
 
-// fakeKMSKey and fakeKMSClient are a minimal in-memory stand-in for the
-// real KMS client, implementing cloudctlaws.KMSClient, so this package's
-// own encryption.enabled wiring (calling into kms.EnsureDedicatedKey) can
-// be tested without hitting real AWS. Detailed KMS behavior itself is
-// already covered by internal/resources/kms's own unit tests; this fake
-// only needs to be complete enough to exercise the dedicated-key call.
-type fakeKMSKey struct {
+type fakeKey struct {
 	arn      string
 	keyID    string
 	tags     map[string]string
 	keyState types.KeyState
 }
 
-type fakeKMSClient struct {
-	keys    map[string]*fakeKMSKey // keyed by ARN
-	aliases map[string]string      // alias name -> ARN
+// FakeKMSClient implements cloudctlaws.KMSClient.
+type FakeKMSClient struct {
+	keys    map[string]*fakeKey // keyed by ARN
+	aliases map[string]string   // alias name -> ARN
 
 	nextKeyNum int
 }
 
-func newFakeKMSClient() *fakeKMSClient {
-	return &fakeKMSClient{keys: map[string]*fakeKMSKey{}, aliases: map[string]string{}}
+func NewFakeKMSClient() *FakeKMSClient {
+	return &FakeKMSClient{keys: map[string]*fakeKey{}, aliases: map[string]string{}}
 }
 
-func (f *fakeKMSClient) resolve(keyID string) string {
+// KeyCount reports how many keys currently exist, for tests asserting a
+// dedicated key was (or wasn't) created.
+func (f *FakeKMSClient) KeyCount() int {
+	return len(f.keys)
+}
+
+func (f *FakeKMSClient) resolve(keyID string) string {
 	if _, ok := f.keys[keyID]; ok {
 		return keyID
 	}
@@ -63,7 +75,7 @@ func (f *fakeKMSClient) resolve(keyID string) string {
 	return ""
 }
 
-func (f *fakeKMSClient) DescribeKey(_ context.Context, in *kms.DescribeKeyInput, _ ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
+func (f *FakeKMSClient) DescribeKey(_ context.Context, in *kms.DescribeKeyInput, _ ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
 	arn := f.resolve(*in.KeyId)
 	if arn == "" {
 		return nil, &types.NotFoundException{}
@@ -73,16 +85,16 @@ func (f *fakeKMSClient) DescribeKey(_ context.Context, in *kms.DescribeKeyInput,
 	return &kms.DescribeKeyOutput{KeyMetadata: &types.KeyMetadata{KeyId: &keyID, Arn: &keyArn, KeyState: state}}, nil
 }
 
-func (f *fakeKMSClient) CreateKey(_ context.Context, in *kms.CreateKeyInput, _ ...func(*kms.Options)) (*kms.CreateKeyOutput, error) {
+func (f *FakeKMSClient) CreateKey(_ context.Context, in *kms.CreateKeyInput, _ ...func(*kms.Options)) (*kms.CreateKeyOutput, error) {
 	f.nextKeyNum++
 	id := fmt.Sprintf("11111111-1111-1111-1111-%012d", f.nextKeyNum)
 	arn := "arn:aws:kms:us-east-1:123456789012:key/" + id
-	f.keys[arn] = &fakeKMSKey{arn: arn, keyID: id, tags: tagsFromKMSSlice(in.Tags), keyState: types.KeyStateEnabled}
+	f.keys[arn] = &fakeKey{arn: arn, keyID: id, tags: tagsFromKMSSlice(in.Tags), keyState: types.KeyStateEnabled}
 	keyID, keyArn := id, arn
 	return &kms.CreateKeyOutput{KeyMetadata: &types.KeyMetadata{KeyId: &keyID, Arn: &keyArn, KeyState: types.KeyStateEnabled}}, nil
 }
 
-func (f *fakeKMSClient) CreateAlias(_ context.Context, in *kms.CreateAliasInput, _ ...func(*kms.Options)) (*kms.CreateAliasOutput, error) {
+func (f *FakeKMSClient) CreateAlias(_ context.Context, in *kms.CreateAliasInput, _ ...func(*kms.Options)) (*kms.CreateAliasOutput, error) {
 	if _, exists := f.aliases[*in.AliasName]; exists {
 		return nil, &types.AlreadyExistsException{}
 	}
@@ -94,14 +106,14 @@ func (f *fakeKMSClient) CreateAlias(_ context.Context, in *kms.CreateAliasInput,
 	return &kms.CreateAliasOutput{}, nil
 }
 
-func (f *fakeKMSClient) EnableKeyRotation(_ context.Context, in *kms.EnableKeyRotationInput, _ ...func(*kms.Options)) (*kms.EnableKeyRotationOutput, error) {
+func (f *FakeKMSClient) EnableKeyRotation(_ context.Context, in *kms.EnableKeyRotationInput, _ ...func(*kms.Options)) (*kms.EnableKeyRotationOutput, error) {
 	if f.resolve(*in.KeyId) == "" {
 		return nil, &types.NotFoundException{}
 	}
 	return &kms.EnableKeyRotationOutput{}, nil
 }
 
-func (f *fakeKMSClient) ListResourceTags(_ context.Context, in *kms.ListResourceTagsInput, _ ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
+func (f *FakeKMSClient) ListResourceTags(_ context.Context, in *kms.ListResourceTagsInput, _ ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
 	arn := f.resolve(*in.KeyId)
 	if arn == "" {
 		return nil, &types.NotFoundException{}
@@ -109,7 +121,7 @@ func (f *fakeKMSClient) ListResourceTags(_ context.Context, in *kms.ListResource
 	return &kms.ListResourceTagsOutput{Tags: tagsToKMSSlice(f.keys[arn].tags)}, nil
 }
 
-func (f *fakeKMSClient) TagResource(_ context.Context, in *kms.TagResourceInput, _ ...func(*kms.Options)) (*kms.TagResourceOutput, error) {
+func (f *FakeKMSClient) TagResource(_ context.Context, in *kms.TagResourceInput, _ ...func(*kms.Options)) (*kms.TagResourceOutput, error) {
 	arn := f.resolve(*in.KeyId)
 	if arn == "" {
 		return nil, &types.NotFoundException{}
@@ -124,7 +136,7 @@ func (f *fakeKMSClient) TagResource(_ context.Context, in *kms.TagResourceInput,
 	return &kms.TagResourceOutput{}, nil
 }
 
-func (f *fakeKMSClient) UntagResource(_ context.Context, in *kms.UntagResourceInput, _ ...func(*kms.Options)) (*kms.UntagResourceOutput, error) {
+func (f *FakeKMSClient) UntagResource(_ context.Context, in *kms.UntagResourceInput, _ ...func(*kms.Options)) (*kms.UntagResourceOutput, error) {
 	arn := f.resolve(*in.KeyId)
 	if arn == "" {
 		return nil, &types.NotFoundException{}
@@ -135,7 +147,7 @@ func (f *fakeKMSClient) UntagResource(_ context.Context, in *kms.UntagResourceIn
 	return &kms.UntagResourceOutput{}, nil
 }
 
-func (f *fakeKMSClient) ScheduleKeyDeletion(_ context.Context, in *kms.ScheduleKeyDeletionInput, _ ...func(*kms.Options)) (*kms.ScheduleKeyDeletionOutput, error) {
+func (f *FakeKMSClient) ScheduleKeyDeletion(_ context.Context, in *kms.ScheduleKeyDeletionInput, _ ...func(*kms.Options)) (*kms.ScheduleKeyDeletionOutput, error) {
 	arn := f.resolve(*in.KeyId)
 	if arn == "" {
 		return nil, &types.NotFoundException{}
@@ -144,7 +156,7 @@ func (f *fakeKMSClient) ScheduleKeyDeletion(_ context.Context, in *kms.ScheduleK
 	return &kms.ScheduleKeyDeletionOutput{}, nil
 }
 
-func (f *fakeKMSClient) CancelKeyDeletion(_ context.Context, in *kms.CancelKeyDeletionInput, _ ...func(*kms.Options)) (*kms.CancelKeyDeletionOutput, error) {
+func (f *FakeKMSClient) CancelKeyDeletion(_ context.Context, in *kms.CancelKeyDeletionInput, _ ...func(*kms.Options)) (*kms.CancelKeyDeletionOutput, error) {
 	arn := f.resolve(*in.KeyId)
 	if arn == "" {
 		return nil, &types.NotFoundException{}

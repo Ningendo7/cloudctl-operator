@@ -285,6 +285,64 @@ func TestEnsure_DeletesConfigMapWhenNothingRemainsToReport(t *testing.T) {
 	}
 }
 
+// TestEnsure_PreExistingForeignConfigMap_Refused guards against silently
+// overwriting a same-named ConfigMap this CR doesn't own.
+func TestEnsure_PreExistingForeignConfigMap_Refused(t *testing.T) {
+	foreign := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "team-a",
+			Name:      ConfigMapName("checkout-service"),
+		},
+		Data: map[string]string{"UNRELATED": "keep-me"},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(foreign).Build()
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:team-a-checkout-service-orders"},
+			},
+		},
+	}
+
+	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err == nil {
+		t.Fatal("expected Ensure to refuse overwriting a ConfigMap it doesn't own")
+	}
+
+	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
+	if cm.Data["UNRELATED"] != "keep-me" || len(cm.Data) != 1 {
+		t.Errorf("expected the foreign ConfigMap's data untouched, got %v", cm.Data)
+	}
+}
+
+// TestEnsure_PreExistingForeignConfigMap_EmptyData_NotDeleted covers the
+// same guard on the delete path, which is more severe than an overwrite.
+func TestEnsure_PreExistingForeignConfigMap_EmptyData_NotDeleted(t *testing.T) {
+	foreign := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "team-a",
+			Name:      ConfigMapName("checkout-service"),
+		},
+		Data: map[string]string{"UNRELATED": "keep-me"},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(foreign).Build()
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+	}
+
+	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err == nil {
+		t.Fatal("expected Ensure to refuse deleting a ConfigMap it doesn't own")
+	}
+
+	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
+	if cm.Data["UNRELATED"] != "keep-me" {
+		t.Error("expected the foreign ConfigMap to survive untouched")
+	}
+}
+
 func keysOf(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

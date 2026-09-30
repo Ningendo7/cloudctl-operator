@@ -24,6 +24,7 @@ package serviceaccount
 
 import (
 	"context"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 )
 
 // RoleARNAnnotation is EKS's own well-known annotation: the AWS SDK inside
@@ -51,22 +53,18 @@ const RoleARNAnnotation = "eks.amazonaws.com/role-arn"
 // provide.
 const fieldOwner = client.FieldOwner("cloudctl-operator-serviceaccount")
 
-// Ensure attaches roleARN to the ServiceAccount this CR's workload should
-// run as: spec.ServiceAccountName if set, otherwise an operator-owned
-// ServiceAccount named after the CR itself. Returns the ServiceAccount
-// name actually written to (for the caller to persist to status), or the
-// unchanged current status value if roleARN is empty (nothing to attach
-// yet — the caller should not call Ensure at all once it has decided no
-// role exists, use Cleanup instead).
+// Ensure attaches roleARN to the ServiceAccount this CR's workload runs
+// as: spec.ServiceAccountName if set, otherwise a CR-named ServiceAccount
+// this operator owns. Returns the current status value unchanged if
+// roleARN is empty — use Cleanup once no role exists, not this.
 //
-// The owner reference (which makes this a ServiceAccount native GC deletes
-// along with the CR) is only ever applied when this call is the one
-// bringing the object into existence at the default, CR-named target —
-// never for one explicitly named in spec (that identity's lifecycle
-// belongs to whatever the user's own manifests do with it), and never
-// retroactively added to a default-named object that already existed
-// before this CR ever reconciled (a name match alone is never adoption —
-// same rule as every AWS-side resource in this project).
+// An owner reference (native GC ties its lifecycle to the CR) is set only
+// when this call creates the object at the default name — a name match
+// alone is never adoption, same rule as every AWS-side resource here.
+//
+// Every claim also stamps cloudctlaws.OwnerTagKey/OwnerUIDTagKey as
+// annotations, mirroring the AWS-side ownership tag. A target already
+// claimed by a different CR is refused, not overwritten.
 func Ensure(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDependencies, roleARN string) (string, error) {
 	if roleARN == "" {
 		return cr.Status.ServiceAccountName, nil
@@ -84,13 +82,24 @@ func Ensure(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDe
 		}
 	}
 
-	exists, err := serviceAccountExists(ctx, k8sClient, cr.Namespace, target)
+	existing, exists, err := getServiceAccount(ctx, k8sClient, cr.Namespace, target)
 	if err != nil {
 		return cr.Status.ServiceAccountName, err
 	}
+	if exists && existing.Annotations[cloudctlaws.OwnerTagKey] != "" &&
+		!cloudctlaws.IsOwnedBy(existing.Annotations, cr.Namespace, cr.Name, string(cr.UID)) {
+		return cr.Status.ServiceAccountName, fmt.Errorf(
+			"ServiceAccount %q is already claimed by a different AppDependencies CR (%s) — refusing to attach a different IAM role",
+			target, existing.Annotations[cloudctlaws.OwnerTagKey],
+		)
+	}
 
 	apply := applycorev1.ServiceAccount(target, cr.Namespace).
-		WithAnnotations(map[string]string{RoleARNAnnotation: roleARN})
+		WithAnnotations(map[string]string{
+			RoleARNAnnotation:          roleARN,
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(cr.Namespace, cr.Name),
+			cloudctlaws.OwnerUIDTagKey: string(cr.UID),
+		})
 	if defaultedName && !exists {
 		gvk, err := apiutil.GVKForObject(cr, k8sClient.Scheme())
 		if err != nil {
@@ -111,16 +120,16 @@ func Ensure(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDe
 	return target, nil
 }
 
-func serviceAccountExists(ctx context.Context, k8sClient client.Client, namespace, name string) (bool, error) {
-	sa := &corev1.ServiceAccount{}
-	err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sa)
+func getServiceAccount(ctx context.Context, k8sClient client.Client, namespace, name string) (sa *corev1.ServiceAccount, exists bool, err error) {
+	sa = &corev1.ServiceAccount{}
+	err = k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sa)
 	if apierrors.IsNotFound(err) {
-		return false, nil
+		return sa, false, nil
 	}
 	if err != nil {
-		return false, err
+		return sa, false, err
 	}
-	return true, nil
+	return sa, true, nil
 }
 
 // Cleanup releases this operator's claim on the ServiceAccount recorded in

@@ -349,16 +349,19 @@ func TestEnsure_ClassifiesMalformedPolicyDocumentAsNotRetryable(t *testing.T) {
 	}
 }
 
-func TestEnsure_RejectsRoleNameExceedingIAMLimit(t *testing.T) {
+func TestEnsure_TruncatesRoleNameExceedingIAMLimit(t *testing.T) {
 	client := newFakeIAM()
 	cr := ownedCR(strings.Repeat("a", 70))
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
-	if err == nil {
-		t.Fatal("expected an error for a computed role name exceeding the length limit")
+	_, arn, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
 	}
-	if len(client.roles) != 0 {
-		t.Error("expected no CreateRole call to have been made for an over-length name")
+	if len(arn) == 0 {
+		t.Fatal("expected a role to have been created despite the over-length name")
+	}
+	if len(roleName(cr.Namespace, cr.Name)) > iamRoleNameMaxLen {
+		t.Errorf("computed role name is %d characters, want <= %d", len(roleName(cr.Namespace, cr.Name)), iamRoleNameMaxLen)
 	}
 }
 

@@ -71,6 +71,8 @@ type fakeDynamoDB struct {
 	updateTableErr             error
 	updateContinuousBackupsErr error
 	listTagsOfResourceErr      error
+
+	scanCalls int
 }
 
 func newFakeDynamoDB() *fakeDynamoDB {
@@ -244,6 +246,7 @@ func (f *fakeDynamoDB) DescribeContinuousBackups(_ context.Context, in *dynamodb
 }
 
 func (f *fakeDynamoDB) Scan(_ context.Context, in *dynamodb.ScanInput, _ ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
+	f.scanCalls++
 	t, ok := f.tables[*in.TableName]
 	if !ok {
 		return nil, &types.ResourceNotFoundException{}

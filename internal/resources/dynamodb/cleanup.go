@@ -74,6 +74,7 @@ func Cleanup(
 	spec *depsv1alpha1.DynamoDBSpec,
 	ledger []depsv1alpha1.ManagedResource,
 	deleting bool,
+	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, results []CleanupResult, err error) {
 	declared := map[string]bool{}
 	if spec != nil && !deleting {
@@ -93,17 +94,25 @@ func Cleanup(
 			if entry.PendingDeletionSince != nil {
 				cleared := entry
 				cleared.PendingDeletionSince = nil
+				cleared.LastEmptyCheckAt = nil
 				status.UpsertManagedResource(&updatedLedger, cleared)
+				if recordEvent != nil {
+					recordEvent("Normal", "TableDeletionCancelled", fmt.Sprintf("Canceled pending deletion of table %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
+				}
 			}
 			continue
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			if relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry); relErr != nil {
+			relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+			if relErr != nil {
 				if firstErr == nil {
 					firstErr = relErr
 				}
 				continue
+			}
+			if relinquished && recordEvent != nil {
+				recordEvent("Normal", "TableOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained table %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
 			}
 			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
 			continue
@@ -131,9 +140,17 @@ func Cleanup(
 		if !entry.Force {
 			if entry.PendingDeletionSince == nil {
 				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
+				if recordEvent != nil {
+					recordEvent("Warning", "TableDeletionPending", fmt.Sprintf("Table %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
+				}
 				continue
 			}
 			if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
+				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
+				continue
+			}
+
+			if !status.NeedsEmptyCheck(entry) {
 				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
 				continue
 			}
@@ -146,7 +163,10 @@ func Cleanup(
 				continue
 			}
 			if !empty {
-				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
+				checked := entry
+				now := metav1.Now()
+				checked.LastEmptyCheckAt = &now
+				updatedLedger, results = markPendingDeletion(updatedLedger, results, checked)
 				continue
 			}
 		}
@@ -170,6 +190,9 @@ func Cleanup(
 			// ledger write or a later step failed before recording it) —
 			// treat like a successful delete rather than refusing to make
 			// progress on a table that's already correctly cleaned up.
+		}
+		if recordEvent != nil {
+			recordEvent("Warning", "TableDeleted", fmt.Sprintf("Deleted table %s (%s)", entry.Name, entry.ARN))
 		}
 		status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 	}
@@ -236,25 +259,25 @@ func tableNameFromARN(arn string) (string, error) {
 // relinquishIfStillTagged removes our ownership tag from a resource whose
 // deletionPolicy is Retain and is no longer declared. Idempotent — safe on
 // every reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, client dynamodbAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) error {
+func relinquishIfStillTagged(ctx context.Context, client dynamodbAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished bool, err error) {
 	tags, tErr := listAllTags(ctx, client, entry.ARN)
 	if tErr != nil {
 		var notFound *types.ResourceNotFoundException
 		if errors.As(tErr, &notFound) {
-			return nil // already gone, nothing to relinquish
+			return false, nil // already gone, nothing to relinquish
 		}
-		return wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained table %q", entry.Name))
+		return false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained table %q", entry.Name))
 	}
 	currentTags := tagsToMap(tags)
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		return nil // already relinquished, or never verified as ours
+		return false, nil // already relinquished, or never verified as ours
 	}
 
 	if _, uErr := client.UntagResource(ctx, &dynamodb.UntagResourceInput{
 		ResourceArn: &entry.ARN,
 		TagKeys:     []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
 	}); uErr != nil {
-		return wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained table %q", entry.Name))
+		return false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained table %q", entry.Name))
 	}
-	return nil
+	return true, nil
 }

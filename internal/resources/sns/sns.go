@@ -62,6 +62,8 @@ func Ensure(
 	accountID string,
 	spec *depsv1alpha1.SNSSpec,
 	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	if spec == nil {
 		return ledger, nil
@@ -70,7 +72,7 @@ func Ensure(
 	var firstErr error
 	for _, t := range spec.Resources {
 		var err error
-		ledger, err = ensureTopic(ctx, client, kmsClient, k8sClient, namespace, crName, crUID, region, accountID, t, ledger)
+		ledger, err = ensureTopic(ctx, client, kmsClient, k8sClient, namespace, crName, crUID, region, accountID, t, ledger, checkpoint, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("topic %q: %w", t.Name, err)
 		}
@@ -90,13 +92,18 @@ func ensureTopic(
 	accountID string,
 	t depsv1alpha1.SNSTopicSpec,
 	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	topicName := cloudctlaws.ResourceName(namespace, crName, t.Name)
+	const snsNameMaxLen = 256
+	const fifoSuffix = ".fifo"
+	budget := snsNameMaxLen
 	if t.FIFO {
-		topicName += ".fifo"
+		budget -= len(fifoSuffix)
 	}
-	if err := cloudctlaws.ValidateNameLength(topicName, 256, "SNS topic"); err != nil {
-		return ledger, err
+	topicName := cloudctlaws.ResourceName(namespace, crName, resourceType, t.Name, budget)
+	if t.FIFO {
+		topicName += fifoSuffix
 	}
 	topicArn := cloudctlaws.TopicARN(region, accountID, topicName)
 
@@ -113,7 +120,7 @@ func ensureTopic(
 			kmsKeyARN = &arn
 		}
 		if t.Encryption.Enabled {
-			arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, t.Name, t.DeletionPolicy, ledger)
+			arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, resourceType, t.Name, t.DeletionPolicy, ledger, checkpoint, recordEvent)
 			ledger = updatedLedger
 			if err != nil {
 				return ledger, fmt.Errorf("encryption key: %w", err)
@@ -170,6 +177,9 @@ func ensureTopic(
 		if cErr != nil {
 			return ledger, wrapAWSError(cErr, "creating topic")
 		}
+		if recordEvent != nil {
+			recordEvent("Normal", "TopicCreated", fmt.Sprintf("Created SNS topic %s", *createOut.TopicArn))
+		}
 		return recordVerified(ledger, t.Name, *createOut.TopicArn, t.DeletionPolicy, t.Force), nil
 	}
 	if err != nil {
@@ -190,6 +200,9 @@ func ensureTopic(
 		merged := cloudctlaws.MergeTags(currentTags, ownerTags)
 		if _, tagErr := client.TagResource(ctx, &sns.TagResourceInput{ResourceArn: &topicArn, Tags: mapToTags(merged)}); tagErr != nil {
 			return ledger, wrapAWSError(tagErr, "adopting topic (tagging)")
+		}
+		if recordEvent != nil {
+			recordEvent("Normal", "TopicAdopted", fmt.Sprintf("Adopted existing SNS topic %s under management", topicArn))
 		}
 	}
 

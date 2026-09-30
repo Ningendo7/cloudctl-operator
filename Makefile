@@ -103,6 +103,10 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 # gain _integration_test.go files.
 LOCALSTACK_CONTAINER ?= cloudctl-operator-test-localstack
 LOCALSTACK_PORT ?= 4566
+# Pinned by digest (not just the :3.8 tag) so a re-push to that tag upstream
+# can't silently change what CI and local integration runs actually test
+# against; bump both the tag and digest together on a deliberate upgrade.
+LOCALSTACK_IMAGE ?= localstack/localstack:3.8@sha256:b279c01f4cfb8f985a482e4014cabc1e2697b9d7a6c8c8db2e40f4d9f93687c7
 INTEGRATION_TEST_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/s3/...
 
 .PHONY: setup-test-integration
@@ -113,7 +117,7 @@ setup-test-integration: ## Start a LocalStack container for integration tests if
 	}
 	@if [ -z "$$($(CONTAINER_TOOL) ps -q -f name=^$(LOCALSTACK_CONTAINER)$$)" ]; then \
 		echo "Starting LocalStack container '$(LOCALSTACK_CONTAINER)'..."; \
-		$(CONTAINER_TOOL) run -d --name $(LOCALSTACK_CONTAINER) -p $(LOCALSTACK_PORT):4566 -e SERVICES=sqs,s3 localstack/localstack:3.8; \
+		$(CONTAINER_TOOL) run -d --name $(LOCALSTACK_CONTAINER) -p $(LOCALSTACK_PORT):4566 -e SERVICES=sqs,s3 $(LOCALSTACK_IMAGE); \
 		echo "Waiting for LocalStack to report SQS/S3 ready..."; \
 		timeout 60 bash -c 'until curl -sf http://localhost:$(LOCALSTACK_PORT)/_localstack/health 2>/dev/null | grep -q "\"sqs\""; do sleep 2; done'; \
 	else \

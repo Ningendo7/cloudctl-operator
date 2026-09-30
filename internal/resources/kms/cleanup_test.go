@@ -47,7 +47,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, CreatedAt: metav1.Now()},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -70,7 +70,7 @@ func TestCleanup_HoldsNewlyEligibleKeyForQuietWindowBeforeScheduling(t *testing.
 		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now()},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -95,7 +95,7 @@ func TestCleanup_SchedulesDeletionAfterQuietWindowElapses(t *testing.T) {
 		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -118,7 +118,7 @@ func TestCleanup_SkipsAlreadyScheduledKey(t *testing.T) {
 		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -136,7 +136,7 @@ func TestCleanup_TreatsAlreadyDeletedKeyAsSuccess(t *testing.T) {
 		{Type: resourceType, Name: "primary", ARN: "arn:aws:kms:us-east-1:123456789012:key/gone", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now()},
 	}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -154,7 +154,7 @@ func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err == nil {
 		t.Fatal("expected an error refusing to delete a key no longer verified as owned by this CR")
 	}
@@ -176,7 +176,7 @@ func TestCleanup_ClearsPendingDeletionMarkerWhenRedeclared(t *testing.T) {
 	}
 	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil, ledger, false)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -201,7 +201,7 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 		{Type: resourceType, Name: "good-key", ARN: goodARN, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err == nil {
 		t.Fatal("expected an error reported for the unowned key")
 	}
@@ -227,7 +227,7 @@ func TestCleanup_TreatsADedicatedKeyStillNeededAsDeclared(t *testing.T) {
 		{Type: resourceType, Name: "orders-key", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, []string{"orders-key"}, ledger, false)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, []string{"orders-key"}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -258,7 +258,7 @@ func TestCleanup_SchedulesADedicatedKeyNoLongerNeeded(t *testing.T) {
 	// dedicatedKeysStillNeeded no longer lists "orders-key" - the owning
 	// SQS resource's encryption was turned off, or the resource itself
 	// was removed from spec.
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -267,5 +267,60 @@ func TestCleanup_SchedulesADedicatedKeyNoLongerNeeded(t *testing.T) {
 	}
 	if status.FindManagedResource(updated, resourceType, "orders-key") != nil {
 		t.Error("expected the dedicated key's ledger entry to be removed once deletion is scheduled")
+	}
+}
+
+func TestCleanup_RelinquishingRetainedKey_EmitsEvent(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, CreatedAt: metav1.Now()},
+	}
+	recordEvent, events := newEventCollector()
+
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, recordEvent); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "KeyOwnershipRelinquished" {
+		t.Errorf("expected exactly one KeyOwnershipRelinquished event, got %+v", *events)
+	}
+}
+
+func TestCleanup_FirstNoticedForDeletion_EmitsPendingEvent(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now()},
+	}
+	recordEvent, events := newEventCollector()
+
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, recordEvent); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "KeyDeletionPending" {
+		t.Errorf("expected exactly one KeyDeletionPending event, got %+v", *events)
+	}
+}
+
+func TestCleanup_SchedulingDeletion_EmitsScheduledEvent(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	since := metav1.NewTime(time.Now().Add(-(deletionQuietWindow + time.Minute)))
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
+	}
+	recordEvent, events := newEventCollector()
+
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, recordEvent); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	if len(*events) != 1 || (*events)[0].reason != "KeyDeletionScheduled" {
+		t.Errorf("expected exactly one KeyDeletionScheduled event, got %+v", *events)
 	}
 }

@@ -84,3 +84,89 @@ func TestNeedsRevalidation(t *testing.T) {
 		})
 	}
 }
+
+func TestNeedsEmptyCheck(t *testing.T) {
+	now := time.Now()
+	since := func(age time.Duration) *metav1.Time {
+		t := metav1.NewTime(now.Add(-age))
+		return &t
+	}
+
+	cases := []struct {
+		name  string
+		entry depsv1alpha1.ManagedResource
+		want  bool
+	}{
+		{
+			"never marked pending",
+			depsv1alpha1.ManagedResource{},
+			true,
+		},
+		{
+			"within the no-backoff window, never checked",
+			depsv1alpha1.ManagedResource{PendingDeletionSince: since(1 * time.Hour)},
+			true,
+		},
+		{
+			"within the no-backoff window, checked a minute ago",
+			depsv1alpha1.ManagedResource{
+				PendingDeletionSince: since(1 * time.Hour),
+				LastEmptyCheckAt:     since(1 * time.Minute),
+			},
+			true,
+		},
+		{
+			"backoff just started, never checked",
+			depsv1alpha1.ManagedResource{PendingDeletionSince: since(EmptyCheckBackoffStartAfter + time.Minute)},
+			true,
+		},
+		{
+			"backoff just started, checked well inside the base interval",
+			depsv1alpha1.ManagedResource{
+				PendingDeletionSince: since(EmptyCheckBackoffStartAfter + time.Minute),
+				LastEmptyCheckAt:     since(1 * time.Minute),
+			},
+			false,
+		},
+		{
+			"backoff just started, base interval elapsed",
+			depsv1alpha1.ManagedResource{
+				PendingDeletionSince: since(EmptyCheckBackoffStartAfter + time.Minute),
+				LastEmptyCheckAt:     since(EmptyCheckBaseInterval + time.Minute),
+			},
+			true,
+		},
+		{
+			"one day into backoff, interval has doubled",
+			depsv1alpha1.ManagedResource{
+				PendingDeletionSince: since(EmptyCheckBackoffStartAfter + 24*time.Hour),
+				LastEmptyCheckAt:     since(EmptyCheckBaseInterval + time.Minute),
+			},
+			false,
+		},
+		{
+			"far past the cap, interval never exceeds EmptyCheckMaxInterval",
+			depsv1alpha1.ManagedResource{
+				PendingDeletionSince: since(EmptyCheckBackoffStartAfter + 30*24*time.Hour),
+				LastEmptyCheckAt:     since(EmptyCheckMaxInterval - time.Minute),
+			},
+			false,
+		},
+		{
+			"far past the cap, interval elapsed",
+			depsv1alpha1.ManagedResource{
+				PendingDeletionSince: since(EmptyCheckBackoffStartAfter + 30*24*time.Hour),
+				LastEmptyCheckAt:     since(EmptyCheckMaxInterval + time.Minute),
+			},
+			true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NeedsEmptyCheck(tc.entry); got != tc.want {
+				t.Errorf("NeedsEmptyCheck() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

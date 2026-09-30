@@ -96,7 +96,7 @@ func iamSection(r *AppDependenciesReconciler) section {
 			if err == nil {
 				err = saErr
 			}
-			setSectionCondition(cr, "IAMReady", err)
+			setSectionCondition(ctx, cr, "IAMReady", err)
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {

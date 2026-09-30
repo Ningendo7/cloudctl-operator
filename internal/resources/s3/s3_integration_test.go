@@ -78,7 +78,7 @@ func TestIntegration_Ensure_CreatesRealBucketWithVersioningLifecycleAndTags(t *t
 			Backup: &depsv1alpha1.S3BackupSpec{Enabled: true}},
 	}}
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -127,11 +127,11 @@ func TestIntegration_Ensure_IsIdempotentAgainstRealAWS(t *testing.T) {
 		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	ledger, err = Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, ledger)
+	ledger, err = Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -157,7 +157,7 @@ func TestIntegration_Ensure_AdoptsRealUntaggedBucket(t *testing.T) {
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Adopt: true},
 	}}
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil); err != nil {
+	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -180,14 +180,14 @@ func TestIntegration_Ensure_CorrectsVersioningDriftOnRealBucket(t *testing.T) {
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 
 	enabled := true
 	spec.Resources[0].Overrides = &depsv1alpha1.S3Overrides{VersioningEnabled: &enabled}
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, ledger); err != nil {
+	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, ledger, nil, nil); err != nil {
 		t.Fatalf("drift-correcting Ensure() error = %v", err)
 	}
 
@@ -210,12 +210,12 @@ func TestIntegration_Cleanup_DeletesRealBucketImmediatelyWhenForced(t *testing.T
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true)
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -243,7 +243,7 @@ func TestIntegration_Cleanup_BlocksRealWritesWhilePendingDeletion(t *testing.T) 
 		// at all — Delete without force is required to exercise it.
 		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: false},
 	}}
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", integrationRegion, integrationAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -251,7 +251,7 @@ func TestIntegration_Cleanup_BlocksRealWritesWhilePendingDeletion(t *testing.T) 
 	// Removing it from spec (empty S3Spec) makes it eligible for deletion;
 	// the first Cleanup pass should hold it for the quiet window rather
 	// than deleting outright, and block new writes in the meantime.
-	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false); err != nil {
+	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 

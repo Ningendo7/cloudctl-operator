@@ -69,7 +69,7 @@ func TestEnsure_CreatesSQSAgeAlarm(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	wantName := "default-checkout-service-orders-age"
+	wantName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", sqsAgeAlarmSuffix), alarmNameMaxLen)
 	alarm, ok := client.alarms[wantName]
 	if !ok {
 		t.Fatalf("expected alarm %q to exist, got %v", wantName, mapKeys(client.alarms))
@@ -77,7 +77,7 @@ func TestEnsure_CreatesSQSAgeAlarm(t *testing.T) {
 	if got := aws.ToString(alarm.input.MetricName); got != "ApproximateAgeOfOldestMessage" {
 		t.Errorf("MetricName = %q, want ApproximateAgeOfOldestMessage", got)
 	}
-	if len(alarm.input.Dimensions) != 1 || aws.ToString(alarm.input.Dimensions[0].Value) != "default-checkout-service-orders" {
+	if len(alarm.input.Dimensions) != 1 || aws.ToString(alarm.input.Dimensions[0].Value) != awsResourceNameWithFIFO("default", "checkout-service", "sqs", "orders", false, sqsNameMaxLen) {
 		t.Errorf("unexpected dimensions: %+v", alarm.input.Dimensions)
 	}
 	if alarm.tags[cloudctlaws.OwnerTagKey] != cloudctlaws.OwnerTagValue("default", "checkout-service") {
@@ -94,11 +94,11 @@ func TestEnsure_FIFOQueueUsesFIFODimensionValue(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	alarm := client.alarms["default-checkout-service-orders-age"]
+	alarm := client.alarms[cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", sqsAgeAlarmSuffix), alarmNameMaxLen)]
 	if alarm == nil {
 		t.Fatal("expected the age alarm to exist")
 	}
-	if got := aws.ToString(alarm.input.Dimensions[0].Value); got != "default-checkout-service-orders.fifo" {
+	if got := aws.ToString(alarm.input.Dimensions[0].Value); got != awsResourceNameWithFIFO("default", "checkout-service", "sqs", "orders", true, sqsNameMaxLen) {
 		t.Errorf("dimension value = %q, want the .fifo-suffixed queue name", got)
 	}
 }
@@ -112,7 +112,7 @@ func TestEnsure_DLQGetsBacklogAlarmSharingParentFIFOness(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	wantName := "default-checkout-service-orders-dlq-dlq-backlog"
+	wantName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey(cloudctlaws.DerivedKey("orders", "dlq"), sqsDLQBackLogAlarmSuffix), alarmNameMaxLen)
 	alarm, ok := client.alarms[wantName]
 	if !ok {
 		t.Fatalf("expected DLQ backlog alarm %q, got %v", wantName, mapKeys(client.alarms))
@@ -120,7 +120,7 @@ func TestEnsure_DLQGetsBacklogAlarmSharingParentFIFOness(t *testing.T) {
 	if got := aws.ToString(alarm.input.MetricName); got != "ApproximateNumberOfMessagesVisible" {
 		t.Errorf("MetricName = %q, want ApproximateNumberOfMessagesVisible", got)
 	}
-	if got := aws.ToString(alarm.input.Dimensions[0].Value); got != "default-checkout-service-orders-dlq.fifo" {
+	if got := aws.ToString(alarm.input.Dimensions[0].Value); got != awsResourceNameWithFIFO("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", "dlq"), true, sqsNameMaxLen) {
 		t.Errorf("dimension value = %q, want the DLQ's .fifo-suffixed name", got)
 	}
 }
@@ -134,7 +134,7 @@ func TestEnsure_CreatesSNSDeliveryFailedAlarm(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	alarm, ok := client.alarms["default-checkout-service-events-delivery-failed"]
+	alarm, ok := client.alarms[cloudctlaws.ResourceName("default", "checkout-service", "sns", cloudctlaws.DerivedKey("events", snsDeliveryFailedSuffix), alarmNameMaxLen)]
 	if !ok {
 		t.Fatal("expected the SNS delivery-failed alarm to exist")
 	}
@@ -152,10 +152,10 @@ func TestEnsure_CreatesDynamoDBThrottleAlarms(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	if _, ok := client.alarms["default-checkout-service-sessions-read-throttle"]; !ok {
+	if _, ok := client.alarms[cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", cloudctlaws.DerivedKey("sessions", dynamoReadThrottleSuffix), alarmNameMaxLen)]; !ok {
 		t.Error("expected a read-throttle alarm")
 	}
-	if _, ok := client.alarms["default-checkout-service-sessions-write-throttle"]; !ok {
+	if _, ok := client.alarms[cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", cloudctlaws.DerivedKey("sessions", dynamoWriteThrottleSuffix), alarmNameMaxLen)]; !ok {
 		t.Error("expected a write-throttle alarm")
 	}
 }
@@ -178,7 +178,7 @@ func TestEnsure_IsIdempotentAndPreservesOwnerTags(t *testing.T) {
 	if len(client.alarms) != 1 {
 		t.Fatalf("expected exactly one alarm after two reconciles, got %d", len(client.alarms))
 	}
-	alarm := client.alarms["default-checkout-service-orders-age"]
+	alarm := client.alarms[cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", sqsAgeAlarmSuffix), alarmNameMaxLen)]
 	if alarm.tags[cloudctlaws.OwnerTagKey] == "" {
 		t.Error("expected owner tag to survive the update reconcile")
 	}
@@ -202,10 +202,10 @@ func TestEnsure_RemovesAlarmForResourceNoLongerDeclared(t *testing.T) {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
-	if _, ok := client.alarms["default-checkout-service-orders-age"]; !ok {
+	if _, ok := client.alarms[cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", sqsAgeAlarmSuffix), alarmNameMaxLen)]; !ok {
 		t.Error("expected the still-declared queue's alarm to survive")
 	}
-	if _, ok := client.alarms["default-checkout-service-shipments-age"]; ok {
+	if _, ok := client.alarms[cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("shipments", sqsAgeAlarmSuffix), alarmNameMaxLen)]; ok {
 		t.Error("expected the removed queue's alarm to be deleted")
 	}
 }
@@ -232,8 +232,8 @@ func TestEnsure_RefusesToOverwriteUnownedAlarm(t *testing.T) {
 	client := newFakeCloudWatch()
 	// Simulate a pre-existing alarm at our exact deterministic name, created
 	// by something else (no owner tags).
-	client.alarms["default-checkout-service-orders-age"] = &fakeAlarm{
-		input: &cloudwatch.PutMetricAlarmInput{AlarmName: aws.String("default-checkout-service-orders-age")},
+	client.alarms[cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", sqsAgeAlarmSuffix), alarmNameMaxLen)] = &fakeAlarm{
+		input: &cloudwatch.PutMetricAlarmInput{AlarmName: aws.String(cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", sqsAgeAlarmSuffix), alarmNameMaxLen))},
 		tags:  map[string]string{},
 	}
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
@@ -294,7 +294,7 @@ func TestEnsure_SnsTopicRefWiresAlarmActionsWhenAuthorized(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	alarm := client.alarms["default-checkout-service-orders-age"]
+	alarm := client.alarms[cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", sqsAgeAlarmSuffix), alarmNameMaxLen)]
 	if alarm == nil {
 		t.Fatal("expected the age alarm to exist")
 	}

@@ -77,3 +77,42 @@ func NeedsRevalidation(entry depsv1alpha1.ManagedResource) bool {
 	}
 	return time.Since(entry.LastVerifiedAt.Time) > TrustWindow
 }
+
+// EmptyCheckBackoffStartAfter is how long a resource can sit pending
+// deletion before its emptiness checks start backing off at all - long
+// enough that an actively-managed drain is never affected by it.
+const EmptyCheckBackoffStartAfter = 24 * time.Hour
+
+// EmptyCheckBaseInterval is the required gap once backoff starts, doubling
+// once per additional elapsed day.
+const EmptyCheckBaseInterval = 10 * time.Minute
+
+// EmptyCheckMaxInterval caps how infrequently a long-neglected resource
+// pending deletion gets checked, so it's never abandoned outright.
+const EmptyCheckMaxInterval = 20 * time.Hour
+
+// NeedsEmptyCheck reports whether enough time has passed to justify
+// another real AWS emptiness check for a resource pending deletion. Always
+// true within EmptyCheckBackoffStartAfter of PendingDeletionSince or before
+// any check has run; after that, gated by the doubling interval above.
+func NeedsEmptyCheck(entry depsv1alpha1.ManagedResource) bool {
+	if entry.PendingDeletionSince == nil {
+		return true
+	}
+	age := time.Since(entry.PendingDeletionSince.Time)
+	if age < EmptyCheckBackoffStartAfter || entry.LastEmptyCheckAt == nil {
+		return true
+	}
+	return time.Since(entry.LastEmptyCheckAt.Time) >= emptyCheckInterval(age)
+}
+
+func emptyCheckInterval(age time.Duration) time.Duration {
+	interval := EmptyCheckBaseInterval
+	for daysPastStart := int((age - EmptyCheckBackoffStartAfter) / (24 * time.Hour)); daysPastStart > 0; daysPastStart-- {
+		interval *= 2
+		if interval >= EmptyCheckMaxInterval {
+			return EmptyCheckMaxInterval
+		}
+	}
+	return interval
+}

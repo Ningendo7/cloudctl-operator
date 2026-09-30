@@ -161,6 +161,7 @@ spec:
                             EncryptionSpec.
                           properties:
                             enabled:
+                              default: false
                               type: boolean
                             kmsKeyRef:
                               description: |-
@@ -465,6 +466,7 @@ spec:
                             EncryptionSpec.
                           properties:
                             enabled:
+                              default: false
                               type: boolean
                             kmsKeyRef:
                               description: |-
@@ -720,6 +722,7 @@ spec:
                             EncryptionSpec.
                           properties:
                             enabled:
+                              default: false
                               type: boolean
                             kmsKeyRef:
                               description: |-
@@ -904,6 +907,7 @@ spec:
                             EncryptionSpec.
                           properties:
                             enabled:
+                              default: false
                               type: boolean
                             kmsKeyRef:
                               description: |-
@@ -1137,6 +1141,13 @@ spec:
                       description: force mirrors the spec entry's force flag at the
                         same point.
                       type: boolean
+                    lastEmptyCheckAt:
+                      description: |-
+                        lastEmptyCheckAt is the last time a real AWS "is it empty yet" call
+                        was made while this resource sat pending deletion. Cleared alongside
+                        pendingDeletionSince.
+                      format: date-time
+                      type: string
                     lastVerifiedAt:
                       description: |-
                         lastVerifiedAt is the last time the ownership tag was confirmed to

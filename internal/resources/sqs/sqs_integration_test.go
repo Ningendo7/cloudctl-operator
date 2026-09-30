@@ -71,7 +71,7 @@ func TestIntegration_Ensure_CreatesRealQueueWithAttributesAndTags(t *testing.T) 
 	}}
 	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestIntegration_Ensure_CreatesRealQueueWithAttributesAndTags(t *testing.T) 
 		t.Fatal("expected a ledger entry for orders")
 	}
 
-	queueName := cloudctlaws.ResourceName(namespace, crName, "orders")
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
 	urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
 	if err != nil {
 		t.Fatalf("real GetQueueUrl() error = %v — queue wasn't actually created against LocalStack", err)
@@ -118,11 +118,11 @@ func TestIntegration_Ensure_IsIdempotentAgainstRealAWS(t *testing.T) {
 	}}
 	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	ledger, err = Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger)
+	ledger, err = Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -135,7 +135,7 @@ func TestIntegration_Ensure_AdoptsRealUntaggedQueue(t *testing.T) {
 	client := newIntegrationClient(t)
 	ctx := context.Background()
 	namespace, crName := "integration", uniqueSuffix(t)
-	queueName := cloudctlaws.ResourceName(namespace, crName, "orders")
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
 	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
 
 	// Create the queue directly via the real SDK, with no ownership tags at
@@ -148,7 +148,7 @@ func TestIntegration_Ensure_AdoptsRealUntaggedQueue(t *testing.T) {
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Adopt: true},
 	}}
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil); err != nil {
+	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -175,17 +175,17 @@ func TestIntegration_Ensure_CorrectsAttributeDriftOnRealQueue(t *testing.T) {
 	}}
 	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 
 	spec.Resources[0].Overrides.VisibilityTimeoutSeconds = aws.Int32(120)
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger); err != nil {
+	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil); err != nil {
 		t.Fatalf("drift-correcting Ensure() error = %v", err)
 	}
 
-	queueName := cloudctlaws.ResourceName(namespace, crName, "orders")
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
 	urlOut, _ := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
 	attrsOut, err := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 		QueueUrl:       urlOut.QueueUrl,
@@ -208,12 +208,12 @@ func TestIntegration_Cleanup_DeletesRealQueueImmediatelyWhenForced(t *testing.T)
 	}}
 	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true)
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -221,7 +221,7 @@ func TestIntegration_Cleanup_DeletesRealQueueImmediatelyWhenForced(t *testing.T)
 		t.Errorf("expected the ledger entry to be removed, got %+v", ledger)
 	}
 
-	queueName := cloudctlaws.ResourceName(namespace, crName, "orders")
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
 	if _, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName}); err == nil {
 		t.Error("expected the real queue to be gone after Cleanup, but GetQueueUrl succeeded")
 	}
@@ -244,7 +244,7 @@ func uniqueSuffix(t *testing.T) string {
 
 func deleteQueueIfExists(t *testing.T, client *sqs.Client, namespace, crName, resourceKey string) {
 	t.Helper()
-	queueName := cloudctlaws.ResourceName(namespace, crName, resourceKey)
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", resourceKey, 80)
 	urlOut, err := client.GetQueueUrl(context.Background(), &sqs.GetQueueUrlInput{QueueName: &queueName})
 	if err != nil {
 		return

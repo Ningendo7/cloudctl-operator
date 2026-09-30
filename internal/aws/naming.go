@@ -16,19 +16,71 @@ limitations under the License.
 
 package aws
 
-import "fmt"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
+)
+
+// identityHashLen is how many hex characters of the identity hash appear
+// in every derived AWS name.
+const identityHashLen = 12
+
+// identityHash fingerprints an ordered tuple of fields, joined with a NUL
+// byte before hashing — a byte no Kubernetes namespace/name or CRD
+// resourceKey pattern can legally contain, so two different tuples can
+// never produce the same hash input.
+func identityHash(fields ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(fields, "\x00")))
+	return hex.EncodeToString(sum[:])[:identityHashLen]
+}
+
+// derivedKeySeparator marks a resourceKey as one this operator computed
+// itself rather than one a user typed — '#' appears in none of this CRD's
+// resourceKey patterns.
+const derivedKeySeparator = "#"
+
+// DerivedKey builds the resourceKey for a resource this operator derives
+// from another one it owns (e.g. an SQS queue's DLQ), named by role so it
+// can never collide with a user-typed key.
+func DerivedKey(resourceKey, role string) string {
+	return resourceKey + derivedKeySeparator + role
+}
 
 // ResourceName derives a deterministic AWS resource name from an
-// AppDependencies CR's namespace/name and a resource's spec-level key. Safe
-// to recompute at any time — nothing about ownership tracking depends on
-// persisted random state.
+// AppDependencies CR's namespace/name, a resource type (sqs, sns,
+// dynamodb, s3, kms, iam), and a key within that type (see DerivedKey for
+// a derived one). Safe to recompute at any time.
 //
-// S3 needs its own variant (in the s3 resource package, not here) since
-// bucket names are unique across every AWS account globally, not just this
-// one, and need an account-id-derived suffix to avoid colliding with an
-// unrelated AWS customer.
-func ResourceName(namespace, crName, resourceKey string) string {
-	return fmt.Sprintf("%s-%s-%s", namespace, crName, resourceKey)
+// The result is a truncated, human-readable prefix followed by a
+// 12-hex-character hash of the full (namespace, crName, resourceType,
+// key) tuple — hashing the whole tuple, rather than joining the parts with
+// '-', keeps two different identities from ever landing on the same name
+// even when '-' appears inside one of the fields. maxLen is the target
+// service's own name limit; only the prefix is ever truncated, never the
+// hash.
+func ResourceName(namespace, crName, resourceType, key string, maxLen int) string {
+	hash := identityHash(namespace, crName, resourceType, key)
+	prefix := fmt.Sprintf("%s-%s-%s", namespace, crName, key)
+
+	budget := maxLen - len(hash) - 1
+	if budget < 0 {
+		budget = 0
+	}
+	if len(prefix) > budget {
+		prefix = prefix[:budget]
+	}
+	return prefix + "-" + hash
+}
+
+// DedicatedKeyLedgerName derives the ledger entry name for a dedicated KMS
+// key belonging to a resource in another section, keyed by that section's
+// own resource type as well as its resource name — an SQS queue and an S3
+// bucket that happen to share a name (legal, since they're declared in
+// different sections) must never derive the same dedicated key.
+func DedicatedKeyLedgerName(ownerType, resourceName string) string {
+	return ownerType + derivedKeySeparator + resourceName + derivedKeySeparator + "key"
 }
 
 // TopicARN constructs the deterministic ARN for an SNS topic. SNS has no
@@ -39,18 +91,4 @@ func ResourceName(namespace, crName, resourceKey string) string {
 // GetTopicAttributes, mirroring SQS's GetQueueUrl-first flow.
 func TopicARN(region, accountID, topicName string) string {
 	return fmt.Sprintf("arn:aws:sns:%s:%s:%s", region, accountID, topicName)
-}
-
-// ValidateNameLength checks a fully-derived resource name against a
-// service's maximum length, returning a clear, actionable error before an
-// AWS call would otherwise reject it with a much less helpful message.
-// Combined length of namespace + CR name + resource key easily exceeds a
-// tighter service limit (SQS's 80 characters, IAM's 64 once that's built)
-// even with entirely reasonable, non-adversarial names — this isn't a
-// theoretical edge case.
-func ValidateNameLength(name string, maxLength int, service string) error {
-	if len(name) > maxLength {
-		return fmt.Errorf("computed %s name %q is %d characters, exceeding the %d-character limit — shorten the namespace, CR name, or resource name", service, name, len(name), maxLength)
-	}
-	return nil
 }

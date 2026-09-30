@@ -52,12 +52,15 @@ type keyOptions struct {
 	adopt          bool
 }
 
+// aliasPrefix is the mandatory literal every KMS alias name starts with.
+const aliasPrefix = "alias/"
+
 // aliasName is this CR's deterministic KMS alias for one key entry — the
 // only name-based handle a KMS key has. Unlike every other resource type,
 // CreateKey itself accepts no name at all; only CreateAlias, a required
 // second call, does.
 func aliasName(namespace, crName, resourceName string) string {
-	return "alias/" + cloudctlaws.ResourceName(namespace, crName, resourceName)
+	return aliasPrefix + cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, aliasMaxLen-len(aliasPrefix))
 }
 
 // Ensure reconciles every declared KMS key against AWS, updating the
@@ -68,6 +71,8 @@ func Ensure(
 	namespace, crName, crUID string,
 	spec *depsv1alpha1.KMSSpec,
 	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	if spec == nil {
 		return ledger, nil
@@ -80,7 +85,7 @@ func Ensure(
 			adopt:          k.Adopt,
 		}
 		var err error
-		ledger, err = ensureKey(ctx, client, namespace, crName, crUID, k.Name, opts, ledger)
+		ledger, err = ensureKey(ctx, client, namespace, crName, crUID, k.Name, opts, ledger, checkpoint, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("key %q: %w", k.Name, err)
 		}
@@ -88,14 +93,10 @@ func Ensure(
 	return ledger, firstErr
 }
 
-// dedicatedKeyLedgerName derives the ledger entry name for a dedicated key
-// belonging to a resource in another section — resourceName + "-key",
-// mirroring how SQS's own DLQ derives its ledger name (resourceName +
-// "-dlq") from its owning queue. Kept as a named function (not just
-// inlined at each call site) since both this package's own Cleanup and
-// every calling section need to agree on the exact same derivation.
-func dedicatedKeyLedgerName(resourceName string) string {
-	return resourceName + "-key"
+// DedicatedKeyLedgerName re-exports cloudctlaws.DedicatedKeyLedgerName for
+// this package's own callers.
+func DedicatedKeyLedgerName(ownerType, resourceName string) string {
+	return cloudctlaws.DedicatedKeyLedgerName(ownerType, resourceName)
 }
 
 // EnsureDedicatedKey ensures a dedicated, operator-owned KMS key exists
@@ -103,25 +104,22 @@ func dedicatedKeyLedgerName(resourceName string) string {
 // s3, dynamodb) — for encryption.enabled:true, the common case that never
 // requires touching a kms.resources section at all. Returns the key's
 // ARN, for the caller to pass into its own create/attribute call.
-//
-// The ledger entry is recorded under dedicatedKeyLedgerName(resourceName)
-// — distinct from any name a user's own kms.resources entry might use, so
-// the two can never collide even if a section happens to share the same
-// base resourceName as an explicit kms.resources entry. deletionPolicy
-// should mirror the owning resource's own current policy (Retain if the
-// resource itself is retained — its data still needs to stay decryptable
-// — Delete otherwise), not be fixed at creation, so it's re-supplied and
-// re-recorded on every call rather than only set once.
+// deletionPolicy should mirror the owning resource's own current policy
+// (Retain if the resource itself is retained — its data still needs to
+// stay decryptable — Delete otherwise), not be fixed at creation, so it's
+// re-supplied and re-recorded on every call rather than only set once.
 func EnsureDedicatedKey(
 	ctx context.Context,
 	client kmsAPI,
-	namespace, crName, crUID, resourceName string,
+	namespace, crName, crUID, ownerType, resourceName string,
 	deletionPolicy depsv1alpha1.DeletionPolicy,
 	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
 ) (arn string, updatedLedger []depsv1alpha1.ManagedResource, err error) {
-	ledgerName := dedicatedKeyLedgerName(resourceName)
+	ledgerName := DedicatedKeyLedgerName(ownerType, resourceName)
 	opts := keyOptions{deletionPolicy: deletionPolicy}
-	updatedLedger, err = ensureKey(ctx, client, namespace, crName, crUID, ledgerName, opts, ledger)
+	updatedLedger, err = ensureKey(ctx, client, namespace, crName, crUID, ledgerName, opts, ledger, checkpoint, recordEvent)
 	if err != nil {
 		return "", updatedLedger, err
 	}
@@ -164,14 +162,13 @@ func ensureKey(
 	namespace, crName, crUID, resourceName string,
 	opts keyOptions,
 	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	alias := aliasName(namespace, crName, resourceName)
-	if err := cloudctlaws.ValidateNameLength(alias, aliasMaxLen, "KMS alias"); err != nil {
-		return ledger, err
-	}
 
 	if entry := status.FindManagedResource(ledger, resourceType, resourceName); entry != nil {
-		return resumeKey(ctx, client, namespace, crName, crUID, alias, opts, *entry, ledger)
+		return resumeKey(ctx, client, namespace, crName, crUID, alias, opts, *entry, ledger, recordEvent)
 	}
 
 	descirbeOut, err := client.DescribeKey(ctx, &kms.DescribeKeyInput{
@@ -179,13 +176,13 @@ func ensureKey(
 	})
 	var notFound *types.NotFoundException
 	if errors.As(err, &notFound) {
-		return createKey(ctx, client, namespace, crName, crUID, alias, resourceName, opts, ledger)
+		return createKey(ctx, client, namespace, crName, crUID, alias, resourceName, opts, ledger, checkpoint, recordEvent)
 	}
 	if err != nil {
 		return ledger, wrapAWSError(err, "looking up KMS key alias")
 	}
 
-	return adoptKey(ctx, client, namespace, crName, crUID, alias, resourceName, opts, *descirbeOut.KeyMetadata, ledger)
+	return adoptKey(ctx, client, namespace, crName, crUID, alias, resourceName, opts, *descirbeOut.KeyMetadata, ledger, recordEvent)
 }
 
 // createKey makes a brand new key: CreateKey (Tags set atomically; Policy
@@ -202,6 +199,8 @@ func createKey(
 	namespace, crName, crUID, alias, resourceName string,
 	opts keyOptions,
 	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	createOut, err := client.CreateKey(ctx, &kms.CreateKeyInput{
 		Tags: mapToTags(ownerTags(namespace, crName, crUID)),
@@ -214,6 +213,21 @@ func createKey(
 
 	ledger = recordKey(ledger, resourceName, arn, opts.deletionPolicy, depsv1alpha1.ManagedResourceStateTagPending)
 
+	// Persist now, before EnableKeyRotation/CreateAlias: the key already
+	// exists and is durably tagged as ours, but until it has an alias it's
+	// only findable by ARN — a crash here with no record of this ARN
+	// anywhere would leave AWS holding a real, billed key that the next
+	// reconcile has no way to find and would create a second one alongside.
+	if checkpoint != nil {
+		if err := checkpoint(ctx, ledger); err != nil {
+			return ledger, wrapAWSError(err, "checkpointing ledger before creating KMS alias")
+		}
+	}
+	// Reported at the same point the checkpoint above persists.
+	if recordEvent != nil {
+		recordEvent("Normal", "KeyCreated", fmt.Sprintf("Created KMS key %s", arn))
+	}
+
 	// Automatic rotation is a fire-and-forget, default-on decision — set
 	// once at creation, never exposed as spec config, never re-verified on
 	// later reconciles (AWS doesn't silently turn it off on its own).
@@ -225,6 +239,9 @@ func createKey(
 
 	if err := ensureAlias(ctx, client, alias, arn, keyID); err != nil {
 		return ledger, err
+	}
+	if recordEvent != nil {
+		recordEvent("Normal", "KeyAliasCreated", fmt.Sprintf("Created alias %s for KMS key %s", alias, arn))
 	}
 
 	return recordKey(ledger, resourceName, arn, opts.deletionPolicy, depsv1alpha1.ManagedResourceStateVerified), nil
@@ -242,6 +259,7 @@ func resumeKey(
 	opts keyOptions,
 	entry depsv1alpha1.ManagedResource,
 	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	describeOut, err := client.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &entry.ARN,
@@ -278,6 +296,9 @@ func resumeKey(
 		}); err != nil {
 			return ledger, wrapAWSError(err, fmt.Sprintf("canceling scheduled deletion of KMS key %q now that it's declared again", entry.Name))
 		}
+		if recordEvent != nil {
+			recordEvent("Normal", "KeyDeletionCancelled", fmt.Sprintf("Canceled scheduled deletion of KMS key %s (alias %s); resource reappeared in spec", entry.ARN, alias))
+		}
 	}
 
 	if err := ensureAlias(ctx, client, alias, entry.ARN, keyID); err != nil {
@@ -298,6 +319,7 @@ func adoptKey(
 	opts keyOptions,
 	meta types.KeyMetadata,
 	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	arn := *meta.Arn
 	tags, tErr := listAllResourceTags(ctx, client, arn)
@@ -323,12 +345,18 @@ func adoptKey(
 	}); err != nil {
 		return ledger, wrapAWSError(err, fmt.Sprintf("adopting KMS key %q (tagging)", alias))
 	}
+	if recordEvent != nil {
+		recordEvent("Normal", "KeyAdopted", fmt.Sprintf("Adopted existing KMS key %s (alias %s) under management", arn, alias))
+	}
 
 	if meta.KeyState == types.KeyStatePendingDeletion {
 		if _, err := client.CancelKeyDeletion(ctx, &kms.CancelKeyDeletionInput{
 			KeyId: &arn,
 		}); err != nil {
 			return ledger, wrapAWSError(err, fmt.Sprintf("canceling scheduled deletion of adopted KMS key %q", alias))
+		}
+		if recordEvent != nil {
+			recordEvent("Normal", "KeyDeletionCancelled", fmt.Sprintf("Canceled scheduled deletion of adopted KMS key %s (alias %s)", arn, alias))
 		}
 	}
 

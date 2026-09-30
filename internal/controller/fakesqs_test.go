@@ -46,6 +46,7 @@ type fakeSQSClient struct {
 	queues map[string]*fakeQueue // keyed by queue name
 
 	createQueueErr error
+	getQueueUrlErr error
 }
 
 func newFakeSQSClient() *fakeSQSClient {
@@ -70,6 +71,9 @@ func (f *fakeSQSClient) CreateQueue(_ context.Context, in *sqs.CreateQueueInput,
 }
 
 func (f *fakeSQSClient) GetQueueUrl(_ context.Context, in *sqs.GetQueueUrlInput, _ ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error) {
+	if f.getQueueUrlErr != nil {
+		return nil, f.getQueueUrlErr
+	}
 	q, ok := f.queues[*in.QueueName]
 	if !ok {
 		return nil, &types.QueueDoesNotExist{}
