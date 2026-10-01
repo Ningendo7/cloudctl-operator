@@ -1,0 +1,10 @@
+apiVersion: deps.cloudctl.io/v1alpha1
+kind: AppDependencies
+metadata:
+  name: e2e-orders
+spec:
+  sqs:
+    resources:
+      - name: orders
+        deletionPolicy: Delete
+        force: true

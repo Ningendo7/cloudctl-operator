@@ -139,6 +139,14 @@ func NewClients(ctx context.Context) (*Clients, error) {
 		}),
 		S3: s3.NewFromConfig(cfg, func(o *s3.Options) {
 			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters["s3"]))
+			// A non-nil BaseEndpoint only happens when AWS_ENDPOINT_URL is
+			// explicitly set - never true against real AWS, always true
+			// against a test double like LocalStack, whose virtual-hosted
+			// -style bucket URLs (bucket.s3.amazonaws.com) don't resolve to
+			// a non-AWS host.
+			if cfg.BaseEndpoint != nil {
+				o.UsePathStyle = true
+			}
 		}),
 		DynamoDB: dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
 			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters["dynamodb"]))
