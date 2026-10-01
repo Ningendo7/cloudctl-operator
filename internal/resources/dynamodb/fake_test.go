@@ -18,6 +18,7 @@ package dynamodb
 
 import (
 	"context"
+	"maps"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -188,9 +189,7 @@ func (f *fakeDynamoDB) TagResource(_ context.Context, in *dynamodb.TagResourceIn
 	if t.tags == nil {
 		t.tags = map[string]string{}
 	}
-	for k, v := range tagsToMap(in.Tags) {
-		t.tags[k] = v
-	}
+	maps.Copy(t.tags, tagsToMap(in.Tags))
 	return &dynamodb.TagResourceOutput{}, nil
 }
 

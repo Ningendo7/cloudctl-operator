@@ -92,13 +92,21 @@ func truncateAndAppendHash(prefix, hash string, maxLen int) string {
 	return prefix + "-" + hash
 }
 
+// DedicatedKeyRole identifies the "dedicated encryption key" derivation
+// role, shared between DedicatedKeyLedgerName below and the kms package's
+// own DerivedResourceName call for the same key's real alias — both must
+// use the identical literal, since kms.EnsureDedicatedKey relies on the
+// two staying in lockstep to find the same key by ledger name that it
+// names in AWS.
+const DedicatedKeyRole = "key"
+
 // DedicatedKeyLedgerName derives the ledger entry name for a dedicated KMS
 // key belonging to a resource in another section, keyed by that section's
 // own resource type as well as its resource name — an SQS queue and an S3
 // bucket that happen to share a name (legal, since they're declared in
 // different sections) must never derive the same dedicated key.
 func DedicatedKeyLedgerName(ownerType, resourceName string) string {
-	return ownerType + derivedKeySeparator + resourceName + derivedKeySeparator + "key"
+	return ownerType + derivedKeySeparator + resourceName + derivedKeySeparator + DedicatedKeyRole
 }
 
 // TopicARN constructs the deterministic ARN for an SNS topic. SNS has no

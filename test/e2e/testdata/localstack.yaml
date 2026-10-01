@@ -27,10 +27,15 @@ spec:
         - name: localstack
           # Pinned by digest, matching Makefile's own LOCALSTACK_IMAGE var -
           # bump both together on a deliberate upgrade.
-          image: localstack/localstack:3.8@sha256:b279c01f4cfb8f985a482e4014cabc1e2697b9d7a6c8c8db2e40f4d9f93687c7
+          image: localstack/localstack:4.9.0@sha256:e74aa0e3dad049db6a6a86dd0d4187e054a63ec4e4273d91959b2c41093bf566
           env:
             - name: SERVICES
-              value: sqs,sns,s3,dynamodb,iam,sts
+              # cloudwatch is required even for a CR that never declares
+              # alarms: the Alarms section always calls DescribeAlarms every
+              # reconcile to find and clean up previously-created alarms no
+              # longer desired, the same declared-vs-ledger diff every other
+              # section runs.
+              value: sqs,sns,s3,dynamodb,iam,sts,cloudwatch
           ports:
             - containerPort: 4566
               name: edge

@@ -525,7 +525,6 @@ func ownerTags(namespace, crName, crUID string) map[string]string {
 func mapToTags(m map[string]string) []types.Tag {
 	tags := make([]types.Tag, 0, len(m))
 	for k, v := range m {
-		k, v := k, v
 		tags = append(tags, types.Tag{Key: &k, Value: &v})
 	}
 	return tags

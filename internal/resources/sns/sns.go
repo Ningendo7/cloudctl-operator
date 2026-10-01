@@ -306,7 +306,6 @@ func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn strin
 func mapToTags(m map[string]string) []types.Tag {
 	tags := make([]types.Tag, 0, len(m))
 	for k, v := range m {
-		k, v := k, v
 		tags = append(tags, types.Tag{Key: &k, Value: &v})
 	}
 	return tags
@@ -322,12 +321,12 @@ func tagsToMap(tags []types.Tag) map[string]string {
 	return m
 }
 
-func wrapAWSError(err error, context string) error {
+func wrapAWSError(err error, errContext string) error {
 	if err == nil {
 		return nil
 	}
 	return &cloudctlaws.ReconcileError{
-		Err:       fmt.Errorf("%s: %w", context, err),
+		Err:       fmt.Errorf("%s: %w", errContext, err),
 		Retryable: cloudctlaws.IsRetryable(err),
 	}
 }

@@ -18,6 +18,7 @@ package sns
 
 import (
 	"context"
+	"maps"
 
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sns/types"
@@ -82,9 +83,7 @@ func (f *fakeSNS) GetTopicAttributes(_ context.Context, in *sns.GetTopicAttribut
 		return nil, &types.NotFoundException{}
 	}
 	out := map[string]string{"Policy": topic.policy}
-	for k, v := range topic.attributes {
-		out[k] = v
-	}
+	maps.Copy(out, topic.attributes)
 	return &sns.GetTopicAttributesOutput{Attributes: out}, nil
 }
 
@@ -134,9 +133,7 @@ func (f *fakeSNS) TagResource(_ context.Context, in *sns.TagResourceInput, _ ...
 	if topic.tags == nil {
 		topic.tags = map[string]string{}
 	}
-	for k, v := range tagsToMap(in.Tags) {
-		topic.tags[k] = v
-	}
+	maps.Copy(topic.tags, tagsToMap(in.Tags))
 	return &sns.TagResourceOutput{}, nil
 }
 

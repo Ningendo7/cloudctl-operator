@@ -19,6 +19,7 @@ package sqs
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -110,9 +111,7 @@ func (f *fakeSQS) GetQueueAttributes(_ context.Context, in *sqs.GetQueueAttribut
 		string(types.QueueAttributeNameApproximateNumberOfMessagesDelayed):    q.approxMessagesDelayed,
 		string(types.QueueAttributeNamePolicy):                                q.policy,
 	}
-	for k, v := range q.attributes {
-		out[k] = v
-	}
+	maps.Copy(out, q.attributes)
 	return &sqs.GetQueueAttributesOutput{Attributes: out}, nil
 }
 
@@ -155,9 +154,7 @@ func (f *fakeSQS) TagQueue(_ context.Context, in *sqs.TagQueueInput, _ ...func(*
 	if q.tags == nil {
 		q.tags = map[string]string{}
 	}
-	for k, v := range in.Tags {
-		q.tags[k] = v
-	}
+	maps.Copy(q.tags, in.Tags)
 	return &sqs.TagQueueOutput{}, nil
 }
 

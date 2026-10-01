@@ -76,7 +76,7 @@ func aliasName(namespace, crName, resourceName string, opts keyOptions) string {
 // ownership ledger as it goes.
 func Ensure(
 	ctx context.Context,
-	client kmsAPI,
+	kmsClient kmsAPI,
 	namespace, crName, crUID string,
 	spec *depsv1alpha1.KMSSpec,
 	ledger []depsv1alpha1.ManagedResource,
@@ -94,7 +94,7 @@ func Ensure(
 			adopt:          k.Adopt,
 		}
 		var err error
-		ledger, err = ensureKey(ctx, client, namespace, crName, crUID, k.Name, opts, ledger, checkpoint, recordEvent)
+		ledger, err = ensureKey(ctx, kmsClient, namespace, crName, crUID, k.Name, opts, ledger, checkpoint, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("key %q: %w", k.Name, err)
 		}
@@ -119,7 +119,7 @@ func DedicatedKeyLedgerName(ownerType, resourceName string) string {
 // re-supplied and re-recorded on every call rather than only set once.
 func EnsureDedicatedKey(
 	ctx context.Context,
-	client kmsAPI,
+	kmsClient kmsAPI,
 	namespace, crName, crUID, ownerType, resourceName string,
 	deletionPolicy depsv1alpha1.DeletionPolicy,
 	ledger []depsv1alpha1.ManagedResource,
@@ -129,9 +129,9 @@ func EnsureDedicatedKey(
 	ledgerName := DedicatedKeyLedgerName(ownerType, resourceName)
 	opts := keyOptions{
 		deletionPolicy: deletionPolicy,
-		aliasParts:     []string{ownerType, resourceName, "key"},
+		aliasParts:     []string{ownerType, resourceName, cloudctlaws.DedicatedKeyRole},
 	}
-	updatedLedger, err = ensureKey(ctx, client, namespace, crName, crUID, ledgerName, opts, ledger, checkpoint, recordEvent)
+	updatedLedger, err = ensureKey(ctx, kmsClient, namespace, crName, crUID, ledgerName, opts, ledger, checkpoint, recordEvent)
 	if err != nil {
 		return "", updatedLedger, err
 	}
@@ -170,7 +170,7 @@ func ResolveSharedKeyARN(ctx context.Context, k8sClient client.Client, namespace
 // second, orphaned key underneath the first.
 func ensureKey(
 	ctx context.Context,
-	client kmsAPI,
+	kmsClient kmsAPI,
 	namespace, crName, crUID, resourceName string,
 	opts keyOptions,
 	ledger []depsv1alpha1.ManagedResource,
@@ -180,21 +180,21 @@ func ensureKey(
 	alias := aliasName(namespace, crName, resourceName, opts)
 
 	if entry := status.FindManagedResource(ledger, resourceType, resourceName); entry != nil {
-		return resumeKey(ctx, client, namespace, crName, crUID, alias, opts, *entry, ledger, recordEvent)
+		return resumeKey(ctx, kmsClient, namespace, crName, crUID, alias, opts, *entry, ledger, recordEvent)
 	}
 
-	descirbeOut, err := client.DescribeKey(ctx, &kms.DescribeKeyInput{
+	descirbeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &alias,
 	})
 	var notFound *types.NotFoundException
 	if errors.As(err, &notFound) {
-		return createKey(ctx, client, namespace, crName, crUID, alias, resourceName, opts, ledger, checkpoint, recordEvent)
+		return createKey(ctx, kmsClient, namespace, crName, crUID, alias, resourceName, opts, ledger, checkpoint, recordEvent)
 	}
 	if err != nil {
 		return ledger, wrapAWSError(err, "looking up KMS key alias")
 	}
 
-	return adoptKey(ctx, client, namespace, crName, crUID, alias, resourceName, opts, *descirbeOut.KeyMetadata, ledger, recordEvent)
+	return adoptKey(ctx, kmsClient, namespace, crName, crUID, alias, resourceName, opts, *descirbeOut.KeyMetadata, ledger, recordEvent)
 }
 
 // createKey makes a brand new key: CreateKey (Tags set atomically; Policy
@@ -207,14 +207,14 @@ func ensureKey(
 // non-atomic second step), enable rotation, then create the alias.
 func createKey(
 	ctx context.Context,
-	client kmsAPI,
+	kmsClient kmsAPI,
 	namespace, crName, crUID, alias, resourceName string,
 	opts keyOptions,
 	ledger []depsv1alpha1.ManagedResource,
 	checkpoint status.Checkpoint,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	createOut, err := client.CreateKey(ctx, &kms.CreateKeyInput{
+	createOut, err := kmsClient.CreateKey(ctx, &kms.CreateKeyInput{
 		Tags: mapToTags(ownerTags(namespace, crName, crUID)),
 	})
 	if err != nil {
@@ -243,13 +243,13 @@ func createKey(
 	// Automatic rotation is a fire-and-forget, default-on decision — set
 	// once at creation, never exposed as spec config, never re-verified on
 	// later reconciles (AWS doesn't silently turn it off on its own).
-	if _, err := client.EnableKeyRotation(ctx, &kms.EnableKeyRotationInput{
+	if _, err := kmsClient.EnableKeyRotation(ctx, &kms.EnableKeyRotationInput{
 		KeyId: &keyID,
 	}); err != nil {
 		return ledger, wrapAWSError(err, "enabling automatic key rotation")
 	}
 
-	if err := ensureAlias(ctx, client, alias, arn, keyID); err != nil {
+	if err := ensureAlias(ctx, kmsClient, alias, arn, keyID); err != nil {
 		return ledger, err
 	}
 	if recordEvent != nil {
@@ -266,14 +266,14 @@ func createKey(
 // window scheduled one and the resource has since reappeared in spec.
 func resumeKey(
 	ctx context.Context,
-	client kmsAPI,
+	kmsClient kmsAPI,
 	namespace, crName, crUID, alias string,
 	opts keyOptions,
 	entry depsv1alpha1.ManagedResource,
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	describeOut, err := client.DescribeKey(ctx, &kms.DescribeKeyInput{
+	describeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &entry.ARN,
 	})
 	var notFound *types.NotFoundException
@@ -294,7 +294,7 @@ func resumeKey(
 	}
 	keyID := *describeOut.KeyMetadata.KeyId
 
-	tags, tErr := listAllResourceTags(ctx, client, entry.ARN)
+	tags, tErr := listAllResourceTags(ctx, kmsClient, entry.ARN)
 	if tErr != nil {
 		return ledger, wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of KMS key %q", entry.Name))
 	}
@@ -303,7 +303,7 @@ func resumeKey(
 	}
 
 	if describeOut.KeyMetadata.KeyState == types.KeyStatePendingDeletion {
-		if _, err := client.CancelKeyDeletion(ctx, &kms.CancelKeyDeletionInput{
+		if _, err := kmsClient.CancelKeyDeletion(ctx, &kms.CancelKeyDeletionInput{
 			KeyId: &entry.ARN,
 		}); err != nil {
 			return ledger, wrapAWSError(err, fmt.Sprintf("canceling scheduled deletion of KMS key %q now that it's declared again", entry.Name))
@@ -313,7 +313,7 @@ func resumeKey(
 		}
 	}
 
-	if err := ensureAlias(ctx, client, alias, entry.ARN, keyID); err != nil {
+	if err := ensureAlias(ctx, kmsClient, alias, entry.ARN, keyID); err != nil {
 		return ledger, err
 	}
 
@@ -326,7 +326,7 @@ func resumeKey(
 // lifetime (e.g. the CR was deleted and recreated, with the key retained).
 func adoptKey(
 	ctx context.Context,
-	client kmsAPI,
+	kmsClient kmsAPI,
 	namespace, crName, crUID, alias, resourceName string,
 	opts keyOptions,
 	meta types.KeyMetadata,
@@ -334,7 +334,7 @@ func adoptKey(
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	arn := *meta.Arn
-	tags, tErr := listAllResourceTags(ctx, client, arn)
+	tags, tErr := listAllResourceTags(ctx, kmsClient, arn)
 	if tErr != nil {
 		return ledger, wrapAWSError(tErr, fmt.Sprintf("reading tags on existing KMS key alias %q", alias))
 	}
@@ -354,7 +354,7 @@ func adoptKey(
 	}
 
 	merged := cloudctlaws.MergeTags(tagMap, ownerTags(namespace, crName, crUID))
-	if _, err := client.TagResource(ctx, &kms.TagResourceInput{
+	if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
 		KeyId: &arn,
 		Tags:  mapToTags(merged),
 	}); err != nil {
@@ -365,7 +365,7 @@ func adoptKey(
 	}
 
 	if meta.KeyState == types.KeyStatePendingDeletion {
-		if _, err := client.CancelKeyDeletion(ctx, &kms.CancelKeyDeletionInput{
+		if _, err := kmsClient.CancelKeyDeletion(ctx, &kms.CancelKeyDeletionInput{
 			KeyId: &arn,
 		}); err != nil {
 			return ledger, wrapAWSError(err, fmt.Sprintf("canceling scheduled deletion of adopted KMS key %q", alias))
@@ -384,8 +384,8 @@ func adoptKey(
 // points at a different key entirely (a genuine naming collision). AWS
 // itself always errors on a pre-existing alias name regardless of target,
 // so this tolerance has to be built here, not assumed from the API.
-func ensureAlias(ctx context.Context, client kmsAPI, alias, arn, keyID string) error {
-	_, err := client.CreateAlias(ctx, &kms.CreateAliasInput{
+func ensureAlias(ctx context.Context, kmsClient kmsAPI, alias, arn, keyID string) error {
+	_, err := kmsClient.CreateAlias(ctx, &kms.CreateAliasInput{
 		AliasName:   &alias,
 		TargetKeyId: &keyID,
 	})
@@ -397,7 +397,7 @@ func ensureAlias(ctx context.Context, client kmsAPI, alias, arn, keyID string) e
 		return wrapAWSError(err, fmt.Sprintf("creating KMS key alias %q", alias))
 	}
 
-	describeOut, dErr := client.DescribeKey(ctx, &kms.DescribeKeyInput{
+	describeOut, dErr := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &alias,
 	})
 	if dErr != nil {
@@ -444,7 +444,6 @@ func ownerTags(namespace, crName, crUID string) map[string]string {
 func mapToTags(m map[string]string) []types.Tag {
 	tags := make([]types.Tag, 0, len(m))
 	for k, v := range m {
-		k, v := k, v
 		tags = append(tags, types.Tag{TagKey: &k, TagValue: &v})
 	}
 	return tags
@@ -460,11 +459,11 @@ func tagsToMap(tags []types.Tag) map[string]string {
 	return m
 }
 
-func listAllResourceTags(ctx context.Context, client kmsAPI, keyID string) ([]types.Tag, error) {
+func listAllResourceTags(ctx context.Context, kmsClient kmsAPI, keyID string) ([]types.Tag, error) {
 	var all []types.Tag
 	var marker *string
 	for {
-		out, err := client.ListResourceTags(ctx, &kms.ListResourceTagsInput{KeyId: &keyID, Marker: marker})
+		out, err := kmsClient.ListResourceTags(ctx, &kms.ListResourceTagsInput{KeyId: &keyID, Marker: marker})
 		if err != nil {
 			return nil, err
 		}
@@ -476,12 +475,12 @@ func listAllResourceTags(ctx context.Context, client kmsAPI, keyID string) ([]ty
 	}
 }
 
-func wrapAWSError(err error, context string) error {
+func wrapAWSError(err error, errContext string) error {
 	if err == nil {
 		return nil
 	}
 	return &cloudctlaws.ReconcileError{
-		Err:       fmt.Errorf("%s: %w", context, err),
+		Err:       fmt.Errorf("%s: %w", errContext, err),
 		Retryable: cloudctlaws.IsRetryable(err),
 	}
 }

@@ -26,6 +26,10 @@ import (
 
 const pendingDeletionDenySid = "cloudctl-pending-deletion-deny"
 
+// policyAttrName is the SNS topic attribute name SetTopicAttributes/
+// GetTopicAttributes use for the topic policy JSON.
+const policyAttrName = "Policy"
+
 type policyDocument struct {
 	Version   string            `json:"Version"`
 	Statement []json.RawMessage `json:"Statement"`
@@ -83,7 +87,7 @@ func removePendingDeletionDeny(ctx context.Context, client snsAPI, topicArn stri
 	}
 
 	if len(doc.Statement) == 0 {
-		attrName := "Policy"
+		attrName := policyAttrName
 		attrValue := ""
 		_, err := client.SetTopicAttributes(ctx, &sns.SetTopicAttributesInput{
 			TopicArn:       &topicArn,
@@ -102,7 +106,7 @@ func readPolicy(ctx context.Context, client snsAPI, topicArn string) (policyDocu
 		return policyDocument{}, fmt.Errorf("reading topic policy: %w", err)
 	}
 
-	raw := out.Attributes["Policy"]
+	raw := out.Attributes[policyAttrName]
 	if raw == "" {
 		return policyDocument{Version: "2012-10-17"}, nil
 	}
@@ -119,7 +123,7 @@ func writePolicy(ctx context.Context, client snsAPI, topicArn string, doc policy
 	if err != nil {
 		return fmt.Errorf("encoding topic policy: %w", err)
 	}
-	attrName := "Policy"
+	attrName := policyAttrName
 	attrValue := string(encoded)
 	_, err = client.SetTopicAttributes(ctx, &sns.SetTopicAttributesInput{
 		TopicArn:       &topicArn,

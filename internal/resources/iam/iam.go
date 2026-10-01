@@ -297,7 +297,6 @@ func ownerTags(namespace, crName, crUID string) map[string]string {
 func mapToTags(m map[string]string) []types.Tag {
 	tags := make([]types.Tag, 0, len(m))
 	for k, v := range m {
-		k, v := k, v
 		tags = append(tags, types.Tag{Key: &k, Value: &v})
 	}
 	return tags
@@ -315,12 +314,12 @@ func tagsToMap(tags []types.Tag) map[string]string {
 
 func strPtr(s string) *string { return &s }
 
-func wrapAWSError(err error, context string) error {
+func wrapAWSError(err error, errContext string) error {
 	if err == nil {
 		return nil
 	}
 	return &cloudctlaws.ReconcileError{
-		Err:       fmt.Errorf("%s: %w", context, err),
+		Err:       fmt.Errorf("%s: %w", errContext, err),
 		Retryable: cloudctlaws.IsRetryable(err),
 	}
 }

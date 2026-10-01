@@ -89,6 +89,7 @@ func queueNameFromARN(arn string) (string, error) {
 // spec (or every sqs entry, if deleting is true) and either deletes them,
 // retains-and-relinquishes them, or marks them pending deletion, depending
 // on their captured deletionPolicy and current state.
+//
 //nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,

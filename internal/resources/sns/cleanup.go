@@ -61,6 +61,7 @@ type CleanupResult struct {
 // retains-and-relinquishes them, or marks them pending deletion if they
 // still have active subscriptions — SNS's equivalent of a non-empty queue,
 // since a topic holds no backlog of its own.
+//
 //nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,

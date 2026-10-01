@@ -19,6 +19,7 @@ package kms
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
@@ -170,9 +171,7 @@ func (f *fakeKMS) TagResource(_ context.Context, in *kms.TagResourceInput, _ ...
 	if k.tags == nil {
 		k.tags = map[string]string{}
 	}
-	for tk, tv := range tagsToMap(in.Tags) {
-		k.tags[tk] = tv
-	}
+	maps.Copy(k.tags, tagsToMap(in.Tags))
 	return &kms.TagResourceOutput{}, nil
 }
 
