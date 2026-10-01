@@ -243,7 +243,7 @@ func TestIntegration_Cleanup_DeletesRealTableImmediatelyWhenForced(t *testing.T)
 	}}
 	ledger := ensureUntilActive(t, client, namespace, crName, "uid-1", spec, nil, tableName)
 
-	ledger, _, err := Cleanup(context.Background(), client, namespace, crName, "uid-1", spec, ledger, true, nil)
+	ledger, _, err := Cleanup(context.Background(), client, namespace, crName, "uid-1", spec, ledger, true, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}

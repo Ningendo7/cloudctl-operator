@@ -387,7 +387,7 @@ func TestLive_Ensure_DedicatedKMSKeyEncryptsRealTable(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() {
-		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, true, nil); err != nil {
+		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, true, false, nil); err != nil {
 			t.Logf("key cleanup warning: %v", err)
 		}
 	})
@@ -470,7 +470,7 @@ func TestLive_Cleanup_BlocksDeletingTableWithARealItemThenSucceedsOnceEmpty(t *t
 
 	// First pass only marks pending (quiet window); backdate it so the next
 	// pass evaluates the real emptiness check instead of waiting.
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -479,7 +479,7 @@ func TestLive_Cleanup_BlocksDeletingTableWithARealItemThenSucceedsOnceEmpty(t *t
 	entry.PendingDeletionSince = &past
 	status.UpsertManagedResource(&ledger, *entry)
 
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -490,7 +490,7 @@ func TestLive_Cleanup_BlocksDeletingTableWithARealItemThenSucceedsOnceEmpty(t *t
 	if _, err := client.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &tableName, Key: itemKey}); err != nil {
 		t.Fatalf("real DeleteItem() error = %v", err)
 	}
-	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil); err != nil {
+	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil); err != nil {
 		t.Fatalf("third Cleanup() error = %v", err)
 	}
 	// DeleteTable is itself asynchronous, like every other DynamoDB

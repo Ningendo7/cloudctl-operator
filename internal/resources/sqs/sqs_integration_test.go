@@ -213,7 +213,7 @@ func TestIntegration_Cleanup_DeletesRealQueueImmediatelyWhenForced(t *testing.T)
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true, nil)
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}

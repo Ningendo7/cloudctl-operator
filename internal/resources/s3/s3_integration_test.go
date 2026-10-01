@@ -250,7 +250,7 @@ func TestIntegration_Cleanup_DeletesRealBucketImmediatelyWhenForced(t *testing.T
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true, nil)
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -297,7 +297,7 @@ func TestIntegration_Cleanup_WritesDenyPolicyWhilePendingDeletion(t *testing.T) 
 	// Removing it from spec (empty S3Spec) makes it eligible for deletion;
 	// the first Cleanup pass should hold it for the quiet window rather
 	// than deleting outright, and write the deny policy in the meantime.
-	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil); err != nil {
+	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 

@@ -203,12 +203,12 @@ func main() {
 	}
 
 	if err := (&controller.AppDependenciesReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		AWSClients:      awsClients,
-		Recorder:        mgr.GetEventRecorder("appdependencies-controller"),
-		OIDCProviderARN: oidcProviderARN,
-		OIDCProviderURL: oidcProviderURL,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		AWSClients:              awsClients,
+		Recorder:                mgr.GetEventRecorder("appdependencies-controller"),
+		OIDCProviderARN:         oidcProviderARN,
+		OIDCProviderURL:         oidcProviderURL,
 		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "appdependencies")

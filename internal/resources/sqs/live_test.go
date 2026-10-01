@@ -195,7 +195,7 @@ func TestLive_Cleanup_DeletesRealQueueImmediatelyWhenForced(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true, nil)
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -269,7 +269,7 @@ func TestLive_Ensure_RedrivePolicyClearsWhenDLQRemoved(t *testing.T) {
 	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
-	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, false, nil); err != nil {
+	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, false, false, nil); err != nil {
 		t.Fatalf("Cleanup() (removing the now-undeclared DLQ) error = %v", err)
 	}
 
@@ -365,7 +365,7 @@ func TestLive_Cleanup_BlocksDeletingQueueWithARealMessage(t *testing.T) {
 
 	// First pass only marks pending (quiet window); backdate it so the
 	// second pass evaluates the real emptiness check instead of waiting.
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -374,7 +374,7 @@ func TestLive_Cleanup_BlocksDeletingQueueWithARealMessage(t *testing.T) {
 	entry.PendingDeletionSince = &past
 	status.UpsertManagedResource(&ledger, *entry)
 
-	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, nil); err != nil {
+	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil); err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 	if _, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName}); err != nil {
@@ -423,7 +423,7 @@ func TestLive_Ensure_DedicatedKMSKeyEncryptsRealQueue(t *testing.T) {
 		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
 	}}
 	t.Cleanup(func() {
-		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, nil, true, nil); err != nil {
+		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, nil, true, false, nil); err != nil {
 			t.Logf("cleanup warning: %v", err)
 		}
 		deleteQueueIfExists(t, client, namespace, crName, "orders")
@@ -436,7 +436,7 @@ func TestLive_Ensure_DedicatedKMSKeyEncryptsRealQueue(t *testing.T) {
 	t.Cleanup(func() {
 		// Actually schedule the real dedicated key for deletion - Ensure's
 		// own ledger already knows about it under this name.
-		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, true, nil); err != nil {
+		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, true, false, nil); err != nil {
 			t.Logf("key cleanup warning: %v", err)
 		}
 	})

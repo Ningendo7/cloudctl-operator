@@ -21,8 +21,6 @@ package e2e
 import (
 	"fmt"
 	"os/exec"
-	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -46,6 +44,12 @@ const localstackNamespace = "localstack-system"
 // needs this, not just this one - see awsEnvArgs' own doc comment) and a
 // fake OIDC provider, since declaring an owned resource always triggers IAM
 // role derivation, which hard-errors without one configured.
+//
+// Each resource type's own It block lives in its own lifecycle_<type>_test.go
+// file, registered here as a function call rather than inline, so the suite
+// stays easy to navigate as more resource types are added without paying
+// the setup cost (install CRDs, deploy manager, patch OIDC, wait for
+// rollout) more than once for the whole Describe.
 var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, func() {
 	BeforeAll(func() {
 		By("creating manager namespace")
@@ -128,7 +132,9 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 		}
 
 		By("deleting the verification pods")
-		cmd = exec.Command("kubectl", "delete", "pod", "verify-queue", "verify-topic", "-n", namespace, "--ignore-not-found")
+		cmd = exec.Command("kubectl", "delete", "pod",
+			"verify-queue", "seed-topic", "tag-topic", "verify-topic",
+			"-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
@@ -144,159 +150,17 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 		_, _ = utils.Run(cmd)
 	})
 
-	It("creates a real SQS queue in LocalStack and reports Ready", func() {
-		By("applying the sample AppDependencies CR")
-		cmd := exec.Command("kubectl", "apply", "-f", "test/e2e/testdata/sqs-sample.yaml", "-n", namespace)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to apply the sample CR")
-
-		By("waiting for the CR to report Ready")
-		verifyReady := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "appdependencies", "e2e-orders", "-n", namespace,
-				"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(Equal("True"), "expected the CR to report Ready")
-		}
-		Eventually(verifyReady, 2*time.Minute, 2*time.Second).Should(Succeed())
-
-		By("verifying the connection ConfigMap was populated with the derived queue URL")
-		cmd = exec.Command("kubectl", "get", "configmap", "e2e-orders-connection", "-n", namespace,
-			"-o", "jsonpath={.data.SQS_ORDERS_URL}")
-		output, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(output).To(ContainSubstring("orders"))
-
-		By("verifying the real queue exists in LocalStack, independent of the operator's own state")
-		// kubectl run's generated pod has no securityContext, so it's rejected
-		// outright by this namespace's restricted Pod Security enforcement -
-		// a full manifest is needed to supply one.
-		verifyQueuePod := `
-apiVersion: v1
-kind: Pod
-metadata:
-  name: verify-queue
-  namespace: ` + namespace + `
-spec:
-  restartPolicy: Never
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    seccompProfile:
-      type: RuntimeDefault
-  containers:
-    - name: verify-queue
-      image: amazon/aws-cli
-      env:
-        - {name: AWS_ACCESS_KEY_ID, value: "test"}
-        - {name: AWS_SECRET_ACCESS_KEY, value: "test"}
-        - {name: AWS_DEFAULT_REGION, value: "us-east-1"}
-        - {name: HOME, value: "/tmp"}
-      command:
-        - aws
-        - --endpoint-url=http://localstack.` + localstackNamespace + `.svc.cluster.local:4566
-        - sqs
-        - list-queues
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop: ["ALL"]
-`
-		cmd = exec.Command("kubectl", "apply", "-f", "-")
-		cmd.Stdin = strings.NewReader(verifyQueuePod)
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create the queue-verification pod")
-
-		verifyQueueVerificationSucceeded := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "pod", "verify-queue", "-n", namespace,
-				"-o", "jsonpath={.status.phase}")
-			phase, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(phase).To(Equal("Succeeded"))
-		}
-		Eventually(verifyQueueVerificationSucceeded, 2*time.Minute, 2*time.Second).Should(Succeed())
-
-		cmd = exec.Command("kubectl", "logs", "verify-queue", "-n", namespace)
-		logs, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(logs).To(ContainSubstring("orders"), "expected the real queue to show up in LocalStack's own list-queues output")
-	})
-
-	// Builds on the previous It rather than standing alone - the same CR
-	// gaining a second resource type, same as a real team's manifest
-	// growing over time, not a fresh scenario from scratch.
-	It("adds a real SNS topic to the same CR and reports Ready", func() {
-		By("applying the updated sample CR with an sns section added")
-		cmd := exec.Command("kubectl", "apply", "-f", "test/e2e/testdata/sqs-sns-sample.yaml", "-n", namespace)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to apply the updated sample CR")
-
-		By("waiting for the CR to report Ready again")
-		verifyReady := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "appdependencies", "e2e-orders", "-n", namespace,
-				"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(Equal("True"), "expected the CR to report Ready")
-		}
-		Eventually(verifyReady, 2*time.Minute, 2*time.Second).Should(Succeed())
-
-		By("verifying the connection ConfigMap was populated with the derived topic ARN")
-		cmd = exec.Command("kubectl", "get", "configmap", "e2e-orders-connection", "-n", namespace,
-			"-o", "jsonpath={.data.SNS_ORDER_EVENTS_ARN}")
-		output, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(output).To(ContainSubstring("order-events"))
-
-		By("verifying the real topic exists in LocalStack, independent of the operator's own state")
-		verifyTopicPod := `
-apiVersion: v1
-kind: Pod
-metadata:
-  name: verify-topic
-  namespace: ` + namespace + `
-spec:
-  restartPolicy: Never
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    seccompProfile:
-      type: RuntimeDefault
-  containers:
-    - name: verify-topic
-      image: amazon/aws-cli
-      env:
-        - {name: AWS_ACCESS_KEY_ID, value: "test"}
-        - {name: AWS_SECRET_ACCESS_KEY, value: "test"}
-        - {name: AWS_DEFAULT_REGION, value: "us-east-1"}
-        - {name: HOME, value: "/tmp"}
-      command:
-        - aws
-        - --endpoint-url=http://localstack.` + localstackNamespace + `.svc.cluster.local:4566
-        - sns
-        - list-topics
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop: ["ALL"]
-`
-		cmd = exec.Command("kubectl", "apply", "-f", "-")
-		cmd.Stdin = strings.NewReader(verifyTopicPod)
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create the topic-verification pod")
-
-		verifyTopicVerificationSucceeded := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "pod", "verify-topic", "-n", namespace,
-				"-o", "jsonpath={.status.phase}")
-			phase, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(phase).To(Equal("Succeeded"))
-		}
-		Eventually(verifyTopicVerificationSucceeded, 2*time.Minute, 2*time.Second).Should(Succeed())
-
-		cmd = exec.Command("kubectl", "logs", "verify-topic", "-n", namespace)
-		logs, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(logs).To(ContainSubstring("order-events"), "expected the real topic to show up in LocalStack's own list-topics output")
-	})
+	sqsLifecycleSpec()
+	snsLifecycleSpec()
 })
+
+// verifyReady polls the given CR's aggregate Ready condition - shared
+// across every resource type's lifecycle spec since the check itself never
+// varies, only which CR/timing triggers it.
+func verifyReady(g Gomega) {
+	cmd := exec.Command("kubectl", "get", "appdependencies", "e2e-orders", "-n", namespace,
+		"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`)
+	output, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(output).To(Equal("True"), "expected the CR to report Ready")
+}

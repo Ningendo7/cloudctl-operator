@@ -311,7 +311,7 @@ func TestLive_Ensure_ServerSideEncryptionNotFoundThenDedicatedKeyApplies(t *test
 		t.Fatalf("Ensure() error = %v", err)
 	}
 	t.Cleanup(func() {
-		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, true, nil); err != nil {
+		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, true, false, nil); err != nil {
 			t.Logf("key cleanup warning: %v", err)
 		}
 	})
@@ -406,7 +406,7 @@ func TestLive_Cleanup_BlocksDeletingBucketWithARealObjectThenSucceedsOnceEmpty(t
 
 	// First pass only marks pending (quiet window); backdate it so the next
 	// pass evaluates the real emptiness check instead of waiting.
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -415,7 +415,7 @@ func TestLive_Cleanup_BlocksDeletingBucketWithARealObjectThenSucceedsOnceEmpty(t
 	entry.PendingDeletionSince = &past
 	status.UpsertManagedResource(&ledger, *entry)
 
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -426,7 +426,7 @@ func TestLive_Cleanup_BlocksDeletingBucketWithARealObjectThenSucceedsOnceEmpty(t
 	if _, err := client.DeleteObject(ctx, &s3sdk.DeleteObjectInput{Bucket: &bucket, Key: &key}); err != nil {
 		t.Fatalf("real DeleteObject() error = %v", err)
 	}
-	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil); err != nil {
+	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil); err != nil {
 		t.Fatalf("third Cleanup() error = %v", err)
 	}
 	if _, err := client.HeadBucket(ctx, &s3sdk.HeadBucketInput{Bucket: &bucket}); err == nil {
