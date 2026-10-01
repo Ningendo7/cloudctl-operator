@@ -462,3 +462,47 @@ func TestLive_Ensure_RefusesBucketOwnedByADifferentRealCR(t *testing.T) {
 		t.Error("expected Ensure to refuse a real bucket already owned by a different CR's UID, even with adopt:true")
 	}
 }
+
+// TestLive_Cleanup_DenyPolicyActuallyBlocksPutObjectThenClearingRestoresIt
+// confirms real enforcement of the pending-deletion deny policy -
+// LocalStack's community edition doesn't evaluate bucket policies at all
+// unless ENFORCE_IAM=1 is set, so the integration tier can only confirm the
+// policy JSON is written correctly, not that it actually blocks anything.
+// Also confirms s3:PutObject is a real, recognized action for a bucket
+// policy - the same class of bug already found once in sqs's own live tier
+// (sqs:SendMessageBatch turning out not to be a real action).
+func TestLive_Cleanup_DenyPolicyActuallyBlocksPutObjectThenClearingRestoresIt(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := s3sdk.NewFromConfig(cfg)
+	region, accountID := liveRegionAndAccount(t, cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	bucket := bucketName(namespace, crName, "receipts", accountID)
+	t.Cleanup(func() { deleteBucketIfExists(t, client, bucket) })
+
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	key := "hello.txt"
+	if _, err := client.PutObject(ctx, &s3sdk.PutObjectInput{Bucket: &bucket, Key: &key, Body: strings.NewReader("hello")}); err != nil {
+		t.Fatalf("real PutObject() before any deny policy error = %v — expected it to succeed", err)
+	}
+
+	if err := addPendingDeletionDeny(ctx, client, bucket); err != nil {
+		t.Fatalf("addPendingDeletionDeny() error = %v", err)
+	}
+	if _, err := client.PutObject(ctx, &s3sdk.PutObjectInput{Bucket: &bucket, Key: &key, Body: strings.NewReader("hello")}); err == nil {
+		t.Fatal("expected real PutObject to be denied after adding the pending-deletion deny policy")
+	}
+
+	if err := removePendingDeletionDeny(ctx, client, bucket); err != nil {
+		t.Fatalf("removePendingDeletionDeny() error = %v", err)
+	}
+	if _, err := client.PutObject(ctx, &s3sdk.PutObjectInput{Bucket: &bucket, Key: &key, Body: strings.NewReader("hello")}); err != nil {
+		t.Errorf("real PutObject() after removing the deny policy error = %v — expected it to succeed again", err)
+	}
+}

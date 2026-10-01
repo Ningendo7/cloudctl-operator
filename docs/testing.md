@@ -34,14 +34,15 @@ which starts LocalStack, runs the suite, and tears the container down
 afterward. CI runs the same suite unconditionally on every push, via a
 LocalStack service container — see `.github/workflows/integration.yml`.
 
-**Current coverage:** SQS and S3 — deliberately chosen first, since S3 in
-particular has code guessing at string-matched error codes with no typed
-SDK exception to verify against
-(`isServerSideEncryptionConfigurationNotFoundError`, `isNoSuchTagSet`; see
-[resources.md](resources.md)). KMS and IAM are deferred for now —
-LocalStack's community edition has historically been the least faithful
-for those two, so testing against it there risks false confidence more
-than real coverage.
+**Current coverage:** SQS, S3, SNS, and DynamoDB — each covering the same
+baseline lifecycle (create+tags, idempotent reconcile, adopt an untagged
+resource, correct attribute drift, forced delete). S3 in particular also
+has code guessing at string-matched error codes with no typed SDK exception
+to verify against (`isServerSideEncryptionConfigurationNotFoundError`,
+`isNoSuchTagSet`; see [resources.md](resources.md)). KMS and IAM are
+deferred for now — LocalStack's community edition has historically been
+the least faithful for those two, so testing against it there risks false
+confidence more than real coverage.
 
 New integration-tested packages get a `<package>_integration_test.go`
 file with a `//go:build integration` tag, added to
