@@ -414,12 +414,11 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 }
 
 func TestCleanup_TreatsAlreadyDeletedTableAsSuccess(t *testing.T) {
-	// Regression-shaped test carried over from a real bug found reviewing a
-	// sibling project's S3 cleanup: without treating "already gone" as
-	// success, retrying cleanup on a table a previous attempt had already
-	// deleted (e.g. after a transient failure removing the finalizer
-	// itself) would wrongly report ErrTableNotOwned-style failures for a
-	// table that was, in fact, correctly cleaned up already.
+	// Without treating "already gone" as success, retrying cleanup on a
+	// table a previous attempt had already deleted (e.g. after a transient
+	// failure removing the finalizer itself) would wrongly report
+	// ErrTableNotOwned-style failures for a table that was, in fact,
+	// correctly cleaned up already.
 	client := newFakeDynamoDB()
 	ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyDelete, false)
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)

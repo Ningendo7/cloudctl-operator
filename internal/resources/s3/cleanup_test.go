@@ -490,14 +490,11 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 }
 
 func TestCleanup_TreatsAlreadyDeletedBucketAsSuccess(t *testing.T) {
-	// Regression test for the isNotFoundError bug found while building
-	// this package: GetBucketTagging signals a missing bucket via
-	// NoSuchBucket, a genuinely different typed exception from HeadBucket's
-	// NotFound - without checking for it specifically, retrying cleanup on
-	// a bucket a previous attempt had already deleted would wrongly report
-	// a failure for a bucket that was, in fact, correctly cleaned up
-	// already (the exact bug class a sibling project's S3 controller hit
-	// before too).
+	// GetBucketTagging signals a missing bucket via NoSuchBucket, a
+	// genuinely different typed exception from HeadBucket's NotFound -
+	// without checking for it specifically, retrying cleanup on a bucket a
+	// previous attempt had already deleted would wrongly report a failure
+	// for a bucket that was, in fact, correctly cleaned up already.
 	client := newFakeS3()
 	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyDelete, false)
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)

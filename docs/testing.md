@@ -64,29 +64,16 @@ standard AWS credential chain, creates its own uniquely-named real
 resource(s), and cleans up via `t.Cleanup` even on failure.
 
 **Current coverage:** SQS, SNS, S3, DynamoDB. Each tier is deliberately
-lean — calibrated against forge-operator's own restrained live-tier
-practice (a handful of tests per service, not exhaustive scenario
-coverage) — and targets specifically the kind of thing a fake or
-LocalStack can't be trusted to catch: real, undocumented, or
-easy-to-mismodel API behavior, not plain CRUD. This is exactly how it's
-earned its keep so far — real bugs found only once these tests ran against
-actual AWS, never caught by the unit or integration tiers:
-
-- **sqs:** the real character-set restrictions on AWS resource names, once
-  found to collide with the internal ledger-key separator character
-  (`internal/aws/naming.go`'s `DerivedResourceName`); a stale-UID
-  adoption gap present in all five resource packages
-  (`cloudctlaws.IsStaleUID`); `sqs:SendMessageBatch` not being a real,
-  recognized SQS action.
-- **sns:** `ListTagsForResource`'s "not found" case raising
-  `ResourceNotFoundException`, not the `NotFoundException` every other
-  topic operation uses — the exact mismatch silently broke creating any
-  brand-new topic, invisible to every unit/controller test because both
-  in-memory fakes simulated the same wrong exception type the buggy code
-  checked for.
-- **dynamodb:** `ContinuousBackupsUnavailableException` (a normal,
-  transient state right after a table reaches `ACTIVE`) not being
-  classified as retryable by the shared `internal/aws.IsRetryable`.
+lean — a handful of tests per service, not exhaustive scenario coverage —
+and targets specifically the kind of thing a fake or LocalStack can't be
+trusted to catch: real, undocumented, or easy-to-mismodel API behavior
+(wrong exception types, string-matched error codes with no typed SDK
+equivalent, illegal characters in a generated name, a transient state
+missing from the shared retryable-error classification), not plain CRUD.
+Findings from this tier that turned out to be real bugs get fixed directly
+in the relevant package, not logged here — `git log` and
+[aws-assumptions.md](aws-assumptions.md) are the record of what's actually
+been confirmed against real AWS and when.
 
 KMS and IAM have no dedicated live tier of their own — KMS's
 dedicated-key path is already exercised end-to-end through sqs/sns/s3/

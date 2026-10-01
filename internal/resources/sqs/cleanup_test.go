@@ -592,12 +592,10 @@ func TestCleanup_ForceDeletesNonEmptyQueue(t *testing.T) {
 }
 
 func TestCleanup_TreatsAlreadyGoneQueueAsSuccess(t *testing.T) {
-	// Regression-shaped test carried over from a real bug found reviewing a
-	// sibling project's S3 cleanup: without treating "already gone" as
-	// success, retrying cleanup on a queue a previous attempt had already
-	// deleted (e.g. after a transient failure removing the finalizer
-	// itself) would wrongly report a failure for a queue that was, in
-	// fact, correctly cleaned up already.
+	// Without treating "already gone" as success, retrying cleanup on a
+	// queue a previous attempt had already deleted (e.g. after a transient
+	// failure removing the finalizer itself) would wrongly report a
+	// failure for a queue that was, in fact, correctly cleaned up already.
 	client := newFakeSQS()
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)

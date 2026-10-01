@@ -487,12 +487,10 @@ func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 }
 
 func TestCleanup_TreatsAlreadyDeletedTopicAsSuccess(t *testing.T) {
-	// Regression-shaped test carried over from a real bug found reviewing a
-	// sibling project's S3 cleanup: without treating "already gone" as
-	// success, retrying cleanup on a topic a previous attempt had already
-	// deleted (e.g. after a transient failure removing the finalizer
-	// itself) would wrongly report a failure for a topic that was, in
-	// fact, correctly cleaned up already.
+	// Without treating "already gone" as success, retrying cleanup on a
+	// topic a previous attempt had already deleted (e.g. after a transient
+	// failure removing the finalizer itself) would wrongly report a
+	// failure for a topic that was, in fact, correctly cleaned up already.
 	client := newFakeSNS()
 	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
 	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))

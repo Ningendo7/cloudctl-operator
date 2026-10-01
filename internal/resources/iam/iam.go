@@ -68,8 +68,7 @@ func roleName(namespace, crName string) string {
 // empty CR shouldn't get an empty, pointless role.
 //
 // Kept as a thin orchestrator over named ensure*/build* steps (mirroring
-// ensureRole below, and the same convention forge-operator's resource
-// reconcilers use) rather than one long function body, so a failure's
+// ensureRole below) rather than one long function body, so a failure's
 // error message says which concern broke instead of requiring a reader to
 // find their place in a longer sequence of AWS calls.
 func Ensure(

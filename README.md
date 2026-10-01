@@ -84,7 +84,8 @@ SQS, SNS, DynamoDB, S3, KMS, CloudWatch alarms, and auto-derived IAM.
   known gaps, and a cross-resource-type lifecycle comparison for every
   resource type currently implemented.
 - **[docs/testing.md](docs/testing.md)** — the test tiers: unit (always),
-  integration (LocalStack, CI-gated), and what's deliberately deferred.
+  integration (LocalStack, CI-gated), live (a real AWS account, opt-in,
+  never in CI), and what's deliberately deferred.
 - **[docs/aws-assumptions.md](docs/aws-assumptions.md)** — which AWS API
   behaviors this code depends on have been verified against a real account
   (and when) versus assumed from documentation.
@@ -100,8 +101,11 @@ deletion-safety model.
 ## Status
 
 Pre-1.0, under active development. SQS, SNS, DynamoDB, S3, KMS, CloudWatch
-alarms, and IAM are implemented and covered by unit and envtest suites;
-RDS support is next.
+alarms, and IAM are implemented and covered by unit, integration, and
+live-AWS test suites. RDS is planned for a later release — it touches
+VPC-level infrastructure (security groups, subnets), a materially
+different blast radius than everything else here, and gets its own design
+pass rather than being bolted on.
 
 ## License
 
