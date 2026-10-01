@@ -132,6 +132,8 @@ func markPastQuietWindow(ledger []depsv1alpha1.ManagedResource, resourceType, na
 // Run drives the shared lifecycle scenario list against subject, one
 // t.Run per scenario. Each scenario uses its own resource name so they
 // never interfere with each other even though they share one subject.
+//
+//nolint:gocyclo // one t.Run block per shared scenario; splitting would scatter closely-related assertions across multiple functions for no readability gain
 func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 	t.Helper()
 

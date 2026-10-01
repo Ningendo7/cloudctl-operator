@@ -22,7 +22,7 @@ import (
 
 	apierror "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -38,7 +38,7 @@ type AppDependenciesReconciler struct {
 	client.Client
 	Scheme     *runtime.Scheme
 	AWSClients *cloudctlaws.Clients
-	Recorder   record.EventRecorder
+	Recorder   events.EventRecorder
 
 	// OIDCProviderARN and OIDCProviderURL identify this cluster's IAM OIDC
 	// identity provider, needed to build the IRSA trust policy on every IAM

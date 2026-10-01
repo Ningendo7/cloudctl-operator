@@ -167,7 +167,6 @@ func tagsFromKMSSlice(tags []types.Tag) map[string]string {
 func tagsToKMSSlice(m map[string]string) []types.Tag {
 	tags := make([]types.Tag, 0, len(m))
 	for k, v := range m {
-		k, v := k, v
 		tags = append(tags, types.Tag{TagKey: &k, TagValue: &v})
 	}
 	return tags

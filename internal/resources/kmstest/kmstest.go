@@ -30,6 +30,7 @@ package kmstest
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
@@ -130,9 +131,7 @@ func (f *FakeKMSClient) TagResource(_ context.Context, in *kms.TagResourceInput,
 	if k.tags == nil {
 		k.tags = map[string]string{}
 	}
-	for tk, tv := range tagsFromKMSSlice(in.Tags) {
-		k.tags[tk] = tv
-	}
+	maps.Copy(k.tags, tagsFromKMSSlice(in.Tags))
 	return &kms.TagResourceOutput{}, nil
 }
 
@@ -178,7 +177,6 @@ func tagsFromKMSSlice(tags []types.Tag) map[string]string {
 func tagsToKMSSlice(m map[string]string) []types.Tag {
 	tags := make([]types.Tag, 0, len(m))
 	for k, v := range m {
-		k, v := k, v
 		tags = append(tags, types.Tag{TagKey: &k, TagValue: &v})
 	}
 	return tags

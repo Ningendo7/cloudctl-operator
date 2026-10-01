@@ -87,10 +87,7 @@ func boundedSectionContext(ctx context.Context, ledger []depsv1alpha1.ManagedRes
 			ledgerCount++
 		}
 	}
-	count := declaredCount
-	if ledgerCount > count {
-		count = ledgerCount
-	}
+	count := max(declaredCount, ledgerCount)
 	timeout := base + time.Duration(count)*perResource
 	return context.WithTimeout(ctx, timeout)
 }

@@ -169,7 +169,7 @@ func TestProperty_ResourceName_DifferentIdentitiesNeverCollide(t *testing.T) {
 		name1 := ResourceName(ns1, cr1, "sqs", key1, 255)
 
 		hyphens := hyphenIndexes(full)
-		for i := 0; i < len(hyphens); i++ {
+		for i := range hyphens {
 			for j := i + 1; j < len(hyphens); j++ {
 				ns2 := full[:hyphens[i]]
 				cr2 := full[hyphens[i]+1 : hyphens[j]]

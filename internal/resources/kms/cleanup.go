@@ -245,7 +245,11 @@ func markPendingDeletion(
 func relinquishIfStillTagged(ctx context.Context, client kmsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished bool, err error) {
 	describeOut, err := client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: &entry.ARN})
 	if err != nil {
-		return false, nil // already gone, nothing to relinquish
+		var notFound *types.NotFoundException
+		if errors.As(err, &notFound) {
+			return false, nil // already gone, nothing to relinquish
+		}
+		return false, wrapAWSError(err, fmt.Sprintf("checking state of retained key %q", entry.Name))
 	}
 	if describeOut.KeyMetadata.KeyState == types.KeyStatePendingDeletion {
 		return false, nil // already being deleted (out-of-band, or a previous pass), nothing to relinquish

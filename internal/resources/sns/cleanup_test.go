@@ -51,17 +51,6 @@ func findResult(results []CleanupResult, name string) *CleanupResult {
 	return nil
 }
 
-func advancePastQuietWindow(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string) {
-	t.Helper()
-	entry := status.FindManagedResource(ledger, "sns", name)
-	if entry == nil {
-		t.Fatalf("test setup broken: no ledger entry named %q", name)
-	}
-	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
-	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
-}
-
 // advancePastEmptyCheckBackoffStart pushes PendingDeletionSince back far
 // enough that status.NeedsEmptyCheck's backoff window has started.
 func advancePastEmptyCheckBackoffStart(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string) {

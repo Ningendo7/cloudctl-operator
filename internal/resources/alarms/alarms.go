@@ -101,7 +101,7 @@ type ownership struct {
 // alarms.snsTopicRef is set.
 func Ensure(
 	ctx context.Context,
-	client cloudctlaws.CloudWatchClient,
+	cwClient cloudctlaws.CloudWatchClient,
 	k8sClient client.Client,
 	namespace, crName, crUID, region, accountID string,
 	alarmsSpec *depsv1alpha1.AlarmsSpec,
@@ -139,16 +139,16 @@ func Ensure(
 		alarmActions = []string{arn}
 	}
 
-	return reconcileAlarms(ctx, client, own, desired, alarmActions)
+	return reconcileAlarms(ctx, cwClient, own, desired, alarmActions)
 }
 
 // Cleanup removes every alarm this CR owns, unconditionally — called from
 // finalize. Unlike every other resource type's Cleanup, there's no
 // PendingDeletion wait: an alarm holds no data, so there's nothing gained
 // by delaying its removal.
-func Cleanup(ctx context.Context, client cloudctlaws.CloudWatchClient, namespace, crName, crUID, region, accountID string) error {
+func Cleanup(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, namespace, crName, crUID, region, accountID string) error {
 	own := ownership{namespace: namespace, crName: crName, crUID: crUID, region: region, accountID: accountID}
-	return reconcileAlarms(ctx, client, own, nil, nil)
+	return reconcileAlarms(ctx, cwClient, own, nil, nil)
 }
 
 // desiredAlarms computes every alarm this CR's current spec implies,
@@ -306,7 +306,7 @@ func alarmARN(region, accountID, alarmName string) string {
 // that's no longer desired (all of it, for Cleanup's empty-desired case).
 func reconcileAlarms(
 	ctx context.Context,
-	client cloudctlaws.CloudWatchClient,
+	cwClient cloudctlaws.CloudWatchClient,
 	own ownership,
 	desired []alarmDef,
 	alarmActions []string,
@@ -315,7 +315,7 @@ func reconcileAlarms(
 	// only a narrowing filter for DescribeAlarms; isAlarmOwnedByUs below is
 	// what actually gates any create, update, or delete.
 	prefix := own.namespace + "-" + own.crName + "-"
-	existing, err := listAlarmsByPrefix(ctx, client, prefix)
+	existing, err := listAlarmsByPrefix(ctx, cwClient, prefix)
 	if err != nil {
 		return wrapAWSError(err, "listing alarms")
 	}
@@ -332,7 +332,7 @@ func reconcileAlarms(
 
 		_, exists := existingByName[d.name]
 		if exists {
-			owned, err := isAlarmOwnedByUs(ctx, client, own, d.name)
+			owned, err := isAlarmOwnedByUs(ctx, cwClient, own, d.name)
 			if err != nil {
 				if firstErr == nil {
 					firstErr = err
@@ -347,7 +347,7 @@ func reconcileAlarms(
 			}
 		}
 
-		if err := putAlarm(ctx, client, own, d, !exists, alarmActions); err != nil {
+		if err := putAlarm(ctx, cwClient, own, d, !exists, alarmActions); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -359,7 +359,7 @@ func reconcileAlarms(
 		if _, stillDesired := desiredByName[name]; stillDesired {
 			continue
 		}
-		owned, err := isAlarmOwnedByUs(ctx, client, own, name)
+		owned, err := isAlarmOwnedByUs(ctx, cwClient, own, name)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -371,7 +371,7 @@ func reconcileAlarms(
 		}
 	}
 	if len(toDelete) > 0 {
-		if _, err := client.DeleteAlarms(ctx, &cloudwatch.DeleteAlarmsInput{AlarmNames: toDelete}); err != nil {
+		if _, err := cwClient.DeleteAlarms(ctx, &cloudwatch.DeleteAlarmsInput{AlarmNames: toDelete}); err != nil {
 			if firstErr == nil {
 				firstErr = wrapAWSError(err, "deleting alarms no longer declared")
 			}
@@ -386,11 +386,11 @@ func reconcileAlarms(
 // ownership — ownership is checked per-alarm afterward, since a
 // name-prefix match alone is never sufficient proof (same rule every other
 // resource type in this operator follows).
-func listAlarmsByPrefix(ctx context.Context, client cloudctlaws.CloudWatchClient, prefix string) ([]types.MetricAlarm, error) {
+func listAlarmsByPrefix(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, prefix string) ([]types.MetricAlarm, error) {
 	var all []types.MetricAlarm
 	var nextToken *string
 	for {
-		out, err := client.DescribeAlarms(ctx, &cloudwatch.DescribeAlarmsInput{
+		out, err := cwClient.DescribeAlarms(ctx, &cloudwatch.DescribeAlarmsInput{
 			AlarmNamePrefix: &prefix,
 			NextToken:       nextToken,
 		})
@@ -408,9 +408,9 @@ func listAlarmsByPrefix(ctx context.Context, client cloudctlaws.CloudWatchClient
 // isAlarmOwnedByUs reads an existing alarm's tags and checks them against
 // this CR's ownership triple — the same check every other resource type
 // runs before ever mutating or deleting something it didn't just create.
-func isAlarmOwnedByUs(ctx context.Context, client cloudctlaws.CloudWatchClient, own ownership, alarmName string) (bool, error) {
+func isAlarmOwnedByUs(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ownership, alarmName string) (bool, error) {
 	arn := alarmARN(own.region, own.accountID, alarmName)
-	out, err := client.ListTagsForResource(ctx, &cloudwatch.ListTagsForResourceInput{ResourceARN: &arn})
+	out, err := cwClient.ListTagsForResource(ctx, &cloudwatch.ListTagsForResourceInput{ResourceARN: &arn})
 	if err != nil {
 		return false, wrapAWSError(err, "reading alarm tags")
 	}
@@ -428,7 +428,7 @@ func isAlarmOwnedByUs(ctx context.Context, client cloudctlaws.CloudWatchClient, 
 // (confirmed via AWS's own API docs), and since ownership never changes
 // for an already-owned alarm, there's nothing to re-tag on the update
 // path anyway.
-func putAlarm(ctx context.Context, client cloudctlaws.CloudWatchClient, own ownership, d alarmDef, isCreate bool, alarmActions []string) error {
+func putAlarm(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ownership, d alarmDef, isCreate bool, alarmActions []string) error {
 	input := &cloudwatch.PutMetricAlarmInput{
 		AlarmName:          aws.String(d.name),
 		AlarmDescription:   aws.String(d.description),
@@ -457,16 +457,16 @@ func putAlarm(ctx context.Context, client cloudctlaws.CloudWatchClient, own owne
 		}
 	}
 
-	_, err := client.PutMetricAlarm(ctx, input)
+	_, err := cwClient.PutMetricAlarm(ctx, input)
 	return wrapAWSError(err, fmt.Sprintf("creating/updating alarm %q", d.name))
 }
 
-func wrapAWSError(err error, context string) error {
+func wrapAWSError(err error, errContext string) error {
 	if err == nil {
 		return nil
 	}
 	return &cloudctlaws.ReconcileError{
-		Err:       fmt.Errorf("%s: %w", context, err),
+		Err:       fmt.Errorf("%s: %w", errContext, err),
 		Retryable: cloudctlaws.IsRetryable(err),
 	}
 }

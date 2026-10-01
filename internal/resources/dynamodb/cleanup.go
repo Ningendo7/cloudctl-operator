@@ -65,6 +65,7 @@ type CleanupResult struct {
 // than SQS/SNS's, and the quiet window plus the 7-day grace period already
 // cover the realistic risk window without it. Revisit if that turns out
 // insufficient in practice.
+//nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,
 	client dynamodbAPI,

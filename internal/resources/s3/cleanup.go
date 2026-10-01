@@ -57,6 +57,7 @@ type CleanupResult struct {
 // Cleanup finds ledger entries for s3 resources no longer declared in spec
 // (or every s3 entry, if deleting is true) and either deletes them,
 // retains-and-relinquishes them, or marks them pending deletion.
+//nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,
 	client s3API,
@@ -294,10 +295,7 @@ func deleteAllObjectVersions(ctx context.Context, client s3API, bucket string) e
 
 		const batchSize = 1000
 		for i := 0; i < len(toDelete); i += batchSize {
-			end := i + batchSize
-			if end > len(toDelete) {
-				end = len(toDelete)
-			}
+			end := min(i+batchSize, len(toDelete))
 			delOut, err := client.DeleteObjects(ctx, &s3sdk.DeleteObjectsInput{
 				Bucket: &bucket,
 				Delete: &types.Delete{Objects: toDelete[i:end], Quiet: aws.Bool(true)},

@@ -85,10 +85,7 @@ func DerivedResourceName(namespace, crName, resourceType string, maxLen int, key
 }
 
 func truncateAndAppendHash(prefix, hash string, maxLen int) string {
-	budget := maxLen - len(hash) - 1
-	if budget < 0 {
-		budget = 0
-	}
+	budget := max(maxLen-len(hash)-1, 0)
 	if len(prefix) > budget {
 		prefix = prefix[:budget]
 	}

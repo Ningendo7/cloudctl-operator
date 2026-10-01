@@ -62,7 +62,8 @@ func Run(cmd *exec.Cmd) (string, error) {
 // UninstallCertManager uninstalls the cert manager
 func UninstallCertManager() {
 	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
-	cmd := exec.Command("kubectl", "delete", "-f", url)
+	// url is built from this file's own constants, not external input.
+	cmd := exec.Command("kubectl", "delete", "-f", url) //nolint:gosec // G204
 	if _, err := Run(cmd); err != nil {
 		warnError(err)
 	}
@@ -73,7 +74,8 @@ func UninstallCertManager() {
 		"cert-manager-controller",
 	}
 	for _, lease := range kubeSystemLeases {
-		cmd = exec.Command("kubectl", "delete", "lease", lease,
+		// lease comes from the fixed literal slice above, not external input.
+		cmd = exec.Command("kubectl", "delete", "lease", lease, //nolint:gosec // G204
 			"-n", "kube-system", "--ignore-not-found", "--force", "--grace-period=0")
 		if _, err := Run(cmd); err != nil {
 			warnError(err)
@@ -84,7 +86,8 @@ func UninstallCertManager() {
 // InstallCertManager installs the cert manager bundle.
 func InstallCertManager() error {
 	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
-	cmd := exec.Command("kubectl", "apply", "-f", url)
+	// url is built from this file's own constants, not external input.
+	cmd := exec.Command("kubectl", "apply", "-f", url) //nolint:gosec // G204
 	if _, err := Run(cmd); err != nil {
 		return err
 	}

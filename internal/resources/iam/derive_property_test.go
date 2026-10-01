@@ -19,6 +19,7 @@ package iam
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -82,12 +83,7 @@ func flattenActions(statements []policyStatement) []string {
 }
 
 func containsString(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, needle)
 }
 
 // TestBuildPolicyDocument_ReadWriteNeverRemovesReadOnlyActions is the core

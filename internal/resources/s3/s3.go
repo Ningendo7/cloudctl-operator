@@ -303,13 +303,13 @@ func reconcileBucketAttributes(ctx context.Context, client s3API, bucket string,
 		return fmt.Errorf("reading versioning status: %w", err)
 	}
 	if (current.Status == types.BucketVersioningStatusEnabled) != desiredVersioning {
-		status := types.BucketVersioningStatusSuspended
+		versioningStatus := types.BucketVersioningStatusSuspended
 		if desiredVersioning {
-			status = types.BucketVersioningStatusEnabled
+			versioningStatus = types.BucketVersioningStatusEnabled
 		}
 		if _, err := client.PutBucketVersioning(ctx, &s3sdk.PutBucketVersioningInput{
 			Bucket:                  &bucket,
-			VersioningConfiguration: &types.VersioningConfiguration{Status: status},
+			VersioningConfiguration: &types.VersioningConfiguration{Status: versioningStatus},
 		}); err != nil {
 			return fmt.Errorf("correcting versioning: %w", err)
 		}
@@ -543,12 +543,12 @@ func tagsToMap(tags []types.Tag) map[string]string {
 
 func strPtr(s string) *string { return &s }
 
-func wrapAWSError(err error, context string) error {
+func wrapAWSError(err error, errContext string) error {
 	if err == nil {
 		return nil
 	}
 	return &cloudctlaws.ReconcileError{
-		Err:       fmt.Errorf("%s: %w", context, err),
+		Err:       fmt.Errorf("%s: %w", errContext, err),
 		Retryable: cloudctlaws.IsRetryable(err),
 	}
 }

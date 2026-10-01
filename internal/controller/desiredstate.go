@@ -59,16 +59,18 @@ func checkpointFor(r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppD
 // eventRecorderFor adapts r.Recorder into a status.EventRecorder bound to
 // cr - the one place a resource package's plain (eventType, reason, message)
 // report becomes an actual Kubernetes Event, so packages like kms don't need
-// to depend on corev1/record themselves. Returns nil if r.Recorder is unset
+// to depend on the events API themselves. Returns nil if r.Recorder is unset
 // (test fixtures that build a reconciler directly, bypassing cmd/main.go's
-// mgr.GetEventRecorderFor call) - callers already treat a nil
-// status.EventRecorder as "don't report events."
+// mgr.GetEventRecorder call) - callers already treat a nil
+// status.EventRecorder as "don't report events." action is reused as reason
+// since this codebase has no separate action taxonomy; note is a format
+// string so a literal '%' in message is never misread as a verb.
 func eventRecorderFor(r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependencies) status.EventRecorder {
 	if r.Recorder == nil {
 		return nil
 	}
 	return func(eventType, reason, message string) {
-		r.Recorder.Event(cr, eventType, reason, message)
+		r.Recorder.Eventf(cr, nil, eventType, reason, reason, "%s", message)
 	}
 }
 

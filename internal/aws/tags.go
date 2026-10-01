@@ -16,6 +16,8 @@ limitations under the License.
 
 package aws
 
+import "maps"
+
 // MergeTags merges desired tags into existing tags, read-merge-write style.
 // Some AWS tagging calls are additive already, but at least one (S3's
 // PutBucketTagging) replaces the entire tag set, so writing our ownership
@@ -24,11 +26,7 @@ package aws
 // per their own documented semantics. desired wins on key conflicts.
 func MergeTags(existing, desired map[string]string) map[string]string {
 	merged := make(map[string]string, len(existing)+len(desired))
-	for k, v := range existing {
-		merged[k] = v
-	}
-	for k, v := range desired {
-		merged[k] = v
-	}
+	maps.Copy(merged, existing)
+	maps.Copy(merged, desired)
 	return merged
 }

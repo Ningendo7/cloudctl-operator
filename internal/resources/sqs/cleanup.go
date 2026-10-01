@@ -89,6 +89,7 @@ func queueNameFromARN(arn string) (string, error) {
 // spec (or every sqs entry, if deleting is true) and either deletes them,
 // retains-and-relinquishes them, or marks them pending deletion, depending
 // on their captured deletionPolicy and current state.
+//nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,
 	client sqsAPI,
@@ -119,7 +120,7 @@ func Cleanup(
 
 		if declared[entry.Name] {
 			if entry.PendingDeletionSince != nil {
-				if clearErr := clearPendingDeletion(ctx, client, namespace, crName, entry); clearErr != nil {
+				if clearErr := clearPendingDeletion(ctx, client, entry); clearErr != nil {
 					if firstErr == nil {
 						firstErr = clearErr
 					}
@@ -313,7 +314,7 @@ func markPendingDeletion(
 // resource that's returned to spec after having been marked pending
 // deletion — it's back in active use, nothing should still be blocking
 // sends to it.
-func clearPendingDeletion(ctx context.Context, client sqsAPI, namespace, crName string, entry depsv1alpha1.ManagedResource) error {
+func clearPendingDeletion(ctx context.Context, client sqsAPI, entry depsv1alpha1.ManagedResource) error {
 	queueName, nameErr := queueNameFromARN(entry.ARN)
 	if nameErr != nil {
 		return nameErr
@@ -322,7 +323,11 @@ func clearPendingDeletion(ctx context.Context, client sqsAPI, namespace, crName 
 		QueueName: &queueName,
 	})
 	if err != nil {
-		return nil // already gone, nothing to clean up
+		var notFound *types.QueueDoesNotExist
+		if errors.As(err, &notFound) {
+			return nil // already gone, nothing to clean up
+		}
+		return wrapAWSError(err, fmt.Sprintf("looking up queue %q to clear its pending-deletion deny", entry.Name))
 	}
 	return removePendingDeletionDeny(ctx, client, *urlOut.QueueUrl)
 }
@@ -340,7 +345,11 @@ func relinquishIfStillTagged(ctx context.Context, client sqsAPI, namespace, crNa
 	}
 	urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
 	if err != nil {
-		return false, nil // already gone, nothing to relinquish
+		var notFound *types.QueueDoesNotExist
+		if errors.As(err, &notFound) {
+			return false, nil // already gone, nothing to relinquish
+		}
+		return false, wrapAWSError(err, fmt.Sprintf("looking up retained queue %q", entry.Name))
 	}
 
 	tagsOut, tErr := client.ListQueueTags(ctx, &sqs.ListQueueTagsInput{

@@ -553,12 +553,12 @@ func tagsToMap(tags []types.Tag) map[string]string {
 	return m
 }
 
-func wrapAWSError(err error, context string) error {
+func wrapAWSError(err error, errContext string) error {
 	if err == nil {
 		return nil
 	}
 	return &cloudctlaws.ReconcileError{
-		Err:       fmt.Errorf("%s: %w", context, err),
+		Err:       fmt.Errorf("%s: %w", errContext, err),
 		Retryable: cloudctlaws.IsRetryable(err),
 	}
 }

@@ -84,9 +84,11 @@ func main() {
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.StringVar(&oidcProviderARN, "oidc-provider-arn", "",
-		"ARN of this cluster's IAM OIDC identity provider, required for the IRSA trust policy on every IAM role this operator derives.")
+		"ARN of this cluster's IAM OIDC identity provider, required for the "+
+			"IRSA trust policy on every IAM role this operator derives.")
 	flag.StringVar(&oidcProviderURL, "oidc-provider-url", "",
-		"URL (without https://) of this cluster's IAM OIDC identity provider, required for the IRSA trust policy on every IAM role this operator derives.")
+		"URL (without https://) of this cluster's IAM OIDC identity provider, "+
+			"required for the IRSA trust policy on every IAM role this operator derives.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -198,7 +200,7 @@ func main() {
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		AWSClients:      awsClients,
-		Recorder:        mgr.GetEventRecorderFor("appdependencies-controller"),
+		Recorder:        mgr.GetEventRecorder("appdependencies-controller"),
 		OIDCProviderARN: oidcProviderARN,
 		OIDCProviderURL: oidcProviderURL,
 	}).SetupWithManager(mgr); err != nil {

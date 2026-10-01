@@ -540,7 +540,7 @@ func TestDeleteAllObjectVersions_ChunksBatchesOver1000Objects(t *testing.T) {
 	client := newFakeS3()
 	bucket := "receipts-test"
 	versions := make([]fakeObjectVersion, 0, 1500)
-	for i := 0; i < 1500; i++ {
+	for i := range 1500 {
 		versions = append(versions, fakeObjectVersion{key: fmt.Sprintf("file-%d.txt", i), versionID: "v1"})
 	}
 	client.buckets[bucket] = &fakeBucket{versions: versions}

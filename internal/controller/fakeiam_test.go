@@ -132,7 +132,6 @@ func tagsFromIAMSlice(tags []types.Tag) map[string]string {
 func tagsToIAMSlice(m map[string]string) []types.Tag {
 	tags := make([]types.Tag, 0, len(m))
 	for k, v := range m {
-		k, v := k, v
 		tags = append(tags, types.Tag{Key: &k, Value: &v})
 	}
 	return tags

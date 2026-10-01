@@ -19,6 +19,7 @@ package iam
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -415,9 +416,10 @@ func TestBuildPolicyDocument_S3ProducesBucketAndObjectStatements(t *testing.T) {
 
 	var bucketStmt, objectStmt *policyStatement
 	for i := range parsed.Statement {
-		if parsed.Statement[i].Resource[0] == "arn:aws:s3:::my-bucket" {
+		switch parsed.Statement[i].Resource[0] {
+		case "arn:aws:s3:::my-bucket":
 			bucketStmt = &parsed.Statement[i]
-		} else if parsed.Statement[i].Resource[0] == "arn:aws:s3:::my-bucket/*" {
+		case "arn:aws:s3:::my-bucket/*":
 			objectStmt = &parsed.Statement[i]
 		}
 	}
@@ -473,10 +475,5 @@ func TestBuildPolicyDocument_ReadOnlyExcludesWriteActions(t *testing.T) {
 }
 
 func containsAction(actions []string, want string) bool {
-	for _, a := range actions {
-		if a == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(actions, want)
 }

@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -48,7 +48,7 @@ var _ = Describe("AppDependencies Controller", func() {
 		fakeIAM        *fakeIAMClient
 		fakeKMS        *fakeKMSClient
 		fakeCloudWatch *fakeCloudWatchClient
-		fakeRecorder   *record.FakeRecorder
+		fakeRecorder   *events.FakeRecorder
 		reconciler     *AppDependenciesReconciler
 	)
 
@@ -58,7 +58,7 @@ var _ = Describe("AppDependencies Controller", func() {
 		fakeIAM = newFakeIAMClient()
 		fakeKMS = newFakeKMSClient()
 		fakeCloudWatch = newFakeCloudWatchClient()
-		fakeRecorder = record.NewFakeRecorder(20)
+		fakeRecorder = events.NewFakeRecorder(20)
 		reconciler = &AppDependenciesReconciler{
 			Client:          k8sClient,
 			Scheme:          k8sClient.Scheme(),
