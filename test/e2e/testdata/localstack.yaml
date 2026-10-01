@@ -35,7 +35,7 @@ spec:
               # reconcile to find and clean up previously-created alarms no
               # longer desired, the same declared-vs-ledger diff every other
               # section runs.
-              value: sqs,sns,s3,dynamodb,iam,sts,cloudwatch
+              value: sqs,sns,s3,dynamodb,kms,iam,sts,cloudwatch
           ports:
             - containerPort: 4566
               name: edge

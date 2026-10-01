@@ -120,8 +120,12 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 		// entire suite (make undeploy below deletes the whole namespace
 		// next, which would then also block forever on the same stuck
 		// object).
+		// Deletes by name/kind rather than -f <file>, so this doesn't need
+		// updating every time a new resource-type stage's sample file is
+		// added - whatever the CR's current cumulative spec is, this still
+		// finds and deletes the one object.
 		By("deleting the sample CR so finalizer-driven cleanup actually runs")
-		cmd := exec.Command("kubectl", "delete", "-f", "test/e2e/testdata/sqs-sns-sample.yaml",
+		cmd := exec.Command("kubectl", "delete", "appdependencies", "e2e-orders",
 			"-n", namespace, "--ignore-not-found", "--timeout=60s")
 		_, delErr := utils.Run(cmd)
 		if delErr != nil {
@@ -133,7 +137,8 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 
 		By("deleting the verification pods")
 		cmd = exec.Command("kubectl", "delete", "pod",
-			"verify-queue", "seed-topic", "tag-topic", "verify-topic",
+			"verify-queue", "seed-topic", "tag-topic", "verify-topic", "verify-table",
+			"seed-bucket", "tag-bucket", "verify-bucket", "verify-key",
 			"-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
@@ -152,6 +157,9 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 
 	sqsLifecycleSpec()
 	snsLifecycleSpec()
+	dynamodbLifecycleSpec()
+	s3LifecycleSpec()
+	kmsLifecycleSpec()
 })
 
 // verifyReady polls the given CR's aggregate Ready condition - shared
