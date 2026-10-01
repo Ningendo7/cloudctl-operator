@@ -39,6 +39,12 @@ const namespace = "cloudctl-operator-system"
 // serviceAccountName created for the project
 const serviceAccountName = "cloudctl-operator-controller-manager"
 
+// deploymentName is the real Deployment name after kustomize's own
+// namePrefix (config/default/kustomization.yaml) is applied - plain
+// "controller-manager" (the name in config/manager/manager.yaml before
+// kustomize touches it) doesn't exist as a real cluster object.
+const deploymentName = "cloudctl-operator-controller-manager"
+
 // metricsServiceName is the name of the metrics service of the project
 const metricsServiceName = "cloudctl-operator-controller-manager-metrics-service"
 
@@ -72,6 +78,12 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+		By("pointing the manager at LocalStack instead of real AWS")
+		cmd = exec.Command("kubectl", "set", "env", "deployment/"+deploymentName, "-n", namespace)
+		cmd.Args = append(cmd.Args, awsEnvArgs()...)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to set AWS env vars on the controller-manager")
 	})
 
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
@@ -157,18 +169,23 @@ var _ = Describe("Manager", Ordered, func() {
 				podOutput, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod information")
 				podNames := utils.GetNonEmptyLines(podOutput)
-				g.Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
+				// 2 replicas (config/manager/manager.yaml) for real HA via
+				// leader election - only one is ever the active leader, but
+				// both processes stay up and Running.
+				g.Expect(podNames).To(HaveLen(2), "expected 2 controller pods running")
 				controllerPodName = podNames[0]
 				g.Expect(controllerPodName).To(ContainSubstring("controller-manager"))
 
-				By("validating the pod's status")
-				cmd = exec.Command("kubectl", "get",
-					"pods", controllerPodName, "-o", "jsonpath={.status.phase}",
-					"-n", namespace,
-				)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
+				By("validating every pod's status")
+				for _, podName := range podNames {
+					cmd = exec.Command("kubectl", "get",
+						"pods", podName, "-o", "jsonpath={.status.phase}",
+						"-n", namespace,
+					)
+					output, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(output).To(Equal("Running"), fmt.Sprintf("incorrect status for pod %q", podName))
+				}
 			}
 			Eventually(verifyControllerUp).Should(Succeed())
 		})

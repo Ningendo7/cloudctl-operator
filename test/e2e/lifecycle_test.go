@@ -32,6 +32,8 @@ import (
 // localstackNamespace is fixed by testdata/localstack.yaml, kept separate
 // from the manager's own namespace (which enforces the restricted Pod
 // Security Standard) since LocalStack's image isn't built to run under it.
+// LocalStack itself is deployed once for the whole suite in BeforeSuite
+// (e2e_suite_test.go), not per Describe block.
 const localstackNamespace = "localstack-system"
 
 // This runs the manager against a real, in-cluster LocalStack instead of
@@ -39,25 +41,15 @@ const localstackNamespace = "localstack-system"
 // E2E scenario that actually exercises reconciliation, not just whether the
 // manager pod comes up. Deploys its own instance of the manager (same fixed
 // namespace as the "Manager" Describe block, reused sequentially rather
-// than concurrently) patched with AWS_ENDPOINT_URL and a fake OIDC provider,
-// since declaring an owned resource always triggers IAM role derivation,
-// which hard-errors without one configured.
+// than concurrently) patched with AWS_ENDPOINT_URL (every Describe block
+// needs this, not just this one - see awsEnvArgs' own doc comment) and a
+// fake OIDC provider, since declaring an owned resource always triggers IAM
+// role derivation, which hard-errors without one configured.
 var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, func() {
 	BeforeAll(func() {
-		By("deploying LocalStack")
-		cmd := exec.Command("kubectl", "apply", "-f", "test/e2e/testdata/localstack.yaml")
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to deploy LocalStack")
-
-		By("waiting for LocalStack to become available")
-		cmd = exec.Command("kubectl", "rollout", "status", "deployment/localstack",
-			"-n", localstackNamespace, "--timeout=2m")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "LocalStack did not become ready")
-
 		By("creating manager namespace")
-		cmd = exec.Command("kubectl", "create", "ns", namespace)
-		_, err = utils.Run(cmd)
+		cmd := exec.Command("kubectl", "create", "ns", namespace)
+		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
 
 		By("labeling the namespace to enforce the restricted security policy")
@@ -77,17 +69,13 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
 		By("pointing the manager at LocalStack instead of real AWS")
-		cmd = exec.Command("kubectl", "set", "env", "deployment/controller-manager", "-n", namespace,
-			"AWS_ENDPOINT_URL=http://localstack."+localstackNamespace+".svc.cluster.local:4566",
-			"AWS_ACCESS_KEY_ID=test",
-			"AWS_SECRET_ACCESS_KEY=test",
-			"AWS_REGION=us-east-1",
-		)
+		cmd = exec.Command("kubectl", "set", "env", "deployment/"+deploymentName, "-n", namespace)
+		cmd.Args = append(cmd.Args, awsEnvArgs()...)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to set AWS env vars on the controller-manager")
 
 		By("configuring a fake OIDC provider so IAM role derivation can proceed")
-		cmd = exec.Command("kubectl", "patch", "deployment", "controller-manager", "-n", namespace,
+		cmd = exec.Command("kubectl", "patch", "deployment", deploymentName, "-n", namespace,
 			"--type=json", "-p", `[
 				{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--oidc-provider-arn=arn:aws:iam::000000000000:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/E2ETEST"},
 				{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--oidc-provider-url=https://oidc.eks.us-east-1.amazonaws.com/id/E2ETEST"}
@@ -96,7 +84,7 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 		Expect(err).NotTo(HaveOccurred(), "Failed to patch OIDC provider args onto the controller-manager")
 
 		By("waiting for the patched controller-manager rollout to complete")
-		cmd = exec.Command("kubectl", "rollout", "status", "deployment/controller-manager",
+		cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+deploymentName,
 			"-n", namespace, "--timeout=2m")
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "controller-manager rollout did not complete")
@@ -122,10 +110,6 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 
 		By("removing manager namespace")
 		cmd = exec.Command("kubectl", "delete", "ns", namespace, "--ignore-not-found")
-		_, _ = utils.Run(cmd)
-
-		By("deleting LocalStack")
-		cmd = exec.Command("kubectl", "delete", "-f", "test/e2e/testdata/localstack.yaml", "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 	})
 

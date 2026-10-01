@@ -64,11 +64,45 @@ var _ = BeforeSuite(func() {
 
 	configureKubectlKubeRC()
 	setupCertManager()
+
+	// Shared across every Describe block below, not per-block: the manager
+	// calls real STS at startup and exits non-zero if it can't resolve
+	// credentials (fail-fast by design - see internal/aws/client.go), so
+	// every deployment of it in this suite needs LocalStack and these env
+	// vars regardless of which scenario is being tested, not just the ones
+	// that actually declare an AppDependencies CR.
+	By("deploying LocalStack")
+	cmd = exec.Command("kubectl", "apply", "-f", "test/e2e/testdata/localstack.yaml")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy LocalStack")
+
+	By("waiting for LocalStack to become available")
+	cmd = exec.Command("kubectl", "rollout", "status", "deployment/localstack",
+		"-n", localstackNamespace, "--timeout=2m")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "LocalStack did not become ready")
 })
 
 var _ = AfterSuite(func() {
 	teardownCertManager()
+
+	By("deleting LocalStack")
+	cmd := exec.Command("kubectl", "delete", "-f", "test/e2e/testdata/localstack.yaml", "--ignore-not-found")
+	_, _ = utils.Run(cmd)
 })
+
+// awsEnvArgs returns the kubectl args for pointing a deployed manager at the
+// shared in-cluster LocalStack instead of real AWS - every Describe block
+// deploys its own instance of the manager and needs this applied before the
+// pod can start successfully at all.
+func awsEnvArgs() []string {
+	return []string{
+		"AWS_ENDPOINT_URL=http://localstack." + localstackNamespace + ".svc.cluster.local:4566",
+		"AWS_ACCESS_KEY_ID=test",
+		"AWS_SECRET_ACCESS_KEY=test",
+		"AWS_REGION=us-east-1",
+	}
+}
 
 // Disable kubectl kuberc by default for test isolation.
 // This prevents local kubectl configurations from affecting test behavior.
