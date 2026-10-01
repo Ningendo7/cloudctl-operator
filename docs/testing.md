@@ -48,17 +48,55 @@ file with a `//go:build integration` tag, added to
 `INTEGRATION_TEST_PACKAGES` in the `Makefile` and to the `go test` command
 in `.github/workflows/integration.yml`.
 
-## Live (not yet built)
+## Live (`make test-live`, never runs in CI)
 
-A future third tier: the same lifecycle tests, but against a real AWS
-account instead of LocalStack — the final check that LocalStack's own
-emulation hasn't itself diverged from real AWS behavior. Deliberately
-**never** runs in GitHub Actions CI: it would need real AWS credentials in
-a public repo's CI secrets, costs money per run, and can't be bounded to
-"only ever talks to LocalStack" the way the integration tier can. When
-built, this runs locally against the maintainer's own AWS account, gated
-behind a separate build tag (e.g. `live`) so it's never picked up by
-`go test ./...`, `make test-integration`, or CI by accident.
+The same idea as the integration tier, one level up: real AWS instead of
+LocalStack, the final check that LocalStack's own emulation hasn't itself
+diverged from real AWS behavior. Deliberately **never** runs in GitHub
+Actions CI — it would need real AWS credentials in a public repo's CI
+secrets, costs money per run, and can't be bounded to "only ever talks to
+LocalStack" the way the integration tier can. Gated behind the `live` build
+tag, so it's never picked up by `go test ./...`, `make test-integration`, or
+CI by accident. Every test skips cleanly (via a harmless
+`sts:GetCallerIdentity` check) unless real credentials resolve through the
+standard AWS credential chain, creates its own uniquely-named real
+resource(s), and cleans up via `t.Cleanup` even on failure.
+
+**Current coverage:** SQS, SNS, S3, DynamoDB. Each tier is deliberately
+lean — calibrated against forge-operator's own restrained live-tier
+practice (a handful of tests per service, not exhaustive scenario
+coverage) — and targets specifically the kind of thing a fake or
+LocalStack can't be trusted to catch: real, undocumented, or
+easy-to-mismodel API behavior, not plain CRUD. This is exactly how it's
+earned its keep so far — real bugs found only once these tests ran against
+actual AWS, never caught by the unit or integration tiers:
+
+- **sqs:** the real character-set restrictions on AWS resource names, once
+  found to collide with the internal ledger-key separator character
+  (`internal/aws/naming.go`'s `DerivedResourceName`); a stale-UID
+  adoption gap present in all five resource packages
+  (`cloudctlaws.IsStaleUID`); `sqs:SendMessageBatch` not being a real,
+  recognized SQS action.
+- **sns:** `ListTagsForResource`'s "not found" case raising
+  `ResourceNotFoundException`, not the `NotFoundException` every other
+  topic operation uses — the exact mismatch silently broke creating any
+  brand-new topic, invisible to every unit/controller test because both
+  in-memory fakes simulated the same wrong exception type the buggy code
+  checked for.
+- **dynamodb:** `ContinuousBackupsUnavailableException` (a normal,
+  transient state right after a table reaches `ACTIVE`) not being
+  classified as retryable by the shared `internal/aws.IsRetryable`.
+
+KMS and IAM have no dedicated live tier of their own — KMS's
+dedicated-key path is already exercised end-to-end through sqs/sns/s3/
+dynamodb's own live tests (same code, only the `resourceType` string
+differs), and a standalone IAM live tier is still open work.
+
+Run it locally with whatever already authenticates your AWS CLI:
+
+```sh
+make test-live
+```
 
 ## E2E
 

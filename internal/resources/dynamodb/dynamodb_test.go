@@ -625,6 +625,32 @@ func TestEnsure_RejectsTableOwnedByDifferentCREvenWithAdopt(t *testing.T) {
 	}
 }
 
+// TestEnsure_RejectsTableWithStaleUIDEvenWithAdopt guards against the
+// deleted-and-recreated-CR case: a table tagged with this exact CR's own
+// namespace/name, but a different UID, must never be silently re-adopted
+// just because adopt:true is set - a name match alone is never ownership.
+func TestEnsure_RejectsTableWithStaleUIDEvenWithAdopt(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	client.tables[tableName] = &fakeTable{
+		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:       types.TableStatusActive,
+		partitionKey: "id",
+		tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "old-uid",
+		},
+	}
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Adopt: true},
+	}}
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "new-uid", spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected adopt:true to never override a table tagged with this CR's name but a stale (different) UID")
+	}
+}
+
 func TestEnsure_RefusesAdoptingTableWithMismatchedKeySchema(t *testing.T) {
 	client := newFakeDynamoDB()
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)

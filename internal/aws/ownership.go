@@ -39,3 +39,21 @@ func OwnerTagValue(namespace, name string) string {
 func IsOwnedBy(tags map[string]string, namespace, name, uid string) bool {
 	return tags[OwnerTagKey] == OwnerTagValue(namespace, name) && tags[OwnerUIDTagKey] == uid
 }
+
+// IsStaleUID reports whether tags carry this exact CR's own owner-name tag
+// (namespace/name) but a different UID — a deleted-and-recreated CR
+// reusing the same name found a resource left over from its previous
+// incarnation. A name match alone is never ownership: this must be
+// surfaced as a conflict and never silently adopted, even with
+// adopt:true, since the resource may still be referenced elsewhere under
+// its old identity.
+func IsStaleUID(tags map[string]string, namespace, name, uid string) (existingUID string, isStale bool) {
+	if tags[OwnerTagKey] != OwnerTagValue(namespace, name) {
+		return "", false
+	}
+	existingUID, ok := tags[OwnerUIDTagKey]
+	if !ok || existingUID == uid {
+		return "", false
+	}
+	return existingUID, true
+}

@@ -47,17 +47,18 @@ type denyStatement struct {
 	Resource  string   `json:"Resource"`
 }
 
-// addPendingDeletionDeny merges a Deny statement for sqs:SendMessage and
-// sqs:SendMessageBatch into the queue's resource policy, scoped to just
-// those two actions so existing consumers can keep draining the queue while
-// nothing new gets added. Both are denied because they're distinct IAM
-// actions — a Deny naming only SendMessage would leave batch producers
-// completely unblocked. A resource-policy Deny beats any Allow from any
-// source — our own derived IAM, a cross-account grant, hand-managed IAM —
-// which is the point: revoking our own IAM grants alone only blocks
-// producers using roles we control. Idempotent — safe to call every
-// reconcile while a resource stays in PendingDeletion (re-adds under the
-// same Sid rather than duplicating).
+// addPendingDeletionDeny merges a Deny statement for sqs:SendMessage into
+// the queue's resource policy, scoped to just that action so existing
+// consumers can keep draining the queue while nothing new gets added.
+// sqs:SendMessage is the only real action here — "sqs:SendMessageBatch"
+// is not a recognized SQS action; AWS rejects it in a resource policy
+// with InvalidParameterValue, and sqs:SendMessage alone governs both the
+// single-message and batch send calls. A resource-policy Deny beats any
+// Allow from any source — our own derived IAM, a cross-account grant,
+// hand-managed IAM — which is the point: revoking our own IAM grants
+// alone only blocks producers using roles we control. Idempotent — safe
+// to call every reconcile while a resource stays in PendingDeletion
+// (re-adds under the same Sid rather than duplicating).
 func addPendingDeletionDeny(ctx context.Context, client sqsAPI, queueURL, queueArn string) error {
 	doc, err := readPolicy(ctx, client, queueURL)
 	if err != nil {
@@ -70,7 +71,7 @@ func addPendingDeletionDeny(ctx context.Context, client sqsAPI, queueURL, queueA
 		Sid:       pendingDeletionDenySid,
 		Effect:    "Deny",
 		Principal: "*",
-		Action:    []string{"sqs:SendMessage", "sqs:SendMessageBatch"},
+		Action:    []string{"sqs:SendMessage"},
 		Resource:  queueArn,
 	})
 	if err != nil {

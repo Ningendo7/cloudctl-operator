@@ -133,6 +133,17 @@ test-integration: setup-test-integration ## Run integration tests against a loca
 cleanup-test-integration: ## Tear down the LocalStack container used for integration tests
 	@$(CONTAINER_TOOL) rm -f $(LOCALSTACK_CONTAINER) >/dev/null 2>&1 || true
 
+# Live tests run the real AWS SDK against a real AWS account instead of
+# LocalStack - see docs/testing.md for why this tier exists on top of the
+# integration one above. Gated behind the "live" build tag; never runs in
+# CI, costs real (small) money per run, and needs real credentials to
+# resolve via the standard AWS credential chain or every test just skips.
+LIVE_TEST_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/sns/... ./internal/resources/s3/... ./internal/resources/dynamodb/...
+
+.PHONY: test-live
+test-live: ## Run live tests against your own real AWS account (costs money, never run in CI)
+	go test -tags=live $(LIVE_TEST_PACKAGES) -v
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run

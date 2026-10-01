@@ -123,7 +123,7 @@ func TestEnsure_DLQSharesMainQueuesDedicatedKey(t *testing.T) {
 	}
 
 	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sqs", "orders"))
-	dlqName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", "dlq"), 80)
+	dlqName := cloudctlaws.DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
 	dlq, ok := client.queues[dlqName]
 	if !ok {
 		t.Fatal("expected the DLQ to have been created")
@@ -348,6 +348,29 @@ func TestEnsure_RefusesAdoptingQueueOwnedByDifferentCR(t *testing.T) {
 	}
 }
 
+// TestEnsure_RefusesAdoptingQueueWithStaleUIDEvenWithAdoptTrue guards
+// against the deleted-and-recreated-CR case: a queue tagged with this
+// exact CR's own namespace/name, but a different UID, must never be
+// silently re-adopted just because adopt:true is set - a name match alone
+// is never ownership.
+func TestEnsure_RefusesAdoptingQueueWithStaleUIDEvenWithAdoptTrue(t *testing.T) {
+	client := newFakeSQS()
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
+	_, _ = client.CreateQueue(context.Background(), &sqs.CreateQueueInput{
+		QueueName: &queueName,
+		Tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "old-uid",
+		},
+	})
+
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", Adopt: true}}}
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "new-uid", spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected adopt:true to never override a queue tagged with this CR's name but a stale (different) UID")
+	}
+}
+
 func TestEnsure_ClassifiesTransientAWSErrorsAsRetryable(t *testing.T) {
 	client := newFakeSQS()
 	client.getQueueUrlErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
@@ -420,7 +443,7 @@ func TestEnsure_CreatesDLQAndSetsRedrivePolicy(t *testing.T) {
 	if dlqEntry == nil {
 		t.Fatal("expected a ledger entry for the DLQ")
 	}
-	dlqQueueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", "dlq"), 80)
+	dlqQueueName := cloudctlaws.DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
 	dlqQueue, ok := client.queues[dlqQueueName]
 	if !ok {
 		t.Fatalf("expected DLQ queue %q to have been created", dlqQueueName)
@@ -513,7 +536,7 @@ func TestEnsure_NoDLQMeansNoRedrivePolicy(t *testing.T) {
 	}
 
 	mainQueueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
-	dlqQueueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", "dlq"), 80)
+	dlqQueueName := cloudctlaws.DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
 	if _, exists := client.queues[dlqQueueName]; exists {
 		t.Error("expected no DLQ to be created when dlq is false")
 	}
@@ -675,7 +698,7 @@ func TestEnsure_DLQInheritsFIFOFromParent(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	dlqFifoName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", "dlq"), 80) + ".fifo"
+	dlqFifoName := cloudctlaws.DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq") + ".fifo"
 	q, ok := client.queues[dlqFifoName]
 	if !ok {
 		t.Fatalf("expected DLQ %q to inherit fifo from its parent queue", dlqFifoName)
@@ -865,6 +888,38 @@ func TestEnsure_RedrivePolicyRemovalWaitsForTrustWindow_WhenNoOtherAttributeSet(
 
 	if got := client.queues[queueName].attributes["RedrivePolicy"]; got == "" {
 		t.Error("expected RedrivePolicy to still be set within the trust window - this documents the known, narrower residual gap, not a desired outcome")
+	}
+}
+
+// TestEnsure_SetsRedrivePolicyWhenDLQAddedLater is day-2's DLQ-add
+// direction, the counterpart to the DLQ-removed tests above - a plain
+// queue created without one, then given dlq:true on a later reconcile,
+// even while still within its own trust window (unlike removal, adding a
+// DLQ changes desiredAttributes(opts) from empty to non-empty, so the
+// fast path's round-trip skip doesn't apply here at all).
+func TestEnsure_SetsRedrivePolicyWhenDLQAddedLater(t *testing.T) {
+	client := newFakeSQS()
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
+	if client.queues[queueName].attributes["RedrivePolicy"] != "" {
+		t.Fatal("test setup broken: expected no RedrivePolicy on a plain queue with no DLQ")
+	}
+
+	spec = &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DLQ: true}}}
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	dlqName := cloudctlaws.DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
+	if _, ok := client.queues[dlqName]; !ok {
+		t.Fatal("expected the DLQ to be created once dlq:true is added")
+	}
+	if got := client.queues[queueName].attributes["RedrivePolicy"]; got == "" {
+		t.Error("expected RedrivePolicy to be set on the main queue immediately once dlq:true is added, even within the trust window")
 	}
 }
 

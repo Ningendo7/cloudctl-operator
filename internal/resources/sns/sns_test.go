@@ -273,6 +273,27 @@ func TestEnsure_RefusesAdoptingTopicOwnedByDifferentCR(t *testing.T) {
 	}
 }
 
+// TestEnsure_RefusesAdoptingTopicWithStaleUIDEvenWithAdoptTrue guards
+// against the deleted-and-recreated-CR case: a topic tagged with this
+// exact CR's own namespace/name, but a different UID, must never be
+// silently re-adopted just because adopt:true is set - a name match alone
+// is never ownership.
+func TestEnsure_RefusesAdoptingTopicWithStaleUIDEvenWithAdoptTrue(t *testing.T) {
+	client := newFakeSNS()
+	topicName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, topicName)
+	client.topics[topicArn] = &fakeTopic{arn: topicArn, tags: map[string]string{
+		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+		cloudctlaws.OwnerUIDTagKey: "old-uid",
+	}}
+
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", Adopt: true}}}
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID, spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected adopt:true to never override a topic tagged with this CR's name but a stale (different) UID")
+	}
+}
+
 func TestEnsure_CreatesFIFOTopicWithSuffixAndAttribute(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", FIFO: true}}}

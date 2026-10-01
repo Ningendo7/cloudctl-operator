@@ -50,6 +50,12 @@ const aliasMaxLen = 256
 type keyOptions struct {
 	deletionPolicy depsv1alpha1.DeletionPolicy
 	adopt          bool
+	// aliasParts, when non-empty, marks this key as one derived from
+	// another resource package's entry (see EnsureDedicatedKey) — the
+	// alias is built from these parts via DerivedResourceName instead of
+	// treating resourceName (which for a derived key is the '#'-joined
+	// ledger key, illegal in a real AWS alias) as the AWS-facing name.
+	aliasParts []string
 }
 
 // aliasPrefix is the mandatory literal every KMS alias name starts with.
@@ -59,7 +65,10 @@ const aliasPrefix = "alias/"
 // only name-based handle a KMS key has. Unlike every other resource type,
 // CreateKey itself accepts no name at all; only CreateAlias, a required
 // second call, does.
-func aliasName(namespace, crName, resourceName string) string {
+func aliasName(namespace, crName, resourceName string, opts keyOptions) string {
+	if len(opts.aliasParts) > 0 {
+		return aliasPrefix + cloudctlaws.DerivedResourceName(namespace, crName, resourceType, aliasMaxLen-len(aliasPrefix), opts.aliasParts...)
+	}
 	return aliasPrefix + cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, aliasMaxLen-len(aliasPrefix))
 }
 
@@ -118,7 +127,10 @@ func EnsureDedicatedKey(
 	recordEvent status.EventRecorder,
 ) (arn string, updatedLedger []depsv1alpha1.ManagedResource, err error) {
 	ledgerName := DedicatedKeyLedgerName(ownerType, resourceName)
-	opts := keyOptions{deletionPolicy: deletionPolicy}
+	opts := keyOptions{
+		deletionPolicy: deletionPolicy,
+		aliasParts:     []string{ownerType, resourceName, "key"},
+	}
 	updatedLedger, err = ensureKey(ctx, client, namespace, crName, crUID, ledgerName, opts, ledger, checkpoint, recordEvent)
 	if err != nil {
 		return "", updatedLedger, err
@@ -165,7 +177,7 @@ func ensureKey(
 	checkpoint status.Checkpoint,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	alias := aliasName(namespace, crName, resourceName)
+	alias := aliasName(namespace, crName, resourceName, opts)
 
 	if entry := status.FindManagedResource(ledger, resourceType, resourceName); entry != nil {
 		return resumeKey(ctx, client, namespace, crName, crUID, alias, opts, *entry, ledger, recordEvent)
@@ -333,6 +345,9 @@ func adoptKey(
 	}
 	if existingOwner, ok := tagMap[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 		return ledger, fmt.Errorf("KMS alias %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", alias, existingOwner)
+	}
+	if staleUID, stale := cloudctlaws.IsStaleUID(tagMap, namespace, crName, crUID); stale {
+		return ledger, fmt.Errorf("KMS alias %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", alias, staleUID)
 	}
 	if !opts.adopt {
 		return ledger, fmt.Errorf("KMS alias %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", alias)

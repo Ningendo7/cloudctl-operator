@@ -146,3 +146,32 @@ exist yet" (but is about to) would be flaky, order-dependent behavior. This
 mirrors how Kubernetes already treats other forward references — an Ingress
 pointing at a not-yet-created Service isn't rejected at admission, it just
 doesn't route until the Service shows up.
+
+## AWS client handling and rate limiting
+
+One shared client per AWS service, built once at manager startup
+(`internal/aws.NewClients`) and reused for the process lifetime — not
+per-reconcile, since client construction resolves credentials (an STS call
+under IRSA) and builds the retry/middleware stack, and doing that on every
+tick would add latency to every reconcile and could itself hammer STS
+under load.
+
+Each service also gets its own independent outgoing rate limiter
+(`internal/aws/ratelimit.go`), attached as SDK middleware on that service's
+client alone rather than a budget shared across services. Sharing one
+budget would mean the tightest service (IAM, whose real limits are
+considerably stricter than SQS/SNS/S3/DynamoDB/CloudWatch's) throttles the
+others down to its own ceiling for no reason tied to their actual
+capacity. This paces requests *before* they're sent, independent of and in
+addition to each client's own SDK-level retry behavior, which only reacts
+after AWS has already started throttling. Defaults are deliberately
+conservative starting points, not verified figures for any specific
+account's real limits — tunable per service via
+`AWS_<SERVICE>_RATE_LIMIT_QPS`/`_BURST` env vars.
+
+A freshly-elected leader can have a large backlog of CRs to reconcile all
+at once (informer cache sync, then the workqueue populating) — exactly
+when a real burst past a service's limits is most likely. Right after
+`mgr.Elected()`, every limiter ramps from 10% of its configured target up
+to that target over 30 seconds, rather than starting at full burst into a
+cold backlog.

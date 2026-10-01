@@ -252,6 +252,9 @@ func ensureTable(
 		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 			return ledger, fmt.Errorf("table %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", tableName, existingOwner)
 		}
+		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
+			return ledger, fmt.Errorf("table %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", tableName, staleUID)
+		}
 		if !opts.adopt {
 			return ledger, fmt.Errorf("table %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", tableName)
 		}
@@ -442,6 +445,11 @@ func reconcileTableAttributes(ctx context.Context, client dynamodbAPI, tableName
 		}
 	}
 
+	// DescribeContinuousBackups/UpdateContinuousBackups raise
+	// TableNotFoundException for a missing table, not the
+	// ResourceNotFoundException DescribeTable and the tagging calls use -
+	// this call site doesn't need to distinguish "not found" from any other
+	// error, but a future change that does should check the right type.
 	backupOut, err := client.DescribeContinuousBackups(ctx, &dynamodb.DescribeContinuousBackupsInput{TableName: &tableName})
 	if err != nil {
 		return fmt.Errorf("reading point-in-time recovery status: %w", err)

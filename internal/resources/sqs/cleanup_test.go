@@ -511,11 +511,11 @@ func TestCleanup_AddsDenyPolicyWhenMarkingPendingDeletion(t *testing.T) {
 	if !strings.Contains(policy, pendingDeletionDenySid) {
 		t.Errorf("expected a send-blocking deny policy to be attached once pending deletion, got policy=%s", policy)
 	}
-	// Exact quoted matches - "sqs:SendMessage" alone is a literal substring
-	// of "sqs:SendMessageBatch", so an unquoted Contains check would pass
-	// even if the batch action were the only one actually denied.
-	if !strings.Contains(policy, `"sqs:SendMessage"`) || !strings.Contains(policy, `"sqs:SendMessageBatch"`) {
-		t.Errorf("expected the pending-deletion deny to block both SendMessage and SendMessageBatch, got policy=%s", policy)
+	if !strings.Contains(policy, `"sqs:SendMessage"`) {
+		t.Errorf("expected the pending-deletion deny to block sqs:SendMessage, got policy=%s", policy)
+	}
+	if strings.Contains(policy, "SendMessageBatch") {
+		t.Errorf("expected no SendMessageBatch action - it's not a recognized SQS action, sqs:SendMessage alone covers batch sends too, got policy=%s", policy)
 	}
 }
 
@@ -671,7 +671,7 @@ func TestCleanup_KeepsDLQWhenStillDeclared(t *testing.T) {
 	if len(results) != 0 {
 		t.Errorf("expected no results for a still-declared queue and its DLQ, got %v", results)
 	}
-	dlqQueueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", "dlq"), 80)
+	dlqQueueName := cloudctlaws.DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
 	if _, stillExists := client.queues[dlqQueueName]; !stillExists {
 		t.Error("expected the DLQ to remain untouched while dlq:true is still declared")
 	}
@@ -702,7 +702,7 @@ func TestCleanup_RemovesDLQWhenDLQDisabled(t *testing.T) {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 
-	dlqQueueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", "dlq"), 80)
+	dlqQueueName := cloudctlaws.DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
 	if _, stillExists := client.queues[dlqQueueName]; stillExists {
 		t.Error("expected the DLQ to be deleted once dlq is toggled off (deletionPolicy inherited as Delete)")
 	}

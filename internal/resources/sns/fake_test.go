@@ -119,7 +119,9 @@ func (f *fakeSNS) ListTagsForResource(_ context.Context, in *sns.ListTagsForReso
 	}
 	topic, ok := f.topics[*in.ResourceArn]
 	if !ok {
-		return nil, &types.NotFoundException{}
+		// Real AWS raises ResourceNotFoundException here, not the plain
+		// NotFoundException other topic operations use.
+		return nil, &types.ResourceNotFoundException{}
 	}
 	return &sns.ListTagsForResourceOutput{Tags: mapToTags(topic.tags)}, nil
 }

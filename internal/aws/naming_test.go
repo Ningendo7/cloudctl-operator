@@ -58,6 +58,32 @@ func TestDerivedKey(t *testing.T) {
 	}
 }
 
+func TestDerivedResourceName(t *testing.T) {
+	got := DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
+	wantPrefix := "default-checkout-service-orders-dlq-"
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("DerivedResourceName() = %q, want prefix %q", got, wantPrefix)
+	}
+	if got2 := DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq"); got2 != got {
+		t.Errorf("DerivedResourceName() is not deterministic: %q vs %q", got, got2)
+	}
+}
+
+// TestDerivedResourceName_NeverCollidesWithAPlainResourceOfTheSameVisibleName
+// is the regression test for a real bug: a derived name's visible prefix
+// can look identical to a plain, user-declared resource's own name (e.g. a
+// queue "orders" with a DLQ produces the same prefix text as a
+// user-declared queue literally named "orders-dlq") — role must be hashed
+// as its own tuple element, not string-joined into resourceKey first, or
+// the two would hash identically and collide on the same real AWS name.
+func TestDerivedResourceName_NeverCollidesWithAPlainResourceOfTheSameVisibleName(t *testing.T) {
+	derived := DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
+	plain := ResourceName("default", "checkout-service", "sqs", "orders-dlq", 80)
+	if derived == plain {
+		t.Errorf("expected a derived name and a plain resource with the same visible text to never collide, both produced %q", derived)
+	}
+}
+
 // Two different (namespace, crName) identities must never produce the
 // same AWS resource name.
 func TestResourceName_DoesNotCollideAcrossDifferentIdentities(t *testing.T) {

@@ -48,7 +48,7 @@ func TestEnsure_CreatesKeyWithOwnerTagsAliasAndRotation(t *testing.T) {
 		t.Errorf("expected State Verified, got %v", entry.State)
 	}
 
-	wantAlias := aliasName("default", "checkout-service", "primary")
+	wantAlias := aliasName("default", "checkout-service", "primary", keyOptions{})
 	arn, ok := client.aliases[wantAlias]
 	if !ok {
 		t.Fatalf("expected alias %q to be created", wantAlias)
@@ -94,7 +94,7 @@ func TestEnsure_ResumesFromLedgerWithoutRecreatingKeyWhenAliasIsMissing(t *testi
 	if entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected State Verified after finishing alias creation, got %v", entry.State)
 	}
-	if client.aliases[aliasName("default", "checkout-service", "primary")] != arn {
+	if client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] != arn {
 		t.Error("expected the alias to now point at the existing key")
 	}
 }
@@ -103,7 +103,7 @@ func TestEnsure_RefusesForeignAliasedKeyWithoutAdopt(t *testing.T) {
 	client := newFakeKMS()
 	arn := "arn:aws:kms:us-east-1:123456789012:key/foreign-id"
 	client.keys[arn] = &fakeKey{arn: arn, keyID: "foreign-id", keyState: types.KeyStateEnabled}
-	client.aliases[aliasName("default", "checkout-service", "primary")] = arn
+	client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] = arn
 
 	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
 	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
@@ -116,7 +116,7 @@ func TestEnsure_AdoptsUntaggedKeyWhenRequested(t *testing.T) {
 	client := newFakeKMS()
 	arn := "arn:aws:kms:us-east-1:123456789012:key/foreign-id"
 	client.keys[arn] = &fakeKey{arn: arn, keyID: "foreign-id", keyState: types.KeyStateEnabled, tags: map[string]string{"team": "someone-else"}}
-	client.aliases[aliasName("default", "checkout-service", "primary")] = arn
+	client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] = arn
 
 	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary", Adopt: true}}}
 	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
@@ -143,12 +143,32 @@ func TestEnsure_RejectsKeyOwnedByDifferentCREvenWithAdopt(t *testing.T) {
 		arn: arn, keyID: "foreign-id", keyState: types.KeyStateEnabled,
 		tags: map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "other-service"), cloudctlaws.OwnerUIDTagKey: "uid-2"},
 	}
-	client.aliases[aliasName("default", "checkout-service", "primary")] = arn
+	client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] = arn
 
 	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary", Adopt: true}}}
 	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to still refuse a key owned by a different AppDependencies CR")
+	}
+}
+
+// TestEnsure_RejectsKeyWithStaleUIDEvenWithAdopt guards against the
+// deleted-and-recreated-CR case: a key tagged with this exact CR's own
+// namespace/name, but a different UID, must never be silently re-adopted
+// just because adopt:true is set - a name match alone is never ownership.
+func TestEnsure_RejectsKeyWithStaleUIDEvenWithAdopt(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/stale-id"
+	client.keys[arn] = &fakeKey{
+		arn: arn, keyID: "stale-id", keyState: types.KeyStateEnabled,
+		tags: map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "old-uid"},
+	}
+	client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] = arn
+
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary", Adopt: true}}}
+	_, err := Ensure(context.Background(), client, "default", "checkout-service", "new-uid", spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected adopt:true to never override a key tagged with this CR's name but a stale (different) UID")
 	}
 }
 
@@ -162,7 +182,7 @@ func TestEnsure_DetectsAliasCollisionWithADifferentKey(t *testing.T) {
 	ownerTags := map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"}
 	client.keys[ourARN] = &fakeKey{arn: ourARN, keyID: "our-id", tags: ownerTags, keyState: types.KeyStateEnabled}
 	client.keys[otherARN] = &fakeKey{arn: otherARN, keyID: "other-id", keyState: types.KeyStateEnabled}
-	client.aliases[aliasName("default", "checkout-service", "primary")] = otherARN
+	client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] = otherARN
 
 	ledger := []depsv1alpha1.ManagedResource{
 		{Type: resourceType, Name: "primary", ARN: ourARN, State: depsv1alpha1.ManagedResourceStateTagPending, CreatedAt: metav1.Now()},
@@ -260,9 +280,25 @@ func TestEnsureDedicatedKey_CreatesKeyUnderDerivedLedgerName(t *testing.T) {
 		t.Errorf("ledger ARN = %q, want %q", entry.ARN, arn)
 	}
 
-	wantAlias := aliasName("default", "checkout-service", ledgerName)
+	wantAlias := aliasName("default", "checkout-service", ledgerName, keyOptions{aliasParts: []string{"sqs", "orders", "key"}})
 	if client.aliases[wantAlias] != arn {
 		t.Errorf("expected alias %q to point at %q", wantAlias, arn)
+	}
+	if strings.Contains(wantAlias, "#") {
+		t.Errorf("alias %q must never contain '#' — AWS rejects it in a real alias name", wantAlias)
+	}
+}
+
+func TestEnsureDedicatedKey_AliasNeverCollidesWithAPlainKeyOfTheSameVisibleName(t *testing.T) {
+	// A dedicated key for sqs/orders and a plain kms.resources entry named
+	// "sqs-orders-key" have the same human-readable prefix once derived,
+	// but must hash to different aliases — DerivedResourceName hashes
+	// "sqs", "orders", "key" as three separate tuple elements, never
+	// pre-joined into the single string a plain ResourceName call would see.
+	dedicated := aliasName("default", "checkout-service", DedicatedKeyLedgerName("sqs", "orders"), keyOptions{aliasParts: []string{"sqs", "orders", "key"}})
+	plain := aliasName("default", "checkout-service", "sqs-orders-key", keyOptions{})
+	if dedicated == plain {
+		t.Errorf("dedicated key alias %q must not collide with a plain resource's alias of the same visible name", dedicated)
 	}
 }
 
@@ -381,7 +417,7 @@ func TestEnsure_ContinuesToOtherKeysAfterOneFails(t *testing.T) {
 	client := newFakeKMS()
 	foreignARN := "arn:aws:kms:us-east-1:123456789012:key/foreign-id"
 	client.keys[foreignARN] = &fakeKey{arn: foreignARN, keyID: "foreign-id", keyState: types.KeyStateEnabled}
-	client.aliases[aliasName("default", "checkout-service", "bad-key")] = foreignARN
+	client.aliases[aliasName("default", "checkout-service", "bad-key", keyOptions{})] = foreignARN
 
 	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
 		{Name: "bad-key"},
@@ -451,7 +487,7 @@ func TestEnsure_AdoptingKey_EmitsAdoptedEvent(t *testing.T) {
 	client := newFakeKMS()
 	arn := "arn:aws:kms:us-east-1:123456789012:key/foreign-id"
 	client.keys[arn] = &fakeKey{arn: arn, keyID: "foreign-id", keyState: types.KeyStateEnabled, tags: map[string]string{"team": "someone-else"}}
-	client.aliases[aliasName("default", "checkout-service", "primary")] = arn
+	client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] = arn
 	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary", Adopt: true}}}
 	recordEvent, events := newEventCollector()
 

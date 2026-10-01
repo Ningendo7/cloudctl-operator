@@ -53,6 +53,16 @@ type queueOptions struct {
 	visibilityTimeoutSeconds  *int32
 	redrivePolicy             *string
 	kmsKeyARN                 *string
+
+	// derivedFromKey/derivedRole, if both set, mean this queue's real AWS
+	// name must be built via DerivedResourceName (role hashed as its own
+	// tuple element) rather than ResourceName - required for a queue this
+	// operator derives from another one it owns (a DLQ), whose ledger key
+	// already has role baked into the string via DerivedKey and so can't
+	// safely double as the ResourceName hash input too (see
+	// DerivedResourceName's own doc comment for why).
+	derivedFromKey string
+	derivedRole    string
 }
 
 // Ensure reconciles every declared SQS queue (and its DLQ, if requested)
@@ -147,6 +157,8 @@ func ensureQueue(
 			adopt:          q.Adopt,
 			fifo:           q.FIFO,
 			kmsKeyARN:      kmsKeyARN,
+			derivedFromKey: q.Name,
+			derivedRole:    "dlq",
 		}, ledger, recordEvent)
 		if err != nil {
 			return ledger, fmt.Errorf("dlq: %w", err)
@@ -257,7 +269,12 @@ func ensureSingleQueue(
 	if opts.fifo {
 		budget -= len(fifoSuffix)
 	}
-	queueName := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, budget)
+	var queueName string
+	if opts.derivedRole != "" {
+		queueName = cloudctlaws.DerivedResourceName(namespace, crName, resourceType, budget, opts.derivedFromKey, opts.derivedRole)
+	} else {
+		queueName = cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, budget)
+	}
 	if opts.fifo {
 		queueName += fifoSuffix
 	}
@@ -325,6 +342,9 @@ func ensureSingleQueue(
 	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, crUID) {
 		if existingOwner, ok := tagsOut.Tags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 			return ledger, fmt.Errorf("queue %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", queueName, existingOwner)
+		}
+		if staleUID, stale := cloudctlaws.IsStaleUID(tagsOut.Tags, namespace, crName, crUID); stale {
+			return ledger, fmt.Errorf("queue %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", queueName, staleUID)
 		}
 		if !opts.adopt {
 			return ledger, fmt.Errorf("queue %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", queueName)

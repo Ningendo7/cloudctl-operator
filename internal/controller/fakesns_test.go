@@ -96,7 +96,9 @@ func (f *fakeSNSClient) SetTopicAttributes(_ context.Context, in *sns.SetTopicAt
 func (f *fakeSNSClient) ListTagsForResource(_ context.Context, in *sns.ListTagsForResourceInput, _ ...func(*sns.Options)) (*sns.ListTagsForResourceOutput, error) {
 	topic, ok := f.topics[*in.ResourceArn]
 	if !ok {
-		return nil, &types.NotFoundException{}
+		// Real AWS raises ResourceNotFoundException here, not the plain
+		// NotFoundException other topic operations use.
+		return nil, &types.ResourceNotFoundException{}
 	}
 	return &sns.ListTagsForResourceOutput{Tags: tagsToSlice(topic.tags)}, nil
 }

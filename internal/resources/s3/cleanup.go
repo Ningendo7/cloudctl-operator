@@ -393,9 +393,10 @@ func relinquishIfStillTagged(ctx context.Context, client s3API, namespace, crNam
 			remaining[k] = v
 		}
 	}
-	// PutBucketTagging replaces the whole tag set - an empty TagSet is
-	// rejected by the API, so clear tagging entirely if nothing else
-	// remains rather than sending an empty set.
+	// PutBucketTagging replaces the whole tag set - an empty TagSet is a
+	// valid way to clear it entirely (GetBucketTagging then reports
+	// NoSuchTagSet), so this needs no separate branch from the non-empty
+	// case below beyond which map gets encoded.
 	if len(remaining) == 0 {
 		_, err := client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
 			Bucket:  &bucket,

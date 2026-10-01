@@ -38,7 +38,10 @@ func identityHash(fields ...string) string {
 
 // derivedKeySeparator marks a resourceKey as one this operator computed
 // itself rather than one a user typed — '#' appears in none of this CRD's
-// resourceKey patterns.
+// resourceKey patterns. Only used for the ledger key string, never sent to
+// AWS as-is: '#' isn't legal in any of SQS/SNS/S3/DynamoDB/KMS's real
+// naming rules, so the AWS-facing name is built separately by
+// DerivedResourceName instead.
 const derivedKeySeparator = "#"
 
 // DerivedKey builds the resourceKey for a resource this operator derives
@@ -62,8 +65,26 @@ func DerivedKey(resourceKey, role string) string {
 // hash.
 func ResourceName(namespace, crName, resourceType, key string, maxLen int) string {
 	hash := identityHash(namespace, crName, resourceType, key)
-	prefix := fmt.Sprintf("%s-%s-%s", namespace, crName, key)
+	return truncateAndAppendHash(fmt.Sprintf("%s-%s-%s", namespace, crName, key), hash, maxLen)
+}
 
+// DerivedResourceName is ResourceName's counterpart for a resource this
+// operator derives from another one it owns (an SQS queue's DLQ, a
+// dedicated KMS key for some other resource's encryption). Each of
+// keyParts is hashed as its own tuple element via identityHash rather than
+// pre-joined into one string first — a user-declared resource named e.g.
+// "orders-dlq" hashes over the single element "orders-dlq", never the two
+// elements "orders" and "dlq", so the two can never collide on the same
+// AWS name even though the visible, human-readable prefix looks the same
+// either way (DerivedKey's ledger key uses '#' for exactly this reason,
+// but that character isn't legal in the real AWS name built here).
+func DerivedResourceName(namespace, crName, resourceType string, maxLen int, keyParts ...string) string {
+	hash := identityHash(append([]string{namespace, crName, resourceType}, keyParts...)...)
+	prefix := strings.Join(append([]string{namespace, crName}, keyParts...), "-")
+	return truncateAndAppendHash(prefix, hash, maxLen)
+}
+
+func truncateAndAppendHash(prefix, hash string, maxLen int) string {
 	budget := maxLen - len(hash) - 1
 	if budget < 0 {
 		budget = 0

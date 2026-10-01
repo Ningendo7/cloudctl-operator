@@ -258,6 +258,9 @@ func ensureBucket(
 		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 			return ledger, fmt.Errorf("bucket %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", bucket, existingOwner)
 		}
+		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
+			return ledger, fmt.Errorf("bucket %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", bucket, staleUID)
+		}
 		if !opts.adopt {
 			return ledger, fmt.Errorf("bucket %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", bucket)
 		}
@@ -378,10 +381,13 @@ func reconcileBucketAttributes(ctx context.Context, client s3API, bucket string,
 
 // isServerSideEncryptionConfigurationNotFound reports whether err is S3's
 // "no default encryption configuration has ever been explicitly set"
-// response — a real, expected state for any bucket PutBucketEncryption was
-// never called on (every bucket is still SSE-S3-encrypted by default
-// regardless), not an error condition. No typed exception exists for this
-// one in the SDK — same as isNoSuchTagSet's own string-code check below.
+// response. Since AWS started applying default SSE-S3 encryption to every
+// new bucket, GetBucketEncryption no longer errors for that case at all —
+// it returns a default AES256 rule with no KMSMasterKeyID — so this branch
+// mainly matters for a bucket predating that change, adopted rather than
+// created by this operator. Not an error condition either way. No typed
+// exception exists for this one in the SDK — same as isNoSuchTagSet's own
+// string-code check below.
 func isServerSideEncryptionConfigurationNotFound(err error) bool {
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "ServerSideEncryptionConfigurationNotFoundError"

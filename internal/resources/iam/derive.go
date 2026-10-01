@@ -39,8 +39,12 @@ type actionSet struct {
 
 var actionSets = map[string]actionSet{
 	"sqs": {
-		baseline:  []string{"sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl", "sqs:ChangeMessageVisibility"},
-		readWrite: []string{"sqs:SendMessage", "sqs:SendMessageBatch"},
+		baseline: []string{"sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl", "sqs:ChangeMessageVisibility"},
+		// sqs:SendMessage alone also governs SendMessageBatch calls -
+		// "sqs:SendMessageBatch" isn't a real, recognized SQS action (AWS
+		// rejects it outright in a resource policy; IAM silently accepts
+		// but doesn't act on it in a role policy either).
+		readWrite: []string{"sqs:SendMessage"},
 	},
 	"sns": {
 		baseline:  []string{"sns:Subscribe", "sns:Unsubscribe", "sns:GetTopicAttributes"},

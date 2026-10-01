@@ -75,6 +75,13 @@ func IsPermissionDenied(err error) bool {
 // CreateRole/UpdateAssumeRolePolicy/PutRolePolicy/DeleteRole can all return
 // it when two requests touch the same role at once, and waiting and
 // retrying is AWS's own documented remedy.
+//
+// ContinuousBackupsUnavailableException (DynamoDB) is also a client-fault
+// by HTTP status but a transient one: UpdateContinuousBackups/
+// DescribeContinuousBackups return it for a brief window right after a
+// table reaches ACTIVE, while backups are still being provisioned for it —
+// a completely normal sequence for any table created with backup enabled,
+// not a request problem.
 func IsRetryable(err error) bool {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
@@ -82,7 +89,7 @@ func IsRetryable(err error) bool {
 			return true
 		}
 		code := apiErr.ErrorCode()
-		if code == "ThrottlingException" || code == "RequestLimitExceeded" || code == "TooManyRequestsException" || code == "ResourceInUseException" || code == "ConcurrentModification" {
+		if code == "ThrottlingException" || code == "RequestLimitExceeded" || code == "TooManyRequestsException" || code == "ResourceInUseException" || code == "ConcurrentModification" || code == "ContinuousBackupsUnavailableException" {
 			return true
 		}
 		return strings.Contains(code, "Throttl")

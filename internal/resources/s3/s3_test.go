@@ -397,6 +397,25 @@ func TestEnsure_RejectsBucketOwnedByDifferentCREvenWithAdopt(t *testing.T) {
 	}
 }
 
+// TestEnsure_RejectsBucketWithStaleUIDEvenWithAdopt guards against the
+// deleted-and-recreated-CR case: a bucket tagged with this exact CR's own
+// namespace/name, but a different UID, must never be silently re-adopted
+// just because adopt:true is set - a name match alone is never ownership.
+func TestEnsure_RejectsBucketWithStaleUIDEvenWithAdopt(t *testing.T) {
+	client := newFakeS3()
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	client.buckets[bucket] = &fakeBucket{tags: map[string]string{
+		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+		cloudctlaws.OwnerUIDTagKey: "old-uid",
+	}}
+
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts", Adopt: true}}}
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID, spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected adopt:true to never override a bucket tagged with this CR's name but a stale (different) UID")
+	}
+}
+
 func TestEnsure_RejectsReplicationAsNotYetSupported(t *testing.T) {
 	client := newFakeS3()
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{

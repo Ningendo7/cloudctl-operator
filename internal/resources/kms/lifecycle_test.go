@@ -89,7 +89,7 @@ func (s *kmsLifecycleSubject) SeedForeign(name string, owner *lifecycletest.Owne
 		tags[cloudctlaws.OwnerUIDTagKey] = owner.CRUID
 	}
 	s.client.keys[arn] = &fakeKey{arn: arn, keyID: "foreign-" + name, keyState: types.KeyStateEnabled, tags: tags}
-	s.client.aliases[aliasName(s.namespace, s.crName, name)] = arn
+	s.client.aliases[aliasName(s.namespace, s.crName, name, keyOptions{})] = arn
 	return nil
 }
 

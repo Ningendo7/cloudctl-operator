@@ -37,3 +37,28 @@ func TestIsOwnedBy(t *testing.T) {
 		t.Error("expected untagged resource to not be owned")
 	}
 }
+
+func TestIsStaleUID(t *testing.T) {
+	tags := map[string]string{
+		OwnerTagKey:    OwnerTagValue("default", "checkout-service"),
+		OwnerUIDTagKey: "old-uid",
+	}
+
+	uid, stale := IsStaleUID(tags, "default", "checkout-service", "new-uid")
+	if !stale {
+		t.Fatal("expected a name match with a different UID to be reported stale")
+	}
+	if uid != "old-uid" {
+		t.Errorf("expected the existing UID %q returned, got %q", "old-uid", uid)
+	}
+
+	if _, stale := IsStaleUID(tags, "default", "checkout-service", "old-uid"); stale {
+		t.Error("expected a matching UID to not be reported stale")
+	}
+	if _, stale := IsStaleUID(tags, "other-namespace", "checkout-service", "new-uid"); stale {
+		t.Error("expected a different namespace/name to not be reported stale - that's a different-CR collision, not a stale UID")
+	}
+	if _, stale := IsStaleUID(nil, "default", "checkout-service", "new-uid"); stale {
+		t.Error("expected a genuinely untagged resource to not be reported stale")
+	}
+}

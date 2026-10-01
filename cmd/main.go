@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -214,6 +215,18 @@ func main() {
 		setupLog.Error(err, "Failed to set up ready check")
 		os.Exit(1)
 	}
+
+	const rateLimitRampDuration = 30 * time.Second
+	go func() {
+		select {
+		case <-mgr.Elected():
+		case <-ctx.Done():
+			return
+		}
+		for _, limiter := range awsClients.RateLimiters {
+			go cloudctlaws.RampUp(ctx, limiter, rateLimitRampDuration)
+		}
+	}()
 
 	setupLog.Info("Starting manager")
 	if err := mgr.Start(ctx); err != nil {

@@ -122,7 +122,9 @@ func Cleanup(
 
 		tagsOut, tErr := client.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{ResourceArn: &entry.ARN})
 		if tErr != nil {
-			var notFound *types.NotFoundException
+			// ListTagsForResource raises ResourceNotFoundException, not the
+			// plain NotFoundException other topic operations use.
+			var notFound *types.ResourceNotFoundException
 			if errors.As(tErr, &notFound) {
 				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 				continue
@@ -255,7 +257,9 @@ func relinquishIfStillTagged(ctx context.Context, client snsAPI, namespace, crNa
 		ResourceArn: &entry.ARN,
 	})
 	if tErr != nil {
-		var notFound *types.NotFoundException
+		// ListTagsForResource raises ResourceNotFoundException, not the
+		// plain NotFoundException other topic operations use.
+		var notFound *types.ResourceNotFoundException
 		if errors.As(tErr, &notFound) {
 			return false, nil // already gone, nothing to relinquish
 		}

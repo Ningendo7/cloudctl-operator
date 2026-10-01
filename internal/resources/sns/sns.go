@@ -162,7 +162,11 @@ func ensureTopic(
 		ResourceArn: &topicArn,
 	})
 
-	var notFound *types.NotFoundException
+	// ListTagsForResource is one of the tagging-family APIs (Tag/Untag/
+	// ListTagsForResource) — those raise ResourceNotFoundException, not the
+	// plain NotFoundException GetTopicAttributes/SetTopicAttributes use for
+	// the same "no such topic" condition.
+	var notFound *types.ResourceNotFoundException
 	if errors.As(err, &notFound) {
 		attrs := desiredTopicAttributes(t, kmsKeyARN)
 		if t.FIFO {
@@ -192,6 +196,9 @@ func ensureTopic(
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
 		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 			return ledger, fmt.Errorf("topic %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", topicName, existingOwner)
+		}
+		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
+			return ledger, fmt.Errorf("topic %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", topicName, staleUID)
 		}
 		if !t.Adopt {
 			return ledger, fmt.Errorf("topic %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", topicName)
