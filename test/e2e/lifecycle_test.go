@@ -90,11 +90,41 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 		Expect(err).NotTo(HaveOccurred(), "controller-manager rollout did not complete")
 	})
 
+	AfterEach(func() {
+		if !CurrentSpecReport().Failed() {
+			return
+		}
+		By("Fetching the CR's full status for debugging")
+		cmd := exec.Command("kubectl", "get", "appdependencies", "e2e-orders", "-n", namespace, "-o", "yaml")
+		if out, err := utils.Run(cmd); err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "e2e-orders status:\n%s", out)
+		}
+
+		By("Fetching controller manager logs for debugging")
+		cmd = exec.Command("kubectl", "logs", "-l", "control-plane=controller-manager",
+			"-n", namespace, "--all-containers", "--tail=300")
+		if out, err := utils.Run(cmd); err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "controller-manager logs:\n%s", out)
+		}
+	})
+
 	AfterAll(func() {
+		// kubectl delete on a resource whose finalizer never clears would
+		// otherwise block here indefinitely; cap it and force the
+		// finalizer off rather than let one broken reconcile hang the
+		// entire suite (make undeploy below deletes the whole namespace
+		// next, which would then also block forever on the same stuck
+		// object).
 		By("deleting the sample CR so finalizer-driven cleanup actually runs")
 		cmd := exec.Command("kubectl", "delete", "-f", "test/e2e/testdata/sqs-sample.yaml",
-			"-n", namespace, "--ignore-not-found", "--timeout=90s")
-		_, _ = utils.Run(cmd)
+			"-n", namespace, "--ignore-not-found", "--timeout=60s")
+		_, delErr := utils.Run(cmd)
+		if delErr != nil {
+			By("CR deletion didn't complete in time - forcing its finalizer off")
+			cmd = exec.Command("kubectl", "patch", "appdependencies", "e2e-orders", "-n", namespace,
+				"--type=merge", "-p", `{"metadata":{"finalizers":null}}`)
+			_, _ = utils.Run(cmd)
+		}
 
 		By("deleting the queue-verification pod")
 		cmd = exec.Command("kubectl", "delete", "pod", "verify-queue", "-n", namespace, "--ignore-not-found")
@@ -109,7 +139,7 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 		_, _ = utils.Run(cmd)
 
 		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace, "--ignore-not-found")
+		cmd = exec.Command("kubectl", "delete", "ns", namespace, "--ignore-not-found", "--timeout=60s")
 		_, _ = utils.Run(cmd)
 	})
 
