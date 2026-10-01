@@ -21,6 +21,7 @@ package e2e
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -166,9 +167,18 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 // across every resource type's lifecycle spec since the check itself never
 // varies, only which CR/timing triggers it.
 func verifyReady(g Gomega) {
+	// Every spec past the first applies a change to a CR that's already
+	// Ready from the previous stage - Eventually's first check runs
+	// immediately, which can read that stale, still-True condition before
+	// this generation's own reconcile has even started. Checking
+	// observedGeneration alongside status closes that race: a Ready
+	// condition left over from an earlier generation never satisfies it.
 	cmd := exec.Command("kubectl", "get", "appdependencies", "e2e-orders", "-n", namespace,
-		"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`)
+		"-o", `jsonpath={.metadata.generation} {.status.conditions[?(@.type=="Ready")].observedGeneration} {.status.conditions[?(@.type=="Ready")].status}`)
 	output, err := utils.Run(cmd)
 	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(output).To(Equal("True"), "expected the CR to report Ready")
+	fields := strings.Fields(output)
+	g.Expect(fields).To(HaveLen(3), "expected \"<generation> <observedGeneration> <status>\", got %q", output)
+	g.Expect(fields[1]).To(Equal(fields[0]), "Ready condition is stale (observedGeneration %s != current generation %s) - this spec change hasn't been reconciled yet", fields[1], fields[0])
+	g.Expect(fields[2]).To(Equal("True"), "expected the CR to report Ready")
 }
