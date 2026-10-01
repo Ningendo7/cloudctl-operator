@@ -21,6 +21,7 @@ package e2e
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -167,16 +168,42 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 		Expect(output).To(ContainSubstring("orders"))
 
 		By("verifying the real queue exists in LocalStack, independent of the operator's own state")
-		cmd = exec.Command("kubectl", "run", "verify-queue", "--restart=Never",
-			"-n", namespace,
-			"--image=amazon/aws-cli",
-			"--env=AWS_ACCESS_KEY_ID=test",
-			"--env=AWS_SECRET_ACCESS_KEY=test",
-			"--env=AWS_DEFAULT_REGION=us-east-1",
-			"--command", "--",
-			"aws", "--endpoint-url=http://localstack."+localstackNamespace+".svc.cluster.local:4566",
-			"sqs", "list-queues",
-		)
+		// kubectl run's generated pod has no securityContext, so it's rejected
+		// outright by this namespace's restricted Pod Security enforcement -
+		// a full manifest is needed to supply one.
+		verifyQueuePod := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: verify-queue
+  namespace: ` + namespace + `
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: verify-queue
+      image: amazon/aws-cli
+      env:
+        - {name: AWS_ACCESS_KEY_ID, value: "test"}
+        - {name: AWS_SECRET_ACCESS_KEY, value: "test"}
+        - {name: AWS_DEFAULT_REGION, value: "us-east-1"}
+        - {name: HOME, value: "/tmp"}
+      command:
+        - aws
+        - --endpoint-url=http://localstack.` + localstackNamespace + `.svc.cluster.local:4566
+        - sqs
+        - list-queues
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+`
+		cmd = exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = strings.NewReader(verifyQueuePod)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create the queue-verification pod")
 
