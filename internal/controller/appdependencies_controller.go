@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -48,7 +49,14 @@ type AppDependenciesReconciler struct {
 	// clear error at that point rather than refusing to start without them.
 	OIDCProviderARN string
 	OIDCProviderURL string
+
+	// MaxConcurrentReconciles bounds how many AppDependencies CRs this
+	// manager reconciles in parallel. Left at zero (the Go zero value, not
+	// a deliberate "disable" setting) falls back to defaultMaxConcurrentReconciles
+	MaxConcurrentReconciles int
 }
+
+const defaultMaxConcurrentReconciles = 5
 
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies/status,verbs=get;update;patch
@@ -149,6 +157,10 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	maxConcurrent := r.MaxConcurrentReconciles
+	if maxConcurrent <= 0 {
+		maxConcurrent = defaultMaxConcurrentReconciles
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&depsv1alpha1.AppDependencies{}).
 		WithEventFilter(predicates.AppDependenciesPredicate()).
@@ -161,6 +173,7 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&depsv1alpha1.AppDependencies{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProducerToConsumers),
 		).
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrent}).
 		Named("appdependencies").
 		Complete(r)
 }

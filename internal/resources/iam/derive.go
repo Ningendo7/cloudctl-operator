@@ -122,12 +122,25 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	if cr.Spec.SQS != nil {
 		for _, q := range cr.Spec.SQS.Resources {
 			grants, skipped = recordOwned(grants, skipped, "sqs", q.Name, findLedgerEntry(cr, "sqs", q.Name))
-			if q.Encryption != nil && q.Encryption.Enabled {
-				// The dedicated key is owned by this CR exactly as much as
-				// the queue it protects - same "always full access to what
-				// you own" rule, via the same recordOwned helper, keyed to
-				// the same ledger name kms.EnsureDedicatedKey uses.
-				grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("sqs", q.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("sqs", q.Name)))
+			if q.Encryption != nil {
+				if q.Encryption.Enabled {
+					// The dedicated key is owned by this CR exactly as much as
+					// the queue it protects - same "always full access to what
+					// you own" rule, via the same recordOwned helper, keyed to
+					// the same ledger name kms.EnsureDedicatedKey uses.
+					grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("sqs", q.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("sqs", q.Name)))
+				} else if q.Encryption.KMSKeyRef != nil {
+					// A shared key still has to be usable: the queue's own
+					// Ensure path already resolves this ref to configure SSE,
+					// so the role needs the matching kms grant too, gated on
+					// the same sharedWith authorization as any other
+					// cross-CR reference.
+					if g, reason := resolveConsume(ctx, k8sClient, cr, "kms", *q.Encryption.KMSKeyRef); reason != "" {
+						skipped = append(skipped, reason)
+					} else {
+						grants = append(grants, g)
+					}
+				}
 			}
 		}
 		for _, ref := range cr.Spec.SQS.Consumes {
@@ -141,8 +154,16 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	if cr.Spec.SNS != nil {
 		for _, t := range cr.Spec.SNS.Resources {
 			grants, skipped = recordOwned(grants, skipped, "sns", t.Name, findLedgerEntry(cr, "sns", t.Name))
-			if t.Encryption != nil && t.Encryption.Enabled {
-				grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("sns", t.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("sns", t.Name)))
+			if t.Encryption != nil {
+				if t.Encryption.Enabled {
+					grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("sns", t.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("sns", t.Name)))
+				} else if t.Encryption.KMSKeyRef != nil {
+					if g, reason := resolveConsume(ctx, k8sClient, cr, "kms", *t.Encryption.KMSKeyRef); reason != "" {
+						skipped = append(skipped, reason)
+					} else {
+						grants = append(grants, g)
+					}
+				}
 			}
 		}
 		for _, ref := range cr.Spec.SNS.Consumes {
@@ -156,8 +177,16 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	if cr.Spec.DynamoDB != nil {
 		for _, tbl := range cr.Spec.DynamoDB.Resources {
 			grants, skipped = recordOwned(grants, skipped, "dynamodb", tbl.Name, findLedgerEntry(cr, "dynamodb", tbl.Name))
-			if tbl.Encryption != nil && tbl.Encryption.Enabled {
-				grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("dynamodb", tbl.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("dynamodb", tbl.Name)))
+			if tbl.Encryption != nil {
+				if tbl.Encryption.Enabled {
+					grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("dynamodb", tbl.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("dynamodb", tbl.Name)))
+				} else if tbl.Encryption.KMSKeyRef != nil {
+					if g, reason := resolveConsume(ctx, k8sClient, cr, "kms", *tbl.Encryption.KMSKeyRef); reason != "" {
+						skipped = append(skipped, reason)
+					} else {
+						grants = append(grants, g)
+					}
+				}
 			}
 		}
 		for _, ref := range cr.Spec.DynamoDB.Consumes {
@@ -171,8 +200,16 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	if cr.Spec.S3 != nil {
 		for _, b := range cr.Spec.S3.Resources {
 			grants, skipped = recordOwned(grants, skipped, "s3", b.Name, findLedgerEntry(cr, "s3", b.Name))
-			if b.Encryption != nil && b.Encryption.Enabled {
-				grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("s3", b.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("s3", b.Name)))
+			if b.Encryption != nil {
+				if b.Encryption.Enabled {
+					grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("s3", b.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("s3", b.Name)))
+				} else if b.Encryption.KMSKeyRef != nil {
+					if g, reason := resolveConsume(ctx, k8sClient, cr, "kms", *b.Encryption.KMSKeyRef); reason != "" {
+						skipped = append(skipped, reason)
+					} else {
+						grants = append(grants, g)
+					}
+				}
 			}
 		}
 		for _, ref := range cr.Spec.S3.Consumes {

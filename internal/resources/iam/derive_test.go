@@ -477,3 +477,226 @@ func TestBuildPolicyDocument_ReadOnlyExcludesWriteActions(t *testing.T) {
 func containsAction(actions []string, want string) bool {
 	return slices.Contains(actions, want)
 }
+
+// kmsProducerCR builds a producer CR owning a single standalone kms
+// resource named "shared-key", shared via sharedWith - the fixture shape
+// needed to exercise encryption.kmsKeyRef, which always points at a
+// kms.resources entry on another (or the same) CR, never at a dedicated
+// key.
+func kmsProducerCR(namespace, name string, sharedWith []depsv1alpha1.SharedWithEntry, arn string) *depsv1alpha1.AppDependencies {
+	return &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
+				{Name: "shared-key", SharedWith: sharedWith},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "kms", Name: "shared-key", ARN: arn},
+			},
+		},
+	}
+}
+
+func TestCollectGrants_SQSWithSharedKMSKeyRefGrantsAccessToThatKey(t *testing.T) {
+	producer := kmsProducerCR("default", "key-owner", []depsv1alpha1.SharedWithEntry{
+		{Namespace: "default", Name: "checkout-service", Access: depsv1alpha1.AccessLevelReadWrite},
+	}, "arn:aws:kms:us-east-1:123456789012:key/shared-id")
+
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+				{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{
+					KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "default", Name: "key-owner", ResourceName: "shared-key"},
+				}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders"},
+			},
+		},
+	}
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped entries, got %v", skipped)
+	}
+	if len(grants) != 2 {
+		t.Fatalf("expected an sqs grant and a kms grant, got %+v", grants)
+	}
+
+	var kmsGrant *grant
+	for i := range grants {
+		if grants[i].resourceType == "kms" {
+			kmsGrant = &grants[i]
+		}
+	}
+	if kmsGrant == nil {
+		t.Fatal("expected a kms grant for the shared key - this is the regression this test guards against: " +
+			"a queue encrypted via kmsKeyRef must not be left unable to use its own encryption key")
+	}
+	if kmsGrant.arn != "arn:aws:kms:us-east-1:123456789012:key/shared-id" {
+		t.Errorf("kms grant arn = %q, want the shared key's ARN", kmsGrant.arn)
+	}
+
+	policy, err := buildPolicyDocument(grants)
+	if err != nil {
+		t.Fatalf("buildPolicyDocument: %v", err)
+	}
+	for _, action := range []string{"kms:Decrypt", "kms:GenerateDataKey"} {
+		if !strings.Contains(policy, action) {
+			t.Errorf("expected derived policy to include %q, got %s", action, policy)
+		}
+	}
+}
+
+func TestCollectGrants_KMSKeyRefRespectsReadOnlyAccessLevel(t *testing.T) {
+	producer := kmsProducerCR("default", "key-owner", []depsv1alpha1.SharedWithEntry{
+		{Namespace: "default", Name: "checkout-service", Access: depsv1alpha1.AccessLevelReadOnly},
+	}, "arn:aws:kms:us-east-1:123456789012:key/shared-id")
+
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			S3: &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+				{Name: "receipts", Encryption: &depsv1alpha1.EncryptionSpec{
+					KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "default", Name: "key-owner", ResourceName: "shared-key"},
+				}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "s3", Name: "receipts", ARN: "arn:aws:s3:::default-checkout-service-receipts-ab12cd34"},
+			},
+		},
+	}
+
+	grants, _ := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	var kmsGrant *grant
+	for i := range grants {
+		if grants[i].resourceType == "kms" {
+			kmsGrant = &grants[i]
+		}
+	}
+	if kmsGrant == nil {
+		t.Fatal("expected a kms grant for the shared key")
+	}
+	if kmsGrant.readWrite {
+		t.Error("expected the kms grant to be ReadOnly, matching the key owner's sharedWith grant - " +
+			"the owning CR's own full access to its bucket must not inflate its access to a shared key beyond what was actually granted")
+	}
+
+	policy, err := buildPolicyDocument(grants)
+	if err != nil {
+		t.Fatalf("buildPolicyDocument: %v", err)
+	}
+	if strings.Contains(policy, "kms:GenerateDataKey") {
+		t.Errorf("expected ReadOnly kmsKeyRef to exclude kms:GenerateDataKey, got %s", policy)
+	}
+}
+
+func TestCollectGrants_SNSWithSharedKMSKeyRefGrantsAccessToThatKey(t *testing.T) {
+	producer := kmsProducerCR("default", "key-owner", []depsv1alpha1.SharedWithEntry{
+		{Namespace: "default", Name: "checkout-service", Access: depsv1alpha1.AccessLevelReadWrite},
+	}, "arn:aws:kms:us-east-1:123456789012:key/shared-id")
+
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SNS: &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
+				{Name: "events", Encryption: &depsv1alpha1.EncryptionSpec{
+					KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "default", Name: "key-owner", ResourceName: "shared-key"},
+				}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sns", Name: "events", ARN: "arn:aws:sns:us-east-1:123456789012:default-checkout-service-events"},
+			},
+		},
+	}
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped entries, got %v", skipped)
+	}
+	found := false
+	for _, g := range grants {
+		if g.resourceType == "kms" && g.arn == "arn:aws:kms:us-east-1:123456789012:key/shared-id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a kms grant for the shared key, got %+v", grants)
+	}
+}
+
+func TestCollectGrants_DynamoDBWithSharedKMSKeyRefGrantsAccessToThatKey(t *testing.T) {
+	producer := kmsProducerCR("default", "key-owner", []depsv1alpha1.SharedWithEntry{
+		{Namespace: "default", Name: "checkout-service", Access: depsv1alpha1.AccessLevelReadWrite},
+	}, "arn:aws:kms:us-east-1:123456789012:key/shared-id")
+
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			DynamoDB: &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+				{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{
+					KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "default", Name: "key-owner", ResourceName: "shared-key"},
+				}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "dynamodb", Name: "sessions", ARN: "arn:aws:dynamodb:us-east-1:123456789012:table/default-checkout-service-sessions"},
+			},
+		},
+	}
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped entries, got %v", skipped)
+	}
+	found := false
+	for _, g := range grants {
+		if g.resourceType == "kms" && g.arn == "arn:aws:kms:us-east-1:123456789012:key/shared-id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a kms grant for the shared key, got %+v", grants)
+	}
+}
+
+func TestCollectGrants_SkipsWhenKMSKeyRefNotAuthorized(t *testing.T) {
+	// Key exists and is declared, but never shared with this consumer.
+	producer := kmsProducerCR("default", "key-owner", nil, "arn:aws:kms:us-east-1:123456789012:key/shared-id")
+
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+				{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{
+					KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "default", Name: "key-owner", ResourceName: "shared-key"},
+				}},
+			}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders"},
+			},
+		},
+	}
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	for _, g := range grants {
+		if g.resourceType == "kms" {
+			t.Fatalf("expected no kms grant when the key owner hasn't authorized this CR, got %+v", g)
+		}
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "not authorized") {
+		t.Errorf("expected a 'not authorized' skip reason for the unauthorized kmsKeyRef, got %v", skipped)
+	}
+}

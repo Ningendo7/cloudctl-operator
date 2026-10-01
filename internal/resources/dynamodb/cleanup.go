@@ -66,6 +66,9 @@ type CleanupResult struct {
 // cover the realistic risk window without it. Revisit if that turns out
 // insufficient in practice.
 //
+// forceDeleteAll overrides every entry's own Force value - meant only for
+// the finalize path, see the sqs package's Cleanup for why this exists.
+//
 //nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,
@@ -76,6 +79,7 @@ func Cleanup(
 	spec *depsv1alpha1.DynamoDBSpec,
 	ledger []depsv1alpha1.ManagedResource,
 	deleting bool,
+	forceDeleteAll bool,
 	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, results []CleanupResult, err error) {
 	declared := map[string]bool{}
@@ -139,7 +143,7 @@ func Cleanup(
 			continue
 		}
 
-		if !entry.Force {
+		if !entry.Force && !forceDeleteAll {
 			if entry.PendingDeletionSince == nil {
 				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
 				if recordEvent != nil {

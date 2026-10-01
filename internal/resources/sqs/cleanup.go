@@ -88,7 +88,11 @@ func queueNameFromARN(arn string) (string, error) {
 // Cleanup finds ledger entries for sqs resources no longer declared in
 // spec (or every sqs entry, if deleting is true) and either deletes them,
 // retains-and-relinquishes them, or marks them pending deletion, depending
-// on their captured deletionPolicy and current state.
+// on their captured deletionPolicy and current state. forceDeleteAll
+// overrides every entry's own (possibly stale, possibly unreachable now
+// that it's left spec) Force value - meant only for the finalize path, to
+// unstick a CR whose deletion can otherwise never complete once a
+// non-empty-guarded resource has no spec entry left to flip force:true on.
 //
 //nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
@@ -100,6 +104,7 @@ func Cleanup(
 	spec *depsv1alpha1.SQSSpec,
 	ledger []depsv1alpha1.ManagedResource,
 	deleting bool,
+	forceDeleteAll bool,
 	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, results []CleanupResult, err error) {
 	declared := map[string]bool{}
@@ -199,7 +204,7 @@ func Cleanup(
 			continue
 		}
 
-		if !entry.Force {
+		if !entry.Force && !forceDeleteAll {
 			if entry.PendingDeletionSince == nil {
 				// First time this queue has come up for deletion. Never
 				// delete on the same pass it's first noticed, even if it

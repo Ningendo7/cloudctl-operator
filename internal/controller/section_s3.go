@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/s3"
@@ -47,7 +48,7 @@ func s3Section(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependenc
 
 			ledger, _, cleanupErr := s3.Cleanup(
 				ctx, r.AWSClients.S3, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.S3, cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
+				cr.Spec.S3, cr.Status.ManagedResources, false, false, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
@@ -58,7 +59,7 @@ func s3Section(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependenc
 			setSectionCondition(ctx, cr, "S3Ready", err)
 			return err
 		},
-		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
+		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {
 			declared := 0
 			if cr.Spec.S3 != nil {
 				declared = len(cr.Spec.S3.Resources)
@@ -66,20 +67,25 @@ func s3Section(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependenc
 			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "s3", declared)
 			defer cancel()
 
+			forceDeleteAll := cr.Annotations[ForceDeleteAllAnnotation] != ""
 			ledger, results, err := s3.Cleanup(
 				ctx, r.AWSClients.S3, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.S3, cr.Status.ManagedResources, true, eventRecorderFor(r, cr),
+				cr.Spec.S3, cr.Status.ManagedResources, true, forceDeleteAll, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {
-				return false, err
+				return false, nil, err
 			}
-			for _, r := range results {
-				if r.Reason == s3.CleanupReasonPendingDeletion || r.Reason == s3.CleanupReasonStuckPendingDeletion {
-					return false, nil
+			var blocked []string
+			for _, res := range results {
+				if res.Reason == s3.CleanupReasonPendingDeletion || res.Reason == s3.CleanupReasonStuckPendingDeletion {
+					blocked = append(blocked, fmt.Sprintf("s3 %q: %s", res.Name, res.Reason))
 				}
 			}
-			return true, nil
+			if len(blocked) > 0 {
+				return false, blocked, nil
+			}
+			return true, nil, nil
 		},
 	}
 }

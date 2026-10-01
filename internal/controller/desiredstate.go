@@ -94,8 +94,22 @@ var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", "S3Ready", 
 type section struct {
 	name      string
 	reconcile func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error
-	finalize  func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (done bool, err error)
+	// finalize's blocked return lists a human-readable reason per ledger
+	// entry still waiting to drain (nil if done is true or err != nil) -
+	// threaded up to finalizeDesiredState so it can report *why* deletion
+	// hasn't completed instead of leaving status silent about it.
+	finalize func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (done bool, blocked []string, err error)
 }
+
+// ForceDeleteAllAnnotation lets a human override a Delete-policy resource's
+// non-empty guard specifically to unstick a CR's deletion - never read
+// outside the finalize path. This exists because the guard's Force field
+// only ever gets refreshed from spec while a resource is still declared
+// there; once it's been removed from spec (the common way a CR ends up
+// here at all), there is no spec field left to flip back to true, so an
+// explicit, CR-level, deliberately-separate escape hatch is the only way
+// back short of stripping the finalizer outright and accepting an orphan.
+const ForceDeleteAllAnnotation = "cloudctl.io/force-delete-all"
 
 // allSections lists every resource-type section this CR reconciles, in
 // dependency order — iamSection must run last, since deriving this CR's
@@ -154,10 +168,11 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependencies) (done bool, err error) {
 	allDone := true
 	var firstErr error
+	var blocked []string
 	// original is nil here: finalize closures only ever call Cleanup, never
 	// checkpointFor, so there's nothing that would dereference it.
 	for _, s := range allSections(r, nil) {
-		done, err := s.finalize(ctx, cr)
+		done, sectionBlocked, err := s.finalize(ctx, cr)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -167,8 +182,19 @@ func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr 
 		}
 		if !done {
 			allDone = false
+			blocked = append(blocked, sectionBlocked...)
 		}
 	}
+
+	// A hard error already gets its own visibility via the deletion
+	// reconcile's own log line and standard requeue/backoff; this condition
+	// is specifically for the silent case - nothing failed, it's just
+	// waiting, potentially forever, on a guard with no remaining way to
+	// clear itself from spec.
+	if !allDone && firstErr == nil {
+		status.SetDeletionBlocked(&cr.Status.Conditions, cr.Generation, blocked)
+	}
+
 	return allDone, firstErr
 }
 

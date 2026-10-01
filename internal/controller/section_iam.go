@@ -99,21 +99,21 @@ func iamSection(r *AppDependenciesReconciler) section {
 			setSectionCondition(ctx, cr, "IAMReady", err)
 			return err
 		},
-		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
+		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {
 			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, resourceTypeIAM, iamWorkloadCount(cr))
 			defer cancel()
 
 			ledger, err := iam.Cleanup(ctx, r.AWSClients.IAM, r.Client, cr, cr.Status.ManagedResources, true)
 			cr.Status.ManagedResources = ledger
 			if err != nil {
-				return false, err
+				return false, nil, err
 			}
 			cr.Status.IAMRoleARN = ""
 			if err := serviceaccount.Cleanup(ctx, r.Client, cr); err != nil {
-				return false, err
+				return false, nil, err
 			}
 			cr.Status.ServiceAccountName = ""
-			return true, nil
+			return true, nil, nil
 		},
 	}
 }

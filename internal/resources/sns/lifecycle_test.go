@@ -64,7 +64,7 @@ func (s *snsLifecycleSubject) Cleanup(ctx context.Context, ledger []depsv1alpha1
 		resources = append(resources, depsv1alpha1.SNSTopicSpec{Name: n})
 	}
 	spec := &depsv1alpha1.SNSSpec{Resources: resources}
-	updated, results, err := Cleanup(ctx, s.client, s.namespace, s.crName, s.crUID, spec, ledger, deleting, nil)
+	updated, results, err := Cleanup(ctx, s.client, s.namespace, s.crName, s.crUID, spec, ledger, deleting, false, nil)
 	return updated, convertResults(results), err
 }
 

@@ -64,7 +64,7 @@ func (s *s3LifecycleSubject) Cleanup(ctx context.Context, ledger []depsv1alpha1.
 		resources = append(resources, depsv1alpha1.S3BucketSpec{Name: n})
 	}
 	spec := &depsv1alpha1.S3Spec{Resources: resources}
-	updated, results, err := Cleanup(ctx, s.client, s.namespace, s.crName, s.crUID, spec, ledger, deleting, nil)
+	updated, results, err := Cleanup(ctx, s.client, s.namespace, s.crName, s.crUID, spec, ledger, deleting, false, nil)
 	return updated, convertResults(results), err
 }
 

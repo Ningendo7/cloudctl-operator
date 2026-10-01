@@ -64,7 +64,7 @@ func (s *sqsLifecycleSubject) Cleanup(ctx context.Context, ledger []depsv1alpha1
 		resources = append(resources, depsv1alpha1.SQSQueueSpec{Name: n})
 	}
 	spec := &depsv1alpha1.SQSSpec{Resources: resources}
-	updated, results, err := Cleanup(ctx, s.client, s.namespace, s.crName, s.crUID, spec, ledger, deleting, nil)
+	updated, results, err := Cleanup(ctx, s.client, s.namespace, s.crName, s.crUID, spec, ledger, deleting, false, nil)
 	return updated, convertResults(results), err
 }
 

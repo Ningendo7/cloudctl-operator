@@ -18,6 +18,7 @@ package status
 
 import (
 	"fmt"
+	"strings"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,13 @@ import (
 // ConditionTypeReady is the aggregate condition computed from every
 // currently-required per-section condition (e.g. SQSReady, S3Ready).
 const ConditionTypeReady = "Ready"
+
+// ConditionTypeDeletionBlocked reports a CR stuck mid-deletion because at
+// least one owned resource is still waiting on its non-empty guard (or, for
+// KMS, its deletion quiet window) before it can actually be removed. Not a
+// per-section condition - it only ever exists during the deletion reconcile
+// path, never the normal one.
+const ConditionTypeDeletionBlocked = "DeletionBlocked"
 
 // SetSectionCondition sets a per-section readiness condition and
 // recomputes the aggregate Ready condition from it. sectionTypes lists
@@ -61,6 +69,30 @@ func recomputeReady(conditions *[]metav1.Condition, sectionTypes []string, obser
 		Type:               ConditionTypeReady,
 		Status:             readyStatus,
 		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: observedGeneration,
+	})
+}
+
+// SetDeletionBlocked records why a CR's deletion hasn't completed yet and
+// pulls the aggregate Ready condition down with it - a CR stuck mid-deletion
+// is not a healthy, steady state, and kubectl get's Ready column must say so
+// rather than keep showing whatever Ready last said before deletion started
+// (the per-section conditions aren't touched by the deletion path at all, so
+// nothing else would ever correct it).
+func SetDeletionBlocked(conditions *[]metav1.Condition, observedGeneration int64, reasons []string) {
+	message := strings.Join(reasons, "; ")
+	apimeta.SetStatusCondition(conditions, metav1.Condition{
+		Type:               ConditionTypeDeletionBlocked,
+		Status:             metav1.ConditionTrue,
+		Reason:             "ResourcesNotDrained",
+		Message:            message,
+		ObservedGeneration: observedGeneration,
+	})
+	apimeta.SetStatusCondition(conditions, metav1.Condition{
+		Type:               ConditionTypeReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "DeletionBlocked",
 		Message:            message,
 		ObservedGeneration: observedGeneration,
 	})

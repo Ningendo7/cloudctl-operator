@@ -72,7 +72,7 @@ func alarmsSection(r *AppDependenciesReconciler) section {
 			setSectionCondition(ctx, cr, "AlarmsReady", err)
 			return err
 		},
-		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
+		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {
 			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "alarm", alarmEligibleResourceCount(cr))
 			defer cancel()
 
@@ -81,7 +81,7 @@ func alarmsSection(r *AppDependenciesReconciler) section {
 				cr.Namespace, cr.Name, string(cr.UID),
 				r.AWSClients.Region, r.AWSClients.AccountID,
 			)
-			return err == nil, err
+			return err == nil, nil, err
 		},
 	}
 }

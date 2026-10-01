@@ -93,7 +93,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	client := newFakeS3()
 	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyRetain, false)
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -120,7 +120,7 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 		{Type: resourceType, Name: "receipts", ARN: "arn:aws:s3:::" + bucket},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -144,7 +144,7 @@ func TestCleanup_RelinquishesOwnershipTagForRetainedResource(t *testing.T) {
 		t.Fatal("test setup broken: expected the bucket to start out owned by us")
 	}
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
@@ -158,7 +158,7 @@ func TestCleanup_HoldsNewlyEligibleBucketForQuietWindowBeforeDeleting(t *testing
 	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyDelete, false)
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -171,7 +171,7 @@ func TestCleanup_HoldsNewlyEligibleBucketForQuietWindowBeforeDeleting(t *testing
 
 	advancePastQuietWindow(t, updated, "receipts")
 
-	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, updated, false, nil)
+	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, updated, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -191,7 +191,7 @@ func TestCleanup_AddsDenyPolicyWhenMarkingPendingDeletion(t *testing.T) {
 	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyDelete, false)
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -210,7 +210,7 @@ func TestCleanup_RemovesDenyPolicyWhenResourceReturnsToSpec(t *testing.T) {
 	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyDelete, false)
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -219,7 +219,7 @@ func TestCleanup_RemovesDenyPolicyWhenResourceReturnsToSpec(t *testing.T) {
 	}
 
 	backInSpec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete}}}
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false, nil); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false, false, nil); err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 
@@ -234,13 +234,13 @@ func TestCleanup_BlocksDeletingNonEmptyBucketWithoutForce(t *testing.T) {
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	client.buckets[bucket].versions = []fakeObjectVersion{{key: "file.txt", versionID: "v1"}}
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastQuietWindow(t, ledger, "receipts")
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -261,14 +261,14 @@ func TestCleanup_PendingDeletion_FirstCheckPastBackoffStartStillRunsAndStamps(t 
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	client.buckets[bucket].versions = []fakeObjectVersion{{key: "file.txt", versionID: "v1"}}
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "receipts")
 
 	client.listObjectVersionsCalls = 0
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -287,18 +287,18 @@ func TestCleanup_PendingDeletion_SkipsRealCheckWhileBackoffIntervalNotElapsed(t 
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	client.buckets[bucket].versions = []fakeObjectVersion{{key: "file.txt", versionID: "v1"}}
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "receipts")
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 
 	client.listObjectVersionsCalls = 0
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("third Cleanup() error = %v", err)
 	}
@@ -316,12 +316,12 @@ func TestCleanup_PendingDeletion_ChecksAndDeletesOnceBackoffIntervalElapses(t *t
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	client.buckets[bucket].versions = []fakeObjectVersion{{key: "file.txt", versionID: "v1"}}
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "receipts")
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -330,7 +330,7 @@ func TestCleanup_PendingDeletion_ChecksAndDeletesOnceBackoffIntervalElapses(t *t
 	pushLastEmptyCheckIntoThePast(t, ledger, "receipts", status.EmptyCheckBaseInterval+time.Minute)
 
 	client.listObjectVersionsCalls = 0
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("third Cleanup() error = %v", err)
 	}
@@ -353,12 +353,12 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	client.buckets[bucket].versions = []fakeObjectVersion{{key: "file.txt", versionID: "v1"}}
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "receipts")
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -369,7 +369,7 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup (reappeared) error = %v", err)
 	}
@@ -392,13 +392,13 @@ func TestCleanup_ConsidersOldVersionsAsNonEmptyEvenWithNoCurrentObjects(t *testi
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	client.buckets[bucket].versions = []fakeObjectVersion{{key: "file.txt", versionID: "v1", isDeleteMarker: true}}
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastQuietWindow(t, ledger, "receipts")
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -424,7 +424,7 @@ func TestCleanup_DeletesAllObjectVersionsAndAbortsMultipartUploadsBeforeDeleting
 	}
 	client.buckets[bucket].uploads = []fakeUpload{{key: "c.txt", uploadID: "upload-1"}}
 
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -439,7 +439,7 @@ func TestCleanup_ForceDeletesNonEmptyBucket(t *testing.T) {
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	client.buckets[bucket].versions = []fakeObjectVersion{{key: "file.txt", versionID: "v1"}}
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -457,7 +457,7 @@ func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	client.buckets[bucket].tags = map[string]string{"team": "someone-else"}
 
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err == nil {
 		t.Fatal("expected Cleanup to refuse deleting a bucket whose ownership tags no longer verify")
 	}
@@ -477,7 +477,7 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 	entry.PendingDeletionSince = &longAgo
 	status.UpsertManagedResource(&ledger, *entry)
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -502,7 +502,7 @@ func TestCleanup_TreatsAlreadyDeletedBucketAsSuccess(t *testing.T) {
 	advancePastQuietWindow(t, ledger, "receipts")
 	delete(client.buckets, bucket) // simulate it already having been deleted out from under us
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v — expected an already-gone bucket to be treated as already cleaned up, not a failure", err)
 	}
@@ -591,7 +591,7 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 	receiptsBucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	client.buckets[receiptsBucket].tags = map[string]string{"team": "someone-else"}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err == nil {
 		t.Fatal("expected an error reported for the corrupted-ownership receipts bucket")
 	}
@@ -609,7 +609,7 @@ func TestCleanup_RelinquishingBucket_EmitsEvent(t *testing.T) {
 	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyRetain, false)
 	recordEvent, events := newEventCollector()
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
@@ -623,7 +623,7 @@ func TestCleanup_FirstNoticedForDeletion_EmitsPendingEvent(t *testing.T) {
 	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyDelete, false)
 	recordEvent, events := newEventCollector()
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
@@ -636,14 +636,14 @@ func TestCleanup_RedeclaredWhilePending_EmitsCancelledEvent(t *testing.T) {
 	client := newFakeS3()
 	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyDelete, false)
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 
 	recordEvent, events := newEventCollector()
 	backInSpec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete}}}
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 
@@ -656,14 +656,14 @@ func TestCleanup_DeletingBucket_EmitsDeletedEvent(t *testing.T) {
 	client := newFakeS3()
 	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyDelete, false)
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastQuietWindow(t, ledger, "receipts")
 
 	recordEvent, events := newEventCollector()
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 

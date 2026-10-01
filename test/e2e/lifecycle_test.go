@@ -117,7 +117,7 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 		// next, which would then also block forever on the same stuck
 		// object).
 		By("deleting the sample CR so finalizer-driven cleanup actually runs")
-		cmd := exec.Command("kubectl", "delete", "-f", "test/e2e/testdata/sqs-sample.yaml",
+		cmd := exec.Command("kubectl", "delete", "-f", "test/e2e/testdata/sqs-sns-sample.yaml",
 			"-n", namespace, "--ignore-not-found", "--timeout=60s")
 		_, delErr := utils.Run(cmd)
 		if delErr != nil {
@@ -127,8 +127,8 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 			_, _ = utils.Run(cmd)
 		}
 
-		By("deleting the queue-verification pod")
-		cmd = exec.Command("kubectl", "delete", "pod", "verify-queue", "-n", namespace, "--ignore-not-found")
+		By("deleting the verification pods")
+		cmd = exec.Command("kubectl", "delete", "pod", "verify-queue", "verify-topic", "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
@@ -220,5 +220,83 @@ spec:
 		logs, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(logs).To(ContainSubstring("orders"), "expected the real queue to show up in LocalStack's own list-queues output")
+	})
+
+	// Builds on the previous It rather than standing alone - the same CR
+	// gaining a second resource type, same as a real team's manifest
+	// growing over time, not a fresh scenario from scratch.
+	It("adds a real SNS topic to the same CR and reports Ready", func() {
+		By("applying the updated sample CR with an sns section added")
+		cmd := exec.Command("kubectl", "apply", "-f", "test/e2e/testdata/sqs-sns-sample.yaml", "-n", namespace)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply the updated sample CR")
+
+		By("waiting for the CR to report Ready again")
+		verifyReady := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "appdependencies", "e2e-orders", "-n", namespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(Equal("True"), "expected the CR to report Ready")
+		}
+		Eventually(verifyReady, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+		By("verifying the connection ConfigMap was populated with the derived topic ARN")
+		cmd = exec.Command("kubectl", "get", "configmap", "e2e-orders-connection", "-n", namespace,
+			"-o", "jsonpath={.data.SNS_ORDER_EVENTS_ARN}")
+		output, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(output).To(ContainSubstring("order-events"))
+
+		By("verifying the real topic exists in LocalStack, independent of the operator's own state")
+		verifyTopicPod := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: verify-topic
+  namespace: ` + namespace + `
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: verify-topic
+      image: amazon/aws-cli
+      env:
+        - {name: AWS_ACCESS_KEY_ID, value: "test"}
+        - {name: AWS_SECRET_ACCESS_KEY, value: "test"}
+        - {name: AWS_DEFAULT_REGION, value: "us-east-1"}
+        - {name: HOME, value: "/tmp"}
+      command:
+        - aws
+        - --endpoint-url=http://localstack.` + localstackNamespace + `.svc.cluster.local:4566
+        - sns
+        - list-topics
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+`
+		cmd = exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = strings.NewReader(verifyTopicPod)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create the topic-verification pod")
+
+		verifyTopicVerificationSucceeded := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pod", "verify-topic", "-n", namespace,
+				"-o", "jsonpath={.status.phase}")
+			phase, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(phase).To(Equal("Succeeded"))
+		}
+		Eventually(verifyTopicVerificationSucceeded, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+		cmd = exec.Command("kubectl", "logs", "verify-topic", "-n", namespace)
+		logs, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(logs).To(ContainSubstring("order-events"), "expected the real topic to show up in LocalStack's own list-topics output")
 	})
 })

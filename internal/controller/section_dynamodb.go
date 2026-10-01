@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/dynamodb"
@@ -30,7 +31,7 @@ func dynamodbSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDep
 
 			ledger, _, cleanupErr := dynamodb.Cleanup(
 				ctx, r.AWSClients.DynamoDB, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.DynamoDB, cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
+				cr.Spec.DynamoDB, cr.Status.ManagedResources, false, false, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
@@ -41,7 +42,7 @@ func dynamodbSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDep
 			setSectionCondition(ctx, cr, "DynamoDBReady", err)
 			return err
 		},
-		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
+		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {
 			declared := 0
 			if cr.Spec.DynamoDB != nil {
 				declared = len(cr.Spec.DynamoDB.Resources)
@@ -49,20 +50,25 @@ func dynamodbSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDep
 			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "dynamodb", declared)
 			defer cancel()
 
+			forceDeleteAll := cr.Annotations[ForceDeleteAllAnnotation] != ""
 			ledger, results, err := dynamodb.Cleanup(
 				ctx, r.AWSClients.DynamoDB, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.DynamoDB, cr.Status.ManagedResources, true, eventRecorderFor(r, cr),
+				cr.Spec.DynamoDB, cr.Status.ManagedResources, true, forceDeleteAll, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {
-				return false, err
+				return false, nil, err
 			}
-			for _, r := range results {
-				if r.Reason == dynamodb.CleanupReasonPendingDeletion || r.Reason == dynamodb.CleanupReasonStuckPendingDeletion {
-					return false, nil
+			var blocked []string
+			for _, res := range results {
+				if res.Reason == dynamodb.CleanupReasonPendingDeletion || res.Reason == dynamodb.CleanupReasonStuckPendingDeletion {
+					blocked = append(blocked, fmt.Sprintf("dynamodb %q: %s", res.Name, res.Reason))
 				}
 			}
-			return true, nil
+			if len(blocked) > 0 {
+				return false, blocked, nil
+			}
+			return true, nil, nil
 		},
 	}
 }

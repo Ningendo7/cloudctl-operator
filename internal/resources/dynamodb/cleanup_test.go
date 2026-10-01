@@ -96,7 +96,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	client := newFakeDynamoDB()
 	ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyRetain, false)
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -139,7 +139,7 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 		},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -163,7 +163,7 @@ func TestCleanup_RelinquishesOwnershipTagForRetainedResource(t *testing.T) {
 		t.Fatal("test setup broken: expected the table to start out owned by us")
 	}
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
@@ -177,7 +177,7 @@ func TestCleanup_HoldsNewlyEligibleTableForQuietWindowBeforeDeleting(t *testing.
 	ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyDelete, false)
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -190,7 +190,7 @@ func TestCleanup_HoldsNewlyEligibleTableForQuietWindowBeforeDeleting(t *testing.
 
 	advancePastQuietWindow(t, updated, "sessions")
 
-	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, updated, false, nil)
+	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, updated, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -211,13 +211,13 @@ func TestCleanup_BlocksDeletingNonEmptyTableWithoutForce(t *testing.T) {
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName].itemCount = 5
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastQuietWindow(t, ledger, "sessions")
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -238,14 +238,14 @@ func TestCleanup_PendingDeletion_FirstCheckPastBackoffStartStillRunsAndStamps(t 
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName].itemCount = 5
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "sessions")
 
 	client.scanCalls = 0
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -264,18 +264,18 @@ func TestCleanup_PendingDeletion_SkipsRealCheckWhileBackoffIntervalNotElapsed(t 
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName].itemCount = 5
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "sessions")
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 
 	client.scanCalls = 0
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("third Cleanup() error = %v", err)
 	}
@@ -293,12 +293,12 @@ func TestCleanup_PendingDeletion_ChecksAndDeletesOnceBackoffIntervalElapses(t *t
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName].itemCount = 5
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "sessions")
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -307,7 +307,7 @@ func TestCleanup_PendingDeletion_ChecksAndDeletesOnceBackoffIntervalElapses(t *t
 	pushLastEmptyCheckIntoThePast(t, ledger, "sessions", status.EmptyCheckBaseInterval+time.Minute)
 
 	client.scanCalls = 0
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("third Cleanup() error = %v", err)
 	}
@@ -328,12 +328,12 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName].itemCount = 5
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "sessions")
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -344,7 +344,7 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup (reappeared) error = %v", err)
 	}
@@ -363,7 +363,7 @@ func TestCleanup_ForceDeletesNonEmptyTable(t *testing.T) {
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName].itemCount = 5
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -381,7 +381,7 @@ func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName].tags = map[string]string{"team": "someone-else"}
 
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err == nil {
 		t.Fatal("expected Cleanup to refuse deleting a table whose ownership tags no longer verify")
 	}
@@ -401,7 +401,7 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 	entry.PendingDeletionSince = &longAgo
 	status.UpsertManagedResource(&ledger, *entry)
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -429,7 +429,7 @@ func TestCleanup_TreatsAlreadyDeletedTableAsSuccess(t *testing.T) {
 	// before persisting the ledger update).
 	delete(client.tables, tableName)
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v — expected an already-gone table to be treated as already cleaned up, not a failure", err)
 	}
@@ -456,7 +456,7 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 	sessionsName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[sessionsName].tags = map[string]string{"team": "someone-else"}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err == nil {
 		t.Fatal("expected an error reported for the corrupted-ownership sessions table")
 	}
@@ -478,7 +478,7 @@ func TestCleanup_RelinquishingTable_EmitsEvent(t *testing.T) {
 	ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyRetain, false)
 	recordEvent, events := newEventCollector()
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
@@ -492,7 +492,7 @@ func TestCleanup_FirstNoticedForDeletion_EmitsPendingEvent(t *testing.T) {
 	ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyDelete, false)
 	recordEvent, events := newEventCollector()
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
@@ -505,14 +505,14 @@ func TestCleanup_RedeclaredWhilePending_EmitsCancelledEvent(t *testing.T) {
 	client := newFakeDynamoDB()
 	ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyDelete, false)
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 
 	recordEvent, events := newEventCollector()
 	backInSpec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete}}}
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 
@@ -525,14 +525,14 @@ func TestCleanup_DeletingTable_EmitsDeletedEvent(t *testing.T) {
 	client := newFakeDynamoDB()
 	ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyDelete, false)
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastQuietWindow(t, ledger, "sessions")
 
 	recordEvent, events := newEventCollector()
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 

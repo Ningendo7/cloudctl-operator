@@ -65,6 +65,7 @@ func main() {
 	var enableHTTP2 bool
 	var oidcProviderARN string
 	var oidcProviderURL string
+	var maxConcurrentReconciles int
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -89,6 +90,11 @@ func main() {
 	flag.StringVar(&oidcProviderURL, "oidc-provider-url", "",
 		"URL (without https://) of this cluster's IAM OIDC identity provider, "+
 			"required for the IRSA trust policy on every IAM role this operator derives.")
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 5,
+		"Maximum number of AppDependencies CRs reconciled in parallel. AWS-side "+
+			"call volume is independently bounded by the per-service rate-limit "+
+			"env vars (AWS_SQS_RATE_LIMIT_QPS, etc.), so raising this mainly "+
+			"improves fairness/latency at higher CR counts rather than raw AWS throughput.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -203,6 +209,7 @@ func main() {
 		Recorder:        mgr.GetEventRecorder("appdependencies-controller"),
 		OIDCProviderARN: oidcProviderARN,
 		OIDCProviderURL: oidcProviderURL,
+		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "appdependencies")
 		os.Exit(1)

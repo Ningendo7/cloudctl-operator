@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
@@ -105,7 +106,7 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			setSectionCondition(ctx, cr, "KMSReady", err)
 			return err
 		},
-		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
+		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {
 			declared := 0
 			if cr.Spec.KMS != nil {
 				declared = len(cr.Spec.KMS.Resources)
@@ -122,14 +123,18 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {
-				return false, err
+				return false, nil, err
 			}
-			for _, r := range results {
-				if r.Reason == kms.CleanupReasonPendingDeletion {
-					return false, nil
+			var blocked []string
+			for _, res := range results {
+				if res.Reason == kms.CleanupReasonPendingDeletion {
+					blocked = append(blocked, fmt.Sprintf("kms %q: %s", res.Name, res.Reason))
 				}
 			}
-			return true, nil
+			if len(blocked) > 0 {
+				return false, blocked, nil
+			}
+			return true, nil, nil
 		},
 	}
 }

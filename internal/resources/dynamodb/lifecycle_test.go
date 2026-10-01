@@ -79,7 +79,7 @@ func (s *dynamodbLifecycleSubject) Cleanup(ctx context.Context, ledger []depsv1a
 		resources = append(resources, depsv1alpha1.DynamoDBTableSpec{Name: n, PartitionKey: lifecyclePartitionKey})
 	}
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: resources}
-	updated, results, err := Cleanup(ctx, s.client, s.namespace, s.crName, s.crUID, spec, ledger, deleting, nil)
+	updated, results, err := Cleanup(ctx, s.client, s.namespace, s.crName, s.crUID, spec, ledger, deleting, false, nil)
 	return updated, convertResults(results), err
 }
 

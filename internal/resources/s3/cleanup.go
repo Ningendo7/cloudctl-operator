@@ -57,6 +57,8 @@ type CleanupResult struct {
 // Cleanup finds ledger entries for s3 resources no longer declared in spec
 // (or every s3 entry, if deleting is true) and either deletes them,
 // retains-and-relinquishes them, or marks them pending deletion.
+// forceDeleteAll overrides every entry's own Force value - meant only for
+// the finalize path, see the sqs package's Cleanup for why this exists.
 //
 //nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
@@ -66,6 +68,7 @@ func Cleanup(
 	spec *depsv1alpha1.S3Spec,
 	ledger []depsv1alpha1.ManagedResource,
 	deleting bool,
+	forceDeleteAll bool,
 	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, results []CleanupResult, err error) {
 	declared := map[string]bool{}
@@ -153,7 +156,7 @@ func Cleanup(
 			continue
 		}
 
-		if !entry.Force {
+		if !entry.Force && !forceDeleteAll {
 			if entry.PendingDeletionSince == nil {
 				// Never delete on the same pass a bucket is first noticed as
 				// eligible, even if it looks empty right now - a moment-old

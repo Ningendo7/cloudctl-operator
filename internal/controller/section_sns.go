@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/sns"
@@ -64,6 +65,7 @@ func snsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 				cr.Spec.SNS,
 				cr.Status.ManagedResources,
 				false,
+				false,
 				eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
@@ -75,7 +77,7 @@ func snsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			setSectionCondition(ctx, cr, "SNSReady", err)
 			return err
 		},
-		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, error) {
+		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {
 			declared := 0
 			if cr.Spec.SNS != nil {
 				declared = len(cr.Spec.SNS.Resources)
@@ -83,6 +85,7 @@ func snsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "sns", declared)
 			defer cancel()
 
+			forceDeleteAll := cr.Annotations[ForceDeleteAllAnnotation] != ""
 			ledger, results, err := sns.Cleanup(
 				ctx,
 				r.AWSClients.SNS,
@@ -92,19 +95,24 @@ func snsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 				cr.Spec.SNS,
 				cr.Status.ManagedResources,
 				true,
+				forceDeleteAll,
 				eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {
-				return false, err
+				return false, nil, err
 			}
 
-			for _, r := range results {
-				if r.Reason == sns.CleanupReasonPendingDeletion || r.Reason == sns.CleanupReasonStuckPendingDeletion {
-					return false, nil
+			var blocked []string
+			for _, res := range results {
+				if res.Reason == sns.CleanupReasonPendingDeletion || res.Reason == sns.CleanupReasonStuckPendingDeletion {
+					blocked = append(blocked, fmt.Sprintf("sns %q: %s", res.Name, res.Reason))
 				}
 			}
-			return true, nil
+			if len(blocked) > 0 {
+				return false, blocked, nil
+			}
+			return true, nil, nil
 		},
 	}
 }
