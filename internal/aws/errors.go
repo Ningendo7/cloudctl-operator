@@ -39,15 +39,16 @@ import (
 // exercising this exact classification - a constant keeps both sides from
 // silently drifting apart on a typo.
 const (
-	errCodeAccessDenied = "AccessDenied"
-	errCodeThrottling   = "ThrottlingException"
+	errCodeAccessDenied          = "AccessDenied"
+	errCodeAccessDeniedException = "AccessDeniedException"
+	errCodeThrottling            = "ThrottlingException"
 )
 
 func IsPermissionDenied(err error) bool {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.ErrorCode() {
-		case errCodeAccessDenied, "AccessDeniedException", "UnauthorizedException", "UnauthorizedOperation", "NotAuthorized", "AuthorizationError":
+		case errCodeAccessDenied, errCodeAccessDeniedException, "UnauthorizedException", "UnauthorizedOperation", "NotAuthorized", "AuthorizationError":
 			return true
 		}
 		return false

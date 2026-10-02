@@ -27,8 +27,8 @@ import (
 // (every owned resource dedicated-key-encrypted) - not an exotic scenario,
 // just one busy team's CR near its own documented schema limit.
 func maxedOutSectionGrants(resourceType string) []grant {
-	var grants []grant
 	const maxPerList = 50
+	grants := make([]grant, 0, 2*maxPerList+maxPerList)
 	for i := range maxPerList {
 		grants = append(grants, grant{resourceType: resourceType, arn: fmt.Sprintf("arn:aws:%s:us-east-1:123456789012:resource-name-%d", resourceType, i), readWrite: true})
 		grants = append(grants, grant{resourceType: "kms", arn: fmt.Sprintf("arn:aws:kms:us-east-1:123456789012:key/%08d-0000-0000-0000-000000000000", i), readWrite: true})

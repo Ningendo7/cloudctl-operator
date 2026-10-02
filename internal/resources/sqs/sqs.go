@@ -78,7 +78,7 @@ type queueOptions struct {
 // hybrid design) — a CR that never uses it can pass nil too.
 func Ensure(
 	ctx context.Context,
-	client sqsAPI,
+	awsClient sqsAPI,
 	kmsClient cloudctlaws.KMSClient,
 	k8sClient client.Client,
 	namespace,
@@ -96,7 +96,7 @@ func Ensure(
 	var firstErr error
 	for _, q := range spec.Resources {
 		var err error
-		ledger, err = ensureQueue(ctx, client, kmsClient, k8sClient, namespace, crName, crUID, q, ledger, checkpoint, recordEvent)
+		ledger, err = ensureQueue(ctx, awsClient, kmsClient, k8sClient, namespace, crName, crUID, q, ledger, checkpoint, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("queue %q: %w", q.Name, err)
 		}
@@ -113,7 +113,7 @@ func Ensure(
 // we own.
 func ensureQueue(
 	ctx context.Context,
-	client sqsAPI,
+	awsClient sqsAPI,
 	kmsClient cloudctlaws.KMSClient,
 	k8sClient client.Client,
 	namespace,
@@ -156,7 +156,7 @@ func ensureQueue(
 		// own dedicated one - it holds a copy of the exact same sensitive
 		// data, so a second key would add cost and complexity with no
 		// actual isolation benefit.
-		ledger, err = ensureSingleQueue(ctx, client, namespace, crName, crUID, dlqName, queueOptions{
+		ledger, err = ensureSingleQueue(ctx, awsClient, namespace, crName, crUID, dlqName, queueOptions{
 			deletionPolicy: q.DeletionPolicy,
 			force:          q.Force,
 			adopt:          q.Adopt,
@@ -205,7 +205,7 @@ func ensureQueue(
 		visibilityTimeout = q.Overrides.VisibilityTimeoutSeconds
 	}
 
-	return ensureSingleQueue(ctx, client, namespace, crName, crUID, q.Name, queueOptions{
+	return ensureSingleQueue(ctx, awsClient, namespace, crName, crUID, q.Name, queueOptions{
 		deletionPolicy:            q.DeletionPolicy,
 		force:                     q.Force,
 		adopt:                     q.Adopt,
@@ -223,7 +223,7 @@ func ensureQueue(
 // when it already exists, and records it in the ledger either way.
 func ensureSingleQueue(
 	ctx context.Context,
-	client sqsAPI,
+	awsClient sqsAPI,
 	namespace,
 	crName,
 	crUID string,
@@ -256,13 +256,13 @@ func ensureSingleQueue(
 		if nameErr != nil {
 			return ledger, nameErr
 		}
-		urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
+		urlOut, err := awsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 			QueueName: &queueName,
 		})
 		if err != nil {
 			return ledger, wrapAWSError(err, "resolving queue URL for drift correction")
 		}
-		if err := reconcileAttributes(ctx, client, *urlOut.QueueUrl, opts); err != nil {
+		if err := reconcileAttributes(ctx, awsClient, *urlOut.QueueUrl, opts); err != nil {
 			return ledger, wrapAWSError(err, "reconciling queue attributes")
 		}
 		return ledger, nil
@@ -288,7 +288,7 @@ func ensureSingleQueue(
 		cloudctlaws.OwnerUIDTagKey: crUID,
 	}
 
-	getOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
+	getOut, err := awsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 		QueueName: &queueName,
 	})
 
@@ -303,7 +303,7 @@ func ensureSingleQueue(
 			attrs["FifoQueue"] = awsAttrTrue
 		}
 
-		createOut, cErr := client.CreateQueue(ctx, &sqs.CreateQueueInput{
+		createOut, cErr := awsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
 			QueueName:  &queueName,
 			Attributes: attrs,
 			Tags:       ownerTags,
@@ -325,7 +325,7 @@ func ensureSingleQueue(
 		// drift-correct yet.
 		return recordVerified(
 			ctx,
-			client,
+			awsClient,
 			*createOut.QueueUrl,
 			resourceName,
 			opts.deletionPolicy,
@@ -339,7 +339,7 @@ func ensureSingleQueue(
 
 	// Queue already exists — verify we actually own it before trusting it.
 	queueURL := *getOut.QueueUrl
-	tagsOut, tErr := client.ListQueueTags(ctx, &sqs.ListQueueTagsInput{QueueUrl: &queueURL})
+	tagsOut, tErr := awsClient.ListQueueTags(ctx, &sqs.ListQueueTagsInput{QueueUrl: &queueURL})
 	if tErr != nil {
 		return ledger, wrapAWSError(tErr, "reading queue tags")
 	}
@@ -356,7 +356,7 @@ func ensureSingleQueue(
 		}
 
 		merged := cloudctlaws.MergeTags(tagsOut.Tags, ownerTags)
-		if _, tagErr := client.TagQueue(ctx, &sqs.TagQueueInput{
+		if _, tagErr := awsClient.TagQueue(ctx, &sqs.TagQueueInput{
 			QueueUrl: &queueURL,
 			Tags:     merged,
 		}); tagErr != nil {
@@ -367,13 +367,13 @@ func ensureSingleQueue(
 		}
 	}
 
-	if err := reconcileAttributes(ctx, client, queueURL, opts); err != nil {
+	if err := reconcileAttributes(ctx, awsClient, queueURL, opts); err != nil {
 		return ledger, wrapAWSError(err, "reconciling queue attributes")
 	}
 
 	return recordVerified(
 		ctx,
-		client,
+		awsClient,
 		queueURL,
 		resourceName,
 		opts.deletionPolicy,
@@ -423,7 +423,7 @@ func desiredAttributes(opts queueOptions) map[string]string {
 //
 // FifoQueue is never included here since it's immutable after creation
 // (enforced via CEL) — only ever set at creation time, never corrected.
-func reconcileAttributes(ctx context.Context, client sqsAPI, queueURL string, opts queueOptions) error {
+func reconcileAttributes(ctx context.Context, awsClient sqsAPI, queueURL string, opts queueOptions) error {
 	desired := desiredAttributes(opts)
 	if opts.redrivePolicy == nil {
 		desired["RedrivePolicy"] = ""
@@ -434,7 +434,7 @@ func reconcileAttributes(ctx context.Context, client sqsAPI, queueURL string, op
 		attrNames = append(attrNames, types.QueueAttributeName(k))
 	}
 
-	current, err := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+	current, err := awsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 		QueueUrl:       &queueURL,
 		AttributeNames: attrNames,
 	})
@@ -453,7 +453,7 @@ func reconcileAttributes(ctx context.Context, client sqsAPI, queueURL string, op
 		return nil
 	}
 
-	_, err = client.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
+	_, err = awsClient.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
 		QueueUrl:   &queueURL,
 		Attributes: changed,
 	})
@@ -462,14 +462,14 @@ func reconcileAttributes(ctx context.Context, client sqsAPI, queueURL string, op
 
 func recordVerified(
 	ctx context.Context,
-	client sqsAPI,
+	awsClient sqsAPI,
 	queueURL,
 	ledgerName string,
 	deletionPolicy depsv1alpha1.DeletionPolicy,
 	force bool,
 	ledger []depsv1alpha1.ManagedResource,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	out, err := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+	out, err := awsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 		QueueUrl:       &queueURL,
 		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
 	})
