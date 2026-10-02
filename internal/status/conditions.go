@@ -57,12 +57,28 @@ func recomputeReady(conditions *[]metav1.Condition, sectionTypes []string, obser
 
 	for _, t := range sectionTypes {
 		c := apimeta.FindStatusCondition(*conditions, t)
-		if c == nil || c.Status != metav1.ConditionTrue {
+		switch {
+		case c == nil || c.Status != metav1.ConditionTrue:
 			readyStatus = metav1.ConditionFalse
 			reason = "SectionsNotReady"
 			message = fmt.Sprintf("%s is not ready", t)
-			break
+		case c.ObservedGeneration != observedGeneration:
+			// ensureDesiredState checkpoints status after every section, so
+			// this runs once per section per reconcile - a section further
+			// along in sectionTypes than whichever one just ran hasn't been
+			// touched yet this pass and still carries its condition from
+			// the CR's previous generation. A stale True must never count
+			// as proof the current generation's own reconcile actually
+			// reached and passed that section - without this check, Ready
+			// could flip True mid-reconcile the moment every section
+			// happens to be True for ANY generation, not the current one.
+			readyStatus = metav1.ConditionFalse
+			reason = "SectionsNotReady"
+			message = fmt.Sprintf("%s has not been reconciled for the current generation yet", t)
+		default:
+			continue
 		}
+		break
 	}
 
 	apimeta.SetStatusCondition(conditions, metav1.Condition{

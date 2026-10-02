@@ -50,3 +50,49 @@ func TestSetSectionCondition_AggregatesReady(t *testing.T) {
 		t.Fatalf("expected Ready=False after S3Ready regresses, got %+v", ready)
 	}
 }
+
+// TestSetSectionCondition_StaleSectionFromOlderGenerationDoesNotSatisfyReady
+// is a regression test for a real bug found live: ensureDesiredState
+// checkpoints status after every section within one reconcile pass, so
+// mid-pass, sections later in the list still carry their condition from
+// the CR's *previous* generation. Before this fix, recomputeReady only
+// checked Status == True, so a stale-but-True DynamoDBReady (e.g. a
+// vacuous "nothing declared" success from the generation before dynamodb
+// was ever added to spec) satisfied the aggregate check just as well as a
+// fresh one - Ready flipped True, observedGeneration stamped to the
+// *current* generation, after only 2 of 7 sections had actually been
+// reprocessed for it.
+func TestSetSectionCondition_StaleSectionFromOlderGenerationDoesNotSatisfyReady(t *testing.T) {
+	var conditions []metav1.Condition
+	sections := []string{"SQSReady", "DynamoDBReady"}
+
+	// Generation 1: only SQS declared. DynamoDBReady is a vacuous success
+	// (section always runs, nothing to do when spec.DynamoDB is nil).
+	SetSectionCondition(&conditions, "SQSReady", metav1.ConditionTrue, "Reconciled", "ok", 1, sections)
+	SetSectionCondition(&conditions, "DynamoDBReady", metav1.ConditionTrue, "Reconciled", "ok", 1, sections)
+	if ready := findCondition(conditions, ConditionTypeReady); ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Ready=True at generation 1, got %+v", ready)
+	}
+
+	// Generation 2: dynamodb added to spec. SQSReady gets reprocessed first
+	// (still True, now at generation 2) - DynamoDBReady hasn't run yet this
+	// pass and is still sitting at its generation-1 value.
+	SetSectionCondition(&conditions, "SQSReady", metav1.ConditionTrue, "Reconciled", "ok", 2, sections)
+	if ready := findCondition(conditions, ConditionTypeReady); ready == nil || ready.Status != metav1.ConditionFalse {
+		t.Fatalf("expected Ready=False: DynamoDBReady's stale generation-1 True must not satisfy generation 2, got %+v", ready)
+	}
+	if dr := findCondition(conditions, "DynamoDBReady"); dr.ObservedGeneration != 1 {
+		t.Fatalf("expected DynamoDBReady to still show its stale observedGeneration=1, got %d", dr.ObservedGeneration)
+	}
+
+	// Now DynamoDBReady actually gets reprocessed for generation 2 - only
+	// now should Ready legitimately go True.
+	SetSectionCondition(&conditions, "DynamoDBReady", metav1.ConditionTrue, "Reconciled", "ok", 2, sections)
+	ready := findCondition(conditions, ConditionTypeReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Ready=True once DynamoDBReady is actually reprocessed for generation 2, got %+v", ready)
+	}
+	if ready.ObservedGeneration != 2 {
+		t.Fatalf("expected Ready's observedGeneration=2, got %d", ready.ObservedGeneration)
+	}
+}
