@@ -34,7 +34,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
           allowed-conclusions: success
-          running-workflow-name: Release
+          running-workflow-name: Wait for CI on this commit
 
   build-and-push-image:
     needs: wait-for-ci
