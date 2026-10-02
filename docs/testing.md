@@ -32,7 +32,7 @@ make test-integration
 
 which starts LocalStack, runs the suite, and tears the container down
 afterward. CI runs the same suite unconditionally on every push, via a
-LocalStack service container — see `.github/workflows/integration.yml`.
+LocalStack service container — see `.github/workflows/test.yml`.
 
 **Current coverage:** SQS, S3, SNS, and DynamoDB — each covering the same
 baseline lifecycle (create+tags, idempotent reconcile, adopt an untagged
@@ -47,7 +47,7 @@ confidence more than real coverage.
 New integration-tested packages get a `<package>_integration_test.go`
 file with a `//go:build integration` tag, added to
 `INTEGRATION_TEST_PACKAGES` in the `Makefile` and to the `go test` command
-in `.github/workflows/integration.yml`.
+in `.github/workflows/test.yml`.
 
 ## Live (`make test-live`, never runs in CI)
 
