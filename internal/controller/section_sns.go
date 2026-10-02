@@ -36,7 +36,7 @@ func snsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			if cr.Spec.SNS != nil {
 				declared = len(cr.Spec.SNS.Resources)
 			}
-			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "sns", declared)
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, resourceTypeSNS, declared)
 			defer cancel()
 
 			ledger, ensureErr := sns.Ensure(
@@ -82,7 +82,7 @@ func snsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			if cr.Spec.SNS != nil {
 				declared = len(cr.Spec.SNS.Resources)
 			}
-			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "sns", declared)
+			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, resourceTypeSNS, declared)
 			defer cancel()
 
 			forceDeleteAll := cr.Annotations[ForceDeleteAllAnnotation] != ""

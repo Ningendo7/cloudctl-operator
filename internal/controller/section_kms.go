@@ -40,28 +40,28 @@ func dedicatedKMSKeyNames(cr *depsv1alpha1.AppDependencies) []string {
 	if cr.Spec.SQS != nil {
 		for _, q := range cr.Spec.SQS.Resources {
 			if q.Encryption != nil && q.Encryption.Enabled {
-				names = append(names, kms.DedicatedKeyLedgerName("sqs", q.Name))
+				names = append(names, kms.DedicatedKeyLedgerName(resourceTypeSQS, q.Name))
 			}
 		}
 	}
 	if cr.Spec.SNS != nil {
 		for _, t := range cr.Spec.SNS.Resources {
 			if t.Encryption != nil && t.Encryption.Enabled {
-				names = append(names, kms.DedicatedKeyLedgerName("sns", t.Name))
+				names = append(names, kms.DedicatedKeyLedgerName(resourceTypeSNS, t.Name))
 			}
 		}
 	}
 	if cr.Spec.DynamoDB != nil {
 		for _, tbl := range cr.Spec.DynamoDB.Resources {
 			if tbl.Encryption != nil && tbl.Encryption.Enabled {
-				names = append(names, kms.DedicatedKeyLedgerName("dynamodb", tbl.Name))
+				names = append(names, kms.DedicatedKeyLedgerName(resourceTypeDynamoDB, tbl.Name))
 			}
 		}
 	}
 	if cr.Spec.S3 != nil {
 		for _, b := range cr.Spec.S3.Resources {
 			if b.Encryption != nil && b.Encryption.Enabled {
-				names = append(names, kms.DedicatedKeyLedgerName("s3", b.Name))
+				names = append(names, kms.DedicatedKeyLedgerName(resourceTypeS3, b.Name))
 			}
 		}
 	}

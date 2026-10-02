@@ -86,11 +86,24 @@ const DriftDetectionInterval = 5 * time.Minute
 // ever reached us.
 const transientRequeueInterval = 30 * time.Second
 
+// Resource-type tags shared across every section/ledger lookup in this
+// package - named constants rather than repeated literals so a typo can't
+// diverge between, say, a section's own sectionContext call and its
+// cross-reference lookup in shared_with_status.go/consume_status.go.
+const (
+	resourceTypeSQS      = "sqs"
+	resourceTypeSNS      = "sns"
+	resourceTypeDynamoDB = "dynamodb"
+	resourceTypeS3       = "s3"
+
+	conditionTypeS3Ready = "S3Ready"
+)
+
 // sectionTypes lists every per-section Ready condition type this CR can
 // produce, used to compute the aggregate Ready condition. Kept in sync
 // with allSections above — each entry here should have a matching
 // section constructor registered there.
-var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", "S3Ready", "KMSReady", "AlarmsReady", "IAMReady", "ConnectionInfoReady"}
+var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", conditionTypeS3Ready, "KMSReady", "AlarmsReady", "IAMReady", "ConnectionInfoReady"}
 
 type section struct {
 	name      string

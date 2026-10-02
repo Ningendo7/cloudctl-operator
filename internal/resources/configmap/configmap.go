@@ -40,6 +40,16 @@ import (
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
+// Resource-type tags this package switches on when deciding how to key and
+// shape a connection value - named so the addOwned/addConsumed call sites
+// and connectionKV's switch can't silently drift apart on a typo.
+const (
+	resourceTypeSQS      = "sqs"
+	resourceTypeSNS      = "sns"
+	resourceTypeDynamoDB = "dynamodb"
+	resourceTypeS3       = "s3"
+)
+
 // fieldOwner is this package's server-side-apply field manager name. The
 // whole ConfigMap belongs to this operator (never a pre-existing or
 // human-edited object like ServiceAccount can be), so there's no
@@ -123,48 +133,48 @@ func buildConnectionData(
 
 	if cr.Spec.SQS != nil {
 		for _, q := range cr.Spec.SQS.Resources {
-			if err := addOwned(data, cr, "sqs", q.Name, region, accountID); err != nil {
+			if err := addOwned(data, cr, resourceTypeSQS, q.Name, region, accountID); err != nil {
 				return nil, err
 			}
 		}
 		for _, ref := range cr.Spec.SQS.Consumes {
-			if err := addConsumed(ctx, k8sClient, data, cr, "sqs", ref, region, accountID); err != nil {
+			if err := addConsumed(ctx, k8sClient, data, cr, resourceTypeSQS, ref, region, accountID); err != nil {
 				return nil, err
 			}
 		}
 	}
 	if cr.Spec.SNS != nil {
 		for _, t := range cr.Spec.SNS.Resources {
-			if err := addOwned(data, cr, "sns", t.Name, region, accountID); err != nil {
+			if err := addOwned(data, cr, resourceTypeSNS, t.Name, region, accountID); err != nil {
 				return nil, err
 			}
 		}
 		for _, ref := range cr.Spec.SNS.Consumes {
-			if err := addConsumed(ctx, k8sClient, data, cr, "sns", ref, region, accountID); err != nil {
+			if err := addConsumed(ctx, k8sClient, data, cr, resourceTypeSNS, ref, region, accountID); err != nil {
 				return nil, err
 			}
 		}
 	}
 	if cr.Spec.DynamoDB != nil {
 		for _, tbl := range cr.Spec.DynamoDB.Resources {
-			if err := addOwned(data, cr, "dynamodb", tbl.Name, region, accountID); err != nil {
+			if err := addOwned(data, cr, resourceTypeDynamoDB, tbl.Name, region, accountID); err != nil {
 				return nil, err
 			}
 		}
 		for _, ref := range cr.Spec.DynamoDB.Consumes {
-			if err := addConsumed(ctx, k8sClient, data, cr, "dynamodb", ref, region, accountID); err != nil {
+			if err := addConsumed(ctx, k8sClient, data, cr, resourceTypeDynamoDB, ref, region, accountID); err != nil {
 				return nil, err
 			}
 		}
 	}
 	if cr.Spec.S3 != nil {
 		for _, b := range cr.Spec.S3.Resources {
-			if err := addOwned(data, cr, "s3", b.Name, region, accountID); err != nil {
+			if err := addOwned(data, cr, resourceTypeS3, b.Name, region, accountID); err != nil {
 				return nil, err
 			}
 		}
 		for _, ref := range cr.Spec.S3.Consumes {
-			if err := addConsumed(ctx, k8sClient, data, cr, "s3", ref, region, accountID); err != nil {
+			if err := addConsumed(ctx, k8sClient, data, cr, resourceTypeS3, ref, region, accountID); err != nil {
 				return nil, err
 			}
 		}
@@ -236,17 +246,17 @@ func connectionKV(resourceType, resourceName, arn, region, accountID, producerCR
 
 	var suffix string
 	switch resourceType {
-	case "sqs":
+	case resourceTypeSQS:
 		url, err := sqsQueueURL(region, accountID, id)
 		if err != nil {
 			return "", "", err
 		}
 		suffix, value = "URL", url
-	case "sns":
+	case resourceTypeSNS:
 		suffix, value = "ARN", arn
-	case "dynamodb":
+	case resourceTypeDynamoDB:
 		suffix, value = "TABLE_NAME", id
-	case "s3":
+	case resourceTypeS3:
 		suffix, value = "BUCKET", id
 	default:
 		return "", "", fmt.Errorf("connectionKV: unknown resource type %q", resourceType)

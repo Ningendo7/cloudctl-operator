@@ -147,6 +147,7 @@ func LoadImageToKindClusterWithName(name string) error {
 	if v, ok := os.LookupEnv("KIND"); ok {
 		kindBinary = v
 	}
+	//nolint:gosec // test-only harness; kindBinary/cluster come from this test run's own env vars, never external input
 	cmd := exec.Command(kindBinary, kindOptions...)
 	_, err := Run(cmd)
 	return err

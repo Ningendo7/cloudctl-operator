@@ -34,11 +34,20 @@ import (
 // Checked here rather than per resource package for the same reason
 // ResourceInUseException lives in IsRetryable: nothing about the
 // classification is specific to one call site.
+// errCodeAccessDenied and errCodeThrottling are named (rather than inline
+// in the switch/if below) purely because each is also referenced by tests
+// exercising this exact classification - a constant keeps both sides from
+// silently drifting apart on a typo.
+const (
+	errCodeAccessDenied = "AccessDenied"
+	errCodeThrottling   = "ThrottlingException"
+)
+
 func IsPermissionDenied(err error) bool {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.ErrorCode() {
-		case "AccessDenied", "AccessDeniedException", "UnauthorizedException", "UnauthorizedOperation", "NotAuthorized", "AuthorizationError":
+		case errCodeAccessDenied, "AccessDeniedException", "UnauthorizedException", "UnauthorizedOperation", "NotAuthorized", "AuthorizationError":
 			return true
 		}
 		return false
@@ -89,7 +98,7 @@ func IsRetryable(err error) bool {
 			return true
 		}
 		code := apiErr.ErrorCode()
-		if code == "ThrottlingException" || code == "RequestLimitExceeded" || code == "TooManyRequestsException" || code == "ResourceInUseException" || code == "ConcurrentModification" || code == "ContinuousBackupsUnavailableException" {
+		if code == errCodeThrottling || code == "RequestLimitExceeded" || code == "TooManyRequestsException" || code == "ResourceInUseException" || code == "ConcurrentModification" || code == "ContinuousBackupsUnavailableException" {
 			return true
 		}
 		return strings.Contains(code, "Throttl")

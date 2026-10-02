@@ -39,6 +39,11 @@ import (
 // second gate on the same fact.
 const conditionTypeConsumeReferences = "ConsumeReferencesValid"
 
+const (
+	reasonProducerNotFoundYet         = "ProducerNotFoundYet"
+	reasonProducerLikelyMisconfigured = "ProducerLikelyMisconfigured"
+)
+
 // consumeReferenceDanglingThreshold is how long a consumes entry's
 // producer CR can be missing before the message stops reading like an
 // ordinary startup-ordering race (a GitOps apply of producer+consumer in
@@ -87,12 +92,12 @@ func checkConsumeReferences(ctx context.Context, k8sClient client.Client, cr *de
 		return
 	}
 
-	reason := "ProducerNotFoundYet"
+	reason := reasonProducerNotFoundYet
 	message := strings.Join(dangling, "; ")
 	if existing := apimeta.FindStatusCondition(cr.Status.Conditions, conditionTypeConsumeReferences); existing != nil &&
 		existing.Status == metav1.ConditionFalse &&
 		time.Since(existing.LastTransitionTime.Time) > consumeReferenceDanglingThreshold {
-		reason = "ProducerLikelyMisconfigured"
+		reason = reasonProducerLikelyMisconfigured
 		message = fmt.Sprintf("%s (unresolved for over %s - this looks like a real misconfiguration, e.g. a typo in the consumer's namespace/name, rather than a startup-ordering race)",
 			message, consumeReferenceDanglingThreshold)
 	}
@@ -108,22 +113,22 @@ func allConsumeRefs(cr *depsv1alpha1.AppDependencies) []consumeRefLocation {
 	var refs []consumeRefLocation
 	if cr.Spec.SQS != nil {
 		for _, c := range cr.Spec.SQS.Consumes {
-			refs = append(refs, consumeRefLocation{"sqs", c})
+			refs = append(refs, consumeRefLocation{resourceTypeSQS, c})
 		}
 	}
 	if cr.Spec.SNS != nil {
 		for _, c := range cr.Spec.SNS.Consumes {
-			refs = append(refs, consumeRefLocation{"sns", c})
+			refs = append(refs, consumeRefLocation{resourceTypeSNS, c})
 		}
 	}
 	if cr.Spec.DynamoDB != nil {
 		for _, c := range cr.Spec.DynamoDB.Consumes {
-			refs = append(refs, consumeRefLocation{"dynamodb", c})
+			refs = append(refs, consumeRefLocation{resourceTypeDynamoDB, c})
 		}
 	}
 	if cr.Spec.S3 != nil {
 		for _, c := range cr.Spec.S3.Consumes {
-			refs = append(refs, consumeRefLocation{"s3", c})
+			refs = append(refs, consumeRefLocation{resourceTypeS3, c})
 		}
 	}
 	return refs

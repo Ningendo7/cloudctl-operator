@@ -42,6 +42,11 @@ import (
 type sqsAPI = cloudctlaws.SQSClient
 
 const resourceType = "sqs"
+
+// awsAttrTrue is the string form SQS's attribute API expects for a boolean
+// attribute - these aren't real JSON/Go booleans, just string values AWS
+// happens to parse as one.
+const awsAttrTrue = "true"
 const defaultMaxReceiveCount = int32(5)
 
 type queueOptions struct {
@@ -295,7 +300,7 @@ func ensureSingleQueue(
 		// ever relevant on this create path, never drift-corrected).
 		attrs := desiredAttributes(opts)
 		if opts.fifo {
-			attrs["FifoQueue"] = "true"
+			attrs["FifoQueue"] = awsAttrTrue
 		}
 
 		createOut, cErr := client.CreateQueue(ctx, &sqs.CreateQueueInput{
@@ -390,7 +395,7 @@ func desiredAttributes(opts queueOptions) map[string]string {
 	if opts.fifo {
 		dedup := "false"
 		if opts.contentBasedDeduplication {
-			dedup = "true"
+			dedup = awsAttrTrue
 		}
 		desired["ContentBasedDeduplication"] = dedup
 	}

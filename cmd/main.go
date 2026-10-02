@@ -62,7 +62,11 @@ const awsClientInitRetryInterval = 30 * time.Second
 // cloudctlaws.NewClients; a test passes a fake) until it succeeds or ctx is
 // cancelled - see awsClientInitRetryInterval's doc comment for why this
 // isn't just a single fatal attempt.
-func waitForAWSClients(ctx context.Context, interval time.Duration, newClients func(context.Context) (*cloudctlaws.Clients, error)) (*cloudctlaws.Clients, error) {
+func waitForAWSClients(
+	ctx context.Context,
+	interval time.Duration,
+	newClients func(context.Context) (*cloudctlaws.Clients, error),
+) (*cloudctlaws.Clients, error) {
 	var clients *cloudctlaws.Clients
 	err := wait.PollUntilContextCancel(ctx, interval, true, func(ctx context.Context) (bool, error) {
 		var err error

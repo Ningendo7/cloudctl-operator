@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -125,9 +126,7 @@ func (f *fakeSQSClient) TagQueue(_ context.Context, in *sqs.TagQueueInput, _ ...
 	if q.tags == nil {
 		q.tags = map[string]string{}
 	}
-	for k, v := range in.Tags {
-		q.tags[k] = v
-	}
+	maps.Copy(q.tags, in.Tags)
 	return &sqs.TagQueueOutput{}, nil
 }
 

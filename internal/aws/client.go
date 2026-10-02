@@ -82,8 +82,13 @@ type rateLimiterDefault struct {
 	defaultBurst int
 }
 
+// serviceNameSQS is this rate limiter table's key for SQS - named since
+// it's also looked up by the same string when SQS's client is constructed
+// below, and a typo between the two would silently leave SQS unlimited.
+const serviceNameSQS = "sqs"
+
 var rateLimiterDefaults = []rateLimiterDefault{
-	{"sqs", "AWS_SQS_RATE_LIMIT_QPS", "AWS_SQS_RATE_LIMIT_BURST", 20, 40},
+	{serviceNameSQS, "AWS_SQS_RATE_LIMIT_QPS", "AWS_SQS_RATE_LIMIT_BURST", 20, 40},
 	{"sns", "AWS_SNS_RATE_LIMIT_QPS", "AWS_SNS_RATE_LIMIT_BURST", 20, 40},
 	{"s3", "AWS_S3_RATE_LIMIT_QPS", "AWS_S3_RATE_LIMIT_BURST", 20, 40},
 	{"dynamodb", "AWS_DYNAMODB_RATE_LIMIT_QPS", "AWS_DYNAMODB_RATE_LIMIT_BURST", 20, 40},
@@ -132,7 +137,7 @@ func NewClients(ctx context.Context) (*Clients, error) {
 
 	return &Clients{
 		SQS: sqs.NewFromConfig(cfg, func(o *sqs.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters["sqs"]))
+			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameSQS]))
 		}),
 		SNS: sns.NewFromConfig(cfg, func(o *sns.Options) {
 			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters["sns"]))

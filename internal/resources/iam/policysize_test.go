@@ -29,11 +29,11 @@ import (
 func maxedOutSectionGrants(resourceType string) []grant {
 	var grants []grant
 	const maxPerList = 50
-	for i := 0; i < maxPerList; i++ {
+	for i := range maxPerList {
 		grants = append(grants, grant{resourceType: resourceType, arn: fmt.Sprintf("arn:aws:%s:us-east-1:123456789012:resource-name-%d", resourceType, i), readWrite: true})
 		grants = append(grants, grant{resourceType: "kms", arn: fmt.Sprintf("arn:aws:kms:us-east-1:123456789012:key/%08d-0000-0000-0000-000000000000", i), readWrite: true})
 	}
-	for i := 0; i < maxPerList; i++ {
+	for i := range maxPerList {
 		grants = append(grants, grant{resourceType: resourceType, arn: fmt.Sprintf("arn:aws:%s:us-east-1:123456789012:other-resource-name-%d", resourceType, i), readWrite: i%2 == 0})
 	}
 	return grants

@@ -109,7 +109,7 @@ func TestCollectGrants_EncryptedOwnedSQSResourceAlsoGrantsItsDedicatedKey(t *tes
 	if err != nil {
 		t.Fatalf("buildPolicyDocument: %v", err)
 	}
-	for _, action := range []string{"kms:Decrypt", "kms:GenerateDataKey"} {
+	for _, action := range []string{kmsActionDecrypt, kmsActionGenerateDataKey} {
 		if !strings.Contains(policy, action) {
 			t.Errorf("expected derived policy to include %q, got %s", action, policy)
 		}
@@ -546,7 +546,7 @@ func TestCollectGrants_SQSWithSharedKMSKeyRefGrantsAccessToThatKey(t *testing.T)
 	if err != nil {
 		t.Fatalf("buildPolicyDocument: %v", err)
 	}
-	for _, action := range []string{"kms:Decrypt", "kms:GenerateDataKey"} {
+	for _, action := range []string{kmsActionDecrypt, kmsActionGenerateDataKey} {
 		if !strings.Contains(policy, action) {
 			t.Errorf("expected derived policy to include %q, got %s", action, policy)
 		}
@@ -593,8 +593,8 @@ func TestCollectGrants_KMSKeyRefRespectsReadOnlyAccessLevel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildPolicyDocument: %v", err)
 	}
-	if strings.Contains(policy, "kms:GenerateDataKey") {
-		t.Errorf("expected ReadOnly kmsKeyRef to exclude kms:GenerateDataKey, got %s", policy)
+	if strings.Contains(policy, kmsActionGenerateDataKey) {
+		t.Errorf("expected ReadOnly kmsKeyRef to exclude %s, got %s", kmsActionGenerateDataKey, policy)
 	}
 }
 

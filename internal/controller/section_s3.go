@@ -30,13 +30,13 @@ import (
 // look up the producer CR a shared key belongs to.
 func s3Section(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	return section{
-		name: "S3Ready",
+		name: conditionTypeS3Ready,
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
 			declared := 0
 			if cr.Spec.S3 != nil {
 				declared = len(cr.Spec.S3.Resources)
 			}
-			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "s3", declared)
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, resourceTypeS3, declared)
 			defer cancel()
 
 			ledger, ensureErr := s3.Ensure(
@@ -56,7 +56,7 @@ func s3Section(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependenc
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(ctx, cr, "S3Ready", err, eventRecorderFor(r, cr))
+			setSectionCondition(ctx, cr, conditionTypeS3Ready, err, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {
@@ -64,7 +64,7 @@ func s3Section(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependenc
 			if cr.Spec.S3 != nil {
 				declared = len(cr.Spec.S3.Resources)
 			}
-			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "s3", declared)
+			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, resourceTypeS3, declared)
 			defer cancel()
 
 			forceDeleteAll := cr.Annotations[ForceDeleteAllAnnotation] != ""

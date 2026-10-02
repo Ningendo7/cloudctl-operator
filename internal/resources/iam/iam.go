@@ -174,12 +174,12 @@ func skippedToError(skipped []string) error {
 // under different ownership means something else in this account claimed
 // the exact deterministic name this CR needs, not a resource this CR could
 // ever legitimately want to take over.
-func ensureRole(ctx context.Context, client iamAPI, namespace, crName, crUID, name, trustPolicy string) (string, error) {
-	getOut, err := client.GetRole(ctx, &iam.GetRoleInput{RoleName: &name})
+func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID, name, trustPolicy string) (string, error) {
+	getOut, err := iamClient.GetRole(ctx, &iam.GetRoleInput{RoleName: &name})
 
 	var notFound *types.NoSuchEntityException
 	if errors.As(err, &notFound) {
-		createOut, cErr := client.CreateRole(ctx, &iam.CreateRoleInput{
+		createOut, cErr := iamClient.CreateRole(ctx, &iam.CreateRoleInput{
 			RoleName:                 &name,
 			AssumeRolePolicyDocument: &trustPolicy,
 			Tags:                     mapToTags(ownerTags(namespace, crName, crUID)),
@@ -193,7 +193,7 @@ func ensureRole(ctx context.Context, client iamAPI, namespace, crName, crUID, na
 		return "", wrapAWSError(err, "looking up IAM role")
 	}
 
-	tags, tErr := listAllRoleTags(ctx, client, name)
+	tags, tErr := listAllRoleTags(ctx, iamClient, name)
 	if tErr != nil {
 		return "", wrapAWSError(tErr, "reading role tags")
 	}
@@ -202,7 +202,7 @@ func ensureRole(ctx context.Context, client iamAPI, namespace, crName, crUID, na
 	}
 
 	if getOut.Role.AssumeRolePolicyDocument == nil || !trustPolicyEquivalent(*getOut.Role.AssumeRolePolicyDocument, trustPolicy) {
-		if _, err := client.UpdateAssumeRolePolicy(ctx, &iam.UpdateAssumeRolePolicyInput{
+		if _, err := iamClient.UpdateAssumeRolePolicy(ctx, &iam.UpdateAssumeRolePolicyInput{
 			RoleName:       &name,
 			PolicyDocument: &trustPolicy,
 		}); err != nil {
@@ -246,10 +246,10 @@ func buildTrustPolicy(oidcProviderARN, oidcProviderURL, namespace, serviceAccoun
 	host = strings.TrimSuffix(host, "/")
 
 	doc := map[string]any{
-		"Version": "2012-10-17",
+		"Version": iamPolicyVersion,
 		"Statement": []map[string]any{
 			{
-				"Effect":    "Allow",
+				"Effect":    effectAllow,
 				"Principal": map[string]string{"Federated": oidcProviderARN},
 				"Action":    "sts:AssumeRoleWithWebIdentity",
 				"Condition": map[string]any{
@@ -268,11 +268,11 @@ func buildTrustPolicy(oidcProviderARN, oidcProviderURL, namespace, serviceAccoun
 	return string(encoded), nil
 }
 
-func listAllRoleTags(ctx context.Context, client iamAPI, roleName string) ([]types.Tag, error) {
+func listAllRoleTags(ctx context.Context, iamClient iamAPI, roleName string) ([]types.Tag, error) {
 	var all []types.Tag
 	var marker *string
 	for {
-		out, err := client.ListRoleTags(ctx, &iam.ListRoleTagsInput{RoleName: &roleName, Marker: marker})
+		out, err := iamClient.ListRoleTags(ctx, &iam.ListRoleTagsInput{RoleName: &roleName, Marker: marker})
 		if err != nil {
 			return nil, err
 		}

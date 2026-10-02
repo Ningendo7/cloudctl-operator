@@ -37,8 +37,28 @@ type actionSet struct {
 	readWrite []string
 }
 
+// Resource-type tags shared across every grant/ledger lookup in this file -
+// named constants rather than repeated literals purely so the same typo
+// can't diverge between a grant's tag and the ledger lookup it's paired
+// with.
+const (
+	resourceTypeSQS      = "sqs"
+	resourceTypeSNS      = "sns"
+	resourceTypeDynamoDB = "dynamodb"
+	resourceTypeS3       = "s3"
+	resourceTypeKMS      = "kms"
+
+	kmsActionDecrypt         = "kms:Decrypt"
+	kmsActionGenerateDataKey = "kms:GenerateDataKey"
+
+	// iamPolicyVersion is the only version string IAM policy documents
+	// (both trust and permissions) currently support.
+	iamPolicyVersion = "2012-10-17"
+	effectAllow      = "Allow"
+)
+
 var actionSets = map[string]actionSet{
-	"sqs": {
+	resourceTypeSQS: {
 		baseline: []string{"sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl", "sqs:ChangeMessageVisibility"},
 		// sqs:SendMessage alone also governs SendMessageBatch calls -
 		// "sqs:SendMessageBatch" isn't a real, recognized SQS action (AWS
@@ -46,11 +66,11 @@ var actionSets = map[string]actionSet{
 		// but doesn't act on it in a role policy either).
 		readWrite: []string{"sqs:SendMessage"},
 	},
-	"sns": {
+	resourceTypeSNS: {
 		baseline:  []string{"sns:Subscribe", "sns:Unsubscribe", "sns:GetTopicAttributes"},
 		readWrite: []string{"sns:Publish"},
 	},
-	"dynamodb": {
+	resourceTypeDynamoDB: {
 		baseline:  []string{"dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem"},
 		readWrite: []string{"dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"},
 	},
@@ -63,9 +83,9 @@ var actionSets = map[string]actionSet{
 	// always gets full baseline+readWrite regardless of sharedWith, an
 	// owned encrypted queue's own role gets both - the same "producer"
 	// requirement set - which is correct since it can always send.
-	"kms": {
-		baseline:  []string{"kms:Decrypt"},
-		readWrite: []string{"kms:GenerateDataKey"},
+	resourceTypeKMS: {
+		baseline:  []string{kmsActionDecrypt},
+		readWrite: []string{kmsActionGenerateDataKey},
 	},
 }
 
@@ -99,7 +119,7 @@ func s3ObjectActions(readWrite bool) []string {
 // grant is one resource this CR's role should have access to, resolved to
 // a concrete ARN, ready to become one or more policy statements.
 type grant struct {
-	resourceType string // "sqs", "sns", "dynamodb", "s3"
+	resourceType string // "sqs", "sns", "dynamodb", "s3" - see the resourceType* constants
 	arn          string
 	readWrite    bool
 }
@@ -118,24 +138,26 @@ type grant struct {
 // used for CEL validation of cross-object references (an Ingress pointing
 // at a not-yet-created Service isn't rejected, it just doesn't route yet).
 // skipped collects a human-readable reason for each one.
+//
+//nolint:gocyclo // four structurally-identical, deliberately-duplicated per-resource-type blocks (own+dedicated-key+shared-key+consumes); already covered by extensive TestCollectGrants_* tests, and splitting risks a correctness bug in this operator's single most security-critical function
 func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDependencies) (grants []grant, skipped []string) {
 	if cr.Spec.SQS != nil {
 		for _, q := range cr.Spec.SQS.Resources {
-			grants, skipped = recordOwned(grants, skipped, "sqs", q.Name, findLedgerEntry(cr, "sqs", q.Name))
+			grants, skipped = recordOwned(grants, skipped, resourceTypeSQS, q.Name, findLedgerEntry(cr, resourceTypeSQS, q.Name))
 			if q.Encryption != nil {
 				if q.Encryption.Enabled {
 					// The dedicated key is owned by this CR exactly as much as
 					// the queue it protects - same "always full access to what
 					// you own" rule, via the same recordOwned helper, keyed to
 					// the same ledger name kms.EnsureDedicatedKey uses.
-					grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("sqs", q.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("sqs", q.Name)))
+					grants, skipped = recordOwned(grants, skipped, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSQS, q.Name), findLedgerEntry(cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSQS, q.Name)))
 				} else if q.Encryption.KMSKeyRef != nil {
 					// A shared key still has to be usable: the queue's own
 					// Ensure path already resolves this ref to configure SSE,
 					// so the role needs the matching kms grant too, gated on
 					// the same sharedWith authorization as any other
 					// cross-CR reference.
-					if g, reason := resolveConsume(ctx, k8sClient, cr, "kms", *q.Encryption.KMSKeyRef); reason != "" {
+					if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeKMS, *q.Encryption.KMSKeyRef); reason != "" {
 						skipped = append(skipped, reason)
 					} else {
 						grants = append(grants, g)
@@ -144,7 +166,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			}
 		}
 		for _, ref := range cr.Spec.SQS.Consumes {
-			if g, reason := resolveConsume(ctx, k8sClient, cr, "sqs", ref); reason != "" {
+			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeSQS, ref); reason != "" {
 				skipped = append(skipped, reason)
 			} else {
 				grants = append(grants, g)
@@ -153,12 +175,12 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	}
 	if cr.Spec.SNS != nil {
 		for _, t := range cr.Spec.SNS.Resources {
-			grants, skipped = recordOwned(grants, skipped, "sns", t.Name, findLedgerEntry(cr, "sns", t.Name))
+			grants, skipped = recordOwned(grants, skipped, resourceTypeSNS, t.Name, findLedgerEntry(cr, resourceTypeSNS, t.Name))
 			if t.Encryption != nil {
 				if t.Encryption.Enabled {
-					grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("sns", t.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("sns", t.Name)))
+					grants, skipped = recordOwned(grants, skipped, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSNS, t.Name), findLedgerEntry(cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSNS, t.Name)))
 				} else if t.Encryption.KMSKeyRef != nil {
-					if g, reason := resolveConsume(ctx, k8sClient, cr, "kms", *t.Encryption.KMSKeyRef); reason != "" {
+					if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeKMS, *t.Encryption.KMSKeyRef); reason != "" {
 						skipped = append(skipped, reason)
 					} else {
 						grants = append(grants, g)
@@ -167,7 +189,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			}
 		}
 		for _, ref := range cr.Spec.SNS.Consumes {
-			if g, reason := resolveConsume(ctx, k8sClient, cr, "sns", ref); reason != "" {
+			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeSNS, ref); reason != "" {
 				skipped = append(skipped, reason)
 			} else {
 				grants = append(grants, g)
@@ -176,12 +198,12 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	}
 	if cr.Spec.DynamoDB != nil {
 		for _, tbl := range cr.Spec.DynamoDB.Resources {
-			grants, skipped = recordOwned(grants, skipped, "dynamodb", tbl.Name, findLedgerEntry(cr, "dynamodb", tbl.Name))
+			grants, skipped = recordOwned(grants, skipped, resourceTypeDynamoDB, tbl.Name, findLedgerEntry(cr, resourceTypeDynamoDB, tbl.Name))
 			if tbl.Encryption != nil {
 				if tbl.Encryption.Enabled {
-					grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("dynamodb", tbl.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("dynamodb", tbl.Name)))
+					grants, skipped = recordOwned(grants, skipped, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeDynamoDB, tbl.Name), findLedgerEntry(cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeDynamoDB, tbl.Name)))
 				} else if tbl.Encryption.KMSKeyRef != nil {
-					if g, reason := resolveConsume(ctx, k8sClient, cr, "kms", *tbl.Encryption.KMSKeyRef); reason != "" {
+					if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeKMS, *tbl.Encryption.KMSKeyRef); reason != "" {
 						skipped = append(skipped, reason)
 					} else {
 						grants = append(grants, g)
@@ -190,7 +212,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			}
 		}
 		for _, ref := range cr.Spec.DynamoDB.Consumes {
-			if g, reason := resolveConsume(ctx, k8sClient, cr, "dynamodb", ref); reason != "" {
+			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeDynamoDB, ref); reason != "" {
 				skipped = append(skipped, reason)
 			} else {
 				grants = append(grants, g)
@@ -199,12 +221,12 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	}
 	if cr.Spec.S3 != nil {
 		for _, b := range cr.Spec.S3.Resources {
-			grants, skipped = recordOwned(grants, skipped, "s3", b.Name, findLedgerEntry(cr, "s3", b.Name))
+			grants, skipped = recordOwned(grants, skipped, resourceTypeS3, b.Name, findLedgerEntry(cr, resourceTypeS3, b.Name))
 			if b.Encryption != nil {
 				if b.Encryption.Enabled {
-					grants, skipped = recordOwned(grants, skipped, "kms", cloudctlaws.DedicatedKeyLedgerName("s3", b.Name), findLedgerEntry(cr, "kms", cloudctlaws.DedicatedKeyLedgerName("s3", b.Name)))
+					grants, skipped = recordOwned(grants, skipped, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeS3, b.Name), findLedgerEntry(cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeS3, b.Name)))
 				} else if b.Encryption.KMSKeyRef != nil {
-					if g, reason := resolveConsume(ctx, k8sClient, cr, "kms", *b.Encryption.KMSKeyRef); reason != "" {
+					if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeKMS, *b.Encryption.KMSKeyRef); reason != "" {
 						skipped = append(skipped, reason)
 					} else {
 						grants = append(grants, g)
@@ -213,7 +235,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			}
 		}
 		for _, ref := range cr.Spec.S3.Consumes {
-			if g, reason := resolveConsume(ctx, k8sClient, cr, "s3", ref); reason != "" {
+			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeS3, ref); reason != "" {
 				skipped = append(skipped, reason)
 			} else {
 				grants = append(grants, g)
@@ -226,12 +248,12 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 		// resource) gets an owned grant exactly like every other resource
 		// type - and its consumes entries resolve exactly the same way,
 		// via the same sharedWith authorization every other cross-CR
-		// reference already uses (see producerSharedWith's "kms" case).
+		// reference already uses (see producerSharedWith's resourceTypeKMS case).
 		for _, k := range cr.Spec.KMS.Resources {
-			grants, skipped = recordOwned(grants, skipped, "kms", k.Name, findLedgerEntry(cr, "kms", k.Name))
+			grants, skipped = recordOwned(grants, skipped, resourceTypeKMS, k.Name, findLedgerEntry(cr, resourceTypeKMS, k.Name))
 		}
 		for _, ref := range cr.Spec.KMS.Consumes {
-			if g, reason := resolveConsume(ctx, k8sClient, cr, "kms", ref); reason != "" {
+			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeKMS, ref); reason != "" {
 				skipped = append(skipped, reason)
 			} else {
 				grants = append(grants, g)
@@ -332,7 +354,7 @@ func ResolveConsumeARN(ctx context.Context, k8sClient client.Client, consumer *d
 // within the producer's given section, regardless of resource type.
 func producerSharedWith(producer *depsv1alpha1.AppDependencies, resourceType, resourceName string) ([]depsv1alpha1.SharedWithEntry, bool) {
 	switch resourceType {
-	case "sqs":
+	case resourceTypeSQS:
 		if producer.Spec.SQS == nil {
 			return nil, false
 		}
@@ -341,7 +363,7 @@ func producerSharedWith(producer *depsv1alpha1.AppDependencies, resourceType, re
 				return q.SharedWith, true
 			}
 		}
-	case "sns":
+	case resourceTypeSNS:
 		if producer.Spec.SNS == nil {
 			return nil, false
 		}
@@ -350,7 +372,7 @@ func producerSharedWith(producer *depsv1alpha1.AppDependencies, resourceType, re
 				return t.SharedWith, true
 			}
 		}
-	case "dynamodb":
+	case resourceTypeDynamoDB:
 		if producer.Spec.DynamoDB == nil {
 			return nil, false
 		}
@@ -359,7 +381,7 @@ func producerSharedWith(producer *depsv1alpha1.AppDependencies, resourceType, re
 				return tbl.SharedWith, true
 			}
 		}
-	case "s3":
+	case resourceTypeS3:
 		if producer.Spec.S3 == nil {
 			return nil, false
 		}
@@ -368,7 +390,7 @@ func producerSharedWith(producer *depsv1alpha1.AppDependencies, resourceType, re
 				return b.SharedWith, true
 			}
 		}
-	case "kms":
+	case resourceTypeKMS:
 		if producer.Spec.KMS == nil {
 			return nil, false
 		}
@@ -399,19 +421,19 @@ type policyDocument struct {
 
 // buildPolicyDocument turns resolved grants into an IAM policy document.
 func buildPolicyDocument(grants []grant) (string, error) {
-	doc := policyDocument{Version: "2012-10-17"}
+	doc := policyDocument{Version: iamPolicyVersion}
 	for i, g := range grants {
-		if g.resourceType == "s3" {
+		if g.resourceType == resourceTypeS3 {
 			doc.Statement = append(doc.Statement,
 				policyStatement{
 					Sid:      fmt.Sprintf("s3Bucket%d", i),
-					Effect:   "Allow",
+					Effect:   effectAllow,
 					Action:   s3BucketLevelActions,
 					Resource: []string{g.arn},
 				},
 				policyStatement{
 					Sid:      fmt.Sprintf("s3Object%d", i),
-					Effect:   "Allow",
+					Effect:   effectAllow,
 					Action:   s3ObjectActions(g.readWrite),
 					Resource: []string{g.arn + "/*"},
 				},
@@ -420,7 +442,7 @@ func buildPolicyDocument(grants []grant) (string, error) {
 		}
 		doc.Statement = append(doc.Statement, policyStatement{
 			Sid:      fmt.Sprintf("%s%d", g.resourceType, i),
-			Effect:   "Allow",
+			Effect:   effectAllow,
 			Action:   actionsFor(g.resourceType, g.readWrite),
 			Resource: []string{g.arn},
 		})

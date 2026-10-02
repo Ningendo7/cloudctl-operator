@@ -36,7 +36,7 @@ func sqsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			if cr.Spec.SQS != nil {
 				declared = len(cr.Spec.SQS.Resources)
 			}
-			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "sqs", declared)
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, resourceTypeSQS, declared)
 			defer cancel()
 
 			ledger, ensureErr := sqs.Ensure(
@@ -80,7 +80,7 @@ func sqsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			if cr.Spec.SQS != nil {
 				declared = len(cr.Spec.SQS.Resources)
 			}
-			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "sqs", declared)
+			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, resourceTypeSQS, declared)
 			defer cancel()
 
 			forceDeleteAll := cr.Annotations[ForceDeleteAllAnnotation] != ""

@@ -100,28 +100,28 @@ func allSharedWithRefs(cr *depsv1alpha1.AppDependencies) []sharedWithRef {
 	if cr.Spec.SQS != nil {
 		for _, q := range cr.Spec.SQS.Resources {
 			for _, e := range q.SharedWith {
-				refs = append(refs, sharedWithRef{"sqs", q.Name, e})
+				refs = append(refs, sharedWithRef{resourceTypeSQS, q.Name, e})
 			}
 		}
 	}
 	if cr.Spec.SNS != nil {
 		for _, t := range cr.Spec.SNS.Resources {
 			for _, e := range t.SharedWith {
-				refs = append(refs, sharedWithRef{"sns", t.Name, e})
+				refs = append(refs, sharedWithRef{resourceTypeSNS, t.Name, e})
 			}
 		}
 	}
 	if cr.Spec.DynamoDB != nil {
 		for _, tbl := range cr.Spec.DynamoDB.Resources {
 			for _, e := range tbl.SharedWith {
-				refs = append(refs, sharedWithRef{"dynamodb", tbl.Name, e})
+				refs = append(refs, sharedWithRef{resourceTypeDynamoDB, tbl.Name, e})
 			}
 		}
 	}
 	if cr.Spec.S3 != nil {
 		for _, b := range cr.Spec.S3.Resources {
 			for _, e := range b.SharedWith {
-				refs = append(refs, sharedWithRef{"s3", b.Name, e})
+				refs = append(refs, sharedWithRef{resourceTypeS3, b.Name, e})
 			}
 		}
 	}

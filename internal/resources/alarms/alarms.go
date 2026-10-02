@@ -56,6 +56,12 @@ import (
 
 const resourceType = "sns" // ConsumeRef resolution for snsTopicRef always targets an SNS topic.
 
+// treatMissingDataNotBreaching is CloudWatch's TreatMissingData value this
+// package always uses: a resource that's momentarily stopped reporting
+// metrics (not necessarily broken) shouldn't flip an alarm to ALARM on
+// absence alone.
+const treatMissingDataNotBreaching = "notBreaching"
+
 // Alarm name suffixes. Combined with cloudctlaws.ResourceName's own
 // namespace-crName-resourceKey scheme to form the full deterministic
 // AlarmName, e.g. "default-checkout-service-orders-age".
@@ -183,7 +189,7 @@ func desiredAlarms(
 				// active messages, which would otherwise leave the alarm
 				// permanently INSUFFICIENT_DATA on an idle queue rather than
 				// reporting the healthy state it actually is.
-				treatMissingData: "notBreaching",
+				treatMissingData: treatMissingDataNotBreaching,
 			})
 
 			if q.DLQ {
@@ -201,7 +207,7 @@ func desiredAlarms(
 					threshold:          0,
 					evaluationPeriods:  1,
 					period:             300,
-					treatMissingData:   "notBreaching",
+					treatMissingData:   treatMissingDataNotBreaching,
 				})
 			}
 		}
@@ -222,7 +228,7 @@ func desiredAlarms(
 				threshold:          0,
 				evaluationPeriods:  1,
 				period:             300,
-				treatMissingData:   "notBreaching",
+				treatMissingData:   treatMissingDataNotBreaching,
 			})
 		}
 	}

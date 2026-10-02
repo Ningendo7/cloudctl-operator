@@ -20,7 +20,7 @@ func dynamodbSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDep
 			if cr.Spec.DynamoDB != nil {
 				declared = len(cr.Spec.DynamoDB.Resources)
 			}
-			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "dynamodb", declared)
+			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, resourceTypeDynamoDB, declared)
 			defer cancel()
 
 			ledger, ensureErr := dynamodb.Ensure(
@@ -47,7 +47,7 @@ func dynamodbSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDep
 			if cr.Spec.DynamoDB != nil {
 				declared = len(cr.Spec.DynamoDB.Resources)
 			}
-			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "dynamodb", declared)
+			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, resourceTypeDynamoDB, declared)
 			defer cancel()
 
 			forceDeleteAll := cr.Annotations[ForceDeleteAllAnnotation] != ""

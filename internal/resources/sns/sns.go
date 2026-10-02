@@ -42,6 +42,11 @@ type snsAPI = cloudctlaws.SNSClient
 
 const resourceType = "sns"
 
+// awsAttrTrue is the string form SNS's attribute API expects for a boolean
+// attribute - these aren't real JSON/Go booleans, just string values AWS
+// happens to parse as one.
+const awsAttrTrue = "true"
+
 // Ensure reconciles every declared SNS topic against AWS, updating the
 // ownership ledger as it goes. kmsClient is only ever touched when a
 // resource actually declares encryption.enabled — a CR that never uses it
@@ -170,7 +175,7 @@ func ensureTopic(
 	if errors.As(err, &notFound) {
 		attrs := desiredTopicAttributes(t, kmsKeyARN)
 		if t.FIFO {
-			attrs["FifoTopic"] = "true"
+			attrs["FifoTopic"] = awsAttrTrue
 		}
 
 		createOut, cErr := client.CreateTopic(ctx, &sns.CreateTopicInput{
@@ -230,7 +235,7 @@ func desiredTopicAttributes(t depsv1alpha1.SNSTopicSpec, kmsKeyARN *string) map[
 	if t.FIFO {
 		dedup := "false"
 		if t.Overrides != nil && t.Overrides.ContentBasedDeduplication != nil && *t.Overrides.ContentBasedDeduplication {
-			dedup = "true"
+			dedup = awsAttrTrue
 		}
 		desired["ContentBasedDeduplication"] = dedup
 	}

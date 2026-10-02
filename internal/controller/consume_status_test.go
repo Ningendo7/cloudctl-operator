@@ -71,7 +71,7 @@ func TestCheckConsumeReferences_MissingProducer_ReportsFalseWithoutImplyingMisco
 	if cond.Status != metav1.ConditionFalse {
 		t.Fatalf("expected ConditionFalse, got %v", cond.Status)
 	}
-	if cond.Reason != "ProducerNotFoundYet" {
+	if cond.Reason != reasonProducerNotFoundYet {
 		t.Errorf("reason = %q, want ProducerNotFoundYet on first sighting", cond.Reason)
 	}
 	if strings.Contains(cond.Message, "misconfiguration") {
@@ -88,7 +88,7 @@ func TestCheckConsumeReferences_StillMissingPastThreshold_EscalatesReason(t *tes
 	consumer.Status.Conditions = []metav1.Condition{{
 		Type:               conditionTypeConsumeReferences,
 		Status:             metav1.ConditionFalse,
-		Reason:             "ProducerNotFoundYet",
+		Reason:             reasonProducerNotFoundYet,
 		Message:            "stale",
 		LastTransitionTime: metav1.NewTime(time.Now().Add(-consumeReferenceDanglingThreshold - time.Minute)),
 		ObservedGeneration: consumer.Generation,
@@ -100,7 +100,7 @@ func TestCheckConsumeReferences_StillMissingPastThreshold_EscalatesReason(t *tes
 	if cond == nil {
 		t.Fatal("expected a ConsumeReferencesValid condition to be set")
 	}
-	if cond.Reason != "ProducerLikelyMisconfigured" {
+	if cond.Reason != reasonProducerLikelyMisconfigured {
 		t.Errorf("reason = %q, want ProducerLikelyMisconfigured once past the dangling threshold", cond.Reason)
 	}
 	if !strings.Contains(cond.Message, "misconfiguration") {

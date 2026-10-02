@@ -99,7 +99,7 @@ func billingModeFor(m depsv1alpha1.DynamoDBBillingMode) types.BillingMode {
 // can pass nil.
 func Ensure(
 	ctx context.Context,
-	client dynamodbAPI,
+	awsClient dynamodbAPI,
 	kmsClient cloudctlaws.KMSClient,
 	k8sClient client.Client,
 	namespace,
@@ -158,7 +158,7 @@ func Ensure(
 		}
 
 		var err error
-		ledger, err = ensureTable(ctx, client, namespace, crName, crUID, t.Name, opts, ledger, recordEvent)
+		ledger, err = ensureTable(ctx, awsClient, namespace, crName, crUID, t.Name, opts, ledger, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("table %q: %w", t.Name, err)
 		}
@@ -168,7 +168,7 @@ func Ensure(
 
 func ensureTable(
 	ctx context.Context,
-	client dynamodbAPI,
+	awsClient dynamodbAPI,
 	namespace,
 	crName,
 	crUID,
@@ -179,13 +179,13 @@ func ensureTable(
 ) ([]depsv1alpha1.ManagedResource, error) {
 	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, 255)
 
-	describeOut, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+	describeOut, err := awsClient.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: &tableName,
 	})
 
 	var notFound *types.ResourceNotFoundException
 	if errors.As(err, &notFound) {
-		return createTable(ctx, client, namespace, crName, crUID, tableName, resourceName, opts, ledger, recordEvent)
+		return createTable(ctx, awsClient, namespace, crName, crUID, tableName, resourceName, opts, ledger, recordEvent)
 	}
 	if err != nil {
 		return ledger, wrapAWSError(err, "looking up table")
@@ -236,13 +236,13 @@ func ensureTable(
 		updated.Force = opts.force
 		status.UpsertManagedResource(&ledger, updated)
 
-		if err := reconcileTableAttributes(ctx, client, tableName, opts); err != nil {
+		if err := reconcileTableAttributes(ctx, awsClient, tableName, opts); err != nil {
 			return ledger, wrapAWSError(err, "reconciling table attributes")
 		}
 		return ledger, nil
 	}
 
-	tags, tErr := listAllTags(ctx, client, tableArn)
+	tags, tErr := listAllTags(ctx, awsClient, tableArn)
 	if tErr != nil {
 		return ledger, wrapAWSError(tErr, "reading table tags")
 	}
@@ -275,7 +275,7 @@ func ensureTable(
 		}
 
 		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
-		if _, tagErr := client.TagResource(ctx, &dynamodb.TagResourceInput{
+		if _, tagErr := awsClient.TagResource(ctx, &dynamodb.TagResourceInput{
 			ResourceArn: &tableArn,
 			Tags:        mapToTags(merged),
 		}); tagErr != nil {
@@ -286,7 +286,7 @@ func ensureTable(
 		}
 	}
 
-	if err := reconcileTableAttributes(ctx, client, tableName, opts); err != nil {
+	if err := reconcileTableAttributes(ctx, awsClient, tableName, opts); err != nil {
 		return ledger, wrapAWSError(err, "reconciling table attributes")
 	}
 
@@ -314,7 +314,7 @@ func tableKeySchema(schema []types.KeySchemaElement) (partitionKey, sortKey stri
 
 func createTable(
 	ctx context.Context,
-	client dynamodbAPI,
+	awsClient dynamodbAPI,
 	namespace, crName, crUID, tableName, resourceName string,
 	opts tableOptions,
 	ledger []depsv1alpha1.ManagedResource,
@@ -352,7 +352,7 @@ func createTable(
 		}
 	}
 
-	createOut, err := client.CreateTable(ctx, input)
+	createOut, err := awsClient.CreateTable(ctx, input)
 	if err != nil {
 		// ResourceInUseException here (e.g. a very fast delete-then-recreate
 		// racing AWS's own cleanup) is covered by the shared IsRetryable
@@ -387,8 +387,8 @@ func createTable(
 // mutable configuration: BillingMode (driven by spec.overrides.billingMode,
 // defaulting to on-demand) and point-in-time recovery (driven by
 // spec.backup.enabled).
-func reconcileTableAttributes(ctx context.Context, client dynamodbAPI, tableName string, opts tableOptions) error {
-	describeOut, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
+func reconcileTableAttributes(ctx context.Context, awsClient dynamodbAPI, tableName string, opts tableOptions) error {
+	describeOut, err := awsClient.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
 	if err != nil {
 		return fmt.Errorf("reading current table config: %w", err)
 	}
@@ -417,7 +417,7 @@ func reconcileTableAttributes(ctx context.Context, client dynamodbAPI, tableName
 				WriteCapacityUnits: aws.Int64(provisionedDefaultCapacityUnits),
 			}
 		}
-		if _, err := client.UpdateTable(ctx, updateInput); err != nil {
+		if _, err := awsClient.UpdateTable(ctx, updateInput); err != nil {
 			return fmt.Errorf("correcting billing mode: %w", err)
 		}
 	}
@@ -432,7 +432,7 @@ func reconcileTableAttributes(ctx context.Context, client dynamodbAPI, tableName
 			currentKeyARN = aws.ToString(describeOut.Table.SSEDescription.KMSMasterKeyArn)
 		}
 		if currentKeyARN != *opts.kmsKeyARN {
-			if _, err := client.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+			if _, err := awsClient.UpdateTable(ctx, &dynamodb.UpdateTableInput{
 				TableName: &tableName,
 				SSESpecification: &types.SSESpecification{
 					Enabled:        aws.Bool(true),
@@ -450,7 +450,7 @@ func reconcileTableAttributes(ctx context.Context, client dynamodbAPI, tableName
 	// ResourceNotFoundException DescribeTable and the tagging calls use -
 	// this call site doesn't need to distinguish "not found" from any other
 	// error, but a future change that does should check the right type.
-	backupOut, err := client.DescribeContinuousBackups(ctx, &dynamodb.DescribeContinuousBackupsInput{TableName: &tableName})
+	backupOut, err := awsClient.DescribeContinuousBackups(ctx, &dynamodb.DescribeContinuousBackupsInput{TableName: &tableName})
 	if err != nil {
 		return fmt.Errorf("reading point-in-time recovery status: %w", err)
 	}
@@ -475,7 +475,7 @@ func reconcileTableAttributes(ctx context.Context, client dynamodbAPI, tableName
 	}
 
 	if needsUpdate {
-		if _, err := client.UpdateContinuousBackups(ctx, &dynamodb.UpdateContinuousBackupsInput{
+		if _, err := awsClient.UpdateContinuousBackups(ctx, &dynamodb.UpdateContinuousBackupsInput{
 			TableName: &tableName,
 			PointInTimeRecoverySpecification: &types.PointInTimeRecoverySpecification{
 				PointInTimeRecoveryEnabled: aws.Bool(opts.backupEnabled),
@@ -508,11 +508,11 @@ func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn strin
 	return ledger
 }
 
-func listAllTags(ctx context.Context, client dynamodbAPI, resourceArn string) ([]types.Tag, error) {
+func listAllTags(ctx context.Context, awsClient dynamodbAPI, resourceArn string) ([]types.Tag, error) {
 	var all []types.Tag
 	var nextToken *string
 	for {
-		out, err := client.ListTagsOfResource(ctx, &dynamodb.ListTagsOfResourceInput{
+		out, err := awsClient.ListTagsOfResource(ctx, &dynamodb.ListTagsOfResourceInput{
 			ResourceArn: &resourceArn,
 			NextToken:   nextToken,
 		})
