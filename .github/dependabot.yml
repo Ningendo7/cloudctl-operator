@@ -4,11 +4,23 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # One PR per ecosystem per week instead of one per dependency - every
+    # PR triggers the full CI matrix (now 6 workflows, several of them a
+    # real kind cluster), so ungrouped updates turn routine patch bumps
+    # into dozens of expensive runs for no real benefit.
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
 # Deliberately no "docker" ecosystem entry: the LocalStack image used in
 # CI/testdata is pinned by digest on purpose (see Makefile's LOCALSTACK_IMAGE
