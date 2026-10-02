@@ -57,7 +57,7 @@ const awsAttrTrue = "true"
 // skip-on-recheck optimization.
 func Ensure(
 	ctx context.Context,
-	client snsAPI,
+	awsClient snsAPI,
 	kmsClient cloudctlaws.KMSClient,
 	k8sClient client.Client,
 	namespace,
@@ -77,7 +77,7 @@ func Ensure(
 	var firstErr error
 	for _, t := range spec.Resources {
 		var err error
-		ledger, err = ensureTopic(ctx, client, kmsClient, k8sClient, namespace, crName, crUID, region, accountID, t, ledger, checkpoint, recordEvent)
+		ledger, err = ensureTopic(ctx, awsClient, kmsClient, k8sClient, namespace, crName, crUID, region, accountID, t, ledger, checkpoint, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("topic %q: %w", t.Name, err)
 		}
@@ -87,7 +87,7 @@ func Ensure(
 
 func ensureTopic(
 	ctx context.Context,
-	client snsAPI,
+	awsClient snsAPI,
 	kmsClient cloudctlaws.KMSClient,
 	k8sClient client.Client,
 	namespace,
@@ -152,7 +152,7 @@ func ensureTopic(
 			// AWS round trip entirely.
 			return ledger, nil
 		}
-		if err := reconcileTopicAttributes(ctx, client, topicArn, t, kmsKeyARN); err != nil {
+		if err := reconcileTopicAttributes(ctx, awsClient, topicArn, t, kmsKeyARN); err != nil {
 			return ledger, wrapAWSError(err, "reconciling topic attributes")
 		}
 		return ledger, nil
@@ -163,7 +163,7 @@ func ensureTopic(
 		cloudctlaws.OwnerUIDTagKey: crUID,
 	}
 
-	tagsOut, err := client.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{
+	tagsOut, err := awsClient.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{
 		ResourceArn: &topicArn,
 	})
 
@@ -178,7 +178,7 @@ func ensureTopic(
 			attrs["FifoTopic"] = awsAttrTrue
 		}
 
-		createOut, cErr := client.CreateTopic(ctx, &sns.CreateTopicInput{
+		createOut, cErr := awsClient.CreateTopic(ctx, &sns.CreateTopicInput{
 			Name:       &topicName,
 			Attributes: attrs,
 			Tags:       mapToTags(ownerTags),
@@ -210,7 +210,7 @@ func ensureTopic(
 		}
 
 		merged := cloudctlaws.MergeTags(currentTags, ownerTags)
-		if _, tagErr := client.TagResource(ctx, &sns.TagResourceInput{ResourceArn: &topicArn, Tags: mapToTags(merged)}); tagErr != nil {
+		if _, tagErr := awsClient.TagResource(ctx, &sns.TagResourceInput{ResourceArn: &topicArn, Tags: mapToTags(merged)}); tagErr != nil {
 			return ledger, wrapAWSError(tagErr, "adopting topic (tagging)")
 		}
 		if recordEvent != nil {
@@ -218,7 +218,7 @@ func ensureTopic(
 		}
 	}
 
-	if err := reconcileTopicAttributes(ctx, client, topicArn, t, kmsKeyARN); err != nil {
+	if err := reconcileTopicAttributes(ctx, awsClient, topicArn, t, kmsKeyARN); err != nil {
 		return ledger, wrapAWSError(err, "reconciling topic attributes")
 	}
 
@@ -251,7 +251,7 @@ func desiredTopicAttributes(t depsv1alpha1.SNSTopicSpec, kmsKeyARN *string) map[
 // Unlike SQS's bulk SetQueueAttributes, SNS's SetTopicAttributes takes
 // exactly one attribute name/value per call, so a changed attribute is set
 // individually rather than in one batched request.
-func reconcileTopicAttributes(ctx context.Context, client snsAPI, topicArn string, t depsv1alpha1.SNSTopicSpec, kmsKeyARN *string) error {
+func reconcileTopicAttributes(ctx context.Context, awsClient snsAPI, topicArn string, t depsv1alpha1.SNSTopicSpec, kmsKeyARN *string) error {
 	desired := desiredTopicAttributes(t, kmsKeyARN)
 	if len(desired) == 0 {
 		return nil
@@ -261,7 +261,7 @@ func reconcileTopicAttributes(ctx context.Context, client snsAPI, topicArn strin
 	for name := range desired {
 		attrNames = append(attrNames, name)
 	}
-	current, err := client.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{
+	current, err := awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{
 		TopicArn: &topicArn,
 	})
 	if err != nil {
@@ -274,7 +274,7 @@ func reconcileTopicAttributes(ctx context.Context, client snsAPI, topicArn strin
 			continue
 		}
 		n, v := name, value
-		if _, err := client.SetTopicAttributes(ctx, &sns.SetTopicAttributesInput{
+		if _, err := awsClient.SetTopicAttributes(ctx, &sns.SetTopicAttributesInput{
 			TopicArn:       &topicArn,
 			AttributeName:  &n,
 			AttributeValue: &v,

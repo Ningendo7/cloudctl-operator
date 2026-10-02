@@ -97,7 +97,7 @@ func bucketName(namespace, crName, resourceKey, accountID string) string {
 // can pass nil.
 func Ensure(
 	ctx context.Context,
-	client s3API,
+	awsClient s3API,
 	kmsClient cloudctlaws.KMSClient,
 	k8sClient client.Client,
 	namespace, crName, crUID, region, accountID string,
@@ -158,7 +158,7 @@ func Ensure(
 		}
 
 		var err error
-		ledger, err = ensureBucket(ctx, client, namespace, crName, crUID, region, accountID, b.Name, opts, ledger, recordEvent)
+		ledger, err = ensureBucket(ctx, awsClient, namespace, crName, crUID, region, accountID, b.Name, opts, ledger, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("bucket %q: %w", b.Name, err)
 		}
@@ -172,11 +172,11 @@ func Ensure(
 // the whole controller process, the same single-region assumption that
 // currently blocks DynamoDB Global Tables. Left unimplemented rather than
 // half-built until there's a real design for multi-region client support.
-var ErrReplicationNotSupported = errors.New("replication is not implemented yet - it needs cross-region client support this operator doesn't have")
+var ErrReplicationNotSupported = errors.New("replication is not implemented yet - it needs cross-region awsClient support this operator doesn't have")
 
 func ensureBucket(
 	ctx context.Context,
-	client s3API,
+	awsClient s3API,
 	namespace, crName, crUID, region, accountID, resourceName string,
 	opts bucketOptions,
 	ledger []depsv1alpha1.ManagedResource,
@@ -205,13 +205,13 @@ func ensureBucket(
 		updated.Force = opts.force
 		status.UpsertManagedResource(&ledger, updated)
 
-		if err := reconcileBucketAttributes(ctx, client, bucket, opts); err != nil {
+		if err := reconcileBucketAttributes(ctx, awsClient, bucket, opts); err != nil {
 			return ledger, wrapAWSError(err, "reconciling bucket attributes")
 		}
 		return ledger, nil
 	}
 
-	_, err := client.HeadBucket(ctx, &s3sdk.HeadBucketInput{
+	_, err := awsClient.HeadBucket(ctx, &s3sdk.HeadBucketInput{
 		Bucket: &bucket,
 	})
 	if err != nil {
@@ -231,7 +231,7 @@ func ensureBucket(
 			// CreateBucketConfiguration is fine there.
 			input.CreateBucketConfiguration.LocationConstraint = types.BucketLocationConstraint(region)
 		}
-		if _, cErr := client.CreateBucket(ctx, input); cErr != nil {
+		if _, cErr := awsClient.CreateBucket(ctx, input); cErr != nil {
 			return ledger, wrapAWSError(cErr, "creating bucket")
 		}
 		if recordEvent != nil {
@@ -242,7 +242,7 @@ func ensureBucket(
 	// Whether just created above (already tagged as ours) or pre-existing,
 	// both paths converge here: read current tags, and either confirm
 	// ownership or decide whether adopting a foreign bucket is justified.
-	tagsOut, tErr := client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
+	tagsOut, tErr := awsClient.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
 	currentTags := map[string]string{}
 	if tErr != nil {
 		if !isNoSuchTagSet(tErr) {
@@ -266,7 +266,7 @@ func ensureBucket(
 		}
 
 		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
-		if _, tagErr := client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
+		if _, tagErr := awsClient.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
 			Bucket:  &bucket,
 			Tagging: &types.Tagging{TagSet: mapToTags(merged)},
 		}); tagErr != nil {
@@ -277,7 +277,7 @@ func ensureBucket(
 		}
 	}
 
-	if err := reconcileBucketAttributes(ctx, client, bucket, opts); err != nil {
+	if err := reconcileBucketAttributes(ctx, awsClient, bucket, opts); err != nil {
 		return ledger, wrapAWSError(err, "reconciling bucket attributes")
 	}
 
@@ -290,13 +290,13 @@ func ensureBucket(
 // is itself fully idempotent, and a deep structural comparison of nested
 // transition/expiration rules isn't worth the complexity it would add for
 // avoiding one harmless redundant call per reconcile.
-func reconcileBucketAttributes(ctx context.Context, client s3API, bucket string, opts bucketOptions) error {
+func reconcileBucketAttributes(ctx context.Context, awsClient s3API, bucket string, opts bucketOptions) error {
 	desiredVersioning := opts.backupEnabled
 	if opts.versioningOverride != nil {
 		desiredVersioning = *opts.versioningOverride
 	}
 
-	current, err := client.GetBucketVersioning(ctx, &s3sdk.GetBucketVersioningInput{
+	current, err := awsClient.GetBucketVersioning(ctx, &s3sdk.GetBucketVersioningInput{
 		Bucket: &bucket,
 	})
 	if err != nil {
@@ -307,7 +307,7 @@ func reconcileBucketAttributes(ctx context.Context, client s3API, bucket string,
 		if desiredVersioning {
 			versioningStatus = types.BucketVersioningStatusEnabled
 		}
-		if _, err := client.PutBucketVersioning(ctx, &s3sdk.PutBucketVersioningInput{
+		if _, err := awsClient.PutBucketVersioning(ctx, &s3sdk.PutBucketVersioningInput{
 			Bucket:                  &bucket,
 			VersioningConfiguration: &types.VersioningConfiguration{Status: versioningStatus},
 		}); err != nil {
@@ -327,7 +327,7 @@ func reconcileBucketAttributes(ctx context.Context, client s3API, bucket string,
 	// SSE-S3 key.
 	if opts.kmsKeyARN != nil {
 		currentKeyARN := ""
-		encOut, encErr := client.GetBucketEncryption(ctx, &s3sdk.GetBucketEncryptionInput{Bucket: &bucket})
+		encOut, encErr := awsClient.GetBucketEncryption(ctx, &s3sdk.GetBucketEncryptionInput{Bucket: &bucket})
 		if encErr != nil && !isServerSideEncryptionConfigurationNotFound(encErr) {
 			return fmt.Errorf("reading encryption configuration: %w", encErr)
 		}
@@ -340,7 +340,7 @@ func reconcileBucketAttributes(ctx context.Context, client s3API, bucket string,
 			}
 		}
 		if currentKeyARN != *opts.kmsKeyARN {
-			if _, err := client.PutBucketEncryption(ctx, &s3sdk.PutBucketEncryptionInput{
+			if _, err := awsClient.PutBucketEncryption(ctx, &s3sdk.PutBucketEncryptionInput{
 				Bucket: &bucket,
 				ServerSideEncryptionConfiguration: &types.ServerSideEncryptionConfiguration{
 					Rules: []types.ServerSideEncryptionRule{
@@ -360,14 +360,14 @@ func reconcileBucketAttributes(ctx context.Context, client s3API, bucket string,
 
 	rules := desiredLifecycleRules(opts)
 	if len(rules) == 0 {
-		_, err := client.DeleteBucketLifecycle(ctx, &s3sdk.DeleteBucketLifecycleInput{Bucket: &bucket})
+		_, err := awsClient.DeleteBucketLifecycle(ctx, &s3sdk.DeleteBucketLifecycleInput{Bucket: &bucket})
 		if err != nil && !isNotFoundError(err) {
 			return fmt.Errorf("removing lifecycle policy: %w", err)
 		}
 		return nil
 	}
 
-	_, err = client.PutBucketLifecycleConfiguration(ctx, &s3sdk.PutBucketLifecycleConfigurationInput{
+	_, err = awsClient.PutBucketLifecycleConfiguration(ctx, &s3sdk.PutBucketLifecycleConfigurationInput{
 		Bucket: &bucket,
 		LifecycleConfiguration: &types.BucketLifecycleConfiguration{
 			Rules: buildLifecycleRules(rules),

@@ -41,14 +41,24 @@ import (
 const (
 	errCodeAccessDenied          = "AccessDenied"
 	errCodeAccessDeniedException = "AccessDeniedException"
-	errCodeThrottling            = "ThrottlingException"
+	errCodeUnauthorizedException = "UnauthorizedException"
+	errCodeUnauthorizedOperation = "UnauthorizedOperation"
+	errCodeNotAuthorized         = "NotAuthorized"
+	errCodeAuthorizationError    = "AuthorizationError"
+
+	errCodeThrottling                            = "ThrottlingException"
+	errCodeRequestLimitExceeded                  = "RequestLimitExceeded"
+	errCodeTooManyRequestsException              = "TooManyRequestsException"
+	errCodeResourceInUseException                = "ResourceInUseException"
+	errCodeConcurrentModification                = "ConcurrentModification"
+	errCodeContinuousBackupsUnavailableException = "ContinuousBackupsUnavailableException"
 )
 
 func IsPermissionDenied(err error) bool {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.ErrorCode() {
-		case errCodeAccessDenied, errCodeAccessDeniedException, "UnauthorizedException", "UnauthorizedOperation", "NotAuthorized", "AuthorizationError":
+		case errCodeAccessDenied, errCodeAccessDeniedException, errCodeUnauthorizedException, errCodeUnauthorizedOperation, errCodeNotAuthorized, errCodeAuthorizationError:
 			return true
 		}
 		return false
@@ -99,7 +109,7 @@ func IsRetryable(err error) bool {
 			return true
 		}
 		code := apiErr.ErrorCode()
-		if code == errCodeThrottling || code == "RequestLimitExceeded" || code == "TooManyRequestsException" || code == "ResourceInUseException" || code == "ConcurrentModification" || code == "ContinuousBackupsUnavailableException" {
+		if code == errCodeThrottling || code == errCodeRequestLimitExceeded || code == errCodeTooManyRequestsException || code == errCodeResourceInUseException || code == errCodeConcurrentModification || code == errCodeContinuousBackupsUnavailableException {
 			return true
 		}
 		return strings.Contains(code, "Throttl")
