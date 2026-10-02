@@ -1,22 +1,16 @@
 # cloudctl-operator
 
+[![Tests](https://github.com/Ningendo7/cloudctl-operator/actions/workflows/test.yml/badge.svg)](https://github.com/Ningendo7/cloudctl-operator/actions/workflows/test.yml)
+[![Lint](https://github.com/Ningendo7/cloudctl-operator/actions/workflows/lint.yml/badge.svg)](https://github.com/Ningendo7/cloudctl-operator/actions/workflows/lint.yml)
+[![E2E Tests](https://github.com/Ningendo7/cloudctl-operator/actions/workflows/test-e2e.yml/badge.svg)](https://github.com/Ningendo7/cloudctl-operator/actions/workflows/test-e2e.yml)
+[![Helm Chart Test](https://github.com/Ningendo7/cloudctl-operator/actions/workflows/helm-chart-test.yml/badge.svg)](https://github.com/Ningendo7/cloudctl-operator/actions/workflows/helm-chart-test.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 A Kubernetes operator for everyday AWS application dependencies. Declare
 *what your app needs* — a queue, a topic, a bucket, a table — and get back
 a derived least-privilege IAM role, safe deletion semantics, and
 connection details wired straight into your pods. No hand-authored IAM
 policy, no raw Terraform-in-YAML.
-
-## Why
-
-Teams provisioning AWS dependencies by hand, or via raw Terraform, tend to
-end up with inconsistent, error-prone hand-authored IAM policy per app, and
-operational hygiene — encryption, backups, cross-team access — that's
-opt-in and frequently skipped. `AppDependencies` is a single CRD that
-captures intent rather than raw provider config, and the controller
-reconciles everything that intent implies: the resource itself, ownership
-tagging, least-privilege IAM, and the IRSA wiring to use it — while still
-reporting the concrete result in `status` rather than hiding it behind a
-default.
 
 ```yaml
 apiVersion: deps.cloudctl.io/v1alpha1
@@ -42,6 +36,36 @@ queue and its dead-letter queue, a dedicated KMS key protecting both, a
 versioned bucket with a backup lifecycle policy, an IAM role scoped to
 exactly these resources, and a ConfigMap the app consumes via `envFrom`
 for the queue URL and bucket name.
+
+## Why
+
+Teams provisioning AWS dependencies by hand, or via raw Terraform, tend to
+end up with inconsistent, error-prone hand-authored IAM policy per app, and
+operational hygiene — encryption, backups, cross-team access — that's
+opt-in and frequently skipped. `AppDependencies` is a single CRD that
+captures intent rather than raw provider config, and the controller
+reconciles everything that intent implies: the resource itself, ownership
+tagging, least-privilege IAM, and the IRSA wiring to use it — while still
+reporting the concrete result in `status` rather than hiding it behind a
+default.
+
+## What it manages
+
+- **SQS** — standard and FIFO queues, dead-letter queues, dedicated or shared KMS encryption.
+- **SNS** — standard and FIFO topics, dedicated or shared KMS encryption.
+- **DynamoDB** — tables with on-demand or provisioned billing, point-in-time recovery, dedicated or shared KMS encryption.
+- **S3** — buckets with versioning/lifecycle-based backup, dedicated or shared KMS encryption.
+- **KMS** — standalone keys for deliberate reuse across resources, with real access-level-aware grants.
+- **CloudWatch alarms** — per-resource alarms, including notification to a topic owned by a different team's CR.
+- **IAM** — never hand-authored. One role per CR, derived from exactly what it owns and what's been explicitly shared with it, attached via IRSA.
+
+Every resource type shares the same safety model: ownership tagging (so
+the operator never touches a resource it doesn't own), `adopt`-gated
+claiming of pre-existing resources, `Retain`-by-default deletion with a
+non-empty guard, and a persisted ownership ledger that survives a resource
+being removed from spec. See [docs/architecture.md](docs/architecture.md)
+for the full design and [docs/resources.md](docs/resources.md) for
+field-by-field behavior.
 
 ## Cross-team resource sharing
 
@@ -73,9 +97,87 @@ IAM, the connection ConfigMap, and status conditions all resolve
 consistently from that one grant — nothing gets wired twice, and an
 ungranted reference is reported, not silently dropped or silently allowed.
 
-## What it manages
+## Installation
 
-SQS, SNS, DynamoDB, S3, KMS, CloudWatch alarms, and auto-derived IAM.
+### Prerequisites
+
+- A Kubernetes cluster with an **IAM OIDC identity provider** configured
+  (standard on EKS; required for any workload, including this operator
+  itself, to assume an IAM role via IRSA).
+- The operator's own pod needs an IAM role (attached via IRSA, the same
+  mechanism it sets up for the workloads it manages) scoped to the AWS
+  services and resources you intend to let it manage. See
+  [docs/threat-model.md](docs/threat-model.md) for what this operator can
+  and can't do with that access.
+- **`--oidc-provider-arn` and `--oidc-provider-url` are required flags** —
+  every IAM role this operator derives is trust-scoped to your cluster's
+  OIDC provider, so reconciliation for any CR needing IAM fails without
+  them.
+
+### Helm (recommended)
+
+Published as an OCI chart on every tagged release, alongside the manager
+image — both on GitHub's own registry, no separate chart repo to add:
+
+```bash
+helm install cloudctl-operator oci://ghcr.io/ningendo7/charts/cloudctl-operator \
+  --version <latest-release-version> \
+  --namespace cloudctl-operator-system \
+  --create-namespace \
+  --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=<operator-irsa-role-arn> \
+  --set-string manager.args="{--leader-elect,--oidc-provider-arn=<oidc-provider-arn>,--oidc-provider-url=<oidc-provider-url>}"
+```
+
+See the chart's [values.yaml](charts/chart/values.yaml) for every
+configurable field (replica count, resource limits, pod security context,
+and more).
+
+### Plain `kubectl` (kustomize-based bundle)
+
+Every tagged release also publishes a consolidated install manifest as a
+release asset — no Helm required:
+
+```bash
+kubectl apply -f https://github.com/Ningendo7/cloudctl-operator/releases/latest/download/install.yaml
+```
+
+This installs the CRDs, RBAC, and the manager Deployment in one step. You
+still need to annotate the manager's ServiceAccount with your IRSA role
+ARN and set `--oidc-provider-arn`/`--oidc-provider-url` on the Deployment
+afterward (or fork the manifest to set them inline before applying).
+
+Both install paths deploy the same image, built for `linux/amd64`,
+`linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
+
+## Testing rigor
+
+Every resource type is covered across three tiers: unit (fake AWS
+clients, runs in milliseconds), integration (real API shapes against
+LocalStack, CI-gated on every PR), and live (a real AWS account, opt-in,
+never in CI). The live tier isn't a formality — it has found and fixed a
+genuine, previously-invisible production bug in every resource type it's
+been built for, including a case where an IAM trust-policy comparison
+could never match real AWS's response format, silently forcing an
+`UpdateAssumeRolePolicy` call on every single reconcile of every
+IAM-needing CR until it was caught this way.
+
+Beyond scripted tests, this operator has been the subject of a dedicated,
+multi-round adversarial testing campaign against a real AWS account and a
+real EKS cluster — deliberately trying to break reconciliation, the
+ownership/adoption model, deletion safety, and behavior under real AWS
+failure modes (throttling, partial failures, concurrent mutation, network
+partition). Every finding that came out of it has been fixed and
+regression-tested, including the most adversarial case attempted: direct,
+privileged tampering with the status subresource specifically designed to
+trick the operator into deleting a resource it doesn't own. It didn't.
+
+Every PR is gated on all of: unit tests, integration tests, lint
+(`golangci-lint`), a Helm chart end-to-end smoke test (real `kind`
+cluster, real chart install), a full E2E lifecycle suite per resource
+type, and a manifests/chart drift check. See
+[docs/testing.md](docs/testing.md) for the complete breakdown.
+
+## Documentation
 
 - **[docs/architecture.md](docs/architecture.md)** — the design decisions:
   ownership and adoption, the trust window, deletion safety, naming,
@@ -100,12 +202,19 @@ deletion-safety model.
 
 ## Status
 
-Pre-1.0, under active development. SQS, SNS, DynamoDB, S3, KMS, CloudWatch
-alarms, and IAM are implemented and covered by unit, integration, and
-live-AWS test suites. RDS is planned for a later release — it touches
-VPC-level infrastructure (security groups, subnets), a materially
-different blast radius than everything else here, and gets its own design
-pass rather than being bolted on.
+Tagged releases are published from `main` once every check — unit,
+integration, lint, Helm chart, and E2E — passes for that exact commit; see
+[Releases](https://github.com/Ningendo7/cloudctl-operator/releases) for
+the current version. SQS, SNS, DynamoDB, S3, KMS, CloudWatch alarms, and
+IAM are implemented, covered by all three test tiers, and have each
+survived a dedicated adversarial testing pass against real AWS.
+
+Still ahead: RDS support (deferred deliberately — it's the first resource
+touching VPC-level infrastructure and a Secret rather than a ConfigMap,
+and gets its own design pass rather than being bolted on), periodic
+re-validation of AWS credentials for an already-running manager (currently
+only the startup path retries instead of crash-looping), and
+Prometheus/OpenTelemetry instrumentation.
 
 ## License
 
