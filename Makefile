@@ -346,6 +346,17 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
 	@# operator's real one (config/manager/manager.yaml) is 2, for the HA
 	@# leader-election setup it actually ships with.
 	sed -i 's/^  replicas: 1$$/  replicas: 2/' charts/chart/values.yaml
+	@# manager.extraEnv: config/manager/manager.yaml (the kustomize source
+	@# this command translates) has no env: field for it to carry over, and
+	@# the plugin has no generic "extra env vars" concept of its own, so
+	@# this chart-only addition is always wiped on regeneration and has to
+	@# be reinserted here, anchored on livenessProbe: - the first stable,
+	@# always-present line right after where a container's env belongs.
+	sed -i '/^        livenessProbe:$$/i\
+        {{- if .Values.manager.extraEnv }}\
+        env:\
+          {{- toYaml .Values.manager.extraEnv | nindent 10 }}\
+        {{- end }}' charts/chart/templates/manager/manager.yaml
 
 .PHONY: install-helm
 install-helm: ## Install the latest version of Helm.

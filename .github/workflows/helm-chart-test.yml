@@ -82,7 +82,30 @@ jobs:
 #          helm repo update
 #          helm install prometheus-crds prometheus-community/prometheus-operator-crds
 
+      # The manager fails its own startup AWS identity check (and so never
+      # becomes Ready) without something real to answer it - this cluster
+      # has no AWS credentials at all otherwise. Deployed inside the kind
+      # cluster itself (not as a GitHub Actions service container) so the
+      # manager pod can reach it by a normal in-cluster Service DNS name,
+      # without needing to bridge kind's own Docker network to the runner's.
+      - name: Deploy LocalStack into the kind cluster
+        run: |
+          kubectl create deployment localstack --image=localstack/localstack:4.9.0@sha256:e74aa0e3dad049db6a6a86dd0d4187e054a63ec4e4273d91959b2c41093bf566
+          kubectl set env deployment/localstack SERVICES=sts
+          kubectl expose deployment localstack --port=4566 --target-port=4566
+          kubectl rollout status deployment/localstack --timeout=120s
+
       - name: Deploy manager via Helm
+        env:
+          HELM_EXTRA_ARGS: >-
+            --set manager.extraEnv[0].name=AWS_ENDPOINT_URL
+            --set manager.extraEnv[0].value=http://localstack.default.svc.cluster.local:4566
+            --set manager.extraEnv[1].name=AWS_ACCESS_KEY_ID
+            --set manager.extraEnv[1].value=test
+            --set manager.extraEnv[2].name=AWS_SECRET_ACCESS_KEY
+            --set manager.extraEnv[2].value=test
+            --set manager.extraEnv[3].name=AWS_REGION
+            --set manager.extraEnv[3].value=us-east-1
         run: |
           make helm-deploy
 

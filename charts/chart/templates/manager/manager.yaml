@@ -93,6 +93,10 @@ spec:
         {{- with .Values.manager.image.pullPolicy }}
         imagePullPolicy: {{ . }}
         {{- end }}
+        {{- if .Values.manager.extraEnv }}
+        env:
+          {{- toYaml .Values.manager.extraEnv | nindent 10 }}
+        {{- end }}
         livenessProbe:
           httpGet:
             path: /healthz
