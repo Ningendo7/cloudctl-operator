@@ -104,9 +104,25 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
 
+      # A brand-new OCI path on GHCR (the first-ever push to this exact
+      # repository, which this is) can have a brief indexing delay: Helm's
+      # push does a PUT of the manifest, then an immediate GET to verify
+      # it, and that GET can 404 before the registry has caught up -
+      # documented upstream (helm/helm#31348) as a registry-side
+      # eventual-consistency gap, not something a client-side fix can
+      # avoid. Retried rather than fixed in code for the same reason this
+      # operator retries AWS's own eventual-consistency errors instead of
+      # treating the first failure as final.
       - name: Push the chart to GHCR as an OCI artifact
         run: |
-          helm push dist/chart/cloudctl-operator-${{ steps.version.outputs.chart_version }}.tgz ${{ env.CHART_OCI }}
+          for attempt in 1 2 3 4 5; do
+            if helm push dist/chart/cloudctl-operator-${{ steps.version.outputs.chart_version }}.tgz ${{ env.CHART_OCI }}; then
+              exit 0
+            fi
+            echo "helm push attempt $attempt failed, retrying in 10s..."
+            sleep 10
+          done
+          exit 1
 
       - name: Upload the packaged chart for the release step
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
