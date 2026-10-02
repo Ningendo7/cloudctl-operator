@@ -390,6 +390,16 @@ func TestLive_Ensure_DedicatedKMSKeyEncryptsRealTable(t *testing.T) {
 		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, true, false, nil); err != nil {
 			t.Logf("key cleanup warning: %v", err)
 		}
+		// Cleanup only tears down "dynamodb"-type ledger entries, and the
+		// kms package's own Cleanup won't schedule deletion within a single
+		// pass (it only starts a quiet window) - delete the real key
+		// directly instead of leaving it dangling.
+		if keyEntry := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "sessions")); keyEntry != nil {
+			windowDays := int32(7)
+			if _, err := kmsClient.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{KeyId: &keyEntry.ARN, PendingWindowInDays: &windowDays}); err != nil {
+				t.Logf("key cleanup warning: %v", err)
+			}
+		}
 	})
 
 	waitForTableActive(t, client, tableName, 3*time.Minute)

@@ -91,7 +91,7 @@ func TestCheckSharedWithReferences_MissingConsumer_ReportsFalseWithDetail(t *tes
 	if cond.Reason != "StaleReferencesFound" {
 		t.Errorf("reason = %q, want StaleReferencesFound", cond.Reason)
 	}
-	wantSubstr := `sqs "orders" shares with team-b/fulfillment-service, which no longer exists`
+	wantSubstr := `sqs "orders" shares with team-b/fulfillment-service, which does not currently exist (not yet created, or was deleted)`
 	if cond.Message != wantSubstr {
 		t.Errorf("message = %q, want %q", cond.Message, wantSubstr)
 	}

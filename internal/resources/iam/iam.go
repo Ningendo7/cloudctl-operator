@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -47,6 +48,11 @@ const resourceType = "iam"
 const roleLedgerName = "role"
 const roleInlinePolicyName = "cloudctl-derived-policy"
 const iamRoleNameMaxLen = 64
+
+// rolePolicySizeLimit is PutRolePolicy's documented inline-policy-document size
+// ceiling. Checked proactively in ensurePermissionsPolicy so an oversized
+// CR fails with a specific, actionable message instead of AWS's generic LimitExceededException.
+const rolePolicySizeLimit = 10240
 
 // roleName derives this CR's IAM role name. Namespace is folded in for the
 // same reason SQS/SNS/DynamoDB/S3's naming does — IAM role names are
@@ -133,6 +139,11 @@ func ensurePermissionsPolicy(grants []grant) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("deriving IAM permissions policy: %w", err)
 	}
+	if len(policy) > rolePolicySizeLimit {
+		return "", fmt.Errorf("derived IAM policy is %d characters, over PutRolePolicy's %d-character limit - "+
+			"this CR owns or consumes too many resources for one IAM role; split it across multiple AppDependencies CRs",
+			len(policy), rolePolicySizeLimit)
+	}
 	return policy, nil
 }
 
@@ -216,7 +227,15 @@ func trustPolicyEquivalent(currentEncoded, desired string) bool {
 		// changed) rather than silently skipping a real one.
 		return false
 	}
-	return current == desired
+
+	var currentDoc, desiredDoc any
+	if err := json.Unmarshal([]byte(current), &currentDoc); err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(desired), &desiredDoc); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(currentDoc, desiredDoc)
 }
 
 // buildTrustPolicy constructs the IRSA trust policy: this cluster's OIDC

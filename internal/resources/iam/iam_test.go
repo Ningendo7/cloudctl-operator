@@ -398,6 +398,29 @@ func TestEnsure_GrantsConsumedResourceFromAnotherCR(t *testing.T) {
 	}
 }
 
+func TestTrustPolicyEquivalent_IgnoresKeyOrderingDivergence(t *testing.T) {
+	desired := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x"},"Action":"sts:AssumeRoleWithWebIdentity"}]}`
+	// Same document, but with keys in a different order and URL-encoded -
+	// a stored policy may come back reformatted rather than byte-identical
+	// to what was submitted, so comparison must be semantic, not raw-string.
+	reordered := `{"Statement":[{"Action":"sts:AssumeRoleWithWebIdentity","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x"},"Effect":"Allow"}],"Version":"2012-10-17"}`
+	currentEncoded := url.QueryEscape(reordered)
+
+	if !trustPolicyEquivalent(currentEncoded, desired) {
+		t.Error("expected differently-ordered but semantically identical policies to be equivalent")
+	}
+}
+
+func TestTrustPolicyEquivalent_DetectsRealDifference(t *testing.T) {
+	desired := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x"},"Action":"sts:AssumeRoleWithWebIdentity"}]}`
+	different := `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x"},"Action":"sts:AssumeRoleWithWebIdentity"}]}`
+	currentEncoded := url.QueryEscape(different)
+
+	if trustPolicyEquivalent(currentEncoded, desired) {
+		t.Error("expected a genuinely different policy to not be equivalent")
+	}
+}
+
 func TestEnsure_ReportsSkippedConsumesButStillCreatesRoleForResolvedGrants(t *testing.T) {
 	cr := ownedCR("checkout-service")
 	cr.Spec.SQS.Consumes = []depsv1alpha1.ConsumeRef{

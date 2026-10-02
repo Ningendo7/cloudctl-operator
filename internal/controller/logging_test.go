@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/smithy-go"
@@ -30,7 +31,19 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
+
+type recordedEvent struct {
+	eventType, reason, message string
+}
+
+func newEventCollector() (status.EventRecorder, *[]recordedEvent) {
+	events := []recordedEvent{}
+	return func(eventType, reason, message string) {
+		events = append(events, recordedEvent{eventType, reason, message})
+	}, &events
+}
 
 // logCall is one recorded Info/Error call from fakeLogSink.
 type logCall struct {
@@ -76,7 +89,7 @@ func TestSetSectionCondition_LogsErrorWithSectionAndReason(t *testing.T) {
 	ctx := logf.IntoContext(context.Background(), logger)
 	cr := &depsv1alpha1.AppDependencies{}
 
-	setSectionCondition(ctx, cr, "S3Ready", errors.New("boom"))
+	setSectionCondition(ctx, cr, "S3Ready", errors.New("boom"), nil)
 
 	if len(*calls) != 1 {
 		t.Fatalf("expected exactly one log call, got %d: %+v", len(*calls), *calls)
@@ -98,7 +111,7 @@ func TestSetSectionCondition_LogsPermissionDeniedReason(t *testing.T) {
 	ctx := logf.IntoContext(context.Background(), logger)
 	cr := &depsv1alpha1.AppDependencies{}
 
-	setSectionCondition(ctx, cr, "IAMReady", &fakeAWSError{code: "AccessDenied", fault: smithy.FaultClient})
+	setSectionCondition(ctx, cr, "IAMReady", &fakeAWSError{code: "AccessDenied", fault: smithy.FaultClient}, nil)
 
 	if reason, _ := (*calls)[0].kv("reason"); reason != "PermissionDenied" {
 		t.Errorf("expected reason=PermissionDenied, got %v", reason)
@@ -111,10 +124,39 @@ func TestSetSectionCondition_LogsTransientErrorReason(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{}
 
 	err := &cloudctlaws.ReconcileError{Err: errors.New("throttled"), Retryable: true}
-	setSectionCondition(ctx, cr, "SQSReady", err)
+	setSectionCondition(ctx, cr, "SQSReady", err, nil)
 
 	if reason, _ := (*calls)[0].kv("reason"); reason != "TransientError" {
 		t.Errorf("expected reason=TransientError, got %v", reason)
+	}
+}
+
+func TestSetSectionCondition_EmitsWarningEventOnError(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{}
+	recordEvent, events := newEventCollector()
+
+	setSectionCondition(context.Background(), cr, "S3Ready", errors.New("adoption refused"), recordEvent)
+
+	if len(*events) != 1 {
+		t.Fatalf("expected exactly one event, got %+v", *events)
+	}
+	e := (*events)[0]
+	if e.eventType != "Warning" {
+		t.Errorf("eventType = %q, want Warning", e.eventType)
+	}
+	if !strings.Contains(e.message, "adoption refused") {
+		t.Errorf("message = %q, want it to contain the underlying error", e.message)
+	}
+}
+
+func TestSetSectionCondition_NoEventOnSuccess(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{}
+	recordEvent, events := newEventCollector()
+
+	setSectionCondition(context.Background(), cr, "S3Ready", nil, recordEvent)
+
+	if len(*events) != 0 {
+		t.Errorf("expected no events on success, got %+v", *events)
 	}
 }
 
@@ -123,7 +165,7 @@ func TestSetSectionCondition_NoLogOnSuccess(t *testing.T) {
 	ctx := logf.IntoContext(context.Background(), logger)
 	cr := &depsv1alpha1.AppDependencies{}
 
-	setSectionCondition(ctx, cr, "S3Ready", nil)
+	setSectionCondition(ctx, cr, "S3Ready", nil, nil)
 
 	if len(*calls) != 0 {
 		t.Errorf("expected no log calls on success, got %+v", *calls)

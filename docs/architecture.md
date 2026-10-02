@@ -156,6 +156,20 @@ under IRSA) and builds the retry/middleware stack, and doing that on every
 tick would add latency to every reconcile and could itself hammer STS
 under load.
 
+**Startup credential failure retries rather than crash-loops.**
+`NewClients` fails if the STS identity check fails (bad/revoked/rotated-out
+credentials) — but `cmd/main.go`'s `waitForAWSClients` retries this on a
+fixed interval instead of exiting the process. The manager (and its health
+probe port) isn't started until this succeeds, so a pod stuck in this state
+isn't crash-looping — it just has nothing listening yet, the same posture
+already confirmed for a real AWS network partition at startup. This matters
+specifically for a credentials outage that affects every replica at once
+(e.g. mid-rotation): without this, every *new* pod started during that
+window would crash-loop and the whole deployment could end up at zero
+`Ready` replicas; an already-`Running` pod on already-valid cached
+credentials is unaffected either way. This doesn't add periodic
+re-validation for an already-started manager — only the startup path.
+
 Each service also gets its own independent outgoing rate limiter
 (`internal/aws/ratelimit.go`), attached as SDK middleware on that service's
 client alone rather than a budget shared across services. Sharing one

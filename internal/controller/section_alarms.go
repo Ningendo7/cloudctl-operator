@@ -69,7 +69,7 @@ func alarmsSection(r *AppDependenciesReconciler) section {
 				r.AWSClients.Region, r.AWSClients.AccountID,
 				cr.Spec.Alarms, cr.Spec.SQS, cr.Spec.SNS, cr.Spec.DynamoDB,
 			)
-			setSectionCondition(ctx, cr, "AlarmsReady", err)
+			setSectionCondition(ctx, cr, "AlarmsReady", err, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

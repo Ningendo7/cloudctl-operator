@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	equality "k8s.io/apimachinery/pkg/api/equality"
@@ -145,13 +146,14 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 		}
 	}
 	checkSharedWithReferences(ctx, r.Client, cr)
+	checkConsumeReferences(ctx, r.Client, cr)
 
 	// Runs last, after every section has written this pass's ARNs into the
 	// ledger: the ConfigMap it generates is only as fresh as that ledger
 	// data, so anything reconciled earlier in this same pass is already
 	// reflected in it, not lagging a full reconcile behind.
 	connErr := configmap.Ensure(ctx, r.Client, r.AWSClients.Region, r.AWSClients.AccountID, cr)
-	setSectionCondition(ctx, cr, "ConnectionInfoReady", connErr)
+	setSectionCondition(ctx, cr, "ConnectionInfoReady", connErr, eventRecorderFor(r, cr))
 	if firstErr == nil {
 		firstErr = connErr
 	}
@@ -198,7 +200,7 @@ func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr 
 	return allDone, firstErr
 }
 
-func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, conditionType string, err error) {
+func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, conditionType string, err error, recordEvent status.EventRecorder) {
 	if err == nil {
 		status.SetSectionCondition(
 			&cr.Status.Conditions,
@@ -220,6 +222,15 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 	}
 
 	logf.FromContext(ctx).Error(err, "Section failed to reconcile", "section", conditionType, "reason", reason)
+
+	// A Warning event here, not just the condition below: status.conditions
+	// alone is invisible to the standard `kubectl describe`/`get events`
+	// triage flow, which only shows Events - every error/refusal condition
+	// deserves one, the same way every success path already reports a
+	// Normal event via this same recorder.
+	if recordEvent != nil {
+		recordEvent("Warning", conditionType+reason, fmt.Sprintf("%s: %s", conditionType, err.Error()))
+	}
 
 	status.SetSectionCondition(
 		&cr.Status.Conditions,

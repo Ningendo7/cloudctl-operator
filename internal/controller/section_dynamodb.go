@@ -39,7 +39,7 @@ func dynamodbSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDep
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(ctx, cr, "DynamoDBReady", err)
+			setSectionCondition(ctx, cr, "DynamoDBReady", err, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

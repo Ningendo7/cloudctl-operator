@@ -56,7 +56,7 @@ func s3Section(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependenc
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(ctx, cr, "S3Ready", err)
+			setSectionCondition(ctx, cr, "S3Ready", err, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

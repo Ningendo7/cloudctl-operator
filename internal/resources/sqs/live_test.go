@@ -434,10 +434,18 @@ func TestLive_Ensure_DedicatedKMSKeyEncryptsRealQueue(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 	t.Cleanup(func() {
-		// Actually schedule the real dedicated key for deletion - Ensure's
-		// own ledger already knows about it under this name.
 		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, true, false, nil); err != nil {
 			t.Logf("key cleanup warning: %v", err)
+		}
+		// sqs.Cleanup only tears down "sqs"-type ledger entries, and the
+		// kms package's own Cleanup won't schedule deletion within a single
+		// pass (it only starts a quiet window) - delete the real key
+		// directly instead of leaving it dangling.
+		if keyEntry := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "orders")); keyEntry != nil {
+			windowDays := int32(7)
+			if _, err := kmsClient.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{KeyId: &keyEntry.ARN, PendingWindowInDays: &windowDays}); err != nil {
+				t.Logf("key cleanup warning: %v", err)
+			}
 		}
 	})
 

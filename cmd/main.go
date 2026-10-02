@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -28,6 +29,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -41,6 +43,39 @@ import (
 	"github.com/Ningendo7/cloudctl-operator/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
+
+// awsClientInitRetryInterval is how often a failed startup AWS identity
+// check (bad/revoked/rotated-out credentials) is retried, rather than
+// crashing the process immediately. A manager that hasn't started yet
+// holds no listening port, so kubelet's readiness/liveness probes simply
+// can't connect during this window - the same "still starting, not yet
+// crash-looping" posture this project's own adversarial testing already
+// found and accepted for a real AWS network partition (see findings.md,
+// T17). This turns a credentials outage into the same recoverable wait
+// instead of CrashLoopBackOff: an already-fine, already-Running replica is
+// never touched by this at all (only pods starting fresh during the bad
+// window are), and a legitimate shutdown signal during the retry window
+// still exits promptly rather than hanging forever.
+const awsClientInitRetryInterval = 30 * time.Second
+
+// waitForAWSClients retries newClients (production callers always pass
+// cloudctlaws.NewClients; a test passes a fake) until it succeeds or ctx is
+// cancelled - see awsClientInitRetryInterval's doc comment for why this
+// isn't just a single fatal attempt.
+func waitForAWSClients(ctx context.Context, interval time.Duration, newClients func(context.Context) (*cloudctlaws.Clients, error)) (*cloudctlaws.Clients, error) {
+	var clients *cloudctlaws.Clients
+	err := wait.PollUntilContextCancel(ctx, interval, true, func(ctx context.Context) (bool, error) {
+		var err error
+		clients, err = newClients(ctx)
+		if err != nil {
+			setupLog.Info("Not yet able to initialize AWS clients, will retry",
+				"error", err.Error(), "retryInterval", interval)
+			return false, nil
+		}
+		return true, nil
+	})
+	return clients, err
+}
 
 var (
 	scheme   = runtime.NewScheme()
@@ -103,12 +138,20 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	if oidcProviderARN == "" || oidcProviderURL == "" {
+		setupLog.Info("Starting without --oidc-provider-arn/--oidc-provider-url set - " +
+			"any AppDependencies CR needing an IAM role will fail reconciliation until both are set")
+	}
+
 	ctx := ctrl.SetupSignalHandler()
 
-	awsClients, err := cloudctlaws.NewClients(ctx)
+	awsClients, err := waitForAWSClients(ctx, awsClientInitRetryInterval, cloudctlaws.NewClients)
 	if err != nil {
-		setupLog.Error(err, "Failed to initialize AWS clients")
-		os.Exit(1)
+		// Only reachable via ctx cancellation (a real shutdown signal) -
+		// waitForAWSClients itself never gives up and returns a non-nil
+		// clients error otherwise.
+		setupLog.Info("Shutting down while still waiting on AWS credentials to become valid")
+		return
 	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled

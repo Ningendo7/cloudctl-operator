@@ -103,7 +103,7 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(ctx, cr, "KMSReady", err)
+			setSectionCondition(ctx, cr, "KMSReady", err, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

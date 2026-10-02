@@ -301,8 +301,12 @@ spec:
   than silently dropped or silently honored.
 - **Role naming and trust policy**: one role per CR, trust-scoped via IRSA
   (`sts:AssumeRoleWithWebIdentity`) to `system:serviceaccount:<namespace>:<serviceAccountName>`
-  using the cluster's OIDC provider (`--oidc-provider-arn`/`--oidc-provider-url`
-  on the manager). Same ownership tagging, adoption (`adopt: true`), and
+  using the cluster's OIDC provider. **`--oidc-provider-arn` and
+  `--oidc-provider-url` are required flags on the manager for any real
+  deployment** — the scaffolded `config/manager/manager.yaml` does not set
+  them by default, and any CR declaring a resource that needs an IAM role
+  (the common case) will fail reconciliation with `IAMReady: False` until
+  both are set. Same ownership tagging, adoption (`adopt: true`), and
   drift-correction rules as every other resource type — including for the
   trust policy document itself, which IAM returns URL-encoded and must be
   decoded before comparing against the freshly-computed one, or every
@@ -381,6 +385,18 @@ run via each package's own `TestSharedLifecycleScenarios`, so the five
 packages' coverage of this common lifecycle can't silently drift apart.
 - **Status conditions** — each section reports its own condition
   (`SQSReady`, `SNSReady`, ...) plus an aggregate `Ready` condition on the CR.
+  Every section's error/refusal path (adoption refused, deletion refused for
+  an ownership mismatch, a naming collision, ...) also fires a matching
+  `Warning` Kubernetes Event via the same recorder success paths already
+  use, so `kubectl describe appdependencies <name>` surfaces it directly
+  instead of requiring a `status.conditions` read.
+- **Forcing a reconcile** — metadata-only changes (labels, arbitrary
+  annotations) never trigger one; only a real `spec` change or the periodic
+  drift-detection timer do. The one documented exception is the exact
+  annotation key `cloudctl.io/force-reconcile` — changing its value
+  triggers an immediate reconcile. Any other annotation key (including a
+  plausible guess like a bare `force-reconcile`) is silently ignored, with
+  no error or event.
 - **`SharedWithReferencesValid`** — flags any `sharedWith` entry whose
   target consumer CR no longer exists (typically because it was deleted
   after being granted access). Deliberately excluded from the `Ready`
@@ -389,3 +405,12 @@ packages' coverage of this common lifecycle can't silently drift apart.
   status-only: `sharedWith` is user-authored spec, and silently pruning it
   would fight a GitOps-managed manifest on its next sync rather than
   actually resolving anything.
+- **`ConsumeReferencesValid`** — the consumer-side mirror: flags any
+  `consumes` entry whose named producer CR does not currently exist. Also
+  excluded from `Ready` (this entry already keeps `IAMReady` from going
+  `True` on its own, so this condition exists purely for visibility, not as
+  a second gate). A producer CR that's merely been applied out of order
+  resolves on its own within a reconcile or two and reports
+  `ProducerNotFoundYet`; one still missing after 30 minutes escalates to
+  `ProducerLikelyMisconfigured`, since at that point it's more likely a
+  typo in the consumer's `namespace`/`name` than a startup-ordering race.

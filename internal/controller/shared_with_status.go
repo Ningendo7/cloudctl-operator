@@ -40,8 +40,11 @@ type sharedWithRef struct {
 }
 
 // checkSharedWithReferences flags sharedWith entries across this CR's owned
-// resources whose target consumer CR no longer exists — most commonly
-// because that CR was deleted sometime after being granted access.
+// resources whose target consumer CR does not currently exist — either
+// because it hasn't been created yet (a GitOps apply of producer+consumer
+// in the same batch, with no ordering guarantee) or because it was deleted
+// after being granted access. The message deliberately doesn't imply
+// either cause specifically, since this check can't tell them apart.
 //
 // Deliberately status-only, never touching spec: sharedWith is
 // user-authored, and this operator has never mutated spec anywhere else.
@@ -65,7 +68,7 @@ func checkSharedWithReferences(ctx context.Context, k8sClient client.Client, cr 
 		err := k8sClient.Get(ctx, key, &consumer)
 		if apierrors.IsNotFound(err) {
 			stale = append(stale, fmt.Sprintf(
-				"%s %q shares with %s/%s, which no longer exists",
+				"%s %q shares with %s/%s, which does not currently exist (not yet created, or was deleted)",
 				ref.resourceType, ref.resourceName, ref.entry.Namespace, ref.entry.Name,
 			))
 			continue
