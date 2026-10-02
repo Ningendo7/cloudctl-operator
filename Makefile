@@ -337,9 +337,15 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
 	git checkout -- config/manager/kustomization.yaml
 	rm -f .github/workflows/test-chart.yml
 	@# This command also overwrites hand-tuned values in charts/chart/values.yaml
-	@# wholesale (kubebuilder's own documented behavior, not a bug) - check
-	@# `git diff charts/chart/values.yaml` after running this and reapply
-	@# anything real (e.g. manager.replicas).
+	@# wholesale (kubebuilder's own documented behavior, not a bug). Known,
+	@# intentional corrections reapplied here rather than left as a "remember
+	@# to redo this by hand" step - Manifests Drift CI regenerates fresh and
+	@# diffs against what's committed, so anything only fixed by hand would
+	@# fail that check on every single run, forever, with no way to pass it.
+	@# manager.replicas: kubebuilder's own generic default is 1; this
+	@# operator's real one (config/manager/manager.yaml) is 2, for the HA
+	@# leader-election setup it actually ships with.
+	sed -i 's/^  replicas: 1$$/  replicas: 2/' charts/chart/values.yaml
 
 .PHONY: install-helm
 install-helm: ## Install the latest version of Helm.

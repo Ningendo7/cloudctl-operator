@@ -13,11 +13,6 @@ manager:
   ##
   enabled: true
 
-  ## Matches config/manager/manager.yaml's own default - 2 replicas plus
-  ## leader election (on by default, --leader-elect) is the real HA setup
-  ## this operator ships with, not a kustomize-specific quirk. Clobbered by
-  ## `make helm-generate` (kubebuilder's own documented behavior) -
-  ## reapply after regenerating.
   replicas: 2
 
   image:
