@@ -1,0 +1,17 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+# Deliberately no "docker" ecosystem entry: the LocalStack image used in
+# CI/testdata is pinned by digest on purpose (see Makefile's LOCALSTACK_IMAGE
+# comment) - an automated bump would fight that, and any version change
+# there needs the same direct-verification treatment a real upgrade already
+# gets, not a drive-by Dependabot PR.

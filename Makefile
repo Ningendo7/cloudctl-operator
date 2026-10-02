@@ -308,3 +308,69 @@ endef
 define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
+
+##@ Helm Deployment
+
+## Helm binary to use for deploying the chart
+HELM ?= helm
+## Namespace to deploy the Helm release
+HELM_NAMESPACE ?= cloudctl-operator-system
+## Name of the Helm release
+HELM_RELEASE ?= cloudctl-operator
+## Path to the Helm chart directory
+HELM_CHART_DIR ?= charts/chart
+## Additional arguments to pass to helm commands
+HELM_EXTRA_ARGS ?=
+
+.PHONY: helm-generate
+helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from the current config/. Not run automatically by manifests/generate - may clobber hand-tuned chart customizations, so it's a deliberate, separate step.
+	kubebuilder edit --plugins=helm/v2-alpha --output-dir=charts --force
+	@# Two known side effects of the command above, neither of which is a
+	@# real change worth tracking: it unconditionally rewrites
+	@# config/manager/kustomization.yaml with a static (and redundant -
+	@# make deploy/build-installer already set the real image at build
+	@# time) image pin, and it unconditionally recreates
+	@# .github/workflows/test-chart.yml with a stale ./dist/chart path
+	@# that --output-dir doesn't actually propagate to. See
+	@# .github/workflows/helm-chart-test.yml, our own maintained
+	@# equivalent with the path fixed, which this command doesn't touch.
+	git checkout -- config/manager/kustomization.yaml
+	rm -f .github/workflows/test-chart.yml
+	@# This command also overwrites hand-tuned values in charts/chart/values.yaml
+	@# wholesale (kubebuilder's own documented behavior, not a bug) - check
+	@# `git diff charts/chart/values.yaml` after running this and reapply
+	@# anything real (e.g. manager.replicas).
+
+.PHONY: install-helm
+install-helm: ## Install the latest version of Helm.
+	@command -v $(HELM) >/dev/null 2>&1 || { \
+		echo "Installing Helm..." && \
+		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash; \
+	}
+
+.PHONY: helm-deploy
+helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.
+	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
+		--namespace $(HELM_NAMESPACE) \
+		--create-namespace \
+		--set manager.image.repository=$${IMG%:*} \
+		--set manager.image.tag=$${IMG##*:} \
+		--wait \
+		--timeout 5m \
+		$(HELM_EXTRA_ARGS)
+
+.PHONY: helm-uninstall
+helm-uninstall: ## Uninstall the Helm release from the K8s cluster.
+	$(HELM) uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-status
+helm-status: ## Show Helm release status.
+	$(HELM) status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-history
+helm-history: ## Show Helm release history.
+	$(HELM) history $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-rollback
+helm-rollback: ## Rollback to previous Helm release.
+	$(HELM) rollback $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)

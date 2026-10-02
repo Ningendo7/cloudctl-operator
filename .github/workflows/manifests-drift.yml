@@ -1,0 +1,54 @@
+name: Manifests Drift
+
+# Catches two related failure modes in one job: (1) a kubebuilder marker
+# (+kubebuilder:validation, +kubebuilder:rbac, ...) changed in Go source
+# without make manifests/generate being re-run, so config/ and the
+# generated deepcopy code are stale; (2) config/ changed (including via
+# (1)) without the Helm chart being regenerated from it - the chart has no
+# way to notice config/ drifted out from under it on its own. Regenerating
+# both fresh and diffing against what's committed is the only way to
+# actually know neither happened, rather than trusting someone remembered.
+
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  drift:
+    permissions:
+      contents: read
+    name: Run on Ubuntu
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install kubebuilder
+        run: |
+          curl -L -o kubebuilder "https://go.kubebuilder.io/dl/v4.15.0/$(go env GOOS)/$(go env GOARCH)"
+          chmod +x kubebuilder
+          sudo mv kubebuilder /usr/local/bin/kubebuilder
+
+      - name: Regenerate manifests, deepcopy code, and the Helm chart
+        run: |
+          go mod tidy
+          make manifests generate helm-generate
+
+      - name: Fail if regenerating changed anything
+        run: |
+          if ! git diff --quiet || [ -n "$(git status --porcelain)" ]; then
+            echo "::error::config/, generated Go code, or charts/chart/ are out of date." \
+              "Run 'make manifests generate helm-generate' locally and commit the result."
+            git status --porcelain
+            git diff
+            exit 1
+          fi
