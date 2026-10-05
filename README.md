@@ -151,25 +151,23 @@ Both install paths deploy the same image, built for `linux/amd64`,
 
 ## Testing rigor
 
-Every resource type is covered across three tiers: unit (fake AWS
-clients, runs in milliseconds), integration (real API shapes against
-LocalStack, CI-gated on every PR), and live (a real AWS account, opt-in,
-never in CI). The live tier isn't a formality — it has found and fixed a
-genuine, previously-invisible production bug in every resource type it's
-been built for, including a case where an IAM trust-policy comparison
-could never match real AWS's response format, silently forcing an
-`UpdateAssumeRolePolicy` call on every single reconcile of every
-IAM-needing CR until it was caught this way.
+Three tiers, each catching a different class of bug: unit (fake AWS
+clients, runs in milliseconds, every resource type), integration (real
+API shapes against LocalStack, CI-gated on every PR, SQS/SNS/DynamoDB/S3/
+IAM), and live (a real AWS account, opt-in, never in CI, same five). The
+live tier exists specifically to catch what the other
+two structurally can't: real, undocumented, or easy-to-mismodel AWS
+behavior — wrong exception types, string-matched error codes with no
+typed SDK equivalent, response formats that diverge from what a request
+sent, eventual-consistency gaps. A fake only ever encodes this project's
+own belief about an API; LocalStack only ever encodes its maintainers'.
 
-Beyond scripted tests, this operator has been the subject of a dedicated,
-multi-round adversarial testing campaign against a real AWS account and a
-real EKS cluster — deliberately trying to break reconciliation, the
-ownership/adoption model, deletion safety, and behavior under real AWS
-failure modes (throttling, partial failures, concurrent mutation, network
-partition). Every finding that came out of it has been fixed and
-regression-tested, including the most adversarial case attempted: direct,
-privileged tampering with the status subresource specifically designed to
-trick the operator into deleting a resource it doesn't own. It didn't.
+Every destructive action re-verifies live ownership tags immediately
+before acting, regardless of how recently that verification last ran —
+cached trust can skip a read-level recheck, but never authorizes a
+delete by itself. Adoption of a pre-existing resource is refused outright
+unless it's explicitly requested and the resource carries no conflicting
+ownership tag from a different CR.
 
 Every PR is gated on all of: unit tests, integration tests, lint
 (`golangci-lint`), a Helm chart end-to-end smoke test (real `kind`
@@ -203,11 +201,15 @@ deletion-safety model.
 ## Status
 
 Tagged releases are published from `main` once every check — unit,
-integration, lint, Helm chart, and E2E — passes for that exact commit; see
+integration, lint, Helm chart, E2E, and the manifests/chart drift check —
+passes for that exact commit; see
 [Releases](https://github.com/Ningendo7/cloudctl-operator/releases) for
-the current version. SQS, SNS, DynamoDB, S3, KMS, CloudWatch alarms, and
-IAM are implemented, covered by all three test tiers, and have each
-survived a dedicated adversarial testing pass against real AWS.
+the current version. SQS, SNS, DynamoDB, S3, and IAM are implemented and
+covered by all three test tiers. KMS's dedicated-key path (the common
+case — `encryption.enabled` on any other resource type) rides along
+inside those same tiers; the standalone `kms.resources` type and
+CloudWatch alarms are unit-tested only, not yet exercised against
+LocalStack or real AWS.
 
 Still ahead: RDS support (deferred deliberately — it's the first resource
 touching VPC-level infrastructure and a Secret rather than a ConfigMap,

@@ -34,15 +34,17 @@ which starts LocalStack, runs the suite, and tears the container down
 afterward. CI runs the same suite unconditionally on every push, via a
 LocalStack service container — see `.github/workflows/test.yml`.
 
-**Current coverage:** SQS, S3, SNS, and DynamoDB — each covering the same
-baseline lifecycle (create+tags, idempotent reconcile, adopt an untagged
-resource, correct attribute drift, forced delete). S3 in particular also
-has code guessing at string-matched error codes with no typed SDK exception
-to verify against (`isServerSideEncryptionConfigurationNotFoundError`,
-`isNoSuchTagSet`; see [resources.md](resources.md)). KMS and IAM are
-deferred for now — LocalStack's community edition has historically been
-the least faithful for those two, so testing against it there risks false
-confidence more than real coverage.
+**Current coverage:** SQS, S3, SNS, DynamoDB, and IAM — each covering the
+same baseline lifecycle (create+tags, idempotent reconcile, adopt an
+untagged resource, correct attribute drift, forced delete). S3 in
+particular also has code guessing at string-matched error codes with no
+typed SDK exception to verify against
+(`isServerSideEncryptionConfigurationNotFoundError`, `isNoSuchTagSet`; see
+[resources.md](resources.md)). Standalone KMS (the `kms.resources` type,
+as opposed to the dedicated-key path every other resource type already
+exercises) is the one deferred for now — LocalStack's community edition
+has historically been the least faithful for it, so testing against it
+there risks false confidence more than real coverage.
 
 New integration-tested packages get a `<package>_integration_test.go`
 file with a `//go:build integration` tag, added to
@@ -63,7 +65,7 @@ CI by accident. Every test skips cleanly (via a harmless
 standard AWS credential chain, creates its own uniquely-named real
 resource(s), and cleans up via `t.Cleanup` even on failure.
 
-**Current coverage:** SQS, SNS, S3, DynamoDB. Each tier is deliberately
+**Current coverage:** SQS, SNS, S3, DynamoDB, IAM. Each tier is deliberately
 lean — a handful of tests per service, not exhaustive scenario coverage —
 and targets specifically the kind of thing a fake or LocalStack can't be
 trusted to catch: real, undocumented, or easy-to-mismodel API behavior
@@ -75,10 +77,11 @@ in the relevant package, not logged here — `git log` and
 [aws-assumptions.md](aws-assumptions.md) are the record of what's actually
 been confirmed against real AWS and when.
 
-KMS and IAM have no dedicated live tier of their own — KMS's
-dedicated-key path is already exercised end-to-end through sqs/sns/s3/
-dynamodb's own live tests (same code, only the `resourceType` string
-differs), and a standalone IAM live tier is still open work.
+KMS has no dedicated live tier of its own — its dedicated-key path is
+exercised end-to-end through sqs/sns/s3/dynamodb's own live tests (same
+code, only the `resourceType` string differs). The standalone
+`kms.resources` type, and CloudWatch alarms, have neither a live nor an
+integration tier yet.
 
 Run it locally with whatever already authenticates your AWS CLI:
 
@@ -88,10 +91,18 @@ make test-live
 
 ## E2E
 
-Kubebuilder's own scaffolded tier (`make test-e2e`, `test/e2e/`, tagged
-`e2e`): spins up a kind cluster and deploys the built manager image,
-currently checking only that the manager comes up healthy and serves
-metrics. Distinct from the integration tier above — it exercises
-deployment plumbing (RBAC, the manager binary, the metrics endpoint), not
-AWS reconciliation behavior, and doesn't touch LocalStack or AWS at all
-today.
+`make test-e2e` (`test/e2e/`, tagged `e2e`): spins up a kind cluster,
+deploys the built manager image, and deploys LocalStack inside the
+cluster itself (`localstack-system` namespace, kept separate from the
+manager's own namespace since LocalStack's image doesn't run under the
+manager's restricted Pod Security Standard). Beyond the baseline check
+that the manager comes up healthy and serves metrics, a dedicated
+lifecycle suite per resource type (SQS, SNS, S3, DynamoDB, KMS) applies a
+real `AppDependencies` CR and verifies the full lifecycle end-to-end
+against that in-cluster LocalStack: create, adopt an untagged resource,
+retain-and-relinquish on removal from spec, the non-empty delete guard,
+and pending-deletion cancellation when a resource reappears in spec.
+Distinct from the integration tier above specifically in scope, not
+mechanism — both go through LocalStack, but this tier drives everything
+through a real Kubernetes reconcile loop (CRDs, finalizers, the actual
+controller binary) rather than calling package functions directly.

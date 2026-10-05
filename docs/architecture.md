@@ -71,6 +71,16 @@ yet. The first time any resource comes up for deletion, it's unconditionally
 held — denied and marked pending — for a short quiet window before its
 emptiness is trusted at all, independent of what that first check shows.
 
+A CR stuck mid-deletion this way is never silent about it: a dedicated
+`DeletionBlocked` status condition names exactly which resources are still
+holding things up, so this is visible from `kubectl get`/`describe`
+without reading `metadata.deletionTimestamp` by hand. Once a resource that
+blocked deletion has already left spec (so there's no `force` field left
+to flip to `true` on it), the `cloudctl.io/force-delete-all` annotation on
+the CR itself is the recovery path — checked at finalize time independent
+of spec, so a resource with no remaining spec entry to carry `force` isn't
+a permanent dead end.
+
 ## Naming
 
 Every resource name is deterministic:

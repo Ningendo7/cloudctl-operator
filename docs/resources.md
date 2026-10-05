@@ -139,15 +139,6 @@ spec:
 | `overrides.lifecycleRules` | Replaces the default backup lifecycle policy entirely. An explicitly empty list (`[]`) opts out of any lifecycle policy, even with `backup.enabled: true` — it does not fall back to the default. |
 | `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. |
 
-Bucket creation and tagging **aren't atomic** — `CreateBucket` doesn't accept
-tags the way SQS/SNS/DynamoDB's create calls do, so a bucket can briefly
-exist untagged right after creation. It's recorded as `TagPending` in the
-ledger and the tag write is retried on the next reconcile; an untagged
-bucket is only trusted as "ours, tagging just hasn't caught up yet" for one
-hour after creation (see [architecture.md](architecture.md)) — past that,
-it's treated the same as any other foreign, untagged bucket, requiring
-`adopt: true`.
-
 Deletion safety matches SQS/SNS in full: a bucket policy Deny on
 `s3:PutObject` (which alone covers every write path, including all three
 multipart upload calls) blocks new writes the moment a bucket enters
@@ -197,6 +188,14 @@ spec:
 |---|---|
 | `encryption.enabled` | Provisions a dedicated key just for this resource (ledger name `<resource>-key`), created and tagged the same as every other owned resource. No `spec.kms` section needs to be touched — this is the common case. |
 | `encryption.kmsKeyRef` | Points at an explicitly declared `kms.resources` entry — this CR's own, or another CR's — for deliberate reuse of one key across multiple resources. Resolved through the exact same `sharedWith`/`consumes` authorization path as any other cross-CR reference: an unauthorized or not-yet-existing reference is a retryable, self-resolving condition, not a permanent failure. |
+
+A freshly created key briefly sits in the ledger as `TagPending` even
+though tagging itself is atomic with `CreateKey` — the name is a holdover
+from when this state generically meant "created but not fully set up
+yet"; for KMS specifically it covers the gap between the key existing and
+its alias/rotation being set up, so a crash in between still has a
+findable-by-ARN record rather than risking a second key being created on
+the next reconcile.
 
 A standalone `kms.resources` entry (as used by `kmsKeyRef` above) supports
 `deletionPolicy` and `adopt` like every other resource type, and
