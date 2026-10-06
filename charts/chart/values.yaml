@@ -17,8 +17,7 @@ manager:
 
   image:
     repository: ghcr.io/ningendo7/cloudctl-operator
-    ## Image tag (defaults to v<Chart.appVersion> if not set - matches
-    ## exactly what release.yml publishes for this chart's own version)
+    ## Image tag (defaults to v<Chart.appVersion> if not set, matching release.yml)
     ##
     # tag: ""
     pullPolicy: IfNotPresent
