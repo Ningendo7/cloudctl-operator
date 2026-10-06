@@ -16,8 +16,9 @@ manager:
   replicas: 2
 
   image:
-    repository: controller
-    ## Image tag (defaults to Chart.appVersion if not set)
+    repository: ghcr.io/ningendo7/cloudctl-operator
+    ## Image tag (defaults to v<Chart.appVersion> if not set - matches
+    ## exactly what release.yml publishes for this chart's own version)
     ##
     # tag: ""
     pullPolicy: IfNotPresent

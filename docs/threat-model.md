@@ -90,9 +90,8 @@ self-tag a same-named AWS resource first, blocking the legitimate CR from
 provisioning. This already surfaces as a refused-collision error rather
 than a silent takeover (see Adoption safety above), so the blast radius is
 availability, not confidentiality or integrity. Same severity class as the
-IAM propagation-lag gap already tracked in project memory — worth
-revisiting if it ever causes real pain, not worth ledger-state machinery
-today.
+IAM propagation-lag gap below — worth revisiting if it ever causes real
+pain, not worth ledger-state machinery today.
 
 **IAM role propagation lag** — see [aws-assumptions.md](aws-assumptions.md);
 unfixable from this operator's own reconcile loop, tracked separately.

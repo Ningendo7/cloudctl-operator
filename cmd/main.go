@@ -49,9 +49,8 @@ import (
 // crashing the process immediately. A manager that hasn't started yet
 // holds no listening port, so kubelet's readiness/liveness probes simply
 // can't connect during this window - the same "still starting, not yet
-// crash-looping" posture this project's own adversarial testing already
-// found and accepted for a real AWS network partition (see findings.md,
-// T17). This turns a credentials outage into the same recoverable wait
+// crash-looping" posture a real AWS network partition at startup already
+// produces. This turns a credentials outage into the same recoverable wait
 // instead of CrashLoopBackOff: an already-fine, already-Running replica is
 // never touched by this at all (only pods starting fresh during the bad
 // window are), and a legitimate shutdown signal during the retry window

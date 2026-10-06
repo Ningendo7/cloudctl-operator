@@ -357,6 +357,18 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
         env:\
           {{- toYaml .Values.manager.extraEnv | nindent 10 }}\
         {{- end }}' charts/chart/templates/manager/manager.yaml
+	@# manager.image.repository: the plugin's own default ("controller")
+	@# can never resolve to a real, pullable image - point it at the real
+	@# published one by default instead, so `helm install` with no image
+	@# override at all still works.
+	sed -i 's|^    repository: controller$$|    repository: ghcr.io/ningendo7/cloudctl-operator|' charts/chart/values.yaml
+	@# manager.image.tag's default: release.yml always publishes the image
+	@# tagged with a leading "v" (from the git tag), but Chart.AppVersion
+	@# itself never has one - the plugin's own default tag fallback
+	@# (bare .Chart.AppVersion) would resolve to a tag that was never
+	@# actually pushed. Prepending "v" here keeps the default correct for
+	@# every release without needing a tag override either.
+	sed -i 's@{{ .Values.manager.image.tag | default .Chart.AppVersion }}@{{ .Values.manager.image.tag | default (printf "v%s" .Chart.AppVersion) }}@' charts/chart/templates/manager/manager.yaml
 
 .PHONY: install-helm
 install-helm: ## Install the latest version of Helm.
