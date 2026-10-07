@@ -166,6 +166,7 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&depsv1alpha1.AppDependencies{}, builder.WithPredicates(predicates.AppDependenciesPredicate())).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.ServiceAccount{}).
 		// Self-referential watch: a producer's sharedWith change (or any
 		// spec change generation-changed already lets through) also
 		// reconciles every CR that consumes from it, so a revocation or

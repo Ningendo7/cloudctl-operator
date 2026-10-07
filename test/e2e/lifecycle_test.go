@@ -157,6 +157,7 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 	})
 
 	sqsLifecycleSpec()
+	watchLifecycleSpec()
 	snsLifecycleSpec()
 	dynamodbLifecycleSpec()
 	s3LifecycleSpec()
