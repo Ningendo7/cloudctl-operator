@@ -55,7 +55,7 @@ func (s *sqsLifecycleSubject) EnsureOne(ctx context.Context, ledger []depsv1alph
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: name, DeletionPolicy: opts.DeletionPolicy, Adopt: opts.Adopt},
 	}}
-	return Ensure(ctx, s.client, nil, nil, s.namespace, s.crName, s.crUID, spec, ledger, nil, nil)
+	return Ensure(ctx, s.client, nil, nil, nil, s.namespace, s.crName, s.crUID, spec, ledger, nil, nil)
 }
 
 func (s *sqsLifecycleSubject) Cleanup(ctx context.Context, ledger []depsv1alpha1.ManagedResource, declared []string, deleting bool) ([]depsv1alpha1.ManagedResource, []lifecycletest.CleanupResult, error) {
@@ -64,7 +64,7 @@ func (s *sqsLifecycleSubject) Cleanup(ctx context.Context, ledger []depsv1alpha1
 		resources = append(resources, depsv1alpha1.SQSQueueSpec{Name: n})
 	}
 	spec := &depsv1alpha1.SQSSpec{Resources: resources}
-	updated, results, err := Cleanup(ctx, s.client, s.namespace, s.crName, s.crUID, spec, ledger, deleting, false, nil)
+	updated, results, err := Cleanup(ctx, s.client, nil, nil, s.namespace, s.crName, s.crUID, spec, ledger, deleting, false, nil)
 	return updated, convertResults(results), err
 }
 

@@ -1,0 +1,22 @@
+apiVersion: deps.cloudctl.io/v1alpha1
+kind: AppDependencies
+metadata:
+  name: e2e-orders
+spec:
+  sqs:
+    resources:
+      - name: orders
+        deletionPolicy: Delete
+        force: true
+        subscribesTo:
+          - namespace: cloudctl-operator-system
+            name: e2e-orders
+            resourceName: order-events
+  sns:
+    resources:
+      - name: order-events
+        deletionPolicy: Delete
+        force: true
+        sharedWith:
+          - namespace: cloudctl-operator-system
+            name: e2e-orders

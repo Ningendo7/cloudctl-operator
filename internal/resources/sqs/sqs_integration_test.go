@@ -71,7 +71,7 @@ func TestIntegration_Ensure_CreatesRealQueueWithAttributesAndTags(t *testing.T) 
 	}}
 	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -118,11 +118,11 @@ func TestIntegration_Ensure_IsIdempotentAgainstRealAWS(t *testing.T) {
 	}}
 	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	ledger, err = Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil)
+	ledger, err = Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -148,7 +148,7 @@ func TestIntegration_Ensure_AdoptsRealUntaggedQueue(t *testing.T) {
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Adopt: true},
 	}}
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil); err != nil {
+	if _, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -175,13 +175,13 @@ func TestIntegration_Ensure_CorrectsAttributeDriftOnRealQueue(t *testing.T) {
 	}}
 	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 
 	spec.Resources[0].Overrides.VisibilityTimeoutSeconds = aws.Int32(120)
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil); err != nil {
+	if _, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil); err != nil {
 		t.Fatalf("drift-correcting Ensure() error = %v", err)
 	}
 
@@ -208,12 +208,12 @@ func TestIntegration_Cleanup_DeletesRealQueueImmediatelyWhenForced(t *testing.T)
 	}}
 	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", spec, ledger, true, false, nil)
+	ledger, _, err = Cleanup(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, true, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}

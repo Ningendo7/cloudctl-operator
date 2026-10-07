@@ -26,6 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -37,7 +38,7 @@ func setupQueue(t *testing.T, client *fakeSQS, namespace, crName, name string, d
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: name, DeletionPolicy: deletionPolicy, Force: force},
 	}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -57,7 +58,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	client := newFakeSQS()
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyRetain, false)
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -82,7 +83,7 @@ func TestCleanup_RelinquishesOwnershipTagForRetainedResource(t *testing.T) {
 		t.Fatal("test setup broken: expected the queue to start out owned by us")
 	}
 
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	_, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -121,7 +122,7 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 		},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -140,11 +141,11 @@ func TestCleanup_RelinquishIsIdempotent(t *testing.T) {
 	client := newFakeSQS()
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyRetain, false)
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil); err != nil {
 		t.Fatalf("second Cleanup() on an already-relinquished resource should be a no-op, got error: %v", err)
 	}
 }
@@ -160,7 +161,7 @@ func TestCleanup_HoldsNewlyEligibleQueueForQuietWindowBeforeDeleting(t *testing.
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -175,7 +176,7 @@ func TestCleanup_HoldsNewlyEligibleQueueForQuietWindowBeforeDeleting(t *testing.
 		t.Fatal("expected PendingDeletionSince to be recorded on first encounter")
 	}
 
-	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, updated, false, false, nil)
+	updated, results, err = Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, updated, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -191,7 +192,7 @@ func TestCleanup_HoldsNewlyEligibleQueueForQuietWindowBeforeDeleting(t *testing.
 	entry.PendingDeletionSince = &past
 	status.UpsertManagedResource(&updated, *entry)
 
-	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, updated, false, false, nil)
+	updated, results, err = Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, updated, false, false, nil)
 	if err != nil {
 		t.Fatalf("third Cleanup() error = %v", err)
 	}
@@ -211,7 +212,7 @@ func TestCleanup_KeepsDeclaredResourcesAlone(t *testing.T) {
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
 
 	stillDeclared := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", stillDeclared, ledger, false, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", stillDeclared, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -234,7 +235,7 @@ func TestCleanup_MakesNoAWSCallsForDeclaredResourceWithNoPendingMarker(t *testin
 	client.getQueueUrlErr = errors.New("should not be called: no AWS call is needed here")
 
 	stillDeclared := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", stillDeclared, ledger, false, false, nil)
+	_, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", stillDeclared, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v — expected a still-declared, never-pending resource to require no AWS calls at all", err)
 	}
@@ -286,14 +287,14 @@ func TestCleanup_PendingDeletion_FirstCheckPastBackoffStartStillRunsAndStamps(t 
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[queueName].approxMessages = "5"
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "orders")
 
 	client.getQueueAttributesCalls = 0
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -312,18 +313,18 @@ func TestCleanup_PendingDeletion_SkipsRealCheckWhileBackoffIntervalNotElapsed(t 
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[queueName].approxMessages = "5"
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "orders")
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 
 	client.getQueueAttributesCalls = 0
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	_, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("third Cleanup() error = %v", err)
 	}
@@ -341,12 +342,12 @@ func TestCleanup_PendingDeletion_ChecksAndDeletesOnceBackoffIntervalElapses(t *t
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[queueName].approxMessages = "5"
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "orders")
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -355,7 +356,7 @@ func TestCleanup_PendingDeletion_ChecksAndDeletesOnceBackoffIntervalElapses(t *t
 	pushLastEmptyCheckIntoThePast(t, ledger, "orders", status.EmptyCheckBaseInterval+time.Minute)
 
 	client.getQueueAttributesCalls = 0
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	_, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("third Cleanup() error = %v", err)
 	}
@@ -376,12 +377,12 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[queueName].approxMessages = "5"
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastEmptyCheckBackoffStart(t, ledger, "orders")
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -392,7 +393,7 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup (reappeared) error = %v", err)
 	}
@@ -414,13 +415,13 @@ func TestCleanup_BlocksDeletingNonEmptyQueueWithoutForce(t *testing.T) {
 
 	// First pass only enters the mandatory quiet window - the counters
 	// aren't evaluated yet on first encounter.
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastQuietWindow(t, ledger, "orders")
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -449,13 +450,13 @@ func TestCleanup_BlocksDeletingQueueWithOnlyInFlightMessages(t *testing.T) {
 	client.queues[queueName].approxMessages = "0"
 	client.queues[queueName].approxMessagesHidden = "3"
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastQuietWindow(t, ledger, "orders")
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	_, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -477,13 +478,13 @@ func TestCleanup_BlocksDeletingQueueWithOnlyDelayedMessages(t *testing.T) {
 	client.queues[queueName].approxMessages = "0"
 	client.queues[queueName].approxMessagesDelayed = "2"
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastQuietWindow(t, ledger, "orders")
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	_, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -502,7 +503,7 @@ func TestCleanup_AddsDenyPolicyWhenMarkingPendingDeletion(t *testing.T) {
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[queueName].approxMessages = "5"
 
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	_, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -526,7 +527,7 @@ func TestCleanup_RemovesDenyPolicyWhenResourceReturnsToSpec(t *testing.T) {
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[queueName].approxMessages = "5"
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -535,7 +536,7 @@ func TestCleanup_RemovesDenyPolicyWhenResourceReturnsToSpec(t *testing.T) {
 	}
 
 	backInSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete}}}
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", backInSpec, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -560,7 +561,7 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 	entry.PendingDeletionSince = &longAgo
 	status.UpsertManagedResource(&ledger, *entry)
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	_, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -579,7 +580,7 @@ func TestCleanup_ForceDeletesNonEmptyQueue(t *testing.T) {
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[queueName].approxMessages = "5"
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	_, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -604,7 +605,7 @@ func TestCleanup_TreatsAlreadyGoneQueueAsSuccess(t *testing.T) {
 	// Simulate the queue already having been deleted out from under us.
 	delete(client.queues, queueName)
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v — expected an already-gone queue to be treated as already cleaned up, not a failure", err)
 	}
@@ -624,7 +625,7 @@ func TestCleanup_DoesNotForgetQueueOnTransientLookupError(t *testing.T) {
 	advancePastQuietWindow(t, ledger, "orders")
 	client.getQueueUrlErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultServer}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err == nil {
 		t.Fatal("expected a transient GetQueueUrl failure to be reported as an error, not silently swallowed")
 	}
@@ -643,7 +644,7 @@ func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[queueName].tags = map[string]string{"team": "someone-else"}
 
-	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	_, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err == nil {
 		t.Fatal("expected Cleanup to refuse deleting a queue whose ownership tags no longer verify, even though the ledger says we created it")
 	}
@@ -657,12 +658,12 @@ func TestCleanup_KeepsDLQWhenStillDeclared(t *testing.T) {
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DLQ: true, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, false, nil)
+	_, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -680,7 +681,7 @@ func TestCleanup_RemovesDLQWhenDLQDisabled(t *testing.T) {
 	withDLQ := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DLQ: true, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", withDLQ, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", withDLQ, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -689,13 +690,13 @@ func TestCleanup_RemovesDLQWhenDLQDisabled(t *testing.T) {
 	withoutDLQ := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DLQ: false, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", withoutDLQ, ledger, false, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", withoutDLQ, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastQuietWindow(t, ledger, cloudctlaws.DerivedKey("orders", "dlq"))
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", withoutDLQ, ledger, false, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", withoutDLQ, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -722,7 +723,7 @@ func TestCleanup_DeletesFIFOQueueByARNDerivedName(t *testing.T) {
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", FIFO: true, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -732,13 +733,13 @@ func TestCleanup_DeletesFIFOQueueByARNDerivedName(t *testing.T) {
 		t.Fatalf("test setup broken: expected FIFO queue %q to exist", fifoName)
 	}
 
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err = Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	advancePastQuietWindow(t, ledger, "orders")
 
-	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	_, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
@@ -758,7 +759,7 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
 	}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -767,7 +768,7 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 	ordersName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[ordersName].tags = map[string]string{"team": "someone-else"}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err == nil {
 		t.Fatal("expected an error reported for the corrupted-ownership queue")
 	}
@@ -789,7 +790,7 @@ func TestCleanup_RelinquishingQueue_EmitsEvent(t *testing.T) {
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyRetain, false)
 	recordEvent, events := newEventCollector()
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
@@ -803,7 +804,7 @@ func TestCleanup_FirstNoticedForDeletion_EmitsPendingEvent(t *testing.T) {
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
 	recordEvent, events := newEventCollector()
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
@@ -816,14 +817,14 @@ func TestCleanup_RedeclaredWhilePending_EmitsCancelledEvent(t *testing.T) {
 	client := newFakeSQS()
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 
 	recordEvent, events := newEventCollector()
 	backInSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete}}}
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", backInSpec, ledger, false, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", backInSpec, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 
@@ -836,7 +837,7 @@ func TestCleanup_DeletingQueue_EmitsDeletedEvent(t *testing.T) {
 	client := newFakeSQS()
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
 
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	ledger, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
@@ -846,7 +847,7 @@ func TestCleanup_DeletingQueue_EmitsDeletedEvent(t *testing.T) {
 	status.UpsertManagedResource(&ledger, *entry)
 
 	recordEvent, events := newEventCollector()
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, recordEvent); err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
 
@@ -861,7 +862,7 @@ func TestCleanup_ForceDeleteAll_DeletesNonEmptyQueueImmediately(t *testing.T) {
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[queueName].approxMessages = "5"
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, true, nil)
+	updated, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, true, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -884,11 +885,96 @@ func TestCleanup_WithoutForceDeleteAll_NonEmptyQueueStaysPendingRegardlessOfForc
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	client.queues[queueName].approxMessages = "5"
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
 	if _, stillExists := client.queues[queueName]; !stillExists {
 		t.Error("expected the non-empty queue to survive without forceDeleteAll")
+	}
+}
+
+func TestCleanup_QueueRemovedFromSpec_TearsDownItsOrphanedSubscriptions(t *testing.T) {
+	sqsClient := newFakeSQS()
+	snsClient := newFakeSNSSubscriber()
+	queueURL, queueARN := newSubscriptionTestQueue(sqsClient, "orders")
+	producer := newAuthorizedTopicProducer("team-b", "platform-service", "events",
+		"arn:aws:sns:us-east-1:123456789012:events", "default", "checkout-service")
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+
+	ref := depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "events"}
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "orders", ARN: queueARN, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
+	}
+	ledger, err := EnsureSubscriptions(context.Background(), snsClient, sqsClient, k8sClient,
+		"default", "checkout-service", "orders", queueURL, queueARN,
+		[]depsv1alpha1.ConsumeRef{ref}, ledger, nil)
+	if err != nil {
+		t.Fatalf("EnsureSubscriptions() error = %v", err)
+	}
+	if len(snsClient.subscriptions) != 1 {
+		t.Fatalf("setup: expected one real subscription, got %d", len(snsClient.subscriptions))
+	}
+
+	// "orders" is no longer declared in spec at all - its queue entry
+	// stays Retained (relinquished, not deleted), but its subscription is
+	// an active delivery path and must be torn down regardless.
+	updated, _, err := Cleanup(context.Background(), sqsClient, snsClient, k8sClient,
+		"default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	if len(snsClient.unsubscribed) != 1 {
+		t.Errorf("expected Cleanup to tear down the orphaned subscription, got %d Unsubscribe calls", len(snsClient.unsubscribed))
+	}
+	ledgerName := subscriptionLedgerName("orders", ref)
+	if status.FindManagedResource(updated, subscriptionResourceType, ledgerName) != nil {
+		t.Error("expected the subscription ledger entry to be removed")
+	}
+}
+
+func TestCleanup_StillDeclaredQueue_PrunesSubscriptionWhoseAuthorizationWasRevoked(t *testing.T) {
+	sqsClient := newFakeSQS()
+	snsClient := newFakeSNSSubscriber()
+	queueURL, queueARN := newSubscriptionTestQueue(sqsClient, "orders")
+	producer := newAuthorizedTopicProducer("team-b", "platform-service", "events",
+		"arn:aws:sns:us-east-1:123456789012:events", "default", "checkout-service")
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+
+	ref := depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "events"}
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "orders", ARN: queueARN, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
+	}
+	ledger, err := EnsureSubscriptions(context.Background(), snsClient, sqsClient, k8sClient,
+		"default", "checkout-service", "orders", queueURL, queueARN,
+		[]depsv1alpha1.ConsumeRef{ref}, ledger, nil)
+	if err != nil {
+		t.Fatalf("EnsureSubscriptions() error = %v", err)
+	}
+
+	// Producer revokes sharedWith, but "orders" itself (and its
+	// subscribesTo entry) is still declared in spec - CleanupSubscriptions
+	// re-checks authorization every pass, not just on removal from spec.
+	producer.Spec.SNS.Resources[0].SharedWith = nil
+	if err := k8sClient.Update(context.Background(), producer); err != nil {
+		t.Fatalf("revoking sharedWith: %v", err)
+	}
+
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, SubscribesTo: []depsv1alpha1.ConsumeRef{ref}},
+	}}
+	updated, _, err := Cleanup(context.Background(), sqsClient, snsClient, k8sClient,
+		"default", "checkout-service", "uid-1", spec, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	if len(snsClient.unsubscribed) != 1 {
+		t.Errorf("expected Cleanup to tear down the now-unauthorized subscription even though the queue is still declared, got %d Unsubscribe calls", len(snsClient.unsubscribed))
+	}
+	ledgerName := subscriptionLedgerName("orders", ref)
+	if status.FindManagedResource(updated, subscriptionResourceType, ledgerName) != nil {
+		t.Error("expected the subscription ledger entry to be removed")
 	}
 }

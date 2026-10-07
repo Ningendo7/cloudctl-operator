@@ -26,6 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -97,7 +98,9 @@ func queueNameFromARN(arn string) (string, error) {
 //nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,
-	client sqsAPI,
+	sqsClient sqsAPI,
+	snsClient cloudctlaws.SNSClient,
+	k8sClient client.Client,
 	namespace,
 	crName,
 	crUID string,
@@ -108,9 +111,11 @@ func Cleanup(
 	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, results []CleanupResult, err error) {
 	declared := map[string]bool{}
+	subscribesToByName := map[string][]depsv1alpha1.ConsumeRef{}
 	if spec != nil && !deleting {
 		for _, q := range spec.Resources {
 			declared[q.Name] = true
+			subscribesToByName[q.Name] = q.SubscribesTo
 			if q.DLQ {
 				declared[cloudctlaws.DerivedKey(q.Name, "dlq")] = true
 			}
@@ -126,7 +131,7 @@ func Cleanup(
 
 		if declared[entry.Name] {
 			if entry.PendingDeletionSince != nil {
-				if clearErr := clearPendingDeletion(ctx, client, entry); clearErr != nil {
+				if clearErr := clearPendingDeletion(ctx, sqsClient, entry); clearErr != nil {
 					if firstErr == nil {
 						firstErr = clearErr
 					}
@@ -144,7 +149,7 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+			relinquished, relErr := relinquishIfStillTagged(ctx, sqsClient, namespace, crName, crUID, entry)
 			if relErr != nil {
 				if firstErr == nil {
 					firstErr = relErr
@@ -168,7 +173,7 @@ func Cleanup(
 			}
 			continue
 		}
-		urlOut, uErr := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
+		urlOut, uErr := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 			QueueName: &queueName,
 		})
 		if uErr != nil {
@@ -188,7 +193,7 @@ func Cleanup(
 			continue
 		}
 
-		tagsOut, tErr := client.ListQueueTags(ctx, &sqs.ListQueueTagsInput{
+		tagsOut, tErr := sqsClient.ListQueueTags(ctx, &sqs.ListQueueTagsInput{
 			QueueUrl: urlOut.QueueUrl,
 		})
 		if tErr != nil {
@@ -212,7 +217,7 @@ func Cleanup(
 				// approximate/eventually consistent, so a message sent
 				// moments ago could still not be reflected. Deny new sends
 				// and hold for the quiet window first.
-				if denyErr := addPendingDeletionDeny(ctx, client, *urlOut.QueueUrl, entry.ARN); denyErr != nil {
+				if denyErr := addPendingDeletionDeny(ctx, sqsClient, *urlOut.QueueUrl, entry.ARN); denyErr != nil {
 					if firstErr == nil {
 						firstErr = wrapAWSError(denyErr, fmt.Sprintf("blocking new sends to queue %q pending deletion", entry.Name))
 					}
@@ -237,7 +242,7 @@ func Cleanup(
 				continue
 			}
 
-			attrs, aErr := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+			attrs, aErr := sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 				QueueUrl: urlOut.QueueUrl,
 				AttributeNames: []types.QueueAttributeName{
 					types.QueueAttributeNameApproximateNumberOfMessages,
@@ -271,7 +276,7 @@ func Cleanup(
 			}
 		}
 
-		if _, dErr := client.DeleteQueue(ctx, &sqs.DeleteQueueInput{
+		if _, dErr := sqsClient.DeleteQueue(ctx, &sqs.DeleteQueueInput{
 			QueueUrl: urlOut.QueueUrl,
 		}); dErr != nil {
 			if firstErr == nil {
@@ -283,6 +288,42 @@ func Cleanup(
 			recordEvent("Warning", "QueueDeleted", fmt.Sprintf("Deleted queue %s (%s)", entry.Name, entry.ARN))
 		}
 		status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
+	}
+
+	// Subscriptions are reconciled as a second pass over updatedLedger,
+	// separate from the deletion state machine above: a still-declared
+	// queue needs its subscriptions reasserted/pruned against its current
+	// subscribesTo every pass (not just on deletion), and a queue dropped
+	// from spec needs every subscription it ever had torn down regardless
+	// of whether it ends up Retained, pending deletion, or actually
+	// deleted this same pass - an active delivery path, not a grant, so it
+	// can't just be left to expire on its own.
+	for _, entry := range updatedLedger {
+		if entry.Type != resourceType {
+			continue
+		}
+		queueName, nameErr := queueNameFromARN(entry.ARN)
+		if nameErr != nil {
+			continue
+		}
+		urlOut, uErr := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
+		if uErr != nil {
+			// No subscriptions can meaningfully exist against a queue we
+			// can't resolve a URL for (gone, or not created yet) - leave
+			// it for a future pass once the queue exists again.
+			continue
+		}
+
+		subscribesTo, stillDeclared := subscribesToByName[entry.Name]
+		if !stillDeclared {
+			subscribesTo = nil // tear down every subscription this queue has
+		}
+
+		var subErr error
+		updatedLedger, subErr = CleanupSubscriptions(ctx, snsClient, sqsClient, k8sClient, namespace, crName, queueName, *urlOut.QueueUrl, subscribesTo, updatedLedger, recordEvent)
+		if subErr != nil && firstErr == nil {
+			firstErr = subErr
+		}
 	}
 
 	return updatedLedger, results, firstErr
