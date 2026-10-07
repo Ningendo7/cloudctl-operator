@@ -106,6 +106,15 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 			_, _ = fmt.Fprintf(GinkgoWriter, "e2e-orders status:\n%s", out)
 		}
 
+		// Full object, not just one field - ownerReferences and
+		// managedFields matter as much as the annotation itself when
+		// diagnosing why a value isn't landing or isn't persisting.
+		By("Fetching the generated ServiceAccount's full object for debugging")
+		cmd = exec.Command("kubectl", "get", "serviceaccount", "e2e-orders", "-n", namespace, "-o", "yaml")
+		if out, err := utils.Run(cmd); err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "e2e-orders ServiceAccount:\n%s", out)
+		}
+
 		By("Fetching controller manager logs for debugging")
 		cmd = exec.Command("kubectl", "logs", "-l", "control-plane=controller-manager",
 			"-n", namespace, "--all-containers", "--tail=300")
