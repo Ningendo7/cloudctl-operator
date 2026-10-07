@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"maps"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -166,9 +167,7 @@ var _ = Describe("AppDependencies watches on its generated ConfigMap", Ordered, 
 		Expect(cm.Data).NotTo(BeEmpty())
 
 		original := map[string]string{}
-		for k, v := range cm.Data {
-			original[k] = v
-		}
+		maps.Copy(original, cm.Data)
 		for k := range cm.Data {
 			cm.Data[k] = "corrupted"
 		}
