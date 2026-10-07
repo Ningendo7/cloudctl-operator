@@ -38,6 +38,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
+
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/controller"
@@ -49,13 +52,13 @@ import (
 // crashing the process immediately. A manager that hasn't started yet
 // holds no listening port, so kubelet's readiness/liveness probes simply
 // can't connect during this window - the same "still starting, not yet
-// crash-looping" posture a real AWS network partition at startup already
-// produces. This turns a credentials outage into the same recoverable wait
-// instead of CrashLoopBackOff: an already-fine, already-Running replica is
-// never touched by this at all (only pods starting fresh during the bad
-// window are), and a legitimate shutdown signal during the retry window
-// still exits promptly rather than hanging forever.
+// crash-looping" posture a real AWS network partition at startup already produces.
 const awsClientInitRetryInterval = 30 * time.Second
+
+// credentialRecheckInterval is how often an already-running manager
+// re-validates its AWS credentials via STS, independent of NewClients'
+// one-time startup check. Matches DriftDetectionInterval for consistency.
+const credentialRecheckInterval = 5 * time.Minute
 
 // waitForAWSClients retries newClients (production callers always pass
 // cloudctlaws.NewClients; a test passes a fake) until it succeeds or ctx is
@@ -270,6 +273,19 @@ func main() {
 		setupLog.Error(err, "Failed to set up ready check")
 		os.Exit(1)
 	}
+
+	credHealth := cloudctlaws.NewCredentialHealth()
+	if err := mgr.AddReadyzCheck("aws-credentials", credHealth.Check); err != nil {
+		setupLog.Error(err, "Failed to set up AWS credential readyz check")
+		os.Exit(1)
+	}
+
+	stsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		setupLog.Error(err, "Failed to load AWS config periodic credential check")
+		os.Exit(1)
+	}
+	go cloudctlaws.RunPeriodicCheck(ctx, sts.NewFromConfig(stsCfg), credentialRecheckInterval, credHealth)
 
 	const rateLimitRampDuration = 30 * time.Second
 	go func() {
