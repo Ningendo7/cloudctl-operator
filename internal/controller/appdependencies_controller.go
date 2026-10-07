@@ -34,6 +34,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/controller/predicates"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/serviceaccount"
 )
 
 // AppDependenciesReconciler reconciles a AppDependencies object
@@ -166,7 +167,10 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&depsv1alpha1.AppDependencies{}, builder.WithPredicates(predicates.AppDependenciesPredicate())).
 		Owns(&corev1.ConfigMap{}).
-		Owns(&corev1.ServiceAccount{}).
+		Owns(
+			&corev1.ServiceAccount{},
+			builder.WithPredicates(predicates.AnnotationValueChangedPredicate(serviceaccount.RoleARNAnnotation)),
+		).
 		// Self-referential watch: a producer's sharedWith change (or any
 		// spec change generation-changed already lets through) also
 		// reconciles every CR that consumes from it, so a revocation or

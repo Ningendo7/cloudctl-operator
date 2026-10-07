@@ -42,3 +42,20 @@ func AppDependenciesPredicate() predicate.Predicate {
 		},
 	)
 }
+
+// AnnotationValueChangedPredicate reconciles on Create/Delete/Generic
+// events, or an Update where the given annotation's value actually
+// changed — filtering out updates to any other field. Meant for watches on
+// objects this operator only partially owns (so GenerationChangedPredicate
+// doesn't apply, and the whole object isn't ours to react to every change
+// on) but where exactly one annotation is actually ours to care about.
+func AnnotationValueChangedPredicate(key string) predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return true },
+		DeleteFunc:  func(event.DeleteEvent) bool { return true },
+		GenericFunc: func(event.GenericEvent) bool { return true },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectOld.GetAnnotations()[key] != e.ObjectNew.GetAnnotations()[key]
+		},
+	}
+}
