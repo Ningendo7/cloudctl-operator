@@ -356,6 +356,35 @@ func TestEnsure_GetErrorOtherThanNotFound_IsReturned(t *testing.T) {
 	}
 }
 
+// TestEnsure_DefaultName_SecondReconcile_KeepsOwnerReference guards against
+// a real bug: the owner reference was only ever attached to the apply when
+// the ServiceAccount didn't exist yet, which meant a CR's own *second*
+// reconcile (exists=true by then) omitted it from that call's apply -
+// server-side apply's rule for a field a manager previously set and later
+// stops requesting is to drop it, since no other manager claims it either.
+// Confirmed against a real cluster: Owns(&corev1.ServiceAccount{})'s own
+// Create-event-triggered second reconcile stripped the owner reference
+// moments after the first reconcile set it, which meant no later
+// Update/Delete event could ever be mapped back to the owning CR again.
+func TestEnsure_DefaultName_SecondReconcile_KeepsOwnerReference(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	cr := newCR("ns", "checkout", "")
+
+	if _, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/v1"); err != nil {
+		t.Fatalf("Ensure (first): %v", err)
+	}
+	if owner := metav1.GetControllerOf(getSA(t, c, "ns", "checkout")); owner == nil {
+		t.Fatal("expected an owner reference after the first reconcile")
+	}
+
+	if _, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/v1"); err != nil {
+		t.Fatalf("Ensure (second, same CR, already exists): %v", err)
+	}
+	if owner := metav1.GetControllerOf(getSA(t, c, "ns", "checkout")); owner == nil {
+		t.Error("expected the owner reference to survive a second reconcile of the same, already-owned ServiceAccount")
+	}
+}
+
 // erroringClient forces every Get to fail with a non-NotFound error, to
 // exercise the "something genuinely went wrong talking to the API server"
 // path (inside release, when a rename requires checking the previous

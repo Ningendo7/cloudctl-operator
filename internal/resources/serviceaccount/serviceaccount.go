@@ -94,13 +94,15 @@ func Ensure(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDe
 		)
 	}
 
+	isOwnedByUs := exists && cloudctlaws.IsOwnedBy(existing.Annotations, cr.Namespace, cr.Name, string(cr.UID))
+
 	apply := applycorev1.ServiceAccount(target, cr.Namespace).
 		WithAnnotations(map[string]string{
 			RoleARNAnnotation:          roleARN,
 			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(cr.Namespace, cr.Name),
 			cloudctlaws.OwnerUIDTagKey: string(cr.UID),
 		})
-	if defaultedName && !exists {
+	if defaultedName && (!exists || isOwnedByUs) {
 		gvk, err := apiutil.GVKForObject(cr, k8sClient.Scheme())
 		if err != nil {
 			return cr.Status.ServiceAccountName, err

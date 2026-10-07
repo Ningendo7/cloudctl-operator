@@ -19,6 +19,7 @@ limitations under the License.
 package e2e
 
 import (
+	"encoding/json"
 	"os/exec"
 	"time"
 
@@ -83,9 +84,7 @@ func watchLifecycleSpec() {
 		// ServiceAccount re-applies on the same CR can cascade a few
 		// rounds), so a one-shot read can catch this object mid-rewrite.
 		Eventually(func() (string, error) {
-			cmd := exec.Command("kubectl", "get", "serviceaccount", "e2e-orders", "-n", namespace,
-				"-o", "jsonpath={.metadata.annotations"+jsonPathEscape(serviceaccount.RoleARNAnnotation)+"}")
-			return utils.Run(cmd)
+			return serviceAccountRoleARNAnnotation()
 		}, 30*time.Second, 2*time.Second).ShouldNot(BeEmpty())
 
 		By("deleting the ServiceAccount directly")
@@ -110,17 +109,34 @@ func watchLifecycleSpec() {
 
 		By("waiting for the manager's watch to restore the annotation")
 		Eventually(func() (string, error) {
-			cmd := exec.Command("kubectl", "get", "serviceaccount", "e2e-orders", "-n", namespace,
-				"-o", "jsonpath={.metadata.annotations"+jsonPathEscape(serviceaccount.RoleARNAnnotation)+"}")
-			return utils.Run(cmd)
+			return serviceAccountRoleARNAnnotation()
 		}, 30*time.Second, 2*time.Second).ShouldNot(BeEmpty())
 	})
 }
 
-// jsonPathEscape wraps an annotation/label key containing dots in the
-// quoting kubectl's jsonpath parser needs to treat it as one literal key
-// rather than a nested-field path - e.g. eks.amazonaws.com/role-arn would
-// otherwise be read as field "eks" of field "amazonaws" of field "com/role-arn".
-func jsonPathEscape(key string) string {
-	return `['` + key + `']`
+// serviceAccountRoleARNAnnotation reads e2e-orders' IRSA annotation via -o
+// json + Go's own JSON decoder, not jsonpath - a jsonpath query chaining a
+// path prefix with bracket notation for a dotted key
+// (.metadata.annotations['eks.amazonaws.com/role-arn']) was found to
+// silently evaluate to empty against this kubectl version despite the
+// annotation genuinely being present (confirmed via a full -o yaml dump
+// during the investigation this spec exists for), even though the same
+// bracket syntax parses fine in isolation. Decoding JSON directly sidesteps
+// that ambiguity entirely instead of chasing the exact correct jsonpath
+// incantation.
+func serviceAccountRoleARNAnnotation() (string, error) {
+	cmd := exec.Command("kubectl", "get", "serviceaccount", "e2e-orders", "-n", namespace, "-o", "json")
+	out, err := utils.Run(cmd)
+	if err != nil {
+		return "", err
+	}
+	var sa struct {
+		Metadata struct {
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(out), &sa); err != nil {
+		return "", err
+	}
+	return sa.Metadata.Annotations[serviceaccount.RoleARNAnnotation], nil
 }
