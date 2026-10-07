@@ -78,15 +78,19 @@ func watchLifecycleSpec() {
 
 	It("recreates the ServiceAccount after it's deleted out-of-band", func() {
 		By("confirming the ServiceAccount already carries the IRSA annotation")
-		cmd := exec.Command("kubectl", "get", "serviceaccount", "e2e-orders", "-n", namespace,
-			"-o", "jsonpath={.metadata.annotations"+jsonPathEscape(serviceaccount.RoleARNAnnotation)+"}")
-		output, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(output).NotTo(BeEmpty())
+		// Eventually, not a single-shot check: the preceding spec's own
+		// Owns()-triggered reconciles can still be settling (ConfigMap and
+		// ServiceAccount re-applies on the same CR can cascade a few
+		// rounds), so a one-shot read can catch this object mid-rewrite.
+		Eventually(func() (string, error) {
+			cmd := exec.Command("kubectl", "get", "serviceaccount", "e2e-orders", "-n", namespace,
+				"-o", "jsonpath={.metadata.annotations"+jsonPathEscape(serviceaccount.RoleARNAnnotation)+"}")
+			return utils.Run(cmd)
+		}, 30*time.Second, 2*time.Second).ShouldNot(BeEmpty())
 
 		By("deleting the ServiceAccount directly")
-		cmd = exec.Command("kubectl", "delete", "serviceaccount", "e2e-orders", "-n", namespace)
-		_, err = utils.Run(cmd)
+		cmd := exec.Command("kubectl", "delete", "serviceaccount", "e2e-orders", "-n", namespace)
+		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to delete the ServiceAccount")
 
 		By("waiting for the manager's watch to recreate it, with no manual reconcile trigger")
