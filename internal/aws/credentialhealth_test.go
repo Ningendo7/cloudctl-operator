@@ -33,11 +33,11 @@ type fakeSTSClient struct {
 	// exhausted, every further call succeeds. A nil entry means that call
 	// succeeds.
 	callerIdentityErrs []error
-	calls              int32
+	calls              atomic.Int32
 }
 
 func (f *fakeSTSClient) GetCallerIdentity(context.Context, *sts.GetCallerIdentityInput, ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error) {
-	i := atomic.AddInt32(&f.calls, 1) - 1
+	i := f.calls.Add(1) - 1
 	if int(i) < len(f.callerIdentityErrs) {
 		if err := f.callerIdentityErrs[i]; err != nil {
 			return nil, err
@@ -57,9 +57,7 @@ func TestRunPeriodicCheck_FlipsUnhealthyOnFailure(t *testing.T) {
 	fake := &fakeSTSClient{callerIdentityErrs: []error{errors.New("AccessDenied")}}
 	h := NewCredentialHealth()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go RunPeriodicCheck(ctx, fake, 5*time.Millisecond, h)
+	go RunPeriodicCheck(t.Context(), fake, 5*time.Millisecond, h)
 
 	waitForCondition(t, func() bool { return h.Check(nil) != nil }, "CredentialHealth to flip unhealthy after a failed re-check")
 }
@@ -68,9 +66,7 @@ func TestRunPeriodicCheck_RecoversOnLaterSuccess(t *testing.T) {
 	fake := &fakeSTSClient{callerIdentityErrs: []error{errors.New("AccessDenied")}} // only the first call fails
 	h := NewCredentialHealth()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go RunPeriodicCheck(ctx, fake, 5*time.Millisecond, h)
+	go RunPeriodicCheck(t.Context(), fake, 5*time.Millisecond, h)
 
 	waitForCondition(t, func() bool { return h.Check(nil) != nil }, "CredentialHealth to flip unhealthy after the first failed re-check")
 	waitForCondition(t, func() bool { return h.Check(nil) == nil }, "CredentialHealth to recover once a later re-check succeeds")
@@ -99,12 +95,10 @@ func TestRunPeriodicCheck_DoesNotCallBeforeFirstInterval(t *testing.T) {
 	fake := &fakeSTSClient{}
 	h := NewCredentialHealth()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go RunPeriodicCheck(ctx, fake, time.Hour, h)
+	go RunPeriodicCheck(t.Context(), fake, time.Hour, h)
 
 	time.Sleep(50 * time.Millisecond)
-	if calls := atomic.LoadInt32(&fake.calls); calls != 0 {
+	if calls := fake.calls.Load(); calls != 0 {
 		t.Errorf("expected no calls before the first interval elapses (1h), got %d", calls)
 	}
 }
