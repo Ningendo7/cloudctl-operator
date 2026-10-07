@@ -20,10 +20,12 @@ import (
 	"context"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierror "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -162,8 +164,8 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		maxConcurrent = defaultMaxConcurrentReconciles
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&depsv1alpha1.AppDependencies{}).
-		WithEventFilter(predicates.AppDependenciesPredicate()).
+		For(&depsv1alpha1.AppDependencies{}, builder.WithPredicates(predicates.AppDependenciesPredicate())).
+		Owns(&corev1.ConfigMap{}).
 		// Self-referential watch: a producer's sharedWith change (or any
 		// spec change generation-changed already lets through) also
 		// reconciles every CR that consumes from it, so a revocation or
@@ -172,6 +174,7 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&depsv1alpha1.AppDependencies{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProducerToConsumers),
+			builder.WithPredicates(predicates.AppDependenciesPredicate()),
 		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrent}).
 		Named("appdependencies").
