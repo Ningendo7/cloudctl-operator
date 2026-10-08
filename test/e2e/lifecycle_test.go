@@ -149,6 +149,8 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 		cmd = exec.Command("kubectl", "delete", "pod",
 			"verify-queue", "seed-topic", "tag-topic", "verify-topic", "verify-table",
 			"seed-bucket", "tag-bucket", "verify-bucket", "verify-key",
+			"verify-subscription", "verify-queue-policy", "publish-event", "verify-delivery",
+			"verify-subscription-removed", "verify-queue-policy-removed",
 			"-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
@@ -168,6 +170,7 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 	sqsLifecycleSpec()
 	watchLifecycleSpec()
 	snsLifecycleSpec()
+	subscriptionLifecycleSpec()
 	dynamodbLifecycleSpec()
 	s3LifecycleSpec()
 	kmsLifecycleSpec()

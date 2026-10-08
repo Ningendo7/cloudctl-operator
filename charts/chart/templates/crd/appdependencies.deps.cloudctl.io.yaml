@@ -1030,6 +1030,46 @@ spec:
                           - namespace
                           - name
                           x-kubernetes-list-type: map
+                        subscribesTo:
+                          description: |-
+                            subscribesTo creates a real SNS subscription (and the matching
+                            queue resource-policy grant) from each referenced topic into this
+                            queue. Each reference must be authorized via the topic's own
+                            sharedWith, the same as any other cross-CR reference.
+                          items:
+                            description: |-
+                              ConsumeRef references a resource owned by another AppDependencies CR. The
+                              owning CR must list this CR in the target resource's sharedWith grants, or
+                              the reference is reported as unauthorized rather than silently honored.
+                            properties:
+                              name:
+                                description: name of the AppDependencies CR that owns
+                                  the resource.
+                                maxLength: 253
+                                type: string
+                              namespace:
+                                description: namespace of the AppDependencies CR that
+                                  owns the resource.
+                                maxLength: 63
+                                type: string
+                              resourceName:
+                                description: |-
+                                  resourceName is the `name` of the specific resource entry within the
+                                  owning CR's section (e.g. the queue name under its sqs.resources list).
+                                maxLength: 80
+                                type: string
+                            required:
+                            - name
+                            - namespace
+                            - resourceName
+                            type: object
+                          maxItems: 20
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - namespace
+                          - name
+                          - resourceName
+                          x-kubernetes-list-type: map
                       required:
                       - name
                       type: object

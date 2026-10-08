@@ -80,6 +80,7 @@ func Ensure(
 	ctx context.Context,
 	awsClient sqsAPI,
 	kmsClient cloudctlaws.KMSClient,
+	snsClient cloudctlaws.SNSClient,
 	k8sClient client.Client,
 	namespace,
 	crName,
@@ -96,7 +97,7 @@ func Ensure(
 	var firstErr error
 	for _, q := range spec.Resources {
 		var err error
-		ledger, err = ensureQueue(ctx, awsClient, kmsClient, k8sClient, namespace, crName, crUID, q, ledger, checkpoint, recordEvent)
+		ledger, err = ensureQueue(ctx, awsClient, kmsClient, snsClient, k8sClient, namespace, crName, crUID, q, ledger, checkpoint, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("queue %q: %w", q.Name, err)
 		}
@@ -115,6 +116,7 @@ func ensureQueue(
 	ctx context.Context,
 	awsClient sqsAPI,
 	kmsClient cloudctlaws.KMSClient,
+	snsClient cloudctlaws.SNSClient,
 	k8sClient client.Client,
 	namespace,
 	crName,
@@ -205,7 +207,7 @@ func ensureQueue(
 		visibilityTimeout = q.Overrides.VisibilityTimeoutSeconds
 	}
 
-	return ensureSingleQueue(ctx, awsClient, namespace, crName, crUID, q.Name, queueOptions{
+	ledger, err := ensureSingleQueue(ctx, awsClient, namespace, crName, crUID, q.Name, queueOptions{
 		deletionPolicy:            q.DeletionPolicy,
 		force:                     q.Force,
 		adopt:                     q.Adopt,
@@ -215,6 +217,27 @@ func ensureQueue(
 		redrivePolicy:             redrivePolicy,
 		kmsKeyARN:                 kmsKeyARN,
 	}, ledger, recordEvent)
+	if err != nil {
+		return ledger, err
+	}
+
+	if len(q.SubscribesTo) == 0 {
+		return ledger, nil
+	}
+
+	entry := status.FindManagedResource(ledger, resourceType, q.Name)
+	if entry == nil {
+		return ledger, fmt.Errorf("expected a ledger entry after ensuring it, found none")
+	}
+	queueName, err := queueNameFromARN(entry.ARN)
+	if err != nil {
+		return ledger, fmt.Errorf("resolving queue name for subscription management: %w", err)
+	}
+	urlOut, err := awsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
+	if err != nil {
+		return ledger, fmt.Errorf("resolving queue URL for subscription management: %w", err)
+	}
+	return EnsureSubscriptions(ctx, snsClient, awsClient, k8sClient, namespace, crName, queueName, *urlOut.QueueUrl, entry.ARN, q.SubscribesTo, ledger, recordEvent)
 }
 
 // ensureSingleQueue creates the named queue if it doesn't exist (tagging is

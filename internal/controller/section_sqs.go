@@ -43,6 +43,7 @@ func sqsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 				ctx,
 				r.AWSClients.SQS,
 				r.AWSClients.KMS,
+				r.AWSClients.SNS,
 				r.Client,
 				cr.Namespace,
 				cr.Name,
@@ -57,6 +58,8 @@ func sqsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			ledger, _, cleanupErr := sqs.Cleanup(
 				ctx,
 				r.AWSClients.SQS,
+				r.AWSClients.SNS,
+				r.Client,
 				cr.Namespace,
 				cr.Name,
 				string(cr.UID),
@@ -87,6 +90,8 @@ func sqsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			ledger, results, err := sqs.Cleanup(
 				ctx,
 				r.AWSClients.SQS,
+				r.AWSClients.SNS,
+				r.Client,
 				cr.Namespace,
 				cr.Name,
 				string(cr.UID),

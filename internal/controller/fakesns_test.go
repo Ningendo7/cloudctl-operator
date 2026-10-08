@@ -144,6 +144,14 @@ func (f *fakeSNSClient) ListSubscriptionsByTopic(_ context.Context, in *sns.List
 	}, nil
 }
 
+func (f *fakeSNSClient) Subscribe(context.Context, *sns.SubscribeInput, ...func(*sns.Options)) (*sns.SubscribeOutput, error) {
+	panic("not used by controller-package tests - see internal/resources/sqs for subscription management tests")
+}
+
+func (f *fakeSNSClient) Unsubscribe(context.Context, *sns.UnsubscribeInput, ...func(*sns.Options)) (*sns.UnsubscribeOutput, error) {
+	panic("not used by controller-package tests - see internal/resources/sqs for subscription management tests")
+}
+
 func tagsFromSlice(tags []types.Tag) map[string]string {
 	m := make(map[string]string, len(tags))
 	for _, t := range tags {

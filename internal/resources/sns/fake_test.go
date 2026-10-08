@@ -181,3 +181,11 @@ func (f *fakeSNS) ListSubscriptionsByTopic(_ context.Context, in *sns.ListSubscr
 		Subscriptions: []types.Subscription{{SubscriptionArn: &arn, TopicArn: in.TopicArn}},
 	}, nil
 }
+
+func (f *fakeSNS) Subscribe(context.Context, *sns.SubscribeInput, ...func(*sns.Options)) (*sns.SubscribeOutput, error) {
+	panic("not used by this package's own tests - see internal/resources/sqs for subscription management tests")
+}
+
+func (f *fakeSNS) Unsubscribe(context.Context, *sns.UnsubscribeInput, ...func(*sns.Options)) (*sns.UnsubscribeOutput, error) {
+	panic("not used by this package's own tests - see internal/resources/sqs for subscription management tests")
+}

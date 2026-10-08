@@ -112,7 +112,7 @@ LOCALSTACK_PORT ?= 4566
 # actually test against; bump both the tag and digest together on a
 # deliberate upgrade.
 LOCALSTACK_IMAGE ?= localstack/localstack:4.9.0@sha256:e74aa0e3dad049db6a6a86dd0d4187e054a63ec4e4273d91959b2c41093bf566
-INTEGRATION_TEST_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/s3/... ./internal/resources/sns/... ./internal/resources/dynamodb/...
+INTEGRATION_TEST_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/s3/... ./internal/resources/sns/... ./internal/resources/dynamodb/... ./internal/resources/iam/...
 
 .PHONY: setup-test-integration
 setup-test-integration: ## Start a LocalStack container for integration tests if one isn't already running
@@ -122,8 +122,8 @@ setup-test-integration: ## Start a LocalStack container for integration tests if
 	}
 	@if [ -z "$$($(CONTAINER_TOOL) ps -q -f name=^$(LOCALSTACK_CONTAINER)$$)" ]; then \
 		echo "Starting LocalStack container '$(LOCALSTACK_CONTAINER)'..."; \
-		$(CONTAINER_TOOL) run -d --name $(LOCALSTACK_CONTAINER) -p $(LOCALSTACK_PORT):4566 -e SERVICES=sqs,s3,sns,dynamodb $(LOCALSTACK_IMAGE); \
-		echo "Waiting for LocalStack to report SQS/S3/SNS/DynamoDB ready..."; \
+		$(CONTAINER_TOOL) run -d --name $(LOCALSTACK_CONTAINER) -p $(LOCALSTACK_PORT):4566 -e SERVICES=sqs,s3,sns,dynamodb,iam,sts $(LOCALSTACK_IMAGE); \
+		echo "Waiting for LocalStack to report SQS/S3/SNS/DynamoDB/IAM ready..."; \
 		timeout 60 bash -c 'until curl -sf http://localhost:$(LOCALSTACK_PORT)/_localstack/health 2>/dev/null | grep -q "\"sqs\""; do sleep 2; done'; \
 	else \
 		echo "LocalStack container '$(LOCALSTACK_CONTAINER)' already running. Skipping."; \
@@ -143,7 +143,7 @@ cleanup-test-integration: ## Tear down the LocalStack container used for integra
 # integration one above. Gated behind the "live" build tag; never runs in
 # CI, costs real (small) money per run, and needs real credentials to
 # resolve via the standard AWS credential chain or every test just skips.
-LIVE_TEST_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/sns/... ./internal/resources/s3/... ./internal/resources/dynamodb/... ./internal/resources/iam/...
+LIVE_TEST_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/sns/... ./internal/resources/s3/... ./internal/resources/dynamodb/... ./internal/resources/iam/... ./internal/resources/alarms/... ./internal/resources/kms/...
 
 .PHONY: test-live
 test-live: ## Run live tests against your own real AWS account (costs money, never run in CI)

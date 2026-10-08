@@ -213,10 +213,10 @@ LocalStack or real AWS.
 
 Still ahead: RDS support (deferred deliberately — it's the first resource
 touching VPC-level infrastructure and a Secret rather than a ConfigMap,
-and gets its own design pass rather than being bolted on), periodic
-re-validation of AWS credentials for an already-running manager (currently
-only the startup path retries instead of crash-looping), and
-Prometheus/OpenTelemetry instrumentation.
+and gets its own design pass rather than being bolted on), SNS→SQS
+subscription management (not yet expressible in the schema at all — you
+create the subscription yourself today), and Prometheus/OpenTelemetry
+instrumentation.
 
 ## License
 

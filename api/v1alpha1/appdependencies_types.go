@@ -191,6 +191,18 @@ type SQSQueueSpec struct {
 	// EncryptionSpec.
 	// +optional
 	Encryption *EncryptionSpec `json:"encryption,omitempty"`
+
+	// subscribesTo creates a real SNS subscription (and the matching
+	// queue resource-policy grant) from each referenced topic into this
+	// queue. Each reference must be authorized via the topic's own
+	// sharedWith, the same as any other cross-CR reference.
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=name
+	// +listMapKey=resourceName
+	SubscribesTo []ConsumeRef `json:"subscribesTo,omitempty"`
 }
 
 // SQSSpec is the sqs section of an AppDependencies spec.

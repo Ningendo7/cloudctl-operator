@@ -35,4 +35,6 @@ type SNSClient interface {
 	UntagResource(ctx context.Context, in *sns.UntagResourceInput, optFns ...func(*sns.Options)) (*sns.UntagResourceOutput, error)
 	DeleteTopic(ctx context.Context, in *sns.DeleteTopicInput, optFns ...func(*sns.Options)) (*sns.DeleteTopicOutput, error)
 	ListSubscriptionsByTopic(ctx context.Context, in *sns.ListSubscriptionsByTopicInput, optFns ...func(*sns.Options)) (*sns.ListSubscriptionsByTopicOutput, error)
+	Subscribe(ctx context.Context, in *sns.SubscribeInput, optFns ...func(*sns.Options)) (*sns.SubscribeOutput, error)
+	Unsubscribe(ctx context.Context, in *sns.UnsubscribeInput, optFns ...func(*sns.Options)) (*sns.UnsubscribeOutput, error)
 }
