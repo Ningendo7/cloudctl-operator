@@ -43,7 +43,7 @@ jobs:
         ports:
           - 4566:4566
         env:
-          SERVICES: sqs,s3,sns,dynamodb,iam,sts,cloudwatch
+          SERVICES: sqs,s3,sns,dynamodb,iam,sts
         options: >-
           --health-cmd "curl -sf http://localhost:4566/_localstack/health | grep -q '\"sqs\"'"
           --health-interval 5s
@@ -64,4 +64,4 @@ jobs:
       - name: Running integration tests against LocalStack
         run: |
           go mod tidy
-          go test -tags=integration ./internal/resources/sqs/... ./internal/resources/s3/... ./internal/resources/sns/... ./internal/resources/dynamodb/... ./internal/resources/iam/... ./internal/resources/alarms/... -v
+          go test -tags=integration ./internal/resources/sqs/... ./internal/resources/s3/... ./internal/resources/sns/... ./internal/resources/dynamodb/... ./internal/resources/iam/... -v

@@ -34,18 +34,28 @@ which starts LocalStack, runs the suite, and tears the container down
 afterward. CI runs the same suite unconditionally on every push, via a
 LocalStack service container — see `.github/workflows/test.yml`.
 
-**Current coverage:** SQS, S3, SNS, DynamoDB, IAM, and alarms (CloudWatch)
-— each covering the same baseline lifecycle (create+tags, idempotent
-reconcile, adopt/refuse an unowned resource, forced delete), plus SQS's
-subscription management (real SNS `Subscribe`/`Unsubscribe` and the queue
-policy grant together). S3 in particular also has code guessing at
-string-matched error codes with no typed SDK exception to verify against
+**Current coverage:** SQS, S3, SNS, DynamoDB, and IAM — each covering the
+same baseline lifecycle (create+tags, idempotent reconcile, adopt/refuse
+an unowned resource, forced delete), plus SQS's subscription management
+(real SNS `Subscribe`/`Unsubscribe` and the queue policy grant together).
+S3 in particular also has code guessing at string-matched error codes
+with no typed SDK exception to verify against
 (`isServerSideEncryptionConfigurationNotFoundError`, `isNoSuchTagSet`; see
-[resources.md](resources.md)). Standalone KMS (the `kms.resources` type,
-as opposed to the dedicated-key path every other resource type already
-exercises) is the one deferred for now — LocalStack's community edition
-has historically been the least faithful for it, so testing against it
-there risks false confidence more than real coverage.
+[resources.md](resources.md)). Two things are deliberately deferred here
+— LocalStack's community edition has historically been the least
+faithful for both, so testing against it risks false confidence more
+than real coverage:
+
+- Standalone KMS (the `kms.resources` type, as opposed to the
+  dedicated-key path every other resource type already exercises).
+- CloudWatch alarms — confirmed directly, not just assumed: this
+  package's integration test originally lived here, but `DescribeAlarms`
+  against the pinned LocalStack image returned a persistent
+  `500 InternalError` ("An unknown error occurred when trying to
+  serialize the response"), retried three times, failing every time, on
+  every test that reached it. Not our bug — LocalStack's own CloudWatch
+  alarm emulation. Removed rather than worked around; alarms still has a
+  live tier (below), which passes against real AWS.
 
 New integration-tested packages get a `<package>_integration_test.go`
 file with a `//go:build integration` tag, added to
