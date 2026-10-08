@@ -34,11 +34,12 @@ which starts LocalStack, runs the suite, and tears the container down
 afterward. CI runs the same suite unconditionally on every push, via a
 LocalStack service container — see `.github/workflows/test.yml`.
 
-**Current coverage:** SQS, S3, SNS, DynamoDB, and IAM — each covering the
-same baseline lifecycle (create+tags, idempotent reconcile, adopt an
-untagged resource, correct attribute drift, forced delete). S3 in
-particular also has code guessing at string-matched error codes with no
-typed SDK exception to verify against
+**Current coverage:** SQS, S3, SNS, DynamoDB, IAM, and alarms (CloudWatch)
+— each covering the same baseline lifecycle (create+tags, idempotent
+reconcile, adopt/refuse an unowned resource, forced delete), plus SQS's
+subscription management (real SNS `Subscribe`/`Unsubscribe` and the queue
+policy grant together). S3 in particular also has code guessing at
+string-matched error codes with no typed SDK exception to verify against
 (`isServerSideEncryptionConfigurationNotFoundError`, `isNoSuchTagSet`; see
 [resources.md](resources.md)). Standalone KMS (the `kms.resources` type,
 as opposed to the dedicated-key path every other resource type already
@@ -65,7 +66,8 @@ CI by accident. Every test skips cleanly (via a harmless
 standard AWS credential chain, creates its own uniquely-named real
 resource(s), and cleans up via `t.Cleanup` even on failure.
 
-**Current coverage:** SQS, SNS, S3, DynamoDB, IAM. Each tier is deliberately
+**Current coverage:** SQS (including subscriptions), SNS, S3, DynamoDB,
+IAM, KMS, and alarms (CloudWatch). Each tier is deliberately
 lean — a handful of tests per service, not exhaustive scenario coverage —
 and targets specifically the kind of thing a fake or LocalStack can't be
 trusted to catch: real, undocumented, or easy-to-mismodel API behavior
@@ -77,11 +79,22 @@ in the relevant package, not logged here — `git log` and
 [aws-assumptions.md](aws-assumptions.md) are the record of what's actually
 been confirmed against real AWS and when.
 
-KMS has no dedicated live tier of its own — its dedicated-key path is
-exercised end-to-end through sqs/sns/s3/dynamodb's own live tests (same
-code, only the `resourceType` string differs). The standalone
-`kms.resources` type, and CloudWatch alarms, have neither a live nor an
-integration tier yet.
+The dedicated-key path (every other resource type's `encryption.enabled`)
+is exercised end-to-end through sqs/sns/s3/dynamodb's own live tests
+(same code, only the `resourceType` string differs) — including its
+delete path, scheduled directly via a real `ScheduleKeyDeletion` call at
+AWS's 7-day minimum rather than through `kms.Cleanup()`, since AWS has no
+faster or instant way to actually delete a key. The standalone
+`kms.resources` type has its own live tier covering creation, tagging,
+rotation, and adoption, with cleanup following that same direct-schedule
+pattern — but deliberately does **not** re-verify `kms.Cleanup()`'s own
+`ScheduleKeyDeletion` call against real AWS: that call's shape is already
+proven by the dedicated-key tests above, `Cleanup()`'s surrounding logic
+(the quiet window, backdating, ledger removal) is pure Go already covered
+by the unit tier's fakes, and the only difference would be the literal
+window value (30 days here vs. 7 there) — not a class of bug this tier
+exists to catch. Still no integration tier for standalone KMS (see the
+note above on why LocalStack is deferred for it).
 
 Run it locally with whatever already authenticates your AWS CLI:
 
