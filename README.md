@@ -51,7 +51,7 @@ default.
 
 ## What it manages
 
-- **SQS** — standard and FIFO queues, dead-letter queues, dedicated or shared KMS encryption.
+- **SQS** — standard and FIFO queues, dead-letter queues, dedicated or shared KMS encryption, and subscribing to a shared SNS topic.
 - **SNS** — standard and FIFO topics, dedicated or shared KMS encryption.
 - **DynamoDB** — tables with on-demand or provisioned billing, point-in-time recovery, dedicated or shared KMS encryption.
 - **S3** — buckets with versioning/lifecycle-based backup, dedicated or shared KMS encryption.
@@ -154,13 +154,18 @@ Both install paths deploy the same image, built for `linux/amd64`,
 Three tiers, each catching a different class of bug: unit (fake AWS
 clients, runs in milliseconds, every resource type), integration (real
 API shapes against LocalStack, CI-gated on every PR, SQS/SNS/DynamoDB/S3/
-IAM), and live (a real AWS account, opt-in, never in CI, same five). The
-live tier exists specifically to catch what the other
-two structurally can't: real, undocumented, or easy-to-mismodel AWS
-behavior — wrong exception types, string-matched error codes with no
-typed SDK equivalent, response formats that diverge from what a request
-sent, eventual-consistency gaps. A fake only ever encodes this project's
-own belief about an API; LocalStack only ever encodes its maintainers'.
+IAM), and live (a real AWS account, opt-in, never in CI — those same
+five, plus KMS's standalone key type and CloudWatch alarms). The live
+tier exists specifically to catch what the other two structurally can't:
+real, undocumented, or easy-to-mismodel AWS behavior — wrong exception
+types, string-matched error codes with no typed SDK equivalent, response
+formats that diverge from what a request sent, eventual-consistency
+gaps. A fake only ever encodes this project's own belief about an API;
+LocalStack only ever encodes its maintainers' — confirmed directly, not
+just assumed: standalone KMS and CloudWatch alarms are both deliberately
+excluded from the integration tier because LocalStack's own emulation of
+them has proven unfaithful (alarms' `DescribeAlarms` call reproducibly
+500s against the pinned LocalStack image).
 
 Every destructive action re-verifies live ownership tags immediately
 before acting, regardless of how recently that verification last ran —
@@ -207,16 +212,17 @@ passes for that exact commit; see
 the current version. SQS, SNS, DynamoDB, S3, and IAM are implemented and
 covered by all three test tiers. KMS's dedicated-key path (the common
 case — `encryption.enabled` on any other resource type) rides along
-inside those same tiers; the standalone `kms.resources` type and
-CloudWatch alarms are unit-tested only, not yet exercised against
-LocalStack or real AWS.
+inside those same tiers. The standalone `kms.resources` type and
+CloudWatch alarms have unit and live coverage but no integration tier —
+LocalStack's own emulation of both has proven unfaithful enough there
+that testing against it risked false confidence rather than real
+coverage (confirmed directly for alarms, not just assumed from KMS's own
+prior history).
 
 Still ahead: RDS support (deferred deliberately — it's the first resource
 touching VPC-level infrastructure and a Secret rather than a ConfigMap,
-and gets its own design pass rather than being bolted on), SNS→SQS
-subscription management (not yet expressible in the schema at all — you
-create the subscription yourself today), and Prometheus/OpenTelemetry
-instrumentation.
+and gets its own design pass rather than being bolted on), and
+Prometheus/OpenTelemetry instrumentation.
 
 ## License
 
