@@ -547,10 +547,12 @@ spec:
                           type: string
                         highAvailability:
                           description: |-
-                            RDSHighAvailabilitySpec enables Multi-AZ failover. Deliberately separate
-                            from RDSBackupSpec/RDSReplicationSpec - see the design notes on why
-                            HA/backup/DR are kept as independent, explicit toggles (same reasoning
-                            as S3's backup/replication split).
+                            RDSHighAvailabilitySpec enables Multi-AZ failover. Kept separate from
+                            RDSBackupSpec/RDSReplicationSpec because each protects against a
+                            different failure mode: Multi-AZ against infrastructure failure,
+                            backup against a logical/human mistake, cross-region replication
+                            against a regional outage - one combined flag would give a false sense
+                            of covering all three.
                           properties:
                             enabled:
                               default: false
@@ -558,6 +560,7 @@ spec:
                           type: object
                         instanceClass:
                           maxLength: 50
+                          pattern: ^db\.[a-z0-9]+\.[a-z0-9]+$
                           type: string
                         name:
                           description: |-

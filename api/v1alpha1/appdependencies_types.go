@@ -631,6 +631,7 @@ type RDSInstanceSpec struct {
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=50
+	// +kubebuilder:validation:Pattern=`^db\.[a-z0-9]+\.[a-z0-9]+$`
 	InstanceClass string `json:"instanceClass"`
 
 	// +optional
