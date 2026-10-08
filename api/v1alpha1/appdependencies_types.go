@@ -561,6 +561,142 @@ type DynamoDBSpec struct {
 }
 
 // ---------------------------------------------------------------------------
+// RDS
+// ---------------------------------------------------------------------------
+
+// RDSHighAvailabilitySpec enables Multi-AZ failover. Kept separate from
+// RDSBackupSpec/RDSReplicationSpec because each protects against a
+// different failure mode: Multi-AZ against infrastructure failure,
+// backup against a logical/human mistake, cross-region replication
+// against a regional outage - one combined flag would give a false sense
+// of covering all three.
+type RDSHighAvailabilitySpec struct {
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// RDSBackupSpec enables automated backups and point-in-time recovery.
+type RDSBackupSpec struct {
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// RDSReplicationSpec configures a cross-region read replica for disaster
+// recovery. Region is required when enabled: this is a self-contained
+// check, enforced here rather than at reconcile time.
+// +kubebuilder:validation:XValidation:rule="!self.enabled || size(self.region) > 0",message="region is required when replication is enabled"
+type RDSReplicationSpec struct {
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:MaxLength=20
+	Region string `json:"region,omitempty"`
+}
+
+// RDSInstanceSpec declares a single RDS instance this app owns.
+//
+// encryption is immutable once set - unlike every other resource type's
+// encryption flag, RDS's StorageEncrypted cannot be toggled on an
+// existing instance; enabling it later requires a full snapshot-and-
+// restore into a new instance, which this design doesn't attempt.
+// +kubebuilder:validation:XValidation:rule="self.encryption == oldSelf.encryption",message="encryption is immutable on an RDS instance; AWS does not support enabling storage encryption after creation"
+type RDSInstanceSpec struct {
+	// name of the instance, used to derive the actual AWS DB instance
+	// identifier.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9-]+$`
+	Name string `json:"name"`
+
+	// dbSubnetGroupName references a DBSubnetGroup that must already
+	// exist - this operator never creates VPC-level networking. The
+	// referencing namespace must be covered by a matching
+	// RDSSubnetGroupGrant, or reconciliation reports
+	// SubnetGroupNotAuthorized.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=255
+	DBSubnetGroupName string `json:"dbSubnetGroupName"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=postgres;mysql;mariadb
+	Engine string `json:"engine"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=20
+	EngineVersion string `json:"engineVersion"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=50
+	InstanceClass string `json:"instanceClass"`
+
+	// +optional
+	// +kubebuilder:default=Retain
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
+
+	// adopt allows this CR to take ownership of a pre-existing AWS
+	// resource found under this entry's deterministic name that isn't
+	// already tagged as owned by this CR. Same semantics as every other
+	// resource type's adopt field.
+	// +optional
+	Adopt bool `json:"adopt,omitempty"`
+
+	// sharedWith grants other AppDependencies CRs network access to this
+	// instance via a dedicated, operator-owned security group - not an
+	// IAM grant. Connecting with a mirrored Secret username/password is a
+	// plain TCP+SQL login, so sharedWith here authorizes network reachability,
+	// never API permissions.
+	// Requires EKS Security Groups for Pods to be enabled on the cluster.
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=name
+	SharedWith []SharedWithEntry `json:"sharedWith,omitempty"`
+
+	// +optional
+	HighAvailability *RDSHighAvailabilitySpec `json:"highAvailability,omitempty"`
+
+	// +optional
+	Backup *RDSBackupSpec `json:"backup,omitempty"`
+
+	// +optional
+	Replication *RDSReplicationSpec `json:"replication,omitempty"`
+
+	// encryption enables storage encryption with a KMS key. See
+	// EncryptionSpec. Immutable once set.
+	// +optional
+	Encryption *EncryptionSpec `json:"encryption,omitempty"`
+}
+
+// RDSSpec is the rds section of an AppDependencies spec.
+type RDSSpec struct {
+	// resources this app owns.
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	// +listType=map
+	// +listMapKey=name
+	Resources []RDSInstanceSpec `json:"resources,omitempty"`
+
+	// consumes references RDS instances owned by other AppDependencies
+	// CRs. Unlike every other resource type, this never feeds IAM policy
+	// derivation - it only ever authorizes network reachability via the
+	// producer's dedicated security group. This is included despite direct
+	// cross-service database access being unusual (a shared multi-tenant instance,
+	// direct reporting/analytics access, or temporary access during a migration).
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=name
+	// +listMapKey=resourceName
+	Consumes []ConsumeRef `json:"consumes,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
 // KMS
 // ---------------------------------------------------------------------------
 
@@ -659,10 +795,25 @@ type AppDependenciesSpec struct {
 	DynamoDB *DynamoDBSpec `json:"dynamodb,omitempty"`
 
 	// +optional
+	RDS *RDSSpec `json:"rds,omitempty"`
+
+	// +optional
 	KMS *KMSSpec `json:"kms,omitempty"`
 
 	// +optional
 	Alarms *AlarmsSpec `json:"alarms,omitempty"`
+
+	// networkServiceAccountName overrides which ServiceAccount identifies
+	// this CR's own pods for network-identity purposes (currently: which
+	// pods get the dedicated security group letting them reach an RDS
+	// instance this CR consumes). Defaults to serviceAccountName if unset
+	// - the common case, since a CR's pods usually only ever have the one
+	// ServiceAccount. Only needed when a CR's pod topology genuinely
+	// diverges (e.g. only one component of a larger app needs database
+	// access, not every pod under the CR's main ServiceAccount).
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	NetworkServiceAccountName string `json:"networkServiceAccountName,omitempty"`
 }
 
 // ManagedResourceState reflects the ownership-ledger trust window for a

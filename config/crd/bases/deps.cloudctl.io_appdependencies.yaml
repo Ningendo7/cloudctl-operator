@@ -396,6 +396,255 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                 type: object
+              networkServiceAccountName:
+                description: |-
+                  networkServiceAccountName overrides which ServiceAccount identifies
+                  this CR's own pods for network-identity purposes (currently: which
+                  pods get the dedicated security group letting them reach an RDS
+                  instance this CR consumes). Defaults to serviceAccountName if unset
+                  - the common case, since a CR's pods usually only ever have the one
+                  ServiceAccount. Only needed when a CR's pod topology genuinely
+                  diverges (e.g. only one component of a larger app needs database
+                  access, not every pod under the CR's main ServiceAccount).
+                maxLength: 253
+                type: string
+              rds:
+                description: RDSSpec is the rds section of an AppDependencies spec.
+                properties:
+                  consumes:
+                    description: |-
+                      consumes references RDS instances owned by other AppDependencies
+                      CRs. Unlike every other resource type, this never feeds IAM policy
+                      derivation - it only ever authorizes network reachability via the
+                      producer's dedicated security group. This is included despite direct
+                      cross-service database access being unusual (a shared multi-tenant instance,
+                      direct reporting/analytics access, or temporary access during a migration).
+                    items:
+                      description: |-
+                        ConsumeRef references a resource owned by another AppDependencies CR. The
+                        owning CR must list this CR in the target resource's sharedWith grants, or
+                        the reference is reported as unauthorized rather than silently honored.
+                      properties:
+                        name:
+                          description: name of the AppDependencies CR that owns the
+                            resource.
+                          maxLength: 253
+                          type: string
+                        namespace:
+                          description: namespace of the AppDependencies CR that owns
+                            the resource.
+                          maxLength: 63
+                          type: string
+                        resourceName:
+                          description: |-
+                            resourceName is the `name` of the specific resource entry within the
+                            owning CR's section (e.g. the queue name under its sqs.resources list).
+                          maxLength: 80
+                          type: string
+                      required:
+                      - name
+                      - namespace
+                      - resourceName
+                      type: object
+                    maxItems: 20
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - namespace
+                    - name
+                    - resourceName
+                    x-kubernetes-list-type: map
+                  resources:
+                    description: resources this app owns.
+                    items:
+                      description: |-
+                        RDSInstanceSpec declares a single RDS instance this app owns.
+
+                        encryption is immutable once set - unlike every other resource type's
+                        encryption flag, RDS's StorageEncrypted cannot be toggled on an
+                        existing instance; enabling it later requires a full snapshot-and-
+                        restore into a new instance, which this design doesn't attempt.
+                      properties:
+                        adopt:
+                          description: |-
+                            adopt allows this CR to take ownership of a pre-existing AWS
+                            resource found under this entry's deterministic name that isn't
+                            already tagged as owned by this CR. Same semantics as every other
+                            resource type's adopt field.
+                          type: boolean
+                        backup:
+                          description: RDSBackupSpec enables automated backups and
+                            point-in-time recovery.
+                          properties:
+                            enabled:
+                              default: false
+                              type: boolean
+                          type: object
+                        dbSubnetGroupName:
+                          description: |-
+                            dbSubnetGroupName references a DBSubnetGroup that must already
+                            exist - this operator never creates VPC-level networking. The
+                            referencing namespace must be covered by a matching
+                            RDSSubnetGroupGrant, or reconciliation reports
+                            SubnetGroupNotAuthorized.
+                          maxLength: 255
+                          type: string
+                        deletionPolicy:
+                          default: Retain
+                          description: |-
+                            DeletionPolicy controls what happens to the underlying AWS resource when a
+                            spec entry is removed or the owning CR is deleted.
+                          enum:
+                          - Retain
+                          - Delete
+                          type: string
+                        encryption:
+                          description: |-
+                            encryption enables storage encryption with a KMS key. See
+                            EncryptionSpec. Immutable once set.
+                          properties:
+                            enabled:
+                              default: false
+                              type: boolean
+                            kmsKeyRef:
+                              description: |-
+                                ConsumeRef references a resource owned by another AppDependencies CR. The
+                                owning CR must list this CR in the target resource's sharedWith grants, or
+                                the reference is reported as unauthorized rather than silently honored.
+                              properties:
+                                name:
+                                  description: name of the AppDependencies CR that
+                                    owns the resource.
+                                  maxLength: 253
+                                  type: string
+                                namespace:
+                                  description: namespace of the AppDependencies CR
+                                    that owns the resource.
+                                  maxLength: 63
+                                  type: string
+                                resourceName:
+                                  description: |-
+                                    resourceName is the `name` of the specific resource entry within the
+                                    owning CR's section (e.g. the queue name under its sqs.resources list).
+                                  maxLength: 80
+                                  type: string
+                              required:
+                              - name
+                              - namespace
+                              - resourceName
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                          - message: enabled and kmsKeyRef are mutually exclusive
+                            rule: '!(self.enabled == true && has(self.kmsKeyRef))'
+                        engine:
+                          enum:
+                          - postgres
+                          - mysql
+                          - mariadb
+                          type: string
+                        engineVersion:
+                          maxLength: 20
+                          type: string
+                        highAvailability:
+                          description: |-
+                            RDSHighAvailabilitySpec enables Multi-AZ failover. Deliberately separate
+                            from RDSBackupSpec/RDSReplicationSpec - see the design notes on why
+                            HA/backup/DR are kept as independent, explicit toggles (same reasoning
+                            as S3's backup/replication split).
+                          properties:
+                            enabled:
+                              default: false
+                              type: boolean
+                          type: object
+                        instanceClass:
+                          maxLength: 50
+                          type: string
+                        name:
+                          description: |-
+                            name of the instance, used to derive the actual AWS DB instance
+                            identifier.
+                          maxLength: 63
+                          pattern: ^[a-zA-Z0-9-]+$
+                          type: string
+                        replication:
+                          description: |-
+                            RDSReplicationSpec configures a cross-region read replica for disaster
+                            recovery. Region is required when enabled: this is a self-contained
+                            check, enforced here rather than at reconcile time.
+                          properties:
+                            enabled:
+                              default: false
+                              type: boolean
+                            region:
+                              maxLength: 20
+                              type: string
+                          type: object
+                          x-kubernetes-validations:
+                          - message: region is required when replication is enabled
+                            rule: '!self.enabled || size(self.region) > 0'
+                        sharedWith:
+                          description: |-
+                            sharedWith grants other AppDependencies CRs network access to this
+                            instance via a dedicated, operator-owned security group - not an
+                            IAM grant. Connecting with a mirrored Secret username/password is a
+                            plain TCP+SQL login, so sharedWith here authorizes network reachability,
+                            never API permissions.
+                            Requires EKS Security Groups for Pods to be enabled on the cluster.
+                          items:
+                            description: |-
+                              SharedWithEntry grants another AppDependencies CR permission to consume a
+                              resource owned by this one. Referencing a resource is not sufficient on
+                              its own — the owner must explicitly list the consumer here.
+                            properties:
+                              access:
+                                default: ReadOnly
+                                description: |-
+                                  access controls how much this grant confers. ReadOnly still includes
+                                  whatever's mechanically required just to consume the resource at all
+                                  (e.g. deleting an SQS message once received, or subscribing to an
+                                  SNS topic) — it's the ability to add new data (SendMessage, Publish,
+                                  PutObject, PutItem, ...) that ReadWrite adds on top.
+                                enum:
+                                - ReadOnly
+                                - ReadWrite
+                                type: string
+                              name:
+                                description: name of the consuming AppDependencies
+                                  CR.
+                                maxLength: 253
+                                type: string
+                              namespace:
+                                description: namespace of the consuming AppDependencies
+                                  CR.
+                                maxLength: 63
+                                type: string
+                            required:
+                            - name
+                            - namespace
+                            type: object
+                          maxItems: 20
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - namespace
+                          - name
+                          x-kubernetes-list-type: map
+                      required:
+                      - dbSubnetGroupName
+                      - engine
+                      - engineVersion
+                      - instanceClass
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: encryption is immutable on an RDS instance; AWS does
+                          not support enabling storage encryption after creation
+                        rule: self.encryption == oldSelf.encryption
+                    maxItems: 20
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                type: object
               s3:
                 properties:
                   consumes:
