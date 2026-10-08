@@ -225,13 +225,13 @@ func TestEnvInt(t *testing.T) {
 
 func TestNewRateLimiters_OneLimiterPerService(t *testing.T) {
 	limiters := newRateLimiters()
-	for _, name := range []string{"sqs", "sns", "s3", "dynamodb", "kms", "iam", "cloudwatch"} {
+	for _, name := range []string{"sqs", "sns", "s3", "dynamodb", "kms", "iam", "cloudwatch", "rds", "ec2"} {
 		if limiters[name] == nil {
 			t.Errorf("expected a limiter for %q, got none", name)
 		}
 	}
-	if len(limiters) != 7 {
-		t.Errorf("expected exactly 7 limiters, got %d", len(limiters))
+	if len(limiters) != 9 {
+		t.Errorf("expected exactly 9 limiters, got %d", len(limiters))
 	}
 }
 

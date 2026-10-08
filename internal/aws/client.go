@@ -23,9 +23,12 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -39,13 +42,16 @@ import (
 // latency to every tick and could hammer STS under load. Clients are safe
 // for concurrent use.
 type Clients struct {
-	SQS        SQSClient
-	SNS        SNSClient
-	S3         *s3.Client
-	DynamoDB   *dynamodb.Client
-	KMS        KMSClient
-	IAM        IAMClient
-	CloudWatch CloudWatchClient
+	SQS            SQSClient
+	SNS            SNSClient
+	S3             *s3.Client
+	DynamoDB       *dynamodb.Client
+	KMS            KMSClient
+	IAM            IAMClient
+	CloudWatch     CloudWatchClient
+	RDS            RDSClient
+	EC2            EC2Client
+	SecretsManager SecretsManagerClient
 
 	// AccountID and Region identify this controller's own AWS account,
 	// resolved once at startup. Needed anywhere a resource's name/ARN must
@@ -82,19 +88,26 @@ type rateLimiterDefault struct {
 	defaultBurst int
 }
 
-// serviceNameSQS is this rate limiter table's key for SQS - named since
-// it's also looked up by the same string when SQS's client is constructed
-// below, and a typo between the two would silently leave SQS unlimited.
 const serviceNameSQS = "sqs"
+const serviceNameSNS = "sns"
+const serviceNameS3 = "s3"
+const serviceNameDynamoDB = "dynamodb"
+const serviceNameKMS = "kms"
+const serviceNameIAM = "iam"
+const serviceNameCloudWatch = "cloudwatch"
+const serviceNameRDS = "rds"
+const serviceNameEC2 = "ec2"
 
 var rateLimiterDefaults = []rateLimiterDefault{
 	{serviceNameSQS, "AWS_SQS_RATE_LIMIT_QPS", "AWS_SQS_RATE_LIMIT_BURST", 20, 40},
-	{"sns", "AWS_SNS_RATE_LIMIT_QPS", "AWS_SNS_RATE_LIMIT_BURST", 20, 40},
-	{"s3", "AWS_S3_RATE_LIMIT_QPS", "AWS_S3_RATE_LIMIT_BURST", 20, 40},
-	{"dynamodb", "AWS_DYNAMODB_RATE_LIMIT_QPS", "AWS_DYNAMODB_RATE_LIMIT_BURST", 20, 40},
-	{"kms", "AWS_KMS_RATE_LIMIT_QPS", "AWS_KMS_RATE_LIMIT_BURST", 10, 20},
-	{"iam", "AWS_IAM_RATE_LIMIT_QPS", "AWS_IAM_RATE_LIMIT_BURST", 8, 16},
-	{"cloudwatch", "AWS_CLOUDWATCH_RATE_LIMIT_QPS", "AWS_CLOUDWATCH_RATE_LIMIT_BURST", 20, 40},
+	{serviceNameSNS, "AWS_SNS_RATE_LIMIT_QPS", "AWS_SNS_RATE_LIMIT_BURST", 20, 40},
+	{serviceNameS3, "AWS_S3_RATE_LIMIT_QPS", "AWS_S3_RATE_LIMIT_BURST", 20, 40},
+	{serviceNameDynamoDB, "AWS_DYNAMODB_RATE_LIMIT_QPS", "AWS_DYNAMODB_RATE_LIMIT_BURST", 20, 40},
+	{serviceNameKMS, "AWS_KMS_RATE_LIMIT_QPS", "AWS_KMS_RATE_LIMIT_BURST", 10, 20},
+	{serviceNameIAM, "AWS_IAM_RATE_LIMIT_QPS", "AWS_IAM_RATE_LIMIT_BURST", 8, 16},
+	{serviceNameCloudWatch, "AWS_CLOUDWATCH_RATE_LIMIT_QPS", "AWS_CLOUDWATCH_RATE_LIMIT_BURST", 20, 40},
+	{serviceNameRDS, "AWS_RDS_RATE_LIMIT_QPS", "AWS_RDS_RATE_LIMIT_BURST", 20, 40},
+	{serviceNameEC2, "AWS_EC2_RATE_LIMIT_QPS", "AWS_EC2_RATE_LIMIT_BURST", 20, 40},
 }
 
 func newRateLimiters() map[string]*rate.Limiter {
@@ -140,10 +153,10 @@ func NewClients(ctx context.Context) (*Clients, error) {
 			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameSQS]))
 		}),
 		SNS: sns.NewFromConfig(cfg, func(o *sns.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters["sns"]))
+			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameSNS]))
 		}),
 		S3: s3.NewFromConfig(cfg, func(o *s3.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters["s3"]))
+			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameS3]))
 			// A non-nil BaseEndpoint only happens when AWS_ENDPOINT_URL is
 			// explicitly set - never true against real AWS, always true
 			// against a test double like LocalStack, whose virtual-hosted
@@ -154,19 +167,26 @@ func NewClients(ctx context.Context) (*Clients, error) {
 			}
 		}),
 		DynamoDB: dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters["dynamodb"]))
+			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameDynamoDB]))
 		}),
 		KMS: kms.NewFromConfig(cfg, func(o *kms.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters["kms"]))
+			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameKMS]))
 		}),
 		IAM: iam.NewFromConfig(iamCfg, func(o *iam.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters["iam"]))
+			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameIAM]))
 		}),
 		CloudWatch: cloudwatch.NewFromConfig(cfg, func(o *cloudwatch.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters["cloudwatch"]))
+			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameCloudWatch]))
 		}),
-		AccountID:    *identity.Account,
-		Region:       cfg.Region,
-		RateLimiters: limiters,
+		RDS: rds.NewFromConfig(cfg, func(o *rds.Options) {
+			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameRDS]))
+		}),
+		EC2: ec2.NewFromConfig(cfg, func(o *ec2.Options) {
+			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameEC2]))
+		}),
+		SecretsManager: secretsmanager.NewFromConfig(cfg),
+		AccountID:      *identity.Account,
+		Region:         cfg.Region,
+		RateLimiters:   limiters,
 	}, nil
 }
