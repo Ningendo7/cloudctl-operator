@@ -41,6 +41,7 @@ type rdsAPI interface {
 	DescribeDBInstances(ctx context.Context, in *rds.DescribeDBInstancesInput, optFns ...func(*rds.Options)) (*rds.DescribeDBInstancesOutput, error)
 	ListTagsForResource(ctx context.Context, in *rds.ListTagsForResourceInput, optFns ...func(*rds.Options)) (*rds.ListTagsForResourceOutput, error)
 	AddTagsToResource(ctx context.Context, in *rds.AddTagsToResourceInput, optFns ...func(*rds.Options)) (*rds.AddTagsToResourceOutput, error)
+	DescribeDBSubnetGroups(ctx context.Context, in *rds.DescribeDBSubnetGroupsInput, optFns ...func(*rds.Options)) (*rds.DescribeDBSubnetGroupsOutput, error)
 }
 
 const resourceType = "rds"
@@ -65,18 +66,23 @@ type instanceOptions struct {
 	multiAZ           bool
 	backupEnabled     bool
 	kmsKeyARN         *string
+	securityGroupID   string
 }
 
 // Ensure reconciles every declared RDS instance against AWS, updating the
 // ownership ledger as it goes. kmsClient is only ever touched when a
 // resource actually declares encryption.enabled or encryption.kmsKeyRef -
-// a CR that never uses either can pass nil.
+// a CR that never uses either can pass nil. region/accountID are needed
+// to construct this instance's dedicated security group's ARN ourselves,
+// since EC2 never hands one back directly, unlike every other service
+// this operator calls.
 func Ensure(
 	ctx context.Context,
 	awsClient rdsAPI,
 	kmsClient cloudctlaws.KMSClient,
+	ec2Client cloudctlaws.EC2Client,
 	k8sClient client.Client,
-	namespace, crName, crUID string,
+	namespace, crName, crUID, region, accountID string,
 	spec *depsv1alpha1.RDSSpec,
 	ledger []depsv1alpha1.ManagedResource,
 	checkpoint status.Checkpoint,
@@ -106,6 +112,14 @@ func Ensure(
 			continue
 		}
 
+		sgARN, sgErr := EnsureSecurityGroup(ctx, awsClient, ec2Client, k8sClient, namespace, crName, crUID, r.Name, r.DBSubnetGroupName, r.Engine, region, accountID, r.SharedWith)
+		if sgErr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("instance %q: security group: %w", r.Name, sgErr)
+			}
+			continue
+		}
+
 		opts := instanceOptions{
 			deletionPolicy:    r.DeletionPolicy,
 			adopt:             r.Adopt,
@@ -113,6 +127,7 @@ func Ensure(
 			engineVersion:     r.EngineVersion,
 			instanceClass:     r.InstanceClass,
 			dbSubnetGroupName: r.DBSubnetGroupName,
+			securityGroupID:   SecurityGroupIDFromARN(sgARN),
 		}
 		if r.HighAvailability != nil {
 			opts.multiAZ = r.HighAvailability.Enabled
@@ -293,6 +308,7 @@ func createInstance(
 		EngineVersion:            &opts.engineVersion,
 		DBInstanceClass:          &opts.instanceClass,
 		DBSubnetGroupName:        &opts.dbSubnetGroupName,
+		VpcSecurityGroupIds:      []string{opts.securityGroupID},
 		MasterUsername:           aws.String(masterUsername),
 		ManageMasterUserPassword: aws.Bool(true),
 		MultiAZ:                  aws.Bool(opts.multiAZ),

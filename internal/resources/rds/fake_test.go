@@ -18,8 +18,11 @@ package rds
 
 import (
 	"context"
+	"fmt"
 	"maps"
 
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/rds/types"
 	"github.com/aws/smithy-go"
@@ -55,15 +58,24 @@ type fakeInstance struct {
 	multiAZ               bool
 	backupRetentionPeriod int32
 	kmsKeyARN             string
+	masterUsername        string
+	manageMasterPassword  bool
 }
 
 type fakeRDS struct {
 	instances map[string]*fakeInstance // keyed by DBInstanceIdentifier
 
-	createDBInstanceErr    error
-	describeDBInstancesErr error
-	listTagsForResourceErr error
-	addTagsToResourceErr   error
+	createDBInstanceErr       error
+	describeDBInstancesErr    error
+	listTagsForResourceErr    error
+	addTagsToResourceErr      error
+	describeDBSubnetGroupsErr error
+
+	// listTagsForResourceCalls counts real calls so trust-window tests can
+	// assert a within-window reconcile skips re-verifying ownership tags
+	// entirely, the same property every other resource package's own
+	// trust-window test already proves.
+	listTagsForResourceCalls int
 }
 
 func newFakeRDS() *fakeRDS {
@@ -97,6 +109,14 @@ func (f *fakeRDS) CreateDBInstance(_ context.Context, in *rds.CreateDBInstanceIn
 	if in.MultiAZ != nil {
 		multiAZ = *in.MultiAZ
 	}
+	var masterUsername string
+	if in.MasterUsername != nil {
+		masterUsername = *in.MasterUsername
+	}
+	var manageMasterPassword bool
+	if in.ManageMasterUserPassword != nil {
+		manageMasterPassword = *in.ManageMasterUserPassword
+	}
 	f.instances[id] = &fakeInstance{
 		arn:                   arn,
 		tags:                  tagsToMap(in.Tags),
@@ -108,6 +128,8 @@ func (f *fakeRDS) CreateDBInstance(_ context.Context, in *rds.CreateDBInstanceIn
 		multiAZ:               multiAZ,
 		backupRetentionPeriod: backupRetention,
 		kmsKeyARN:             kmsKeyARN,
+		masterUsername:        masterUsername,
+		manageMasterPassword:  manageMasterPassword,
 	}
 	return &rds.CreateDBInstanceOutput{
 		DBInstance: &types.DBInstance{
@@ -151,6 +173,7 @@ func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInsta
 }
 
 func (f *fakeRDS) ListTagsForResource(_ context.Context, in *rds.ListTagsForResourceInput, _ ...func(*rds.Options)) (*rds.ListTagsForResourceOutput, error) {
+	f.listTagsForResourceCalls++
 	if f.listTagsForResourceErr != nil {
 		return nil, f.listTagsForResourceErr
 	}
@@ -176,5 +199,159 @@ func (f *fakeRDS) AddTagsToResource(_ context.Context, in *rds.AddTagsToResource
 	return &rds.AddTagsToResourceOutput{}, nil
 }
 
+func (f *fakeRDS) DescribeDBSubnetGroups(_ context.Context, in *rds.DescribeDBSubnetGroupsInput, _ ...func(*rds.Options)) (*rds.DescribeDBSubnetGroupsOutput, error) {
+	if f.describeDBSubnetGroupsErr != nil {
+		return nil, f.describeDBSubnetGroupsErr
+	}
+	// Deterministic, not configurable per-test: every existing test only
+	// needs this call to succeed, never cares which VPC it resolves to.
+	vpcID := "vpc-" + *in.DBSubnetGroupName
+	return &rds.DescribeDBSubnetGroupsOutput{
+		DBSubnetGroups: []types.DBSubnetGroup{{DBSubnetGroupName: in.DBSubnetGroupName, VpcId: &vpcID}},
+	}, nil
+}
+
 func strPtr(s string) *string { return &s }
 func boolPtr(b bool) *bool    { return &b }
+
+// fakeIngressRule records just enough of one AuthorizeSecurityGroupIngress
+// call to assert on later - which other security group it allows in, and
+// on which port.
+type fakeIngressRule struct {
+	sourceGroupID    string
+	fromPort, toPort int32
+}
+
+// fakeSecurityGroup and fakeEC2 are a minimal in-memory stand-in for the
+// real EC2 client, implementing just the methods EC2Client declares that
+// this package's security-group logic actually calls.
+type fakeSecurityGroup struct {
+	id, name, vpcID string
+	tags            map[string]string
+	ingress         []fakeIngressRule
+}
+
+type fakeEC2 struct {
+	groups map[string]*fakeSecurityGroup // keyed by GroupId
+	nextID int
+
+	createSecurityGroupErr           error
+	describeSecurityGroupsErr        error
+	authorizeSecurityGroupIngressErr error
+	revokeSecurityGroupIngressErr    error
+
+	authorizeSecurityGroupIngressCalls int
+}
+
+func newFakeEC2() *fakeEC2 {
+	return &fakeEC2{groups: map[string]*fakeSecurityGroup{}}
+}
+
+func (f *fakeEC2) findByNameAndVPC(name, vpcID string) *fakeSecurityGroup {
+	for _, g := range f.groups {
+		if g.name == name && g.vpcID == vpcID {
+			return g
+		}
+	}
+	return nil
+}
+
+func (f *fakeEC2) CreateSecurityGroup(_ context.Context, in *ec2.CreateSecurityGroupInput, _ ...func(*ec2.Options)) (*ec2.CreateSecurityGroupOutput, error) {
+	if f.createSecurityGroupErr != nil {
+		return nil, f.createSecurityGroupErr
+	}
+	f.nextID++
+	id := fmt.Sprintf("sg-%08d", f.nextID)
+	tags := map[string]string{}
+	for _, spec := range in.TagSpecifications {
+		for _, t := range spec.Tags {
+			if t.Key != nil && t.Value != nil {
+				tags[*t.Key] = *t.Value
+			}
+		}
+	}
+	f.groups[id] = &fakeSecurityGroup{id: id, name: *in.GroupName, vpcID: *in.VpcId, tags: tags}
+	return &ec2.CreateSecurityGroupOutput{GroupId: &id}, nil
+}
+
+func (f *fakeEC2) DescribeSecurityGroups(_ context.Context, in *ec2.DescribeSecurityGroupsInput, _ ...func(*ec2.Options)) (*ec2.DescribeSecurityGroupsOutput, error) {
+	if f.describeSecurityGroupsErr != nil {
+		return nil, f.describeSecurityGroupsErr
+	}
+	var name, vpcID string
+	for _, filt := range in.Filters {
+		if filt.Name == nil || len(filt.Values) == 0 {
+			continue
+		}
+		switch *filt.Name {
+		case "group-name":
+			name = filt.Values[0]
+		case "vpc-id":
+			vpcID = filt.Values[0]
+		}
+	}
+	g := f.findByNameAndVPC(name, vpcID)
+	if g == nil {
+		return &ec2.DescribeSecurityGroupsOutput{}, nil
+	}
+	return &ec2.DescribeSecurityGroupsOutput{
+		SecurityGroups: []ec2types.SecurityGroup{{GroupId: &g.id, GroupName: &g.name, VpcId: &g.vpcID}},
+	}, nil
+}
+
+func (f *fakeEC2) AuthorizeSecurityGroupIngress(_ context.Context, in *ec2.AuthorizeSecurityGroupIngressInput, _ ...func(*ec2.Options)) (*ec2.AuthorizeSecurityGroupIngressOutput, error) {
+	f.authorizeSecurityGroupIngressCalls++
+	if f.authorizeSecurityGroupIngressErr != nil {
+		return nil, f.authorizeSecurityGroupIngressErr
+	}
+	g, ok := f.groups[*in.GroupId]
+	if !ok {
+		return nil, &fakeAWSError{code: "InvalidGroup.NotFound", fault: smithy.FaultClient}
+	}
+	for _, perm := range in.IpPermissions {
+		for _, pair := range perm.UserIdGroupPairs {
+			for _, existing := range g.ingress {
+				if existing.sourceGroupID == *pair.GroupId && existing.fromPort == *perm.FromPort && existing.toPort == *perm.ToPort {
+					return nil, &fakeAWSError{code: "InvalidPermission.Duplicate", fault: smithy.FaultClient}
+				}
+			}
+			g.ingress = append(g.ingress, fakeIngressRule{sourceGroupID: *pair.GroupId, fromPort: *perm.FromPort, toPort: *perm.ToPort})
+		}
+	}
+	return &ec2.AuthorizeSecurityGroupIngressOutput{}, nil
+}
+
+func (f *fakeEC2) RevokeSecurityGroupIngress(_ context.Context, in *ec2.RevokeSecurityGroupIngressInput, _ ...func(*ec2.Options)) (*ec2.RevokeSecurityGroupIngressOutput, error) {
+	if f.revokeSecurityGroupIngressErr != nil {
+		return nil, f.revokeSecurityGroupIngressErr
+	}
+	g, ok := f.groups[*in.GroupId]
+	if !ok {
+		return nil, &fakeAWSError{code: "InvalidGroup.NotFound", fault: smithy.FaultClient}
+	}
+	for _, perm := range in.IpPermissions {
+		for _, pair := range perm.UserIdGroupPairs {
+			filtered := g.ingress[:0]
+			for _, existing := range g.ingress {
+				if existing.sourceGroupID != *pair.GroupId {
+					filtered = append(filtered, existing)
+				}
+			}
+			g.ingress = filtered
+		}
+	}
+	return &ec2.RevokeSecurityGroupIngressOutput{}, nil
+}
+
+func (f *fakeEC2) DeleteSecurityGroup(_ context.Context, in *ec2.DeleteSecurityGroupInput, _ ...func(*ec2.Options)) (*ec2.DeleteSecurityGroupOutput, error) {
+	delete(f.groups, *in.GroupId)
+	return &ec2.DeleteSecurityGroupOutput{}, nil
+}
+
+func (f *fakeEC2) CreateTags(context.Context, *ec2.CreateTagsInput, ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error) {
+	panic("not used - this package tags security groups atomically at creation via TagSpecifications")
+}
+
+func (f *fakeEC2) DescribeTags(context.Context, *ec2.DescribeTagsInput, ...func(*ec2.Options)) (*ec2.DescribeTagsOutput, error) {
+	panic("not used - this package tags security groups atomically at creation via TagSpecifications")
+}

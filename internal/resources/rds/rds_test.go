@@ -68,7 +68,7 @@ func baseInstanceSpec(name string) depsv1alpha1.RDSInstanceSpec {
 
 func TestEnsure_NilSpec_ReturnsLedgerUnchanged(t *testing.T) {
 	client := newFakeRDS()
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", nil, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -81,9 +81,10 @@ func TestEnsure_CreatesNewInstance(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
 
-	ledger, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -110,9 +111,10 @@ func TestEnsure_StillCreating_IsRetryable(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
 
-	ledger, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
@@ -120,7 +122,7 @@ func TestEnsure_StillCreating_IsRetryable(t *testing.T) {
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	client.instances[instanceID].status = "creating"
 
-	_, err = Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+	_, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error while the instance is still creating")
 	}
@@ -139,9 +141,10 @@ func TestEnsure_UnrecognizedStatus_DefaultsToRetryable(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
 
-	ledger, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
@@ -149,7 +152,7 @@ func TestEnsure_UnrecognizedStatus_DefaultsToRetryable(t *testing.T) {
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	client.instances[instanceID].status = "storage-optimization"
 
-	_, err = Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+	_, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil)
 	if err == nil {
 		t.Fatal("expected an unrecognized status to be treated as not-yet-usable, not silently accepted")
 	}
@@ -163,9 +166,10 @@ func TestEnsure_FailedStatus_IsHardError(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
 
-	ledger, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
@@ -173,7 +177,7 @@ func TestEnsure_FailedStatus_IsHardError(t *testing.T) {
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	client.instances[instanceID].status = "failed"
 
-	_, err = Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+	_, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when the instance status is failed")
 	}
@@ -187,12 +191,13 @@ func TestEnsure_BecomingAvailable_EmitsAvailableEvent(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
 
 	var events []string
 	recordEvent := func(eventType, reason, message string) { events = append(events, reason) }
 
-	ledger, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, recordEvent)
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, recordEvent)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
@@ -201,7 +206,7 @@ func TestEnsure_BecomingAvailable_EmitsAvailableEvent(t *testing.T) {
 	}
 
 	events = nil
-	_, err = Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, ledger, nil, recordEvent)
+	_, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, recordEvent)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -214,15 +219,16 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
 
-	ledger, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 	firstCreatedAt := status.FindManagedResource(ledger, resourceType, "orders-db").CreatedAt
 
-	ledger, err = Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+	ledger, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -239,6 +245,7 @@ func TestEnsure_RefusesUnownedExistingInstance(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	client.instances[instanceID] = &fakeInstance{
 		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "available",
@@ -246,7 +253,7 @@ func TestEnsure_RefusesUnownedExistingInstance(t *testing.T) {
 	}
 
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when a same-named instance exists without our ownership tag")
 	}
@@ -256,6 +263,7 @@ func TestEnsure_AdoptsUntaggedInstance(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	client.instances[instanceID] = &fakeInstance{
 		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "available",
@@ -263,7 +271,7 @@ func TestEnsure_AdoptsUntaggedInstance(t *testing.T) {
 
 	spec := baseInstanceSpec("orders-db")
 	spec.Adopt = true
-	ledger, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -279,6 +287,7 @@ func TestEnsure_RefusesAdoptingInstanceOwnedByDifferentCR(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	client.instances[instanceID] = &fakeInstance{
 		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "available",
@@ -290,7 +299,7 @@ func TestEnsure_RefusesAdoptingInstanceOwnedByDifferentCR(t *testing.T) {
 
 	spec := baseInstanceSpec("orders-db")
 	spec.Adopt = true
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to never override an instance already owned by a different AppDependencies CR")
 	}
@@ -304,6 +313,7 @@ func TestEnsure_RefusesAdoptingInstanceWithStaleUIDEvenWithAdoptTrue(t *testing.
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	client.instances[instanceID] = &fakeInstance{
 		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "available",
@@ -315,7 +325,7 @@ func TestEnsure_RefusesAdoptingInstanceWithStaleUIDEvenWithAdoptTrue(t *testing.
 
 	spec := baseInstanceSpec("orders-db")
 	spec.Adopt = true
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "new-uid", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "new-uid", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to never override an instance tagged with this CR's name but a stale (different) UID")
 	}
@@ -325,9 +335,10 @@ func TestEnsure_SubnetGroupNotAuthorized_IsRetryable(t *testing.T) {
 	client := newFakeRDS()
 	// No RDSSubnetGroupGrant exists at all.
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	ec2Client := newFakeEC2()
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error - no grant authorizes this namespace for this subnet group")
 	}
@@ -344,9 +355,10 @@ func TestEnsure_SubnetGroupGrantCoversDifferentNamespace_IsNotAuthorized(t *test
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "fulfillment")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error - the grant covers a different namespace")
 	}
@@ -357,11 +369,12 @@ func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 	kmsClient := kmstest.NewFakeKMSClient()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 
 	spec := baseInstanceSpec("orders-db")
 	spec.Encryption = &depsv1alpha1.EncryptionSpec{Enabled: true}
 
-	ledger, err := Ensure(context.Background(), client, kmsClient, k8sClient, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, kmsClient, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -385,13 +398,14 @@ func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 
 	spec := baseInstanceSpec("orders-db")
 	spec.Encryption = &depsv1alpha1.EncryptionSpec{
 		KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
 	}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error - the producer CR doesn't exist yet")
 	}
@@ -420,13 +434,14 @@ func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
 	}
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, grant).Build()
+	ec2Client := newFakeEC2()
 
 	spec := baseInstanceSpec("orders-db")
 	spec.Encryption = &depsv1alpha1.EncryptionSpec{
 		KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
 	}
 
-	ledger, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -446,12 +461,13 @@ func TestEnsure_ContinuesToOtherInstancesAfterOneFails(t *testing.T) {
 	// "sessions-db".
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 
 	failing := baseInstanceSpec("orders-db")
 	failing.DBSubnetGroupName = "some-unauthorized-subnet-group"
 	succeeding := baseInstanceSpec("sessions-db")
 
-	ledger, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1",
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012",
 		&depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{failing, succeeding}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error from the failing instance")
@@ -468,12 +484,13 @@ func TestEnsure_HighAvailabilityAndBackupFlowThroughToCreateCall(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 
 	spec := baseInstanceSpec("orders-db")
 	spec.HighAvailability = &depsv1alpha1.RDSHighAvailabilitySpec{Enabled: true}
 	spec.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: true}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -493,9 +510,10 @@ func TestEnsure_ClassifiesTransientAWSErrorsAsRetryable(t *testing.T) {
 	client.describeDBInstancesErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when the instance lookup fails")
 	}
@@ -512,4 +530,215 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestEnsure_CreatesNewInstance_PassesThroughAllFields(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	instance := client.instances[instanceID]
+	if instance.engine != "postgres" {
+		t.Errorf("engine = %q, want postgres", instance.engine)
+	}
+	if instance.engineVersion != "16.3" {
+		t.Errorf("engineVersion = %q, want 16.3", instance.engineVersion)
+	}
+	if instance.instanceClass != "db.t4g.micro" {
+		t.Errorf("instanceClass = %q, want db.t4g.micro", instance.instanceClass)
+	}
+	if instance.dbSubnetGroupName != "prod-private-data-tier" {
+		t.Errorf("dbSubnetGroupName = %q, want prod-private-data-tier", instance.dbSubnetGroupName)
+	}
+	if instance.masterUsername != masterUsername {
+		t.Errorf("masterUsername = %q, want %q", instance.masterUsername, masterUsername)
+	}
+	if !instance.manageMasterPassword {
+		t.Error("expected ManageMasterUserPassword to be true - the operator must never generate its own password")
+	}
+}
+
+func TestEnsure_BackupDisabled_SetsRetentionPeriodToZero(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := baseInstanceSpec("orders-db")
+	spec.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: false}
+
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	if got := client.instances[instanceID].backupRetentionPeriod; got != 0 {
+		t.Errorf("backupRetentionPeriod = %d, want 0 when backup is disabled", got)
+	}
+}
+
+func TestEnsure_NoEncryption_LeavesInstanceUnencrypted(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	if got := client.instances[instanceID].kmsKeyARN; got != "" {
+		t.Errorf("expected no KMS key when encryption isn't declared, got %q", got)
+	}
+}
+
+// TestEnsure_WithinTrustWindow_SkipsReVerification proves a reconcile
+// that finds an already-Verified, not-yet-stale ledger entry never calls
+// ListTagsForResource again - the same property every other resource
+// package's own trust-window test already proves, ported here since
+// Ensure's own trust-window branch is identical in shape to DynamoDB's.
+func TestEnsure_WithinTrustWindow_SkipsReVerification(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+
+	// First pass only creates the instance (status Creating in our
+	// ledger) - no tag check happens yet, same as real AWS, since
+	// there's nothing to verify ownership of until it's usable.
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	// Second pass finds the (fake, immediately-available) instance and
+	// the ledger entry still marked Creating, so NeedsRevalidation is
+	// true - this is the pass that actually calls ListTagsForResource
+	// and marks the entry Verified.
+	ledger, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	callsAfterVerify := client.listTagsForResourceCalls
+	if callsAfterVerify == 0 {
+		t.Fatal("expected ListTagsForResource to be called once the instance needed its first real verification")
+	}
+
+	// Third pass is now within the trust window - should skip entirely.
+	ledger, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("third Ensure() error = %v", err)
+	}
+	if client.listTagsForResourceCalls != callsAfterVerify {
+		t.Errorf("expected ListTagsForResource not to be called again within the trust window, got %d more calls", client.listTagsForResourceCalls-callsAfterVerify)
+	}
+
+	// Backdating LastVerifiedAt past the trust window should make the
+	// next reconcile re-verify for real.
+	entry := status.FindManagedResource(ledger, resourceType, "orders-db")
+	stale := metav1.NewTime(entry.LastVerifiedAt.Add(-2 * status.TrustWindow))
+	entry.LastVerifiedAt = &stale
+	status.UpsertManagedResource(&ledger, *entry)
+
+	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil); err != nil {
+		t.Fatalf("fourth Ensure() error = %v", err)
+	}
+	if client.listTagsForResourceCalls <= callsAfterVerify {
+		t.Error("expected ListTagsForResource to be called again once the trust window has expired")
+	}
+}
+
+func TestEnsure_CreateDBInstanceFails_IsClassifiedCorrectly(t *testing.T) {
+	client := newFakeRDS()
+	client.createDBInstanceErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error when CreateDBInstance fails")
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable ReconcileError for a throttling error, got %v", err)
+	}
+}
+
+func TestEnsure_AddTagsToResourceFails_DuringAdoption(t *testing.T) {
+	client := newFakeRDS()
+	client.addTagsToResourceErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID] = &fakeInstance{
+		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "available",
+	}
+
+	spec := baseInstanceSpec("orders-db")
+	spec.Adopt = true
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error when AddTagsToResource fails during adoption")
+	}
+}
+
+func TestEnsure_ListTagsForResourceFails(t *testing.T) {
+	client := newFakeRDS()
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID] = &fakeInstance{
+		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "available",
+		tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-1",
+		},
+	}
+	client.listTagsForResourceErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error when ListTagsForResource fails - ownership can't be re-verified without it")
+	}
+}
+
+func TestEnsure_AdoptingInstance_EmitsAdoptedEvent(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID] = &fakeInstance{
+		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "available",
+	}
+
+	var events []string
+	recordEvent := func(eventType, reason, message string) { events = append(events, reason) }
+
+	spec := baseInstanceSpec("orders-db")
+	spec.Adopt = true
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, recordEvent)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if !contains(events, "InstanceAdopted") {
+		t.Errorf("expected an InstanceAdopted event, got %v", events)
+	}
 }
