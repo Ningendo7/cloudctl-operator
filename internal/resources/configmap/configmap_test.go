@@ -78,7 +78,7 @@ func TestEnsure_PopulatesOwnedResourceKeys(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -123,7 +123,7 @@ func TestEnsure_MirrorsAuthorizedConsumedResource(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, consumer); err != nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, consumer); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestEnsure_OmitsUnauthorizedConsumedResource(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, consumer); err != nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, consumer); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -187,7 +187,7 @@ func TestEnsure_SetsOwnerReferenceForNativeGC(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -211,14 +211,14 @@ func TestEnsure_UpdatesExistingConfigMapOnDataChange(t *testing.T) {
 			},
 		},
 	}
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
 	// Simulate the queue having been recreated with a new logical ARN
 	// (contrived, but exercises the update path deterministically).
 	cr.Status.ManagedResources[0].ARN = "arn:aws:sqs:us-east-1:123456789012:team-a-checkout-service-orders-v2"
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure (update): %v", err)
 	}
 
@@ -243,7 +243,7 @@ func TestEnsure_SanitizesKeysForEnvVarCompatibility(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -266,7 +266,7 @@ func TestEnsure_DeletesConfigMapWhenNothingRemainsToReport(t *testing.T) {
 			},
 		},
 	}
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -274,7 +274,7 @@ func TestEnsure_DeletesConfigMapWhenNothingRemainsToReport(t *testing.T) {
 	// would leave things once the queue itself is actually gone.
 	cr.Spec.SQS = nil
 	cr.Status.ManagedResources = nil
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure (now empty): %v", err)
 	}
 
@@ -308,7 +308,7 @@ func TestEnsure_PreExistingForeignConfigMap_Refused(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err == nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err == nil {
 		t.Fatal("expected Ensure to refuse overwriting a ConfigMap it doesn't own")
 	}
 
@@ -333,7 +333,7 @@ func TestEnsure_PreExistingForeignConfigMap_EmptyData_NotDeleted(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
 	}
 
-	if err := Ensure(context.Background(), c, testRegion, testAccountID, cr); err == nil {
+	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err == nil {
 		t.Fatal("expected Ensure to refuse deleting a ConfigMap it doesn't own")
 	}
 

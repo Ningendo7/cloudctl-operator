@@ -425,6 +425,46 @@ func TestEnsure_RejectsReplicationAsNotYetSupported(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected replication to be explicitly rejected as unsupported")
 	}
+	if !errors.Is(err, ErrReplicationNotSupported) {
+		t.Errorf("expected errors.Is(err, ErrReplicationNotSupported), got %v", err)
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if errors.As(err, &reconcileErr) {
+		t.Errorf("expected a hard, non-retryable error - retrying forever on a feature that can never succeed would look indistinguishable from a slow-but-working reconcile, got a ReconcileError with Retryable=%v", reconcileErr.Retryable)
+	}
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	if _, created := client.buckets[bucket]; created {
+		t.Error("expected no CreateBucket call for a replication-enabled bucket - it should fail before touching AWS at all")
+	}
+}
+
+func TestEnsure_ReplicationRequested_DoesNotBlockOtherBuckets(t *testing.T) {
+	client := newFakeS3()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Replication: &depsv1alpha1.S3ReplicationSpec{Enabled: true, Region: "us-west-2"}},
+		{Name: "invoices"},
+	}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error from the replication-enabled bucket")
+	}
+	if status.FindManagedResource(ledger, resourceType, "invoices") == nil {
+		t.Error("expected the unaffected bucket to still be created despite the other one's unsupported replication request")
+	}
+}
+
+func TestEnsure_ReplicationDisabled_ProceedsNormally(t *testing.T) {
+	client := newFakeS3()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Replication: &depsv1alpha1.S3ReplicationSpec{Enabled: false}},
+	}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if status.FindManagedResource(ledger, resourceType, "receipts") == nil {
+		t.Error("expected the bucket to be created normally when replication is declared but disabled")
+	}
 }
 
 func TestEnsure_EnablesVersioningWhenBackupEnabled(t *testing.T) {

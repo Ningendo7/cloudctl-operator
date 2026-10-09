@@ -14,24 +14,39 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+// Package watches holds this controller's handler.MapFunc implementations
+// - the half of "what triggers a reconcile" that decides which object(s)
+// to reconcile in response to a secondary watched object's event, as
+// opposed to the predicates package next to it, which decides whether an
+// event is let through at all. Kept separate because controller-runtime
+// itself treats the two as distinct, independently-composed pieces of a
+// Watches() call (WithPredicates vs EnqueueRequestsFromMapFunc) - merging
+// them into one package would blur that distinction for no benefit. Split
+// one file per watched type, same as every resource package in this
+// project splits by concern rather than collecting unrelated logic into
+// one file just because it's short today.
+package watches
 
 import (
 	"context"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 )
 
-// mapProducerToConsumers maps a change on one AppDependencies CR (the
+// ProducerToConsumers maps a change on one AppDependencies CR (the
 // "producer" side - its sharedWith grants, or the resources it owns at
 // all) to a reconcile request for every OTHER AppDependencies CR that
 // currently consumes from it. Without this, revoking (or granting) a
 // sharedWith entry only takes effect on the consumer's next periodic
 // drift-detection reconcile - up to DriftDetectionInterval later - instead
-// of immediately, which matters for a security-relevant IAM grant.
+// of immediately, which matters for a security-relevant IAM or network
+// grant. reader only ever needs List here, never Get or a write method -
+// client.Reader says so directly rather than accepting the wider
+// client.Client than this ever uses.
 //
 // Deliberately doesn't try to detect exactly what changed (sharedWith vs.
 // something unrelated) - a MapFunc only sees the current object, not old
@@ -47,27 +62,29 @@ import (
 // fine at the scale this operator targets (one CR per app team), but
 // doesn't scale indefinitely; revisit with a client.IndexField on a
 // computed "consumes" key if this ever shows up as a real cost.
-func (r *AppDependenciesReconciler) mapProducerToConsumers(ctx context.Context, producer client.Object) []reconcile.Request {
-	producerNS, producerName := producer.GetNamespace(), producer.GetName()
+func ProducerToConsumers(reader client.Reader) handler.MapFunc {
+	return func(ctx context.Context, producer client.Object) []reconcile.Request {
+		producerNS, producerName := producer.GetNamespace(), producer.GetName()
 
-	var all depsv1alpha1.AppDependenciesList
-	if err := r.List(ctx, &all); err != nil {
-		return nil
-	}
+		var all depsv1alpha1.AppDependenciesList
+		if err := reader.List(ctx, &all); err != nil {
+			return nil
+		}
 
-	var requests []reconcile.Request
-	for i := range all.Items {
-		consumer := &all.Items[i]
-		if consumer.Namespace == producerNS && consumer.Name == producerName {
-			continue // never need to map a CR to itself
+		var requests []reconcile.Request
+		for i := range all.Items {
+			consumer := &all.Items[i]
+			if consumer.Namespace == producerNS && consumer.Name == producerName {
+				continue // never need to map a CR to itself
+			}
+			if consumesFrom(consumer, producerNS, producerName) {
+				requests = append(requests, reconcile.Request{
+					NamespacedName: client.ObjectKeyFromObject(consumer),
+				})
+			}
 		}
-		if consumesFrom(consumer, producerNS, producerName) {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: client.ObjectKeyFromObject(consumer),
-			})
-		}
+		return requests
 	}
-	return requests
 }
 
 // consumesFrom reports whether consumer has any consumes entry, in any
@@ -91,6 +108,9 @@ func consumesFrom(consumer *depsv1alpha1.AppDependencies, producerNS, producerNa
 		return true
 	}
 	if consumer.Spec.S3 != nil && refsInclude(consumer.Spec.S3.Consumes) {
+		return true
+	}
+	if consumer.Spec.RDS != nil && refsInclude(consumer.Spec.RDS.Consumes) {
 		return true
 	}
 	return false

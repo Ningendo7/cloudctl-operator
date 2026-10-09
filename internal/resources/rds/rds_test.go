@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/aws/smithy-go"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -36,6 +37,9 @@ import (
 func newScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1.AddToScheme: %v", err)
+	}
 	if err := depsv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
@@ -104,6 +108,97 @@ func TestEnsure_CreatesNewInstance(t *testing.T) {
 	}
 	if !cloudctlaws.IsOwnedBy(instance.tags, "default", "checkout-service", "uid-1") {
 		t.Error("expected the instance to be tagged as owned by this CR at creation")
+	}
+}
+
+// TestEnsure_NeverSetsStaticMasterPassword guards the design invariant
+// that AWS Secrets Manager - via RDS's own ManageMasterUserPassword
+// feature - is the sole, permanent source of truth for this instance's
+// credentials. This operator must never supply a literal
+// MasterUserPassword of its own; doing so would make it a second,
+// competing authority for credentials AWS is supposed to own and rotate
+// entirely by itself.
+func TestEnsure_NeverSetsStaticMasterPassword(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+
+	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	in := client.lastCreateDBInstanceInput
+	if in == nil {
+		t.Fatal("expected CreateDBInstance to have been called")
+	}
+	if in.MasterUserPassword != nil {
+		t.Errorf("expected MasterUserPassword to never be set, got %q - Secrets Manager must be the only source of truth for credentials", *in.MasterUserPassword)
+	}
+	if in.ManageMasterUserPassword == nil || !*in.ManageMasterUserPassword {
+		t.Error("expected ManageMasterUserPassword=true so AWS itself owns provisioning and rotating the credentials")
+	}
+}
+
+func TestEnsure_ReplicationRequested_ReturnsHardUnsupportedError(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+	spec.Resources[0].Replication = &depsv1alpha1.RDSReplicationSpec{Enabled: true, Region: "us-west-2"}
+
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error for a replication-enabled instance")
+	}
+	if !errors.Is(err, ErrReplicationNotSupported) {
+		t.Errorf("expected errors.Is(err, ErrReplicationNotSupported), got %v", err)
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if errors.As(err, &reconcileErr) {
+		t.Errorf("expected a hard, non-retryable error, got a ReconcileError with Retryable=%v", reconcileErr.Retryable)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	if _, created := client.instances[instanceID]; created {
+		t.Error("expected no CreateDBInstance call for a replication-enabled instance - it should fail before touching AWS at all")
+	}
+}
+
+func TestEnsure_ReplicationRequested_DoesNotBlockOtherInstances(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	replicated := baseInstanceSpec("orders-db")
+	replicated.Replication = &depsv1alpha1.RDSReplicationSpec{Enabled: true, Region: "us-west-2"}
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{replicated, baseInstanceSpec("invoices-db")}}
+
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error from the replication-enabled instance")
+	}
+	if status.FindManagedResource(ledger, resourceType, "invoices-db") == nil {
+		t.Error("expected the unaffected instance to still be created despite the other one's unsupported replication request")
+	}
+}
+
+func TestEnsure_ReplicationDisabled_ProceedsNormally(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := baseInstanceSpec("orders-db")
+	spec.Replication = &depsv1alpha1.RDSReplicationSpec{Enabled: false}
+
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012",
+		&depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if status.FindManagedResource(ledger, resourceType, "orders-db") == nil {
+		t.Error("expected the instance to be created normally when replication is declared but disabled")
 	}
 }
 

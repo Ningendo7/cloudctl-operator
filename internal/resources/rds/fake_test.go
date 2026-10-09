@@ -25,6 +25,8 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/rds/types"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/smithy-go"
 )
 
@@ -60,26 +62,53 @@ type fakeInstance struct {
 	kmsKeyARN             string
 	masterUsername        string
 	manageMasterPassword  bool
+	endpointAddress       string
+	endpointPort          int32
+	masterUserSecretARN   string
+}
+
+type fakeSnapshot struct {
+	id, arn, instanceID, status string
 }
 
 type fakeRDS struct {
 	instances map[string]*fakeInstance // keyed by DBInstanceIdentifier
+	snapshots map[string]*fakeSnapshot // keyed by DBSnapshotIdentifier
 
 	createDBInstanceErr       error
 	describeDBInstancesErr    error
 	listTagsForResourceErr    error
 	addTagsToResourceErr      error
+	removeTagsFromResourceErr error
 	describeDBSubnetGroupsErr error
+	createDBSnapshotErr       error
+	describeDBSnapshotsErr    error
 
 	// listTagsForResourceCalls counts real calls so trust-window tests can
 	// assert a within-window reconcile skips re-verifying ownership tags
 	// entirely, the same property every other resource package's own
 	// trust-window test already proves.
 	listTagsForResourceCalls int
+	createDBSnapshotCalls    int
+
+	// lastCreateDBInstanceInput captures the raw input to the most recent
+	// CreateDBInstance call, so a test can assert directly on what this
+	// package actually sent AWS - in particular, that it never sets a
+	// static MasterUserPassword, which would make this operator a
+	// competing source of truth for credentials instead of Secrets
+	// Manager.
+	lastCreateDBInstanceInput *rds.CreateDBInstanceInput
+
+	// snapshotStatus overrides a newly created snapshot's status so cleanup
+	// tests can simulate the still-creating/available/failed progression
+	// AWS itself goes through; defaults to "available" like fakeInstance's
+	// own create behavior, a deliberate test simplification over the real
+	// (always async) API.
+	snapshotStatus string
 }
 
 func newFakeRDS() *fakeRDS {
-	return &fakeRDS{instances: map[string]*fakeInstance{}}
+	return &fakeRDS{instances: map[string]*fakeInstance{}, snapshots: map[string]*fakeSnapshot{}}
 }
 
 func (f *fakeRDS) findByARN(arn string) *fakeInstance {
@@ -92,6 +121,7 @@ func (f *fakeRDS) findByARN(arn string) *fakeInstance {
 }
 
 func (f *fakeRDS) CreateDBInstance(_ context.Context, in *rds.CreateDBInstanceInput, _ ...func(*rds.Options)) (*rds.CreateDBInstanceOutput, error) {
+	f.lastCreateDBInstanceInput = in
 	if f.createDBInstanceErr != nil {
 		return nil, f.createDBInstanceErr
 	}
@@ -153,6 +183,14 @@ func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInsta
 	if i.kmsKeyARN != "" {
 		kmsKeyID = &i.kmsKeyARN
 	}
+	var endpoint *types.Endpoint
+	if i.endpointAddress != "" {
+		endpoint = &types.Endpoint{Address: &i.endpointAddress, Port: &i.endpointPort}
+	}
+	var masterUserSecret *types.MasterUserSecret
+	if i.masterUserSecretARN != "" {
+		masterUserSecret = &types.MasterUserSecret{SecretArn: &i.masterUserSecretARN}
+	}
 	return &rds.DescribeDBInstancesOutput{
 		DBInstances: []types.DBInstance{
 			{
@@ -166,6 +204,8 @@ func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInsta
 				MultiAZ:               &i.multiAZ,
 				BackupRetentionPeriod: &i.backupRetentionPeriod,
 				KmsKeyId:              kmsKeyID,
+				Endpoint:              endpoint,
+				MasterUserSecret:      masterUserSecret,
 				StorageEncrypted:      boolPtr(i.kmsKeyARN != ""),
 			},
 		},
@@ -199,6 +239,70 @@ func (f *fakeRDS) AddTagsToResource(_ context.Context, in *rds.AddTagsToResource
 	return &rds.AddTagsToResourceOutput{}, nil
 }
 
+func (f *fakeRDS) RemoveTagsFromResource(_ context.Context, in *rds.RemoveTagsFromResourceInput, _ ...func(*rds.Options)) (*rds.RemoveTagsFromResourceOutput, error) {
+	if f.removeTagsFromResourceErr != nil {
+		return nil, f.removeTagsFromResourceErr
+	}
+	i := f.findByARN(*in.ResourceName)
+	if i == nil {
+		return nil, &types.DBInstanceNotFoundFault{}
+	}
+	for _, k := range in.TagKeys {
+		delete(i.tags, k)
+	}
+	return &rds.RemoveTagsFromResourceOutput{}, nil
+}
+
+func (f *fakeRDS) CreateDBSnapshot(_ context.Context, in *rds.CreateDBSnapshotInput, _ ...func(*rds.Options)) (*rds.CreateDBSnapshotOutput, error) {
+	f.createDBSnapshotCalls++
+	if f.createDBSnapshotErr != nil {
+		return nil, f.createDBSnapshotErr
+	}
+	id := *in.DBSnapshotIdentifier
+	if _, exists := f.snapshots[id]; exists {
+		return nil, &types.DBSnapshotAlreadyExistsFault{}
+	}
+	snapStatus := f.snapshotStatus
+	if snapStatus == "" {
+		snapStatus = "available"
+	}
+	arn := "arn:aws:rds:us-east-1:123456789012:snapshot:" + id
+	snap := &fakeSnapshot{id: id, arn: arn, instanceID: *in.DBInstanceIdentifier, status: snapStatus}
+	f.snapshots[id] = snap
+	return &rds.CreateDBSnapshotOutput{
+		DBSnapshot: &types.DBSnapshot{DBSnapshotIdentifier: &id, DBSnapshotArn: &arn, Status: &snap.status},
+	}, nil
+}
+
+func (f *fakeRDS) DescribeDBSnapshots(_ context.Context, in *rds.DescribeDBSnapshotsInput, _ ...func(*rds.Options)) (*rds.DescribeDBSnapshotsOutput, error) {
+	if f.describeDBSnapshotsErr != nil {
+		return nil, f.describeDBSnapshotsErr
+	}
+	if in.DBSnapshotIdentifier == nil {
+		return &rds.DescribeDBSnapshotsOutput{}, nil
+	}
+	s, ok := f.snapshots[*in.DBSnapshotIdentifier]
+	if !ok {
+		// Also accept lookup by ARN - cleanup.go stores the snapshot's
+		// identifier as the ledger ARN and passes it straight back in as
+		// DBSnapshotIdentifier, so this only ever needs to match by ID in
+		// practice, but staying lenient here costs nothing.
+		for _, candidate := range f.snapshots {
+			if candidate.arn == *in.DBSnapshotIdentifier {
+				s = candidate
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		return &rds.DescribeDBSnapshotsOutput{}, nil
+	}
+	return &rds.DescribeDBSnapshotsOutput{
+		DBSnapshots: []types.DBSnapshot{{DBSnapshotIdentifier: &s.id, DBInstanceIdentifier: &s.instanceID, DBSnapshotArn: &s.arn, Status: &s.status}},
+	}, nil
+}
+
 func (f *fakeRDS) DescribeDBSubnetGroups(_ context.Context, in *rds.DescribeDBSubnetGroupsInput, _ ...func(*rds.Options)) (*rds.DescribeDBSubnetGroupsOutput, error) {
 	if f.describeDBSubnetGroupsErr != nil {
 		return nil, f.describeDBSubnetGroupsErr
@@ -209,6 +313,16 @@ func (f *fakeRDS) DescribeDBSubnetGroups(_ context.Context, in *rds.DescribeDBSu
 	return &rds.DescribeDBSubnetGroupsOutput{
 		DBSubnetGroups: []types.DBSubnetGroup{{DBSubnetGroupName: in.DBSubnetGroupName, VpcId: &vpcID}},
 	}, nil
+}
+
+// setSnapshotStatus lets a cleanup test simulate a snapshot's async
+// progression (creating -> available/failed) between two Cleanup calls,
+// mirroring how fakeInstance's own status field is mutated directly in
+// rds_test.go rather than through any client call the real API lacks too.
+func (f *fakeRDS) setSnapshotStatus(id, status string) {
+	if s, ok := f.snapshots[id]; ok {
+		s.status = status
+	}
 }
 
 func strPtr(s string) *string { return &s }
@@ -354,4 +468,29 @@ func (f *fakeEC2) CreateTags(context.Context, *ec2.CreateTagsInput, ...func(*ec2
 
 func (f *fakeEC2) DescribeTags(context.Context, *ec2.DescribeTagsInput, ...func(*ec2.Options)) (*ec2.DescribeTagsOutput, error) {
 	panic("not used - this package tags security groups atomically at creation via TagSpecifications")
+}
+
+// fakeSecretsManager is a minimal in-memory stand-in for the real Secrets
+// Manager client, keyed by secret ARN since that's the only identifier
+// this package ever looks a secret up by.
+type fakeSecretsManager struct {
+	secrets             map[string]string // ARN -> raw SecretString JSON
+	getSecretValueErr   error
+	getSecretValueCalls int
+}
+
+func newFakeSecretsManager() *fakeSecretsManager {
+	return &fakeSecretsManager{secrets: map[string]string{}}
+}
+
+func (f *fakeSecretsManager) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
+	f.getSecretValueCalls++
+	if f.getSecretValueErr != nil {
+		return nil, f.getSecretValueErr
+	}
+	raw, ok := f.secrets[*in.SecretId]
+	if !ok {
+		return nil, &smtypes.ResourceNotFoundException{}
+	}
+	return &secretsmanager.GetSecretValueOutput{SecretString: &raw}, nil
 }

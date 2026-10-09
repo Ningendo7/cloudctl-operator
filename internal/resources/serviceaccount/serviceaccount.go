@@ -53,6 +53,32 @@ const RoleARNAnnotation = "eks.amazonaws.com/role-arn"
 // provide.
 const fieldOwner = client.FieldOwner("cloudctl-operator-serviceaccount")
 
+// NetworkIdentityLabelKey marks a ServiceAccount as selected by this
+// operator's own SecurityGroupPolicy objects (see
+// internal/resources/rds) - its value is the ServiceAccount's own name,
+// unique enough within one namespace to let a SecurityGroupPolicy target
+// exactly one ServiceAccount even when several coexist in it.
+const NetworkIdentityLabelKey = "cloudctl.io/network-identity"
+
+// networkIdentityFieldOwner is deliberately separate from fieldOwner
+// above - SSA lets multiple field managers jointly own different fields
+// on the same object without conflict, so this claim never needs to
+// coordinate with (or risk clobbering) whatever Ensure already applied
+// for the roleARN annotation.
+const networkIdentityFieldOwner = client.FieldOwner("cloudctl-operator-network-identity")
+
+// EnsureNetworkIdentityLabel merges NetworkIdentityLabelKey onto the
+// target ServiceAccount, so EKS's Security Groups for Pods feature can
+// select exactly the pods running as it. Safe to call regardless of
+// whether this ServiceAccount is one Ensure above created and owns, or
+// one it only ever merges into - the label claim is independent either
+// way.
+func EnsureNetworkIdentityLabel(ctx context.Context, k8sClient client.Client, namespace, name string) error {
+	apply := applycorev1.ServiceAccount(name, namespace).
+		WithLabels(map[string]string{NetworkIdentityLabelKey: name})
+	return k8sClient.Apply(ctx, apply, networkIdentityFieldOwner, client.ForceOwnership)
+}
+
 // Ensure attaches roleARN to the ServiceAccount this CR's workload runs
 // as: spec.ServiceAccountName if set, otherwise a CR-named ServiceAccount
 // this operator owns. Returns the current status value unchanged if

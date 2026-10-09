@@ -41,7 +41,10 @@ type rdsAPI interface {
 	DescribeDBInstances(ctx context.Context, in *rds.DescribeDBInstancesInput, optFns ...func(*rds.Options)) (*rds.DescribeDBInstancesOutput, error)
 	ListTagsForResource(ctx context.Context, in *rds.ListTagsForResourceInput, optFns ...func(*rds.Options)) (*rds.ListTagsForResourceOutput, error)
 	AddTagsToResource(ctx context.Context, in *rds.AddTagsToResourceInput, optFns ...func(*rds.Options)) (*rds.AddTagsToResourceOutput, error)
+	RemoveTagsFromResource(ctx context.Context, in *rds.RemoveTagsFromResourceInput, optFns ...func(*rds.Options)) (*rds.RemoveTagsFromResourceOutput, error)
 	DescribeDBSubnetGroups(ctx context.Context, in *rds.DescribeDBSubnetGroupsInput, optFns ...func(*rds.Options)) (*rds.DescribeDBSubnetGroupsOutput, error)
+	CreateDBSnapshot(ctx context.Context, in *rds.CreateDBSnapshotInput, optFns ...func(*rds.Options)) (*rds.CreateDBSnapshotOutput, error)
+	DescribeDBSnapshots(ctx context.Context, in *rds.DescribeDBSnapshotsInput, optFns ...func(*rds.Options)) (*rds.DescribeDBSnapshotsOutput, error)
 }
 
 const resourceType = "rds"
@@ -55,6 +58,21 @@ const masterUsername = "cloudctl_admin"
 // defaultBackupRetentionDays is AWS's own long-standing default retention
 // window for automated backups, applied when backup.enabled is true.
 const defaultBackupRetentionDays = int32(7)
+
+// ErrReplicationNotSupported is returned for any instance requesting
+// replication. A cross-region read replica needs a client calling the RDS
+// API in the destination region (CreateDBInstanceReadReplica has to run
+// against that region's own endpoint, unlike S3's PutBucketReplication,
+// which stays a same-region call referencing the destination bucket only
+// by ARN) - this operator's Clients holds exactly one region for the
+// whole controller process, the same single-region assumption that
+// already blocks S3's own cross-region replication and DynamoDB Global
+// Tables. Left unimplemented rather than half-built until there's a real
+// design for multi-region client support, and surfaced as a hard,
+// non-retryable error rather than silently ignored - retrying forever on
+// a feature that can never succeed would look indistinguishable from a
+// slow-but-working reconcile.
+var ErrReplicationNotSupported = errors.New("replication is not implemented yet - it needs cross-region awsClient support this operator doesn't have")
 
 type instanceOptions struct {
 	deletionPolicy    depsv1alpha1.DeletionPolicy
@@ -94,6 +112,13 @@ func Ensure(
 
 	var firstErr error
 	for _, r := range spec.Resources {
+		if r.Replication != nil && r.Replication.Enabled {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("instance %q: %w", r.Name, ErrReplicationNotSupported)
+			}
+			continue
+		}
+
 		authorized, authErr := isSubnetGroupAuthorized(ctx, k8sClient, namespace, r.DBSubnetGroupName)
 		if authErr != nil {
 			if firstErr == nil {

@@ -34,6 +34,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/controller/predicates"
+	"github.com/Ningendo7/cloudctl-operator/internal/controller/watches"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/serviceaccount"
 )
 
@@ -64,8 +65,10 @@ const defaultMaxConcurrentReconciles = 5
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies/finalizers,verbs=update
+// +kubebuilder:rbac:groups=deps.cloudctl.io,resources=rdssubnetgroupgrants,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=vpcresources.k8s.aws,resources=securitygrouppolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -178,8 +181,17 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// periodic drift-detection interval. See mapProducerToConsumers.
 		Watches(
 			&depsv1alpha1.AppDependencies{},
-			handler.EnqueueRequestsFromMapFunc(r.mapProducerToConsumers),
+			handler.EnqueueRequestsFromMapFunc(watches.ProducerToConsumers(r.Client)),
 			builder.WithPredicates(predicates.AppDependenciesPredicate()),
+		).
+		// A grant covering a CR's dbSubnetGroupName can be created, edited,
+		// or revoked well after that CR first reconciled - this immediately
+		// re-reconciles whichever CRs it affects instead of leaving a
+		// SubnetGroupNotAuthorized CR blocked until the next periodic
+		// drift-detection pass. See watches.SubnetGroupGrantToAffectedCRs.
+		Watches(
+			&depsv1alpha1.RDSSubnetGroupGrant{},
+			handler.EnqueueRequestsFromMapFunc(watches.SubnetGroupGrantToAffectedCRs(r.Client)),
 		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrent}).
 		Named("appdependencies").

@@ -30,6 +30,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/configmap"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -95,6 +96,7 @@ const (
 	resourceTypeSNS      = "sns"
 	resourceTypeDynamoDB = "dynamodb"
 	resourceTypeS3       = "s3"
+	resourceTypeRDS      = "rds"
 
 	conditionTypeS3Ready = "S3Ready"
 )
@@ -103,7 +105,7 @@ const (
 // produce, used to compute the aggregate Ready condition. Kept in sync
 // with allSections above — each entry here should have a matching
 // section constructor registered there.
-var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", conditionTypeS3Ready, "KMSReady", "AlarmsReady", "IAMReady", "ConnectionInfoReady"}
+var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", conditionTypeS3Ready, "RDSReady", "KMSReady", "AlarmsReady", "IAMReady", "ConnectionInfoReady"}
 
 type section struct {
 	name      string
@@ -137,6 +139,7 @@ func allSections(r *AppDependenciesReconciler, original *depsv1alpha1.AppDepende
 		snsSection(r, original),
 		dynamodbSection(r, original),
 		s3Section(r, original),
+		rdsSection(r, original),
 		kmsSection(r, original),
 		alarmsSection(r),
 		iamSection(r),
@@ -164,8 +167,14 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 	// Runs last, after every section has written this pass's ARNs into the
 	// ledger: the ConfigMap it generates is only as fresh as that ledger
 	// data, so anything reconciled earlier in this same pass is already
-	// reflected in it, not lagging a full reconcile behind.
-	connErr := configmap.Ensure(ctx, r.Client, r.AWSClients.Region, r.AWSClients.AccountID, cr)
+	// reflected in it, not lagging a full reconcile behind. The mirrored
+	// RDS credentials Secret is the same kind of connection-info delivery
+	// (just the one piece of it that's secret, not identifiers), so it
+	// shares this same condition and timing rather than getting its own.
+	connErr := configmap.Ensure(ctx, r.Client, r.AWSClients.RDS, r.AWSClients.Region, r.AWSClients.AccountID, cr)
+	if connErr == nil {
+		connErr = rds.EnsureCredentialsSecret(ctx, r.AWSClients.SecretsManager, r.AWSClients.RDS, r.Client, cr)
+	}
 	setSectionCondition(ctx, cr, "ConnectionInfoReady", connErr, eventRecorderFor(r, cr))
 	if firstErr == nil {
 		firstErr = connErr
