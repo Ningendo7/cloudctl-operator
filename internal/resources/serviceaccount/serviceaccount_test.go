@@ -356,16 +356,14 @@ func TestEnsure_GetErrorOtherThanNotFound_IsReturned(t *testing.T) {
 	}
 }
 
-// TestEnsure_DefaultName_SecondReconcile_KeepsOwnerReference guards against
-// a real bug: the owner reference was only ever attached to the apply when
-// the ServiceAccount didn't exist yet, which meant a CR's own *second*
-// reconcile (exists=true by then) omitted it from that call's apply -
-// server-side apply's rule for a field a manager previously set and later
-// stops requesting is to drop it, since no other manager claims it either.
-// Confirmed against a real cluster: Owns(&corev1.ServiceAccount{})'s own
-// Create-event-triggered second reconcile stripped the owner reference
-// moments after the first reconcile set it, which meant no later
-// Update/Delete event could ever be mapped back to the owning CR again.
+// TestEnsure_DefaultName_SecondReconcile_KeepsOwnerReference guards an
+// invariant server-side apply makes easy to violate by omission: a field
+// manager that stops requesting a field in a later apply call has that
+// field dropped, since no other manager claims it either. The owner
+// reference must therefore be included in every apply call for this
+// object, not just the one made when it doesn't exist yet - omitting it
+// on a later call strips it, and once stripped, no later Update/Delete
+// event on the ServiceAccount can be mapped back to the owning CR again.
 func TestEnsure_DefaultName_SecondReconcile_KeepsOwnerReference(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	cr := newCR("ns", "checkout", "")

@@ -23,11 +23,19 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
+
+func noConsumersK8sClient(t *testing.T) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().WithScheme(newSchemeForSharedKeyTest(t)).Build()
+}
 
 func ownedFakeKey(arn, keyID string) *fakeKey {
 	return &fakeKey{
@@ -47,7 +55,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, CreatedAt: metav1.Now()},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -70,7 +78,7 @@ func TestCleanup_HoldsNewlyEligibleKeyForQuietWindowBeforeScheduling(t *testing.
 		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now()},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -95,7 +103,7 @@ func TestCleanup_SchedulesDeletionAfterQuietWindowElapses(t *testing.T) {
 		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -104,6 +112,81 @@ func TestCleanup_SchedulesDeletionAfterQuietWindowElapses(t *testing.T) {
 	}
 	if status.FindManagedResource(updated, resourceType, "primary") != nil {
 		t.Error("expected the ledger entry to be removed once deletion is scheduled - AWS's own 30-day window takes over from here")
+	}
+}
+
+// TestCleanup_RefusesSchedulingDeletionWhileAnotherCRStillConsumesIt is the
+// cross-CR counterpart to every other refusal case in this file: a key no
+// longer declared here but still referenced by some other CR's own
+// encryption.kmsKeyRef must never be scheduled for deletion, regardless of
+// how long the quiet window has elapsed - doing so would make that other,
+// still-live resource's data permanently unreadable, not just drop this
+// CR's own now-unwanted ledger entry.
+func TestCleanup_RefusesSchedulingDeletionWhileAnotherCRStillConsumesIt(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	since := metav1.NewTime(time.Now().Add(-(deletionQuietWindow + time.Minute)))
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
+	}
+	consumer := consumerWithKeyRef("team-b", "fulfillment-service", &depsv1alpha1.ConsumeRef{
+		Namespace: "default", Name: "checkout-service", ResourceName: "primary",
+	})
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForSharedKeyTest(t)).WithObjects(consumer).Build()
+
+	updated, results, err := Cleanup(context.Background(), client, k8sClient, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if client.keys[arn].keyState != types.KeyStateEnabled {
+		t.Error("expected no ScheduleKeyDeletion call while another CR still consumes this key")
+	}
+	if len(results) != 1 || results[0].Reason != CleanupReasonBlockedByConsumer {
+		t.Fatalf("expected a BlockedByConsumer result, got %+v", results)
+	}
+	if status.FindManagedResource(updated, resourceType, "primary") == nil {
+		t.Error("expected the ledger entry to remain tracked, not dropped, while deletion is blocked")
+	}
+}
+
+// TestCleanup_ListsAllCRsOnceAcrossMultipleKeys guards against re-listing
+// every AppDependencies CR once per key eligible for deletion - the same
+// cluster-wide list answers the consumer check for all of them in one
+// pass.
+func TestCleanup_ListsAllCRsOnceAcrossMultipleKeys(t *testing.T) {
+	kmsClient := newFakeKMS()
+	arn1 := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	arn2 := "arn:aws:kms:us-east-1:123456789012:key/id-2"
+	kmsClient.keys[arn1] = ownedFakeKey(arn1, "id-1")
+	kmsClient.keys[arn2] = ownedFakeKey(arn2, "id-2")
+	since := metav1.NewTime(time.Now().Add(-(deletionQuietWindow + time.Minute)))
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "key-one", ARN: arn1, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
+		{Type: resourceType, Name: "key-two", ARN: arn2, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
+	}
+
+	var listCalls int
+	k8sClient := interceptor.NewClient(
+		fake.NewClientBuilder().WithScheme(newSchemeForSharedKeyTest(t)).Build(),
+		interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*depsv1alpha1.AppDependenciesList); ok {
+					listCalls++
+				}
+				return c.List(ctx, list, opts...)
+			},
+		},
+	)
+
+	if _, _, err := Cleanup(context.Background(), kmsClient, k8sClient, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if listCalls != 1 {
+		t.Errorf("expected exactly 1 AppDependencies list across 2 keys, got %d", listCalls)
+	}
+	if kmsClient.keys[arn1].keyState != types.KeyStatePendingDeletion || kmsClient.keys[arn2].keyState != types.KeyStatePendingDeletion {
+		t.Error("expected both keys to still have deletion scheduled")
 	}
 }
 
@@ -118,7 +201,7 @@ func TestCleanup_SkipsAlreadyScheduledKey(t *testing.T) {
 		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -136,7 +219,7 @@ func TestCleanup_TreatsAlreadyDeletedKeyAsSuccess(t *testing.T) {
 		{Type: resourceType, Name: "primary", ARN: "arn:aws:kms:us-east-1:123456789012:key/gone", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now()},
 	}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -154,7 +237,7 @@ func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err == nil {
 		t.Fatal("expected an error refusing to delete a key no longer verified as owned by this CR")
 	}
@@ -176,7 +259,7 @@ func TestCleanup_ClearsPendingDeletionMarkerWhenRedeclared(t *testing.T) {
 	}
 	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", spec, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -201,7 +284,7 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 		{Type: resourceType, Name: "good-key", ARN: goodARN, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err == nil {
 		t.Fatal("expected an error reported for the unowned key")
 	}
@@ -227,7 +310,7 @@ func TestCleanup_TreatsADedicatedKeyStillNeededAsDeclared(t *testing.T) {
 		{Type: resourceType, Name: "orders-key", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, []string{"orders-key"}, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, []string{"orders-key"}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -258,7 +341,7 @@ func TestCleanup_SchedulesADedicatedKeyNoLongerNeeded(t *testing.T) {
 	// dedicatedKeysStillNeeded no longer lists "orders-key" - the owning
 	// SQS resource's encryption was turned off, or the resource itself
 	// was removed from spec.
-	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
+	updated, _, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -279,7 +362,7 @@ func TestCleanup_RelinquishingRetainedKey_EmitsEvent(t *testing.T) {
 	}
 	recordEvent, events := newEventCollector()
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, recordEvent); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
@@ -297,7 +380,7 @@ func TestCleanup_FirstNoticedForDeletion_EmitsPendingEvent(t *testing.T) {
 	}
 	recordEvent, events := newEventCollector()
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, recordEvent); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
@@ -316,7 +399,7 @@ func TestCleanup_SchedulingDeletion_EmitsScheduledEvent(t *testing.T) {
 	}
 	recordEvent, events := newEventCollector()
 
-	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, recordEvent); err != nil {
+	if _, _, err := Cleanup(context.Background(), client, noConsumersK8sClient(t), "default", "checkout-service", "uid-1", nil, nil, ledger, false, recordEvent); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 

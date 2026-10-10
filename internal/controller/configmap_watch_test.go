@@ -26,10 +26,13 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -71,18 +74,32 @@ var _ = Describe("AppDependencies watches on its generated ConfigMap", Ordered, 
 		// too, with a reconciler whose AWSClients was only ever configured
 		// for what these specs need (no DynamoDB/S3 fakes), causing a real
 		// nil-pointer panic rather than a clean, isolated test failure.
+		// SkipNameValidation: section_rds_integration_test.go's own watch
+		// spec also runs a live manager for this same reconciler type in
+		// this process - Ginkgo randomizes top-level spec order by
+		// default, so either one could register the "appdependencies"
+		// controller name first; both must tolerate the other already
+		// holding it.
+		skipNameValidation := true
 		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 			Scheme:                 k8sClient.Scheme(),
 			Metrics:                metricsserver.Options{BindAddress: "0"},
 			HealthProbeBindAddress: "0",
+			Controller:             config.Controller{SkipNameValidation: &skipNameValidation},
 			Cache: cache.Options{
 				DefaultNamespaces: map[string]cache.Config{testNS: {}},
+				ByObject: map[client.Object]cache.ByObject{
+					&corev1.ConfigMap{}: {Label: labels.SelectorFromSet(labels.Set{
+						depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue,
+					})},
+				},
 			},
 		})
 		Expect(err).NotTo(HaveOccurred())
 
 		reconciler := &AppDependenciesReconciler{
-			Client: mgr.GetClient(),
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
 			Scheme: mgr.GetScheme(),
 			AWSClients: &cloudctlaws.Clients{
 				SQS: newFakeSQSClient(), SNS: newFakeSNSClient(), IAM: newFakeIAMClient(),
@@ -149,13 +166,9 @@ var _ = Describe("AppDependencies watches on its generated ConfigMap", Ordered, 
 	})
 
 	It("repairs the connection ConfigMap's data after it's corrupted in place, not just deleted", func() {
-		// Delete and Update are different event types - a Delete-only test
-		// previously passed even while a real bug silently dropped every
-		// Update event on this watch (see SetupWithManager history: a global
-		// WithEventFilter was unintentionally ANDed onto this Owns() call
-		// too, and Create/Delete pass that filter trivially while Update
-		// does not). Corrupting data in place, rather than deleting the
-		// object, is the only way to actually exercise the Update path.
+		// Delete and Update are different event types for this watch -
+		// corrupting data in place, rather than deleting the object, is
+		// the only way to actually exercise the Update path.
 		cr := newWatchTestCR("watch-configmap-update-")
 		Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 

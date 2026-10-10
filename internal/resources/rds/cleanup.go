@@ -34,16 +34,17 @@ import (
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
-// PendingDeletionGracePeriod mirrors every other resource type's own grace
-// period before a resource stuck pending deletion escalates to the
-// Stuck variant. Unlike those, reaching Stuck here is permanent, not a
-// precursor to an eventual automatic delete - this package never attempts
-// DeleteDBInstance (see Ensure's rdsAPI interface for why).
-const PendingDeletionGracePeriod = 7 * 24 * time.Hour
+// PendingDeletionGracePeriod is RDS's own constant, deliberately much
+// shorter than dynamodb/sqs/s3's shared 7 days - those reuse "stuck" as a
+// label on an ongoing, cheap, maybe-self-resolving check, which doesn't
+// exist for RDS. There's no automatic recourse here regardless of how
+// long we wait, so a short threshold matters: every extra hour is an
+// idle, possibly expensive instance billing with nothing watching it.
+const PendingDeletionGracePeriod = 1 * time.Hour
 
-// deletionQuietWindow mirrors sqs/sns/dynamodb's: a resource no longer
-// declared in spec sits here first, in case the spec change reverts itself
-// moments later, before any deletion-safety machinery kicks in at all.
+// deletionQuietWindow mirrors sqs/sns/dynamodb's anti-flapping buffer.
+// Also gates the proactive final snapshot here, since taking one is
+// cheap and non-destructive - no reason to wait any longer than this.
 const deletionQuietWindow = 10 * time.Minute
 
 // snapshotResourceType is the ledger key a stuck instance's proactive
@@ -105,16 +106,11 @@ func Cleanup(
 					recordEvent("Normal", "InstanceDeletionCancelled", fmt.Sprintf("Canceled pending deletion of RDS instance %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
 				}
 			}
-			// Drop this instance's own final-snapshot bookkeeping entry, if
-			// any - it only ever exists to track a snapshot taken while
-			// stuck pending deletion, a state this instance no longer has
-			// now that it's declared again.
-			if status.FindManagedResource(updatedLedger, snapshotResourceType, entry.Name) != nil {
-				status.RemoveManagedResource(&updatedLedger, snapshotResourceType, entry.Name)
-				if recordEvent != nil {
-					recordEvent("Normal", "FinalSnapshotBookkeepingCleared", fmt.Sprintf(
-						"RDS instance %s reappeared in spec - no longer tracking its earlier stuck-pending-deletion snapshot in status (the snapshot itself is retained in AWS, not deleted)", entry.Name))
-				}
+			// Back in use - any tracked snapshot has outlived its purpose.
+			var retireErr error
+			updatedLedger, retireErr = retireFinalSnapshot(ctx, awsClient, entry.Name, updatedLedger, "the instance reappeared in spec", recordEvent)
+			if retireErr != nil && firstErr == nil {
+				firstErr = retireErr
 			}
 			continue
 		}
@@ -138,16 +134,17 @@ func Cleanup(
 			updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
 			if recordEvent != nil {
 				recordEvent("Warning", "InstanceDeletionRequiresManualAction", fmt.Sprintf(
-					"RDS instance %s (%s) is no longer declared, but this operator never deletes a database automatically. "+
-						"After %s it will be marked for manual deletion and a final snapshot will be taken proactively.",
-					entry.Name, entry.ARN, deletionQuietWindow))
+					"RDS instance %s (%s) is no longer declared. A final snapshot will be taken proactively after %s, "+
+						"and this will be flagged as needing manual deletion after %s - this operator never deletes a database automatically.",
+					entry.Name, entry.ARN, deletionQuietWindow, PendingDeletionGracePeriod))
 			}
 			continue
 		}
 
 		reason := pendingDeletionReason(entry.PendingDeletionSince.Time)
 		results = append(results, CleanupResult{Name: entry.Name, Reason: reason})
-		if reason != CleanupReasonStuckPendingDeletion {
+
+		if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
 			continue
 		}
 
@@ -180,11 +177,11 @@ func markPendingDeletion(ledger []depsv1alpha1.ManagedResource, results []Cleanu
 }
 
 // ensureFinalSnapshot creates (once) and then polls a final snapshot for a
-// stuck instance, recording it as its own ledger entry under
-// snapshotResourceType. Idempotent across reconciles: a snapshot request
-// already recorded as Verified is left alone, one still Creating is
-// re-checked, and a brand new one is only ever requested once per
-// instance, never re-requested on every pass.
+// removed instance, recording it under snapshotResourceType. If a tracked
+// snapshot belongs to an older episode (entry.Name matches but the
+// derived ID doesn't - this instance was redeclared and removed again
+// since), it's superseded: retire it first and let the fresh one start on
+// a later pass once that's done, rather than tracking two at once.
 func ensureFinalSnapshot(
 	ctx context.Context,
 	awsClient rdsAPI,
@@ -193,7 +190,16 @@ func ensureFinalSnapshot(
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
+	// entry.PendingDeletionSince is guaranteed non-nil here - reaching
+	// this function at all requires it. Folded into the ID so a later,
+	// separate episode never collides with an earlier one's snapshot.
+	episodeID := strconv.FormatInt(entry.PendingDeletionSince.Unix(), 10)
+	expectedSnapshotID := cloudctlaws.DerivedResourceName(namespace, crName, resourceType, 255, entry.Name, "final-snapshot", episodeID)
+
 	existing := status.FindManagedResource(ledger, snapshotResourceType, entry.Name)
+	if existing != nil && existing.ARN != expectedSnapshotID {
+		return retireFinalSnapshot(ctx, awsClient, entry.Name, ledger, "superseded by a newer episode", recordEvent)
+	}
 	if existing != nil && existing.State == depsv1alpha1.ManagedResourceStateVerified {
 		return ledger, nil
 	}
@@ -204,20 +210,7 @@ func ensureFinalSnapshot(
 	}
 
 	if existing == nil {
-		// PendingDeletionSince is folded into the derived ID - not just
-		// entry.Name - specifically so a later, separate stuck episode for
-		// this same instance (removed from spec, redeclared, then removed
-		// and left stuck again) computes a genuinely new snapshot ID
-		// instead of recomputing the exact same one as last time. AWS
-		// never deletes a snapshot on its own, so without this, the second
-		// episode's CreateDBSnapshot would hit DBSnapshotAlreadyExistsFault
-		// against the FIRST episode's snapshot and silently adopt it as if
-		// it were current, even though it reflects a point in time from
-		// however long ago the first episode happened - guaranteed non-nil
-		// here, since reaching this function at all requires
-		// entry.PendingDeletionSince to already be set.
-		episodeID := strconv.FormatInt(entry.PendingDeletionSince.Unix(), 10)
-		snapshotID := cloudctlaws.DerivedResourceName(namespace, crName, resourceType, 255, entry.Name, "final-snapshot", episodeID)
+		snapshotID := expectedSnapshotID
 		_, createErr := awsClient.CreateDBSnapshot(ctx, &rds.CreateDBSnapshotInput{
 			DBInstanceIdentifier: &instanceID,
 			DBSnapshotIdentifier: &snapshotID,
@@ -265,6 +258,57 @@ func ensureFinalSnapshot(
 	default:
 		// still in progress - leave the ledger entry as Creating, checked
 		// again next reconcile.
+	}
+	return ledger, nil
+}
+
+// retireFinalSnapshot deletes a tracked final snapshot once it's no
+// longer needed (superseded, or the instance is back in use) and drops
+// its ledger entry. A no-op if nothing is tracked. One still mid-creation
+// is left tracked and rechecked next pass rather than deleted early -
+// DeleteDBSnapshot only works on an available (or failed) snapshot.
+func retireFinalSnapshot(
+	ctx context.Context,
+	awsClient rdsAPI,
+	resourceName string,
+	ledger []depsv1alpha1.ManagedResource,
+	why string,
+	recordEvent status.EventRecorder,
+) ([]depsv1alpha1.ManagedResource, error) {
+	existing := status.FindManagedResource(ledger, snapshotResourceType, resourceName)
+	if existing == nil {
+		return ledger, nil
+	}
+
+	if existing.State != depsv1alpha1.ManagedResourceStateVerified {
+		describeOut, err := awsClient.DescribeDBSnapshots(ctx, &rds.DescribeDBSnapshotsInput{DBSnapshotIdentifier: &existing.ARN})
+		if err != nil {
+			return ledger, wrapAWSError(err, fmt.Sprintf("checking snapshot %q before retiring it", existing.ARN))
+		}
+		if len(describeOut.DBSnapshots) == 0 {
+			status.RemoveManagedResource(&ledger, snapshotResourceType, resourceName)
+			return ledger, nil
+		}
+		switch aws.ToString(describeOut.DBSnapshots[0].Status) {
+		case "available":
+			// proceed to delete below
+		case "failed":
+			status.RemoveManagedResource(&ledger, snapshotResourceType, resourceName)
+			return ledger, nil
+		default:
+			return ledger, nil // still creating - recheck next pass
+		}
+	}
+
+	if _, err := awsClient.DeleteDBSnapshot(ctx, &rds.DeleteDBSnapshotInput{DBSnapshotIdentifier: &existing.ARN}); err != nil {
+		var notFound *types.DBSnapshotNotFoundFault
+		if !errors.As(err, &notFound) {
+			return ledger, wrapAWSError(err, fmt.Sprintf("deleting retired snapshot %q", existing.ARN))
+		}
+	}
+	status.RemoveManagedResource(&ledger, snapshotResourceType, resourceName)
+	if recordEvent != nil {
+		recordEvent("Normal", "FinalSnapshotRetired", fmt.Sprintf("Deleted final snapshot %q for %q - %s", existing.ARN, resourceName, why))
 	}
 	return ledger, nil
 }

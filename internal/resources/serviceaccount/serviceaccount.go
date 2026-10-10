@@ -79,6 +79,19 @@ func EnsureNetworkIdentityLabel(ctx context.Context, k8sClient client.Client, na
 	return k8sClient.Apply(ctx, apply, networkIdentityFieldOwner, client.ForceOwnership)
 }
 
+// ReleaseNetworkIdentityLabel gives up this field manager's claim on the
+// label, the same re-apply-without-the-field mechanism release() uses for
+// the roleARN annotation - safe to call even if the ServiceAccount is
+// already gone, or never had the label in the first place.
+func ReleaseNetworkIdentityLabel(ctx context.Context, k8sClient client.Client, namespace, name string) error {
+	sa := &corev1.ServiceAccount{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sa); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	apply := applycorev1.ServiceAccount(name, namespace)
+	return k8sClient.Apply(ctx, apply, networkIdentityFieldOwner, client.ForceOwnership)
+}
+
 // Ensure attaches roleARN to the ServiceAccount this CR's workload runs
 // as: spec.ServiceAccountName if set, otherwise a CR-named ServiceAccount
 // this operator owns. Returns the current status value unchanged if

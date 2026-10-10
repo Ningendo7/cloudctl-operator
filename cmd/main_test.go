@@ -74,3 +74,78 @@ func TestWaitForAWSClients_SucceedsOnFirstAttemptWithoutWaitingAFullInterval(t *
 		t.Errorf("expected an immediate first attempt, took %s against a 1h interval", elapsed)
 	}
 }
+
+func TestAWSBootstrap_BecomesReadyOnlyAfterSetupSucceeds(t *testing.T) {
+	want := &cloudctlaws.Clients{Region: "us-east-1"}
+	var got *cloudctlaws.Clients
+	var attempts int32
+	b := &awsBootstrap{
+		newClients: func(context.Context) (*cloudctlaws.Clients, error) {
+			if atomic.AddInt32(&attempts, 1) < 2 {
+				return nil, errors.New("SignatureDoesNotMatch")
+			}
+			return want, nil
+		},
+		interval: time.Millisecond,
+		onReady: func(_ context.Context, c *cloudctlaws.Clients) error {
+			got = c
+			return nil
+		},
+	}
+	if b.readyCheck(nil) == nil {
+		t.Fatal("expected readyz to fail before AWS clients are initialized")
+	}
+
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if got != want {
+		t.Errorf("onReady got %v, want the initialized clients", got)
+	}
+	if err := b.readyCheck(nil); err != nil {
+		t.Errorf("expected readyz to pass after setup, got %v", err)
+	}
+}
+
+func TestAWSBootstrap_ShutdownWhileRetrying_ReturnsNilAndStaysNotReady(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	b := &awsBootstrap{
+		newClients: func(context.Context) (*cloudctlaws.Clients, error) {
+			cancel()
+			return nil, errors.New("SignatureDoesNotMatch")
+		},
+		interval: time.Millisecond,
+		onReady: func(context.Context, *cloudctlaws.Clients) error {
+			t.Error("onReady must not run when clients never initialized")
+			return nil
+		},
+	}
+
+	if err := b.Start(ctx); err != nil {
+		t.Errorf("expected a clean nil return on shutdown, got %v", err)
+	}
+	if b.readyCheck(nil) == nil {
+		t.Error("expected readyz to keep failing")
+	}
+}
+
+func TestAWSBootstrap_SetupFailurePropagatesAndStaysNotReady(t *testing.T) {
+	b := &awsBootstrap{
+		newClients: func(context.Context) (*cloudctlaws.Clients, error) { return &cloudctlaws.Clients{}, nil },
+		interval:   time.Millisecond,
+		onReady:    func(context.Context, *cloudctlaws.Clients) error { return errors.New("controller setup failed") },
+	}
+
+	if err := b.Start(context.Background()); err == nil {
+		t.Error("expected the setup error to propagate so the manager exits")
+	}
+	if b.readyCheck(nil) == nil {
+		t.Error("expected readyz to keep failing")
+	}
+}
+
+func TestAWSBootstrap_RunsOnStandbyReplicasToo(t *testing.T) {
+	if (&awsBootstrap{}).NeedLeaderElection() {
+		t.Error("expected NeedLeaderElection() = false so standby replicas become ready")
+	}
+}

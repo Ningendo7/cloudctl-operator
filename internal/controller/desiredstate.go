@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	equality "k8s.io/apimachinery/pkg/api/equality"
@@ -80,6 +81,15 @@ func eventRecorderFor(r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependen
 // without a spec change, to catch out-of-band AWS-side drift (e.g. someone
 // deletes a queue via the console) that no Kubernetes watch can see.
 const DriftDetectionInterval = 5 * time.Minute
+
+// driftRequeueJitterFraction keeps a fleet of CRs reconciled around the
+// same time from staying locked in step on every later requeue too.
+const driftRequeueJitterFraction = 0.2
+
+func jitteredDriftRequeue() time.Duration {
+	span := float64(DriftDetectionInterval) * driftRequeueJitterFraction
+	return DriftDetectionInterval + time.Duration(rand.Float64()*2*span-span)
+}
 
 // transientRequeueInterval is how soon a transient AWS error (throttling,
 // eventual consistency) gets retried - short, since the SDK's own retryer
@@ -147,6 +157,12 @@ func allSections(r *AppDependenciesReconciler, original *depsv1alpha1.AppDepende
 }
 
 func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) error {
+	// Shares one DescribeDBInstances call per RDS instance across this
+	// whole pass - rdsSection's own status check, and the ConfigMap/Secret
+	// connection-info delivery below, would otherwise each describe the
+	// same instance independently. See rds.WithDescribeCache.
+	ctx = rds.WithDescribeCache(ctx)
+
 	checkpoint := checkpointFor(r, cr, original)
 	lastCheckpointed := cr.Status.DeepCopy()
 	var firstErr error
@@ -171,9 +187,9 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 	// RDS credentials Secret is the same kind of connection-info delivery
 	// (just the one piece of it that's secret, not identifiers), so it
 	// shares this same condition and timing rather than getting its own.
-	connErr := configmap.Ensure(ctx, r.Client, r.AWSClients.RDS, r.AWSClients.Region, r.AWSClients.AccountID, cr)
+	connErr := configmap.Ensure(ctx, r.Client, r.APIReader, r.AWSClients.RDS, r.AWSClients.Region, r.AWSClients.AccountID, cr)
 	if connErr == nil {
-		connErr = rds.EnsureCredentialsSecret(ctx, r.AWSClients.SecretsManager, r.AWSClients.RDS, r.Client, cr)
+		connErr = rds.EnsureCredentialsSecret(ctx, r.AWSClients.SecretsManager, r.AWSClients.RDS, r.Client, r.APIReader, cr)
 	}
 	setSectionCondition(ctx, cr, "ConnectionInfoReady", connErr, eventRecorderFor(r, cr))
 	if firstErr == nil {
@@ -236,7 +252,10 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 	}
 
 	reason := "Error"
+	var reconcileErr *cloudctlaws.ReconcileError
 	switch {
+	case errors.As(err, &reconcileErr) && reconcileErr.Reason != "":
+		reason = reconcileErr.Reason
 	case cloudctlaws.IsPermissionDenied(err):
 		reason = "PermissionDenied"
 	case isRetryable(err):

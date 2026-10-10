@@ -70,11 +70,9 @@ func dedicatedKMSKeyNames(cr *depsv1alpha1.AppDependencies) []string {
 
 // kmsSection adapts the kms package's Ensure/Cleanup to the orchestrator's
 // uniform section shape. Registered before iamSection but after every
-// other resource section — nothing derives grants against a KMS key yet
-// (that's future work, once other resource types can reference one via an
-// encryption field), but keeping it ahead of iamSection now means a
-// dedicated-key grant will already have somewhere to plug in without
-// reordering sections later.
+// other resource section — iamSection's own grant derivation reads KMS
+// ledger entries (both dedicated and kmsKeyRef-shared) that this section's
+// own reconcile pass just wrote, so it has to run first.
 func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	awsClients := r.AWSClients
 	return section{
@@ -94,7 +92,7 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			cr.Status.ManagedResources = ledger
 
 			ledger, _, cleanupErr := kms.Cleanup(
-				ctx, awsClients.KMS, cr.Namespace, cr.Name, string(cr.UID),
+				ctx, awsClients.KMS, r.Client, cr.Namespace, cr.Name, string(cr.UID),
 				cr.Spec.KMS, dedicatedKMSKeyNames(cr), cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
@@ -118,7 +116,7 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			// true, so kms.Cleanup tears down every kms-type ledger entry
 			// regardless, the same as every other resource type's finalize.
 			ledger, results, err := kms.Cleanup(
-				ctx, awsClients.KMS, cr.Namespace, cr.Name, string(cr.UID),
+				ctx, awsClients.KMS, r.Client, cr.Namespace, cr.Name, string(cr.UID),
 				cr.Spec.KMS, nil, cr.Status.ManagedResources, true, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger

@@ -222,6 +222,56 @@ func TestEnsure_DoesNotUpdateTrustPolicyWhenAlreadyCorrect(t *testing.T) {
 	}
 }
 
+// TestEnsure_DoesNotCallPutRolePolicyWhenAlreadyCorrect mirrors
+// TestEnsure_DoesNotUpdateTrustPolicyWhenAlreadyCorrect for the
+// permissions policy: PutRolePolicy must not be called on every single
+// reconcile regardless of whether the derived policy actually changed.
+func TestEnsure_DoesNotCallPutRolePolicyWhenAlreadyCorrect(t *testing.T) {
+	client := newFakeIAM()
+	cr := ownedCR("checkout-service")
+
+	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil); err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	callsAfterFirst := client.putRolePolicyCalls
+	if callsAfterFirst == 0 {
+		t.Fatal("expected the first Ensure() to write the policy at least once")
+	}
+
+	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if client.putRolePolicyCalls != callsAfterFirst {
+		t.Errorf("expected no additional PutRolePolicy call once the policy already matches, got %d more", client.putRolePolicyCalls-callsAfterFirst)
+	}
+}
+
+// TestEnsure_CallsPutRolePolicyWhenGrantsChange is the other half: once
+// the derived policy genuinely differs, the write must still happen.
+func TestEnsure_CallsPutRolePolicyWhenGrantsChange(t *testing.T) {
+	client := newFakeIAM()
+	cr := ownedCR("checkout-service")
+
+	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil); err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	callsAfterFirst := client.putRolePolicyCalls
+
+	cr.Spec.SNS = &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
+	cr.Status.ManagedResources = append(cr.Status.ManagedResources,
+		depsv1alpha1.ManagedResource{Type: "sns", Name: "events", ARN: "arn:aws:sns:us-east-1:123456789012:default-checkout-service-events"})
+
+	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if client.putRolePolicyCalls != callsAfterFirst+1 {
+		t.Errorf("expected exactly one more PutRolePolicy call once the grants changed, got %d more", client.putRolePolicyCalls-callsAfterFirst)
+	}
+	if !strings.Contains(client.roles[roleName("default", "checkout-service")].policies[roleInlinePolicyName], "sns:Publish") {
+		t.Error("expected the updated policy to actually reflect the new grant")
+	}
+}
+
 func TestEnsure_RefusesRoleOwnedByDifferentCR(t *testing.T) {
 	client := newFakeIAM()
 	cr := ownedCR("checkout-service")
@@ -271,9 +321,7 @@ func TestEnsure_ClassifiesTransientErrorsAsRetryable(t *testing.T) {
 // CreateRole's real documented ConcurrentModification error
 // ("multiple requests to change this object were submitted
 // simultaneously... wait and retry") end-to-end through Ensure, not just
-// in isolation against IsRetryable directly - this is the one AWS error
-// this session's error-classification audit added support for and it had
-// never been exercised against the actual role-creation path.
+// in isolation against IsRetryable directly.
 func TestEnsure_ClassifiesConcurrentModificationAsRetryable(t *testing.T) {
 	client := newFakeIAM()
 	client.createRoleErr = &fakeAWSError{code: "ConcurrentModification", fault: smithy.FaultClient}
@@ -398,7 +446,7 @@ func TestEnsure_GrantsConsumedResourceFromAnotherCR(t *testing.T) {
 	}
 }
 
-func TestTrustPolicyEquivalent_IgnoresKeyOrderingDivergence(t *testing.T) {
+func TestPolicyDocumentEquivalent_IgnoresKeyOrderingDivergence(t *testing.T) {
 	desired := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x"},"Action":"sts:AssumeRoleWithWebIdentity"}]}`
 	// Same document, but with keys in a different order and URL-encoded -
 	// a stored policy may come back reformatted rather than byte-identical
@@ -406,17 +454,17 @@ func TestTrustPolicyEquivalent_IgnoresKeyOrderingDivergence(t *testing.T) {
 	reordered := `{"Statement":[{"Action":"sts:AssumeRoleWithWebIdentity","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x"},"Effect":"Allow"}],"Version":"2012-10-17"}`
 	currentEncoded := url.QueryEscape(reordered)
 
-	if !trustPolicyEquivalent(currentEncoded, desired) {
+	if !policyDocumentEquivalent(currentEncoded, desired) {
 		t.Error("expected differently-ordered but semantically identical policies to be equivalent")
 	}
 }
 
-func TestTrustPolicyEquivalent_DetectsRealDifference(t *testing.T) {
+func TestPolicyDocumentEquivalent_DetectsRealDifference(t *testing.T) {
 	desired := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x"},"Action":"sts:AssumeRoleWithWebIdentity"}]}`
 	different := `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x"},"Action":"sts:AssumeRoleWithWebIdentity"}]}`
 	currentEncoded := url.QueryEscape(different)
 
-	if trustPolicyEquivalent(currentEncoded, desired) {
+	if policyDocumentEquivalent(currentEncoded, desired) {
 		t.Error("expected a genuinely different policy to not be equivalent")
 	}
 }

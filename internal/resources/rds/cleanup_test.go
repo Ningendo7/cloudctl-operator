@@ -61,10 +61,14 @@ func findCleanupResult(results []CleanupResult, name string) *CleanupResult {
 }
 
 func backdatePendingDeletion(ledger []depsv1alpha1.ManagedResource, name string, d time.Duration) []depsv1alpha1.ManagedResource {
+	return setPendingDeletionSince(ledger, name, time.Now().Add(-d))
+}
+
+func setPendingDeletionSince(ledger []depsv1alpha1.ManagedResource, name string, since time.Time) []depsv1alpha1.ManagedResource {
 	entry := status.FindManagedResource(ledger, resourceType, name)
-	past := metav1.NewTime(time.Now().Add(-d))
+	t := metav1.NewTime(since)
 	updated := *entry
-	updated.PendingDeletionSince = &past
+	updated.PendingDeletionSince = &t
 	status.UpsertManagedResource(&ledger, updated)
 	return ledger
 }
@@ -167,7 +171,7 @@ func TestCleanup_DeletePolicy_FirstPassMarksPendingDeletion(t *testing.T) {
 		t.Error("expected the instance to remain in the ledger - this package never deletes it")
 	}
 	if client.createDBSnapshotCalls != 0 {
-		t.Error("should not take a snapshot before the grace period elapses")
+		t.Error("should not take a snapshot before the quiet window elapses")
 	}
 }
 
@@ -182,6 +186,39 @@ func TestCleanup_DeletePolicy_WithinQuietWindowStaysPending(t *testing.T) {
 	}
 	if r := findCleanupResult(results, "orders-db"); r == nil || r.Reason != CleanupReasonPendingDeletion {
 		t.Errorf("expected PendingDeletion within the quiet window, got %+v", results)
+	}
+	if client.createDBSnapshotCalls != 0 {
+		t.Error("should not take a snapshot before the quiet window elapses")
+	}
+}
+
+// TestCleanup_SnapshotFiresBeforeStuck proves the snapshot timing is fully
+// decoupled from the Stuck/alert escalation: well past deletionQuietWindow
+// but short of PendingDeletionGracePeriod, the instance must already have
+// its proactive snapshot, while still only being reported PendingDeletion,
+// not StuckPendingDeletion.
+func TestCleanup_SnapshotFiresBeforeStuck(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	ledger = setMarked(t, client, ledger, "orders-db")
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+
+	if PendingDeletionGracePeriod <= deletionQuietWindow+time.Minute {
+		t.Fatal("test assumption broken: PendingDeletionGracePeriod must be well beyond deletionQuietWindow")
+	}
+
+	ledger, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if r := findCleanupResult(results, "orders-db"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+		t.Errorf("expected PendingDeletion (not yet Stuck), got %+v", results)
+	}
+	if client.createDBSnapshotCalls != 1 {
+		t.Errorf("expected the snapshot to already be taken despite not being Stuck yet, got %d CreateDBSnapshot calls", client.createDBSnapshotCalls)
+	}
+	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") == nil {
+		t.Error("expected a snapshot ledger entry before the instance is ever Stuck")
 	}
 }
 
@@ -375,61 +412,406 @@ func TestCleanup_CreateDBSnapshotAlreadyExists_RecoversGracefully(t *testing.T) 
 	}
 }
 
-// TestCleanup_SecondStuckEpisode_TakesFreshSnapshotNotStaleOne proves the
-// full redeclare-then-stuck-again cycle end to end: once an instance
-// reappears in spec (clearing the first episode's snapshot bookkeeping,
-// per the declared[entry.Name] branch above) and is later removed and
-// left stuck a second time, it gets a genuinely new snapshot rather than
-// silently reusing or colliding with the first episode's already-Retained
-// one - the exact scenario a purely name-based (not episode-based) ID
-// would get wrong.
-func TestCleanup_SecondStuckEpisode_TakesFreshSnapshotNotStaleOne(t *testing.T) {
+// --- Trigger A: "back in use" retirement ---
+
+func TestCleanup_BackInUse_DeletesVerifiedSnapshot(t *testing.T) {
 	client := newFakeRDS()
 	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
-
-	// First episode: removed, stuck, snapshotted.
 	ledger = setMarked(t, client, ledger, "orders-db")
-	ledger = backdatePendingDeletion(ledger, "orders-db", PendingDeletionGracePeriod+time.Hour)
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
 	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
 	if err != nil {
-		t.Fatalf("first-episode Cleanup() error = %v", err)
+		t.Fatalf("snapshot-creating Cleanup() error = %v", err)
 	}
-	firstSnapshotARN := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
-	if client.createDBSnapshotCalls != 1 {
-		t.Fatalf("expected one CreateDBSnapshot call after the first episode, got %d", client.createDBSnapshotCalls)
+	snapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	client.setSnapshotStatus(snapshotID, "available")
+
+	var events []string
+	recordEvent := func(eventType, reason, message string) { events = append(events, reason) }
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, recordEvent)
+	if err != nil {
+		t.Fatalf("redeclare Cleanup() error = %v", err)
 	}
 
-	// Redeclared - clears the first episode's snapshot bookkeeping entry,
-	// but the AWS-side snapshot itself must still exist afterward.
+	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+		t.Error("expected the snapshot's ledger entry to be removed once retired")
+	}
+	if _, stillExists := client.snapshots[snapshotID]; stillExists {
+		t.Error("expected the AWS-side snapshot to actually be deleted once the instance is back in use")
+	}
+	if client.deleteDBSnapshotCalls != 1 || len(client.deletedSnapshotIDs) != 1 || client.deletedSnapshotIDs[0] != snapshotID {
+		t.Errorf("expected exactly one DeleteDBSnapshot call for %q, got calls=%d ids=%v", snapshotID, client.deleteDBSnapshotCalls, client.deletedSnapshotIDs)
+	}
+	if !containsString(events, "FinalSnapshotRetired") {
+		t.Errorf("expected a FinalSnapshotRetired event, got %v", events)
+	}
+
+	// Second pass: already gone - must not error or re-attempt deletion.
+	callsBefore := client.deleteDBSnapshotCalls
+	_, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("second redeclare Cleanup() error = %v", err)
+	}
+	if client.deleteDBSnapshotCalls != callsBefore {
+		t.Error("expected no further DeleteDBSnapshot calls once already retired")
+	}
+}
+
+func TestCleanup_BackInUse_SnapshotStillCreating_KeepsPollingUntilDeletable(t *testing.T) {
+	client := newFakeRDS()
+	client.snapshotStatus = "creating"
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	ledger = setMarked(t, client, ledger, "orders-db")
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("snapshot-creating Cleanup() error = %v", err)
+	}
+	snapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+
+	// Redeclared while the snapshot is still mid-creation - must not
+	// attempt to delete it (AWS only allows deleting an available/failed
+	// snapshot), and must keep tracking it rather than abandoning it.
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
 	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("redeclare Cleanup() error = %v", err)
 	}
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
-		t.Fatal("expected the first episode's snapshot bookkeeping entry to be cleared on redeclare")
+	if client.deleteDBSnapshotCalls != 0 {
+		t.Errorf("expected no DeleteDBSnapshot call while still creating, got %d", client.deleteDBSnapshotCalls)
 	}
-	if _, stillExists := client.snapshots[firstSnapshotARN]; !stillExists {
-		t.Error("expected the first episode's AWS-side snapshot to still exist - redeclaring must never delete it")
+	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") == nil {
+		t.Fatal("expected the snapshot to still be tracked, not abandoned")
 	}
 
-	// Removed and left stuck a second time - a real second episode,
-	// separated in time from the first.
+	// Now it finishes - the very next pass (instance still declared) must
+	// delete it.
+	client.setSnapshotStatus(snapshotID, "available")
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("follow-up redeclared Cleanup() error = %v", err)
+	}
+	if client.deleteDBSnapshotCalls != 1 {
+		t.Errorf("expected the now-available snapshot to be deleted, got %d DeleteDBSnapshot calls", client.deleteDBSnapshotCalls)
+	}
+	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+		t.Error("expected the snapshot's ledger entry to finally be removed")
+	}
+}
+
+func TestCleanup_BackInUse_FailedSnapshot_DropsTrackingWithoutDeleteCall(t *testing.T) {
+	client := newFakeRDS()
+	client.snapshotStatus = "failed"
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
 	ledger = setMarked(t, client, ledger, "orders-db")
-	ledger = backdatePendingDeletion(ledger, "orders-db", PendingDeletionGracePeriod+2*time.Hour)
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("snapshot-creating Cleanup() error = %v", err)
+	}
+
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("redeclare Cleanup() error = %v", err)
+	}
+	if client.deleteDBSnapshotCalls != 0 {
+		t.Errorf("expected no DeleteDBSnapshot call for a failed snapshot, got %d", client.deleteDBSnapshotCalls)
+	}
+	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+		t.Error("expected the failed snapshot's tracking entry to be dropped")
+	}
+}
+
+func TestCleanup_BackInUse_NoTrackedSnapshot_NoOp(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	// Removed and immediately redeclared, well within the quiet window -
+	// no snapshot was ever taken.
+	ledger = setMarked(t, client, ledger, "orders-db")
+
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
+	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if client.deleteDBSnapshotCalls != 0 || client.describeDBSnapshotsCalls != 0 {
+		t.Errorf("expected zero snapshot-related AWS calls when nothing is tracked, got delete=%d describe=%d",
+			client.deleteDBSnapshotCalls, client.describeDBSnapshotsCalls)
+	}
+}
+
+func TestCleanup_BackInUse_PropagatesDescribeFailure(t *testing.T) {
+	client := newFakeRDS()
+	client.snapshotStatus = "creating"
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	ledger = setMarked(t, client, ledger, "orders-db")
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("snapshot-creating Cleanup() error = %v", err)
+	}
+
+	client.describeDBSnapshotsErr = &fakeAWSError{code: "ThrottlingException"}
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err == nil {
+		t.Fatal("expected DescribeDBSnapshots' failure to propagate")
+	}
+	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") == nil {
+		t.Error("expected the snapshot to remain tracked after a failed check, not silently dropped")
+	}
+}
+
+func TestCleanup_BackInUse_PropagatesDeleteFailure(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	ledger = setMarked(t, client, ledger, "orders-db")
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("snapshot-creating Cleanup() error = %v", err)
+	}
+	snapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	client.setSnapshotStatus(snapshotID, "available")
+
+	client.deleteDBSnapshotErr = &fakeAWSError{code: "ThrottlingException"}
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err == nil {
+		t.Fatal("expected DeleteDBSnapshot's failure to propagate")
+	}
+	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") == nil {
+		t.Error("expected the snapshot to remain tracked after a failed delete, not silently dropped")
+	}
+}
+
+func TestCleanup_BackInUse_DeleteNotFound_TreatedAsSuccess(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	ledger = setMarked(t, client, ledger, "orders-db")
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("snapshot-creating Cleanup() error = %v", err)
+	}
+	snapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	client.setSnapshotStatus(snapshotID, "available")
+	// Simulate the snapshot having already been deleted out-of-band (e.g.
+	// by a human in the AWS console) between our last check and now.
+	delete(client.snapshots, snapshotID)
+
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("expected a NotFound on delete to be treated as success, got error: %v", err)
+	}
+	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+		t.Error("expected the ledger entry to be removed even though AWS already lacked the snapshot")
+	}
+}
+
+func TestCleanup_BackInUse_OnlyTouchesItsOwnInstanceSnapshot(t *testing.T) {
+	client := newFakeRDS()
+	ledgerA := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	ledgerB, err := createInstance(context.Background(), client, "default", "checkout-service", "uid-1",
+		"default-checkout-service-invoices-db", "invoices-db",
+		instanceOptions{deletionPolicy: depsv1alpha1.DeletionPolicyDelete, engine: "mysql", engineVersion: "8.0", instanceClass: "db.t4g.micro", dbSubnetGroupName: "sg", securityGroupID: "sg-2"},
+		ledgerA, nil)
+	if err != nil {
+		t.Fatalf("setup second createInstance() error = %v", err)
+	}
+	ledgerB, err = ensureInstance(context.Background(), client, "default", "checkout-service", "uid-1", "invoices-db",
+		instanceOptions{deletionPolicy: depsv1alpha1.DeletionPolicyDelete, engine: "mysql", engineVersion: "8.0", instanceClass: "db.t4g.micro", dbSubnetGroupName: "sg", securityGroupID: "sg-2"},
+		ledgerB, nil)
+	if err != nil {
+		t.Fatalf("setup second ensureInstance() error = %v", err)
+	}
+
+	// Only orders-db gets removed and snapshotted - invoices-db stays
+	// declared the whole time.
+	ledgerB = setMarked(t, client, ledgerB, "orders-db")
+	ledgerB = backdatePendingDeletion(ledgerB, "orders-db", deletionQuietWindow+time.Minute)
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "invoices-db"}}}
+	ledgerB, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledgerB, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	ordersSnapshotID := status.FindManagedResource(ledgerB, snapshotResourceType, "orders-db").ARN
+	client.setSnapshotStatus(ordersSnapshotID, "available")
+
+	// Redeclare orders-db too - must only ever retire orders-db's own
+	// snapshot, never touch invoices-db (which never had one).
+	spec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}, {Name: "invoices-db"}}}
+	ledgerB, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledgerB, false, nil)
+	if err != nil {
+		t.Fatalf("redeclare Cleanup() error = %v", err)
+	}
+	if client.deleteDBSnapshotCalls != 1 || client.deletedSnapshotIDs[0] != ordersSnapshotID {
+		t.Errorf("expected exactly one delete, for orders-db's own snapshot, got calls=%d ids=%v", client.deleteDBSnapshotCalls, client.deletedSnapshotIDs)
+	}
+	if status.FindManagedResource(ledgerB, snapshotResourceType, "invoices-db") != nil {
+		t.Error("expected invoices-db to have no snapshot entry at all - it was never removed from spec")
+	}
+}
+
+// --- Trigger B: superseded-by-a-newer-episode retirement ---
+
+// TestCleanup_SupersededEpisode_FullLifecycle drives the full, rare
+// overlap scenario end to end: an instance is removed, snapshotted,
+// redeclared while that snapshot is still mid-creation (so trigger A
+// can't retire it yet), then removed again - starting a second episode
+// while the first's snapshot is still tracked. Proves: the second episode
+// never creates its own snapshot until the first is fully retired, the
+// two snapshots never collide, and nothing is ever deleted before AWS
+// confirms it's safe to.
+func TestCleanup_SupersededEpisode_FullLifecycle(t *testing.T) {
+	client := newFakeRDS()
+	client.snapshotStatus = "creating"
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+
+	// Episode timestamps are set explicitly, not derived from two
+	// back-to-back metav1.Now() calls: metav1.Time only round-trips to
+	// whole seconds, and two real Now() calls executing within the same
+	// wall-clock second would derive the SAME episode ID, silently
+	// defeating the very thing this test is checking.
+	episode1Since := time.Now().Add(-2 * time.Hour)
+	episode2Since := time.Now().Add(-1 * time.Hour)
+
+	// Episode 1: removed, past the quiet window, snapshot requested.
+	ledger = setMarked(t, client, ledger, "orders-db")
+	ledger = setPendingDeletionSince(ledger, "orders-db", episode1Since)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("episode-1 Cleanup() error = %v", err)
+	}
+	if client.createDBSnapshotCalls != 1 {
+		t.Fatalf("expected one CreateDBSnapshot call for episode 1, got %d", client.createDBSnapshotCalls)
+	}
+	firstSnapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+
+	// Redeclared while episode 1's snapshot is still mid-creation -
+	// trigger A can't retire it yet, so it stays tracked.
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("redeclare Cleanup() error = %v", err)
+	}
+	if client.deleteDBSnapshotCalls != 0 {
+		t.Fatalf("expected episode 1's snapshot to survive the redeclare (still creating), got %d deletes", client.deleteDBSnapshotCalls)
+	}
+
+	// Removed again before episode 1's snapshot ever resolved - episode 2
+	// starts, at a distinctly later point in time than episode 1.
 	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
 	if err != nil {
-		t.Fatalf("second-episode Cleanup() error = %v", err)
+		t.Fatalf("episode-2 first-pass Cleanup() error = %v", err)
+	}
+	if client.createDBSnapshotCalls != 1 {
+		t.Fatalf("expected no new snapshot yet on episode 2's first pass, got %d total CreateDBSnapshot calls", client.createDBSnapshotCalls)
+	}
+	ledger = setPendingDeletionSince(ledger, "orders-db", episode2Since)
+
+	// Episode 2 past its own quiet window: finds episode 1's snapshot
+	// still tracked under a different (older) ID - detects supersession,
+	// but episode 1's snapshot is still "creating", so nothing is deleted
+	// and episode 2's own snapshot does NOT start yet either (serialized).
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("episode-2 supersede-detect Cleanup() error = %v", err)
+	}
+	if client.createDBSnapshotCalls != 1 {
+		t.Errorf("expected episode 2's snapshot creation to wait for episode 1's retirement, got %d total CreateDBSnapshot calls", client.createDBSnapshotCalls)
+	}
+	if client.deleteDBSnapshotCalls != 0 {
+		t.Errorf("expected no delete yet - episode 1's snapshot is still creating, got %d", client.deleteDBSnapshotCalls)
+	}
+	stillTracked := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	if stillTracked == nil || stillTracked.ARN != firstSnapshotID {
+		t.Fatalf("expected episode 1's snapshot %q to still be the tracked one, got %+v", firstSnapshotID, stillTracked)
+	}
+
+	// Episode 1's snapshot finally resolves - the next pass must retire
+	// it (delete it), but STILL not start episode 2's snapshot in the
+	// same pass.
+	client.setSnapshotStatus(firstSnapshotID, "available")
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("episode-2 retire-old Cleanup() error = %v", err)
+	}
+	if client.deleteDBSnapshotCalls != 1 || client.deletedSnapshotIDs[0] != firstSnapshotID {
+		t.Fatalf("expected episode 1's snapshot to be deleted now, got calls=%d ids=%v", client.deleteDBSnapshotCalls, client.deletedSnapshotIDs)
+	}
+	if client.createDBSnapshotCalls != 1 {
+		t.Errorf("expected episode 2's snapshot to still not have started in the same pass as the retirement, got %d total CreateDBSnapshot calls", client.createDBSnapshotCalls)
+	}
+	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+		t.Fatal("expected the slot to be free after retirement")
+	}
+
+	// Next pass: the slot is free - episode 2's own snapshot finally
+	// starts, under a genuinely different ID than episode 1's.
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("episode-2 fresh-snapshot Cleanup() error = %v", err)
 	}
 	if client.createDBSnapshotCalls != 2 {
-		t.Errorf("expected a second, fresh CreateDBSnapshot call for the second episode, got %d total calls", client.createDBSnapshotCalls)
+		t.Errorf("expected episode 2's own CreateDBSnapshot call now, got %d total calls", client.createDBSnapshotCalls)
 	}
-	secondSnapshotARN := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
-	if secondSnapshotARN == firstSnapshotARN {
-		t.Errorf("expected the second episode's snapshot to have a different ID than the first, got the same %q for both", secondSnapshotARN)
+	secondEntry := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	if secondEntry == nil {
+		t.Fatal("expected episode 2's snapshot to now be tracked")
 	}
-	if _, stillExists := client.snapshots[firstSnapshotARN]; !stillExists {
-		t.Error("expected the first episode's snapshot to still exist alongside the second - neither is ever deleted")
+	if secondEntry.ARN == firstSnapshotID {
+		t.Errorf("expected episode 2's snapshot ID to differ from episode 1's %q, got the same ID", firstSnapshotID)
+	}
+	if _, firstStillExistsInAWS := client.snapshots[firstSnapshotID]; firstStillExistsInAWS {
+		t.Error("expected episode 1's snapshot to have actually been deleted from AWS, not just untracked")
+	}
+}
+
+func TestCleanup_SupersededEpisode_PropagatesRetireFailure(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	ledger = setMarked(t, client, ledger, "orders-db")
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("episode-1 Cleanup() error = %v", err)
+	}
+	firstSnapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	client.setSnapshotStatus(firstSnapshotID, "available")
+
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("redeclare Cleanup() error = %v", err)
+	}
+	// Redeclaring with the snapshot already available retires it via
+	// trigger A, before episode 2 ever gets a chance to - re-verify that
+	// happened so the next step genuinely exercises trigger B, not A.
+	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+		t.Fatal("test setup: expected trigger A to have already retired episode 1's snapshot")
+	}
+
+	// Re-seed a tracked "old episode" entry directly to force the
+	// superseded path in ensureFinalSnapshot without relying on timing.
+	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{
+		Type: snapshotResourceType, Name: "orders-db", ARN: "some-older-snapshot-id",
+		State: depsv1alpha1.ManagedResourceStateVerified, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, CreatedAt: metav1.Now(),
+	})
+	client.deleteDBSnapshotErr = &fakeAWSError{code: "ThrottlingException"}
+
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("setup-remove-again Cleanup() error = %v", err)
+	}
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+
+	_, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err == nil {
+		t.Fatal("expected the superseded snapshot's delete failure to propagate")
 	}
 }
 

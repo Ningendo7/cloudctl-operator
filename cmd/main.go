@@ -19,19 +19,27 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
+	"fmt"
+	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -49,10 +57,8 @@ import (
 
 // awsClientInitRetryInterval is how often a failed startup AWS identity
 // check (bad/revoked/rotated-out credentials) is retried, rather than
-// crashing the process immediately. A manager that hasn't started yet
-// holds no listening port, so kubelet's readiness/liveness probes simply
-// can't connect during this window - the same "still starting, not yet
-// crash-looping" posture a real AWS network partition at startup already produces.
+// crashing the process. See awsBootstrap for how the pod stays alive
+// meanwhile.
 const awsClientInitRetryInterval = 30 * time.Second
 
 // credentialRecheckInterval is how often an already-running manager
@@ -81,6 +87,39 @@ func waitForAWSClients(
 		return true, nil
 	})
 	return clients, err
+}
+
+// awsBootstrap retries AWS setup after the manager starts, so the probe
+// server is up and liveness doesn't kill the pod mid-retry.
+type awsBootstrap struct {
+	newClients func(context.Context) (*cloudctlaws.Clients, error)
+	interval   time.Duration
+	onReady    func(context.Context, *cloudctlaws.Clients) error
+	ready      atomic.Bool
+}
+
+// NeedLeaderElection is false so standby replicas become ready too.
+func (b *awsBootstrap) NeedLeaderElection() bool { return false }
+
+func (b *awsBootstrap) Start(ctx context.Context) error {
+	clients, err := waitForAWSClients(ctx, b.interval, b.newClients)
+	if err != nil {
+		// Only reachable via ctx cancellation, i.e. a normal shutdown.
+		return nil
+	}
+	if err := b.onReady(ctx, clients); err != nil {
+		return err
+	}
+	b.ready.Store(true)
+	setupLog.Info("AWS clients initialized")
+	return nil
+}
+
+func (b *awsBootstrap) readyCheck(_ *http.Request) error {
+	if !b.ready.Load() {
+		return errors.New("AWS clients not initialized yet")
+	}
+	return nil
 }
 
 var (
@@ -151,15 +190,6 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	awsClients, err := waitForAWSClients(ctx, awsClientInitRetryInterval, cloudctlaws.NewClients)
-	if err != nil {
-		// Only reachable via ctx cancellation (a real shutdown signal) -
-		// waitForAWSClients itself never gives up and returns a non-nil
-		// clients error otherwise.
-		setupLog.Info("Shutting down while still waiting on AWS credentials to become valid")
-		return
-	}
-
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
@@ -227,6 +257,7 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	managedBySelector := labels.SelectorFromSet(labels.Set{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue})
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -234,6 +265,13 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "687fa3e1.cloudctl.io",
+		// Only cache our own Secrets/ConfigMaps, not the whole cluster's.
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Secret{}:    {Label: managedBySelector},
+				&corev1.ConfigMap{}: {Label: managedBySelector},
+			},
+		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -251,19 +289,49 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.AppDependenciesReconciler{
-		Client:                  mgr.GetClient(),
-		Scheme:                  mgr.GetScheme(),
-		AWSClients:              awsClients,
-		Recorder:                mgr.GetEventRecorder("appdependencies-controller"),
-		OIDCProviderARN:         oidcProviderARN,
-		OIDCProviderURL:         oidcProviderURL,
-		MaxConcurrentReconciles: maxConcurrentReconciles,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "appdependencies")
+	credHealth := cloudctlaws.NewCredentialHealth()
+	const rateLimitRampDuration = 30 * time.Second
+	bootstrap := &awsBootstrap{
+		newClients: cloudctlaws.NewClients,
+		interval:   awsClientInitRetryInterval,
+		onReady: func(ctx context.Context, awsClients *cloudctlaws.Clients) error {
+			if err := (&controller.AppDependenciesReconciler{
+				Client:                  mgr.GetClient(),
+				APIReader:               mgr.GetAPIReader(),
+				Scheme:                  mgr.GetScheme(),
+				AWSClients:              awsClients,
+				Recorder:                mgr.GetEventRecorder("appdependencies-controller"),
+				OIDCProviderARN:         oidcProviderARN,
+				OIDCProviderURL:         oidcProviderURL,
+				MaxConcurrentReconciles: maxConcurrentReconciles,
+			}).SetupWithManager(mgr); err != nil {
+				return fmt.Errorf("creating appdependencies controller: %w", err)
+			}
+			// +kubebuilder:scaffold:builder
+
+			stsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+			if err != nil {
+				return fmt.Errorf("loading AWS config for periodic credential check: %w", err)
+			}
+			go cloudctlaws.RunPeriodicCheck(ctx, sts.NewFromConfig(stsCfg), credentialRecheckInterval, credHealth)
+
+			go func() {
+				select {
+				case <-mgr.Elected():
+				case <-ctx.Done():
+					return
+				}
+				for _, limiter := range awsClients.RateLimiters {
+					go cloudctlaws.RampUp(ctx, limiter, rateLimitRampDuration)
+				}
+			}()
+			return nil
+		},
+	}
+	if err := mgr.Add(bootstrap); err != nil {
+		setupLog.Error(err, "Failed to register AWS bootstrap")
 		os.Exit(1)
 	}
-	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")
@@ -273,31 +341,14 @@ func main() {
 		setupLog.Error(err, "Failed to set up ready check")
 		os.Exit(1)
 	}
-
-	credHealth := cloudctlaws.NewCredentialHealth()
+	if err := mgr.AddReadyzCheck("aws-clients", bootstrap.readyCheck); err != nil {
+		setupLog.Error(err, "Failed to set up AWS client readyz check")
+		os.Exit(1)
+	}
 	if err := mgr.AddReadyzCheck("aws-credentials", credHealth.Check); err != nil {
 		setupLog.Error(err, "Failed to set up AWS credential readyz check")
 		os.Exit(1)
 	}
-
-	stsCfg, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		setupLog.Error(err, "Failed to load AWS config periodic credential check")
-		os.Exit(1)
-	}
-	go cloudctlaws.RunPeriodicCheck(ctx, sts.NewFromConfig(stsCfg), credentialRecheckInterval, credHealth)
-
-	const rateLimitRampDuration = 30 * time.Second
-	go func() {
-		select {
-		case <-mgr.Elected():
-		case <-ctx.Done():
-			return
-		}
-		for _, limiter := range awsClients.RateLimiters {
-			go cloudctlaws.RampUp(ctx, limiter, rateLimitRampDuration)
-		}
-	}()
 
 	setupLog.Info("Starting manager")
 	if err := mgr.Start(ctx); err != nil {

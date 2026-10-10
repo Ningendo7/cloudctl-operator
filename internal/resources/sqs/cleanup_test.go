@@ -615,11 +615,11 @@ func TestCleanup_TreatsAlreadyGoneQueueAsSuccess(t *testing.T) {
 }
 
 func TestCleanup_DoesNotForgetQueueOnTransientLookupError(t *testing.T) {
-	// Regression test for a real bug: GetQueueUrl failing for any reason
-	// (throttling, a permission gap, a network blip) must NOT be treated
-	// the same as "the queue doesn't exist" - doing so silently dropped a
-	// queue that still exists from the ledger, abandoning it without ever
-	// actually deleting or retaining it per policy.
+	// GetQueueUrl failing for any reason (throttling, a permission gap, a
+	// network blip) must NOT be treated the same as "the queue doesn't
+	// exist" - doing so would silently drop a queue that still exists from
+	// the ledger, abandoning it without ever actually deleting or
+	// retaining it per policy.
 	client := newFakeSQS()
 	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
 	advancePastQuietWindow(t, ledger, "orders")

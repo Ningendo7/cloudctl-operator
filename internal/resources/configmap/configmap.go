@@ -78,7 +78,10 @@ func ConfigMapName(crName string) string {
 // DescribeDBInstances call (unlike every other resource type here, which
 // derives its connection value purely from the ARN already in the
 // ledger), so a CR that never uses RDS can pass nil.
-func Ensure(ctx context.Context, k8sClient client.Client, rdsClient cloudctlaws.RDSClient, region, accountID string, cr *depsv1alpha1.AppDependencies) error {
+//
+// apiReader bypasses the label-filtered cache, which can't see an
+// unlabeled same-named ConfigMap.
+func Ensure(ctx context.Context, k8sClient client.Client, apiReader client.Reader, rdsClient cloudctlaws.RDSClient, region, accountID string, cr *depsv1alpha1.AppDependencies) error {
 	data, err := buildConnectionData(ctx, k8sClient, rdsClient, region, accountID, cr)
 	if err != nil {
 		return err
@@ -86,7 +89,11 @@ func Ensure(ctx context.Context, k8sClient client.Client, rdsClient cloudctlaws.
 
 	name := ConfigMapName(cr.Name)
 	existing := &corev1.ConfigMap{}
-	getErr := k8sClient.Get(ctx, client.ObjectKey{Namespace: cr.Namespace, Name: name}, existing)
+	key := client.ObjectKey{Namespace: cr.Namespace, Name: name}
+	getErr := k8sClient.Get(ctx, key, existing)
+	if apierrors.IsNotFound(getErr) {
+		getErr = apiReader.Get(ctx, key, existing)
+	}
 	exists := getErr == nil
 	if getErr != nil && !apierrors.IsNotFound(getErr) {
 		return getErr
@@ -111,6 +118,7 @@ func Ensure(ctx context.Context, k8sClient client.Client, rdsClient cloudctlaws.
 	}
 
 	apply := applycorev1.ConfigMap(name, cr.Namespace).
+		WithLabels(map[string]string{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue}).
 		WithData(data).
 		WithOwnerReferences(applymetav1.OwnerReference().
 			WithAPIVersion(gvk.GroupVersion().String()).
@@ -225,7 +233,7 @@ func addOwnedRDS(ctx context.Context, rdsClient cloudctlaws.RDSClient, data map[
 	if !ok {
 		return nil
 	}
-	setRDSConnectionKeys(data, resourceName, "", info)
+	setRDSConnectionKeys(data, resourceName, "", "", info)
 	return nil
 }
 
@@ -255,19 +263,19 @@ func addConsumedRDS(ctx context.Context, k8sClient client.Client, rdsClient clou
 	if !ok {
 		return nil
 	}
-	setRDSConnectionKeys(data, ref.ResourceName, ref.Name, info)
+	setRDSConnectionKeys(data, ref.ResourceName, ref.Namespace, ref.Name, info)
 	return nil
 }
 
 // setRDSConnectionKeys writes one RDS instance's host/port/engine/
 // identifier into data, keyed the same owned-vs-consumed way every other
 // resource type's connectionKV already keys its own single value.
-func setRDSConnectionKeys(data map[string]string, resourceName, producerCRName string, info rds.ConnectionInfo) {
+func setRDSConnectionKeys(data map[string]string, resourceName, producerNamespace, producerCRName string, info rds.ConnectionInfo) {
 	key := func(suffix string) string {
 		if producerCRName == "" {
 			return envKey(resourceTypeRDS, resourceName, suffix)
 		}
-		return envKey(resourceTypeRDS, producerCRName, resourceName, suffix)
+		return envKey(resourceTypeRDS, producerNamespace, producerCRName, resourceName, suffix)
 	}
 	data[key("HOST")] = info.Host
 	data[key("PORT")] = strconv.Itoa(int(info.Port))
@@ -293,7 +301,7 @@ func addOwned(
 	if entry == nil {
 		return nil
 	}
-	key, value, err := connectionKV(resourceType, resourceName, entry.ARN, region, accountID, "")
+	key, value, err := connectionKV(resourceType, resourceName, entry.ARN, region, accountID, "", "")
 	if err != nil {
 		return err
 	}
@@ -305,8 +313,7 @@ func addOwned(
 // iam.ResolveConsumeARN confirms it's actually authorized - the same
 // check IAM's own policy derivation applies, reused rather than
 // duplicated so this can never expose more than IAM actually grants
-// access to. Keyed with the producer CR's name folded in, since two
-// different producers can each own a resource with the same logical name.
+// access to. Keyed with the producer CR's namespace and name folded in.
 func addConsumed(
 	ctx context.Context,
 	k8sClient client.Client,
@@ -321,7 +328,7 @@ func addConsumed(
 	if !ok {
 		return nil
 	}
-	key, value, err := connectionKV(resourceType, ref.ResourceName, arn, region, accountID, ref.Name)
+	key, value, err := connectionKV(resourceType, ref.ResourceName, arn, region, accountID, ref.Namespace, ref.Name)
 	if err != nil {
 		return err
 	}
@@ -333,7 +340,7 @@ func addConsumed(
 // actually needs for one resource: SQS needs a queue URL (SendMessage/
 // ReceiveMessage take a URL, not an ARN), the others hand back what
 // they're natively identified by.
-func connectionKV(resourceType, resourceName, arn, region, accountID, producerCRName string) (key, value string, err error) {
+func connectionKV(resourceType, resourceName, arn, region, accountID, producerNamespace, producerCRName string) (key, value string, err error) {
 	id := arnResourceID(arn)
 
 	var suffix string
@@ -357,7 +364,7 @@ func connectionKV(resourceType, resourceName, arn, region, accountID, producerCR
 	if producerCRName == "" {
 		key = envKey(resourceType, resourceName, suffix)
 	} else {
-		key = envKey(resourceType, producerCRName, resourceName, suffix)
+		key = envKey(resourceType, producerNamespace, producerCRName, resourceName, suffix)
 	}
 	return key, value, nil
 }

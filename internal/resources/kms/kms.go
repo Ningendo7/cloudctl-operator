@@ -264,6 +264,10 @@ func createKey(
 // finishing alias creation if that's what didn't complete last time, and
 // reviving the key out of a scheduled deletion if Cleanup's own quiet
 // window scheduled one and the resource has since reappeared in spec.
+// Skips all of that and returns immediately once the entry is already
+// Verified and within its trust window - the same re-verification cadence
+// every other resource type already applies to its own ownership check,
+// which this package had been doing on every single pass instead.
 func resumeKey(
 	ctx context.Context,
 	kmsClient kmsAPI,
@@ -273,6 +277,13 @@ func resumeKey(
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
+	if !status.NeedsRevalidation(entry) {
+		updated := entry
+		updated.DeletionPolicy = opts.deletionPolicy
+		status.UpsertManagedResource(&ledger, updated)
+		return ledger, nil
+	}
+
 	describeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &entry.ARN,
 	})

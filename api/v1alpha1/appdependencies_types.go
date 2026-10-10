@@ -603,7 +603,15 @@ type RDSReplicationSpec struct {
 // encryption flag, RDS's StorageEncrypted cannot be toggled on an
 // existing instance; enabling it later requires a full snapshot-and-
 // restore into a new instance, which this design doesn't attempt.
-// +kubebuilder:validation:XValidation:rule="self.encryption == oldSelf.encryption",message="encryption is immutable on an RDS instance; AWS does not support enabling storage encryption after creation"
+// +kubebuilder:validation:XValidation:rule="has(self.encryption) == has(oldSelf.encryption) && (!has(self.encryption) || self.encryption == oldSelf.encryption)",message="encryption is immutable on an RDS instance; AWS does not support enabling storage encryption after creation"
+// engine is immutable - AWS never allows changing an instance's engine
+// after creation, so this blocks the edit outright instead of silently
+// accepting a change the controller could never apply.
+// +kubebuilder:validation:XValidation:rule="self.engine == oldSelf.engine",message="engine is immutable on an RDS instance"
+// dbSubnetGroupName is immutable here (though AWS itself allows changing
+// it): doing so would mean re-resolving the instance's VPC and moving its
+// dedicated security group, which this design doesn't attempt yet.
+// +kubebuilder:validation:XValidation:rule="self.dbSubnetGroupName == oldSelf.dbSubnetGroupName",message="dbSubnetGroupName is immutable on an RDS instance for now - moving VPCs isn't supported"
 type RDSInstanceSpec struct {
 	// name of the instance, used to derive the actual AWS DB instance
 	// identifier.
@@ -633,6 +641,14 @@ type RDSInstanceSpec struct {
 	// +kubebuilder:validation:MaxLength=50
 	// +kubebuilder:validation:Pattern=`^db\.[a-z0-9]+\.[a-z0-9]+$`
 	InstanceClass string `json:"instanceClass"`
+
+	// allocatedStorage in GiB. AWS rejects any decrease via ModifyDBInstance,
+	// so this field can only grow once set.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=20
+	// +kubebuilder:validation:Maximum=65536
+	// +kubebuilder:validation:XValidation:rule="self >= oldSelf",message="allocatedStorage cannot be decreased"
+	AllocatedStorage int32 `json:"allocatedStorage"`
 
 	// +optional
 	// +kubebuilder:default=Retain

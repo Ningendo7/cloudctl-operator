@@ -54,9 +54,15 @@ type fakeIAM struct {
 	createRoleErr             error
 	updateAssumeRolePolicyErr error
 	listRoleTagsErr           error
+	getRolePolicyErr          error
 	putRolePolicyErr          error
 	deleteRolePolicyErr       error
 	deleteRoleErr             error
+
+	// putRolePolicyCalls counts every real call - lets a test prove the
+	// diff-before-write check actually skips the call when nothing
+	// changed, not just trusts it does.
+	putRolePolicyCalls int
 }
 
 func newFakeIAM() *fakeIAM {
@@ -112,7 +118,24 @@ func (f *fakeIAM) ListRoleTags(_ context.Context, in *iam.ListRoleTagsInput, _ .
 	return &iam.ListRoleTagsOutput{Tags: mapToTags(r.tags)}, nil
 }
 
+func (f *fakeIAM) GetRolePolicy(_ context.Context, in *iam.GetRolePolicyInput, _ ...func(*iam.Options)) (*iam.GetRolePolicyOutput, error) {
+	if f.getRolePolicyErr != nil {
+		return nil, f.getRolePolicyErr
+	}
+	r, ok := f.roles[*in.RoleName]
+	if !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	doc, ok := r.policies[*in.PolicyName]
+	if !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	name, policyName := *in.RoleName, *in.PolicyName
+	return &iam.GetRolePolicyOutput{RoleName: &name, PolicyName: &policyName, PolicyDocument: &doc}, nil
+}
+
 func (f *fakeIAM) PutRolePolicy(_ context.Context, in *iam.PutRolePolicyInput, _ ...func(*iam.Options)) (*iam.PutRolePolicyOutput, error) {
+	f.putRolePolicyCalls++
 	if f.putRolePolicyErr != nil {
 		return nil, f.putRolePolicyErr
 	}

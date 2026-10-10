@@ -21,7 +21,6 @@ import (
 	"errors"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/rds/types"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -57,7 +56,7 @@ func ResolveConnectionInfo(ctx context.Context, awsClient rdsAPI, instanceARN st
 		return ConnectionInfo{}, false, err
 	}
 
-	out, err := awsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
+	out, err := describeDBInstanceCached(ctx, awsClient, instanceID)
 	if err != nil {
 		var notFound *types.DBInstanceNotFoundFault
 		if errors.As(err, &notFound) {

@@ -42,20 +42,19 @@ S3 in particular also has code guessing at string-matched error codes
 with no typed SDK exception to verify against
 (`isServerSideEncryptionConfigurationNotFoundError`, `isNoSuchTagSet`; see
 [resources.md](resources.md)). Two things are deliberately deferred here
-— LocalStack's community edition has historically been the least
-faithful for both, so testing against it risks false confidence more
-than real coverage:
+— LocalStack's community edition is the least faithful of the services
+this project depends on for both, so testing against it risks false
+confidence more than real coverage:
 
 - Standalone KMS (the `kms.resources` type, as opposed to the
   dedicated-key path every other resource type already exercises).
-- CloudWatch alarms — confirmed directly, not just assumed: this
-  package's integration test originally lived here, but `DescribeAlarms`
-  against the pinned LocalStack image returned a persistent
-  `500 InternalError` ("An unknown error occurred when trying to
-  serialize the response"), retried three times, failing every time, on
-  every test that reached it. Not our bug — LocalStack's own CloudWatch
-  alarm emulation. Removed rather than worked around; alarms still has a
-  live tier (below), which passes against real AWS.
+- CloudWatch alarms — confirmed directly, not just assumed:
+  `DescribeAlarms` against the pinned LocalStack image returns a
+  persistent `500 InternalError` ("An unknown error occurred when trying
+  to serialize the response") — LocalStack's own CloudWatch alarm
+  emulation, not a bug in this project. No integration tier for alarms as
+  a result; it still has a live tier (below), which passes against real
+  AWS.
 
 New integration-tested packages get a `<package>_integration_test.go`
 file with a `//go:build integration` tag, added to

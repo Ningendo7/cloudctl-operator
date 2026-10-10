@@ -43,9 +43,7 @@ func maxedOutSectionGrants(resourceType string) []grant {
 // the proactive size check actually fires for a realistic, reachable case:
 // a single section maxed out at its own CRD-declared limit renders a
 // 32,758-character document (confirmed via this exact grant set), well
-// over PutRolePolicy's 10,240-character ceiling - this used to only
-// surface via AWS's own generic LimitExceededException after a doomed
-// round-trip.
+// over PutRolePolicy's 10,240-character ceiling.
 func TestEnsurePermissionsPolicy_RefusesOversizedPolicyWithClearError(t *testing.T) {
 	grants := maxedOutSectionGrants("sqs")
 

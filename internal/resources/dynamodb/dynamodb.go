@@ -34,9 +34,8 @@ import (
 )
 
 // dynamodbAPI is the subset of the DynamoDB client this package needs.
-// Stays private here — like sqsAPI and snsAPI originally did — until a
-// second real consumer (controller-level envtest fakes) needs to
-// substitute a fake here too.
+// Stays private here until a second real consumer (controller-level
+// envtest fakes) needs to substitute a fake here too.
 type dynamodbAPI interface {
 	DescribeTable(ctx context.Context, in *dynamodb.DescribeTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error)
 	CreateTable(ctx context.Context, in *dynamodb.CreateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.CreateTableOutput, error)

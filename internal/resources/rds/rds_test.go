@@ -25,7 +25,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -67,6 +69,7 @@ func baseInstanceSpec(name string) depsv1alpha1.RDSInstanceSpec {
 		Engine:            "postgres",
 		EngineVersion:     "16.3",
 		InstanceClass:     "db.t4g.micro",
+		AllocatedStorage:  20,
 	}
 }
 
@@ -354,6 +357,34 @@ func TestEnsure_RefusesUnownedExistingInstance(t *testing.T) {
 	}
 }
 
+// TestEnsure_RefusesUnownedInstanceStillProvisioning proves ownership is
+// checked before the status gate, not after: a foreign instance that
+// hasn't even finished creating yet must still be refused immediately,
+// not reported as a retryable "still creating" - tags are set atomically
+// at CreateDBInstance, so there's no reason to wait out the full
+// provisioning window just to learn a problem that was never going away.
+func TestEnsure_RefusesUnownedInstanceStillProvisioning(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID] = &fakeInstance{
+		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "creating",
+		tags: map[string]string{"team": "someone-else"},
+	}
+
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error for an unowned instance even while still provisioning")
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if errors.As(err, &reconcileErr) && reconcileErr.Retryable {
+		t.Errorf("expected a non-retryable ownership error, not the retryable still-provisioning one, got %v", err)
+	}
+}
+
 func TestEnsure_AdoptsUntaggedInstance(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
@@ -456,6 +487,40 @@ func TestEnsure_SubnetGroupGrantCoversDifferentNamespace_IsNotAuthorized(t *test
 	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error - the grant covers a different namespace")
+	}
+}
+
+// TestEnsure_ListsSubnetGroupGrantsOnceAcrossMultipleResources guards
+// against re-listing every RDSSubnetGroupGrant once per declared
+// instance - the same grant set authorizes every instance in one pass,
+// so it only needs fetching once.
+func TestEnsure_ListsSubnetGroupGrantsOnceAcrossMultipleResources(t *testing.T) {
+	rdsClient := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+
+	var listCalls int
+	k8sClient := interceptor.NewClient(
+		fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build(),
+		interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*depsv1alpha1.RDSSubnetGroupGrantList); ok {
+					listCalls++
+				}
+				return c.List(ctx, list, opts...)
+			},
+		},
+	)
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{
+		baseInstanceSpec("orders-db"),
+		baseInstanceSpec("invoices-db"),
+	}}
+
+	if _, err := Ensure(context.Background(), rdsClient, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if listCalls != 1 {
+		t.Errorf("expected exactly 1 RDSSubnetGroupGrant list across 2 resources, got %d", listCalls)
 	}
 }
 
@@ -835,5 +900,237 @@ func TestEnsure_AdoptingInstance_EmitsAdoptedEvent(t *testing.T) {
 	}
 	if !contains(events, "InstanceAdopted") {
 		t.Errorf("expected an InstanceAdopted event, got %v", events)
+	}
+}
+
+// --- Attribute drift-correction (ModifyDBInstance) ---
+
+func TestEnsure_UpdatesInstanceClassWhenChanged(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := baseInstanceSpec("orders-db")
+	rdsSpec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	// User resizes the instance in spec.
+	spec.InstanceClass = "db.t4g.small"
+	rdsSpec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	ledger, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+
+	if client.modifyDBInstanceCalls != 1 {
+		t.Fatalf("expected exactly one ModifyDBInstance call, got %d", client.modifyDBInstanceCalls)
+	}
+	in := client.lastModifyDBInstanceInput
+	if in.DBInstanceClass == nil || *in.DBInstanceClass != "db.t4g.small" {
+		t.Errorf("expected DBInstanceClass=db.t4g.small in the Modify call, got %v", in.DBInstanceClass)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	if client.instances[instanceID].instanceClass != "db.t4g.small" {
+		t.Errorf("expected the fake instance's class to actually update, got %q", client.instances[instanceID].instanceClass)
+	}
+	entry := status.FindManagedResource(ledger, resourceType, "orders-db")
+	if entry.State != depsv1alpha1.ManagedResourceStateVerified {
+		t.Errorf("expected the instance to still verify successfully after a modify, got state %s", entry.State)
+	}
+}
+
+func TestEnsure_EnablesMultiAZWhenHighAvailabilityToggledOn(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := baseInstanceSpec("orders-db")
+	rdsSpec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	spec.HighAvailability = &depsv1alpha1.RDSHighAvailabilitySpec{Enabled: true}
+	rdsSpec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+
+	in := client.lastModifyDBInstanceInput
+	if in == nil || in.MultiAZ == nil || !*in.MultiAZ {
+		t.Errorf("expected MultiAZ=true in the Modify call, got %v", in)
+	}
+}
+
+func TestEnsure_DisablesMultiAZWhenHighAvailabilityToggledOff(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := baseInstanceSpec("orders-db")
+	spec.HighAvailability = &depsv1alpha1.RDSHighAvailabilitySpec{Enabled: true}
+	rdsSpec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	spec.HighAvailability = &depsv1alpha1.RDSHighAvailabilitySpec{Enabled: false}
+	rdsSpec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+
+	in := client.lastModifyDBInstanceInput
+	if in == nil || in.MultiAZ == nil || *in.MultiAZ {
+		t.Errorf("expected MultiAZ=false in the Modify call, got %v", in)
+	}
+}
+
+func TestEnsure_UpdatesBackupRetentionWhenBackupToggled(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := baseInstanceSpec("orders-db")
+	rdsSpec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	spec.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: true}
+	rdsSpec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+
+	in := client.lastModifyDBInstanceInput
+	if in == nil || in.BackupRetentionPeriod == nil || *in.BackupRetentionPeriod != defaultBackupRetentionDays {
+		t.Errorf("expected BackupRetentionPeriod=%d in the Modify call, got %v", defaultBackupRetentionDays, in)
+	}
+}
+
+func TestEnsure_NoModifyCallWhenNothingChanged(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+
+	if client.modifyDBInstanceCalls != 0 {
+		t.Errorf("expected no ModifyDBInstance call when spec matches AWS already, got %d", client.modifyDBInstanceCalls)
+	}
+}
+
+func TestEnsure_DoesNotCallModifyOnFreshCreate(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+
+	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if client.modifyDBInstanceCalls != 0 {
+		t.Errorf("expected no ModifyDBInstance call on the very first, create-only pass, got %d", client.modifyDBInstanceCalls)
+	}
+}
+
+func TestEnsure_PropagatesModifyDBInstanceFailure(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := baseInstanceSpec("orders-db")
+	rdsSpec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	spec.InstanceClass = "db.t4g.small"
+	rdsSpec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	client.modifyDBInstanceErr = &fakeAWSError{code: "ThrottlingException"}
+	_, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, ledger, nil, nil)
+	if err == nil {
+		t.Fatal("expected ModifyDBInstance's failure to propagate")
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable ReconcileError for a throttling error, got %v", err)
+	}
+}
+
+func TestEnsure_ModifiesMultipleAttributesInOneCall(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := baseInstanceSpec("orders-db")
+	rdsSpec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	spec.InstanceClass = "db.t4g.small"
+	spec.HighAvailability = &depsv1alpha1.RDSHighAvailabilitySpec{Enabled: true}
+	spec.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: true}
+	rdsSpec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+
+	if client.modifyDBInstanceCalls != 1 {
+		t.Fatalf("expected all three changes to be sent in exactly one ModifyDBInstance call, got %d calls", client.modifyDBInstanceCalls)
+	}
+	in := client.lastModifyDBInstanceInput
+	if in.DBInstanceClass == nil || *in.DBInstanceClass != "db.t4g.small" {
+		t.Error("expected DBInstanceClass in the combined Modify call")
+	}
+	if in.MultiAZ == nil || !*in.MultiAZ {
+		t.Error("expected MultiAZ in the combined Modify call")
+	}
+	if in.BackupRetentionPeriod == nil || *in.BackupRetentionPeriod != defaultBackupRetentionDays {
+		t.Error("expected BackupRetentionPeriod in the combined Modify call")
+	}
+}
+
+func TestEnsure_ModifyAppliesImmediately(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := baseInstanceSpec("orders-db")
+	rdsSpec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	spec.InstanceClass = "db.t4g.small"
+	rdsSpec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
+	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+
+	in := client.lastModifyDBInstanceInput
+	if in.ApplyImmediately == nil || !*in.ApplyImmediately {
+		t.Error("expected ApplyImmediately=true so the operator's desired state takes effect promptly, not on AWS's own maintenance window")
 	}
 }

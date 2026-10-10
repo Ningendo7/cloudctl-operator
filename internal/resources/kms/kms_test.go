@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/aws/smithy-go"
@@ -96,6 +97,67 @@ func TestEnsure_ResumesFromLedgerWithoutRecreatingKeyWhenAliasIsMissing(t *testi
 	}
 	if client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] != arn {
 		t.Error("expected the alias to now point at the existing key")
+	}
+}
+
+// TestEnsure_SkipsReVerificationWithinTrustWindow proves resumeKey no
+// longer re-verifies ownership (ListResourceTags) or re-describes the key
+// on every single pass once an entry is already Verified and recently
+// checked - the same trust-window cadence rds/sqs/sns/s3/dynamodb already
+// apply to their own ownership checks.
+func TestEnsure_SkipsReVerificationWithinTrustWindow(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	recentlyVerified := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			CreatedAt: metav1.Now(), LastVerifiedAt: &recentlyVerified, State: depsv1alpha1.ManagedResourceStateVerified},
+	}
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+
+	updated, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if client.describeKeyCalls[arn] != 0 {
+		t.Errorf("expected no DescribeKey call within the trust window, got %d", client.describeKeyCalls[arn])
+	}
+	if client.listResourceTagsCalls[arn] != 0 {
+		t.Errorf("expected no ListResourceTags call within the trust window, got %d", client.listResourceTagsCalls[arn])
+	}
+	entry := status.FindManagedResource(updated, resourceType, "primary")
+	if entry == nil || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+		t.Errorf("expected the entry to remain Verified, got %+v", entry)
+	}
+}
+
+// TestEnsure_ReVerifiesOnceTrustWindowExpires is the other half: once the
+// window has elapsed, the real check must still run.
+func TestEnsure_ReVerifiesOnceTrustWindowExpires(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			CreatedAt: metav1.Now(), LastVerifiedAt: &stale, State: depsv1alpha1.ManagedResourceStateVerified},
+	}
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+
+	updated, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if client.describeKeyCalls[arn] != 1 {
+		t.Errorf("expected exactly 1 DescribeKey call once the trust window expired, got %d", client.describeKeyCalls[arn])
+	}
+	if client.listResourceTagsCalls[arn] != 1 {
+		t.Errorf("expected exactly 1 ListResourceTags call once the trust window expired, got %d", client.listResourceTagsCalls[arn])
+	}
+	entry := status.FindManagedResource(updated, resourceType, "primary")
+	if entry == nil || entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Time.After(stale.Time) {
+		t.Error("expected LastVerifiedAt to be refreshed after a real re-verification")
 	}
 }
 

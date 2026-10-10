@@ -446,9 +446,7 @@ func TestLive_Cleanup_BlocksDeletingBucketWithARealObjectThenSucceedsOnceEmpty(t
 
 // TestLive_Ensure_RefusesBucketOwnedByADifferentRealCR confirms the
 // stale-UID/ownership check against real, round-tripped tags read via S3's
-// own GetBucketTagging shape - this exact bug class was real and found live
-// once already in sqs's own ownership check before IsStaleUID existed
-// everywhere.
+// own GetBucketTagging shape.
 func TestLive_Ensure_RefusesBucketOwnedByADifferentRealCR(t *testing.T) {
 	cfg := skipUnlessLiveAWSCredentials(t)
 	client := s3sdk.NewFromConfig(cfg)

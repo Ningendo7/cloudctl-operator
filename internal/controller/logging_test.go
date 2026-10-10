@@ -24,6 +24,7 @@ import (
 
 	"github.com/aws/smithy-go"
 	"github.com/go-logr/logr"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -128,6 +129,63 @@ func TestSetSectionCondition_LogsTransientErrorReason(t *testing.T) {
 
 	if reason, _ := (*calls)[0].kv("reason"); reason != "TransientError" {
 		t.Errorf("expected reason=TransientError, got %v", reason)
+	}
+}
+
+// TestSetSectionCondition_UsesReconcileErrorReasonWhenSet proves the
+// generic, shared condition-setting helper (used by every section) honors
+// a ReconcileError's own Reason field as the condition's own Reason,
+// ahead of the generic PermissionDenied/TransientError/Error
+// classification - this is what lets a resource type's own distinct,
+// alertable reason (e.g. rds's InstanceStuckPendingDeletion) surface
+// without being mistaken for an ordinary transient failure.
+func TestSetSectionCondition_UsesReconcileErrorReasonWhenSet(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{}
+	err := &cloudctlaws.ReconcileError{Err: errors.New("instance orders-db is stuck"), Reason: "InstanceStuckPendingDeletion"}
+
+	setSectionCondition(context.Background(), cr, "RDSReady", err, nil)
+
+	cond := apimeta.FindStatusCondition(cr.Status.Conditions, "RDSReady")
+	if cond == nil {
+		t.Fatal("expected an RDSReady condition to be set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("expected ConditionFalse, got %s", cond.Status)
+	}
+	if cond.Reason != "InstanceStuckPendingDeletion" {
+		t.Errorf("expected Reason %q, got %q", "InstanceStuckPendingDeletion", cond.Reason)
+	}
+}
+
+func TestSetSectionCondition_FallsBackToGenericClassificationWithoutReason(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{}
+	// No Reason set - must fall back to the existing Retryable-based
+	// classification, unchanged from before that field existed.
+	err := &cloudctlaws.ReconcileError{Err: errors.New("throttled"), Retryable: true}
+
+	setSectionCondition(context.Background(), cr, "RDSReady", err, nil)
+
+	cond := apimeta.FindStatusCondition(cr.Status.Conditions, "RDSReady")
+	if cond == nil {
+		t.Fatal("expected an RDSReady condition to be set")
+	}
+	if cond.Reason != "TransientError" {
+		t.Errorf("expected the generic TransientError reason, got %q", cond.Reason)
+	}
+}
+
+func TestSetSectionCondition_PlainErrorStillGetsGenericReason(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{}
+	err := errors.New("something broke")
+
+	setSectionCondition(context.Background(), cr, "RDSReady", err, nil)
+
+	cond := apimeta.FindStatusCondition(cr.Status.Conditions, "RDSReady")
+	if cond == nil {
+		t.Fatal("expected an RDSReady condition to be set")
+	}
+	if cond.Reason != "Error" {
+		t.Errorf("expected the generic Error reason for a plain, unwrapped error, got %q", cond.Reason)
 	}
 }
 

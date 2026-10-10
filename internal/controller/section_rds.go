@@ -19,8 +19,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 )
 
@@ -49,7 +51,9 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 
 			// Only ever relevant for a CR that consumes an RDS instance -
 			// one that only owns instances of its own has no pods needing
-			// network identity for this purpose.
+			// network identity for this purpose. Once consumes becomes
+			// empty, any previously-set-up identity is torn down instead
+			// of left dangling.
 			var networkErr error
 			if cr.Spec.RDS != nil && len(cr.Spec.RDS.Consumes) > 0 {
 				ledger, networkErr = rds.EnsurePodNetworkIdentity(
@@ -58,9 +62,15 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 					r.AWSClients.Region, r.AWSClients.AccountID, cr.Spec.RDS.Consumes, cr.Status.ManagedResources,
 				)
 				cr.Status.ManagedResources = ledger
+			} else {
+				ledger, networkErr = rds.CleanupPodNetworkIdentity(
+					ctx, r.AWSClients.EC2, r.Client,
+					cr.Namespace, cr.Name, rdsNetworkServiceAccountName(cr), cr.Status.ManagedResources,
+				)
+				cr.Status.ManagedResources = ledger
 			}
 
-			ledger, _, cleanupErr := rds.Cleanup(
+			ledger, results, cleanupErr := rds.Cleanup(
 				ctx, r.AWSClients.RDS, cr.Namespace, cr.Name, string(cr.UID),
 				cr.Spec.RDS, cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
 			)
@@ -73,7 +83,19 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(ctx, cr, "RDSReady", err, eventRecorderFor(r, cr))
+			// Surface a stuck instance as a persistent, alertable condition
+			// reason - drives the condition only, not reconcile's return
+			// value, same as SetDeletionBlocked during finalize.
+			conditionErr := err
+			if conditionErr == nil {
+				if names := stuckInstanceNames(results); len(names) > 0 {
+					conditionErr = &cloudctlaws.ReconcileError{
+						Err:    fmt.Errorf("instance(s) %s removed from spec and stuck pending manual deletion - billing continues, this operator will never delete them automatically", strings.Join(names, ", ")),
+						Reason: "InstanceStuckPendingDeletion",
+					}
+				}
+			}
+			setSectionCondition(ctx, cr, "RDSReady", conditionErr, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {
@@ -83,6 +105,15 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			}
 			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, resourceTypeRDS, declared)
 			defer cancel()
+
+			ledger, networkErr := rds.CleanupPodNetworkIdentity(
+				ctx, r.AWSClients.EC2, r.Client,
+				cr.Namespace, cr.Name, rdsNetworkServiceAccountName(cr), cr.Status.ManagedResources,
+			)
+			cr.Status.ManagedResources = ledger
+			if networkErr != nil {
+				return false, nil, networkErr
+			}
 
 			ledger, results, err := rds.Cleanup(
 				ctx, r.AWSClients.RDS, cr.Namespace, cr.Name, string(cr.UID),
@@ -104,6 +135,19 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			return true, nil, nil
 		},
 	}
+}
+
+// stuckInstanceNames returns the names of every rds result reported
+// StuckPendingDeletion, in order - never PendingDeletion, which is still
+// within the grace period and might yet resolve on its own.
+func stuckInstanceNames(results []rds.CleanupResult) []string {
+	var names []string
+	for _, res := range results {
+		if res.Reason == rds.CleanupReasonStuckPendingDeletion {
+			names = append(names, res.Name)
+		}
+	}
+	return names
 }
 
 // rdsNetworkServiceAccountName resolves which ServiceAccount identifies

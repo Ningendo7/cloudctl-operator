@@ -131,9 +131,15 @@ func IsRetryable(err error) bool {
 // packages wrap errors with this so the controller can pick an appropriate
 // RequeueAfter and status condition reason without re-deriving the
 // classification itself.
+// Reason, if set, names a distinct, stable condition reason for this
+// error - used instead of the generic PermissionDenied/TransientError/
+// Error classification, so a caller can alert on this exact Reason
+// without it being confused with (or masked by) an ordinary transient
+// failure of the same section.
 type ReconcileError struct {
 	Err       error
 	Retryable bool
+	Reason    string
 }
 
 func (e *ReconcileError) Error() string { return e.Err.Error() }

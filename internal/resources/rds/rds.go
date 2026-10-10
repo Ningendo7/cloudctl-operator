@@ -38,6 +38,7 @@ import (
 // cleanup.go for why Cleanup never calls it.
 type rdsAPI interface {
 	CreateDBInstance(ctx context.Context, in *rds.CreateDBInstanceInput, optFns ...func(*rds.Options)) (*rds.CreateDBInstanceOutput, error)
+	ModifyDBInstance(ctx context.Context, in *rds.ModifyDBInstanceInput, optFns ...func(*rds.Options)) (*rds.ModifyDBInstanceOutput, error)
 	DescribeDBInstances(ctx context.Context, in *rds.DescribeDBInstancesInput, optFns ...func(*rds.Options)) (*rds.DescribeDBInstancesOutput, error)
 	ListTagsForResource(ctx context.Context, in *rds.ListTagsForResourceInput, optFns ...func(*rds.Options)) (*rds.ListTagsForResourceOutput, error)
 	AddTagsToResource(ctx context.Context, in *rds.AddTagsToResourceInput, optFns ...func(*rds.Options)) (*rds.AddTagsToResourceOutput, error)
@@ -45,6 +46,7 @@ type rdsAPI interface {
 	DescribeDBSubnetGroups(ctx context.Context, in *rds.DescribeDBSubnetGroupsInput, optFns ...func(*rds.Options)) (*rds.DescribeDBSubnetGroupsOutput, error)
 	CreateDBSnapshot(ctx context.Context, in *rds.CreateDBSnapshotInput, optFns ...func(*rds.Options)) (*rds.CreateDBSnapshotOutput, error)
 	DescribeDBSnapshots(ctx context.Context, in *rds.DescribeDBSnapshotsInput, optFns ...func(*rds.Options)) (*rds.DescribeDBSnapshotsOutput, error)
+	DeleteDBSnapshot(ctx context.Context, in *rds.DeleteDBSnapshotInput, optFns ...func(*rds.Options)) (*rds.DeleteDBSnapshotOutput, error)
 }
 
 const resourceType = "rds"
@@ -80,6 +82,7 @@ type instanceOptions struct {
 	engine            string
 	engineVersion     string
 	instanceClass     string
+	allocatedStorage  int32
 	dbSubnetGroupName string
 	multiAZ           bool
 	backupEnabled     bool
@@ -111,6 +114,9 @@ func Ensure(
 	}
 
 	var firstErr error
+	var grants []depsv1alpha1.RDSSubnetGroupGrant
+	var grantsFetched bool
+	var grantsErr error
 	for _, r := range spec.Resources {
 		if r.Replication != nil && r.Replication.Enabled {
 			if firstErr == nil {
@@ -119,14 +125,17 @@ func Ensure(
 			continue
 		}
 
-		authorized, authErr := isSubnetGroupAuthorized(ctx, k8sClient, namespace, r.DBSubnetGroupName)
-		if authErr != nil {
+		if !grantsFetched {
+			grants, grantsErr = listSubnetGroupGrants(ctx, k8sClient)
+			grantsFetched = true
+		}
+		if grantsErr != nil {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("instance %q: checking subnet group authorization: %w", r.Name, authErr)
+				firstErr = fmt.Errorf("instance %q: checking subnet group authorization: %w", r.Name, grantsErr)
 			}
 			continue
 		}
-		if !authorized {
+		if !isAuthorizedByGrants(grants, namespace, r.DBSubnetGroupName) {
 			if firstErr == nil {
 				firstErr = &cloudctlaws.ReconcileError{
 					Err: fmt.Errorf("instance %q: namespace %q is not authorized to use DB subnet group %q - "+
@@ -151,6 +160,7 @@ func Ensure(
 			engine:            r.Engine,
 			engineVersion:     r.EngineVersion,
 			instanceClass:     r.InstanceClass,
+			allocatedStorage:  r.AllocatedStorage,
 			dbSubnetGroupName: r.DBSubnetGroupName,
 			securityGroupID:   SecurityGroupIDFromARN(sgARN),
 		}
@@ -198,28 +208,35 @@ func Ensure(
 	return ledger, firstErr
 }
 
-// isSubnetGroupAuthorized checks every RDSSubnetGroupGrant (cluster-
-// scoped) for one covering dbSubnetGroupName that also lists namespace in
-// allowedNamespaces. No grant covering this subnet group at all, or one
-// that exists but doesn't list this namespace, both mean not authorized -
-// there's no CR on the other end of this grant to default-trust the way
-// sharedWith always has one.
-func isSubnetGroupAuthorized(ctx context.Context, k8sClient client.Client, namespace, dbSubnetGroupName string) (bool, error) {
+// listSubnetGroupGrants fetches every RDSSubnetGroupGrant (cluster-
+// scoped) once - callers reuse the result across every resource in one
+// Ensure pass rather than re-listing per resource, since the same grant
+// set authorizes all of them.
+func listSubnetGroupGrants(ctx context.Context, k8sClient client.Client) ([]depsv1alpha1.RDSSubnetGroupGrant, error) {
 	var grants depsv1alpha1.RDSSubnetGroupGrantList
 	if err := k8sClient.List(ctx, &grants); err != nil {
-		return false, err
+		return nil, err
 	}
-	for _, g := range grants.Items {
+	return grants.Items, nil
+}
+
+// isAuthorizedByGrants checks grants for one covering dbSubnetGroupName
+// that also lists namespace in allowedNamespaces. No grant covering this
+// subnet group at all, or one that exists but doesn't list this
+// namespace, both mean not authorized - there's no CR on the other end
+// of this grant to default-trust the way sharedWith always has one.
+func isAuthorizedByGrants(grants []depsv1alpha1.RDSSubnetGroupGrant, namespace, dbSubnetGroupName string) bool {
+	for _, g := range grants {
 		if g.Spec.DBSubnetGroupName != dbSubnetGroupName {
 			continue
 		}
 		for _, ns := range g.Spec.AllowedNamespaces {
 			if ns == namespace {
-				return true, nil
+				return true
 			}
 		}
 	}
-	return false, nil
+	return false
 }
 
 func ensureInstance(
@@ -232,9 +249,7 @@ func ensureInstance(
 ) ([]depsv1alpha1.ManagedResource, error) {
 	instanceID := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, 63)
 
-	describeOut, err := awsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
-		DBInstanceIdentifier: &instanceID,
-	})
+	describeOut, err := describeDBInstanceCached(ctx, awsClient, instanceID)
 
 	var notFound *types.DBInstanceNotFoundFault
 	if errors.As(err, &notFound) {
@@ -249,6 +264,48 @@ func ensureInstance(
 
 	instance := describeOut.DBInstances[0]
 	instanceStatus := aws.ToString(instance.DBInstanceStatus)
+	instanceARN := aws.ToString(instance.DBInstanceArn)
+	existingBeforeCheck := status.FindManagedResource(ledger, resourceType, resourceName)
+
+	// Ownership is verified (or re-verified past the trust window) before
+	// the status check below, not after - tags are set atomically on
+	// CreateDBInstance, so they're queryable the instant the instance
+	// exists, regardless of its provisioning status. Checking this first
+	// means a foreign instance, or one owned by a different CR, is
+	// reported immediately instead of only after waiting out the entire
+	// "still creating" or "still modifying" window to learn the real
+	// problem was never going to resolve on its own.
+	needsOwnershipCheck := existingBeforeCheck == nil || status.NeedsRevalidation(*existingBeforeCheck)
+	if needsOwnershipCheck {
+		tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &instanceARN})
+		if tErr != nil {
+			return ledger, wrapAWSError(tErr, "reading instance tags")
+		}
+		currentTags := tagsToMap(tagsOut.TagList)
+
+		if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
+			if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
+				return ledger, fmt.Errorf("instance %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", instanceID, existingOwner)
+			}
+			if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
+				return ledger, fmt.Errorf("instance %q is tagged with this CR's name but a different UID (%s) - likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", instanceID, staleUID)
+			}
+			if !opts.adopt {
+				return ledger, fmt.Errorf("instance %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", instanceID)
+			}
+
+			merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
+			if _, tagErr := awsClient.AddTagsToResource(ctx, &rds.AddTagsToResourceInput{
+				ResourceName: &instanceARN,
+				Tags:         mapToTags(merged),
+			}); tagErr != nil {
+				return ledger, wrapAWSError(tagErr, "adopting instance (tagging)")
+			}
+			if recordEvent != nil {
+				recordEvent("Normal", "InstanceAdopted", fmt.Sprintf("Adopted existing RDS instance %s under management", instanceARN))
+			}
+		}
+	}
 
 	// "available" is the only status treated as usable; a small, explicit
 	// set of genuinely terminal-failure statuses short-circuits with a
@@ -272,44 +329,22 @@ func ensureInstance(
 		}
 	}
 
-	instanceARN := aws.ToString(instance.DBInstanceArn)
+	// Re-asserted every pass, not gated behind the ownership trust window
+	// above (a different concern: that's about how often we re-verify the
+	// ownership tag, not how often spec's own mutable fields get applied).
+	// Safe to call every pass: once a modify is in flight, the instance's
+	// own status stops reporting "available" until it completes, so the
+	// status switch above already prevents resubmitting on top of an
+	// in-progress change.
+	if err := reconcileInstanceAttributes(ctx, awsClient, instanceID, instance, opts); err != nil {
+		return ledger, err
+	}
 
-	existingBeforeCheck := status.FindManagedResource(ledger, resourceType, resourceName)
-
-	if existing := existingBeforeCheck; existing != nil && !status.NeedsRevalidation(*existing) {
-		updated := *existing
+	if !needsOwnershipCheck {
+		updated := *existingBeforeCheck
 		updated.DeletionPolicy = opts.deletionPolicy
 		status.UpsertManagedResource(&ledger, updated)
 		return ledger, nil
-	}
-
-	tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &instanceARN})
-	if tErr != nil {
-		return ledger, wrapAWSError(tErr, "reading instance tags")
-	}
-	currentTags := tagsToMap(tagsOut.TagList)
-
-	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return ledger, fmt.Errorf("instance %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", instanceID, existingOwner)
-		}
-		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
-			return ledger, fmt.Errorf("instance %q is tagged with this CR's name but a different UID (%s) - likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", instanceID, staleUID)
-		}
-		if !opts.adopt {
-			return ledger, fmt.Errorf("instance %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", instanceID)
-		}
-
-		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
-		if _, tagErr := awsClient.AddTagsToResource(ctx, &rds.AddTagsToResourceInput{
-			ResourceName: &instanceARN,
-			Tags:         mapToTags(merged),
-		}); tagErr != nil {
-			return ledger, wrapAWSError(tagErr, "adopting instance (tagging)")
-		}
-		if recordEvent != nil {
-			recordEvent("Normal", "InstanceAdopted", fmt.Sprintf("Adopted existing RDS instance %s under management", instanceARN))
-		}
 	}
 
 	if recordEvent != nil && existingBeforeCheck != nil && existingBeforeCheck.State == depsv1alpha1.ManagedResourceStateCreating {
@@ -332,6 +367,7 @@ func createInstance(
 		Engine:                   &opts.engine,
 		EngineVersion:            &opts.engineVersion,
 		DBInstanceClass:          &opts.instanceClass,
+		AllocatedStorage:         &opts.allocatedStorage,
 		DBSubnetGroupName:        &opts.dbSubnetGroupName,
 		VpcSecurityGroupIds:      []string{opts.securityGroupID},
 		MasterUsername:           aws.String(masterUsername),
@@ -369,6 +405,43 @@ func createInstance(
 	})
 
 	return ledger, nil
+}
+
+func reconcileInstanceAttributes(ctx context.Context, awsClient rdsAPI, instanceID string, instance types.DBInstance, opts instanceOptions) error {
+	modify := &rds.ModifyDBInstanceInput{DBInstanceIdentifier: &instanceID}
+	changed := false
+
+	if aws.ToString(instance.DBInstanceClass) != opts.instanceClass {
+		modify.DBInstanceClass = &opts.instanceClass
+		changed = true
+	}
+	if aws.ToBool(instance.MultiAZ) != opts.multiAZ {
+		modify.MultiAZ = aws.Bool(opts.multiAZ)
+		changed = true
+	}
+	desiredBackupRetention := int32(0)
+	if opts.backupEnabled {
+		desiredBackupRetention = defaultBackupRetentionDays
+	}
+	if aws.ToInt32(instance.BackupRetentionPeriod) != desiredBackupRetention {
+		modify.BackupRetentionPeriod = aws.Int32(desiredBackupRetention)
+		changed = true
+	}
+	// AWS rejects a decrease outright, and the CEL rule on the field
+	// already keeps spec from requesting one - only growth is ever sent.
+	if opts.allocatedStorage > aws.ToInt32(instance.AllocatedStorage) {
+		modify.AllocatedStorage = &opts.allocatedStorage
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
+	modify.ApplyImmediately = aws.Bool(true)
+	if _, err := awsClient.ModifyDBInstance(ctx, modify); err != nil {
+		return wrapAWSError(err, "updating instance attributes")
+	}
+	return nil
 }
 
 func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn string, deletionPolicy depsv1alpha1.DeletionPolicy) []depsv1alpha1.ManagedResource {

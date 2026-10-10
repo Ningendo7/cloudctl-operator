@@ -152,14 +152,14 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 	return *createOut.GroupId, nil
 }
 
-// reconcileIngress adds (never removes - see cleanup.go for the removal
-// half, a later piece) an ingress rule for every currently-authorized
-// sharedWith entry, scoped to exactly the engine's own port.
-// AuthorizeSecurityGroupIngress is naturally idempotent against a rule
-// that already exists (InvalidPermission.Duplicate), so this is safe to
-// call every reconcile without tracking which rules already exist itself.
+// reconcileIngress grants ingress for every currently-authorized consumer
+// and revokes it for anyone no longer authorized - safe to treat
+// sharedWith as the complete desired state since this security group is
+// never shared (see EnsureSecurityGroup). Idempotent either way: Authorize
+// and Revoke both tolerate their own already-applied error.
 func reconcileIngress(ctx context.Context, ec2Client cloudctlaws.EC2Client, k8sClient client.Client, groupID, engine string, sharedWith []depsv1alpha1.SharedWithEntry) error {
 	port := enginePort(engine)
+	desired := map[string]bool{}
 	var firstErr error
 	for _, consumer := range sharedWith {
 		consumerGroupARN, ok := consumerPodSecurityGroupARN(ctx, k8sClient, consumer.Namespace, consumer.Name)
@@ -170,6 +170,7 @@ func reconcileIngress(ctx context.Context, ec2Client cloudctlaws.EC2Client, k8sC
 			continue
 		}
 		consumerGroupID := SecurityGroupIDFromARN(consumerGroupARN)
+		desired[consumerGroupID] = true
 
 		_, err := ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 			GroupId: &groupID,
@@ -183,6 +184,49 @@ func reconcileIngress(ctx context.Context, ec2Client cloudctlaws.EC2Client, k8sC
 		if err != nil && !isDuplicatePermission(err) {
 			if firstErr == nil {
 				firstErr = wrapEC2Error(err, fmt.Sprintf("granting %s/%s ingress", consumer.Namespace, consumer.Name))
+			}
+		}
+	}
+
+	if err := revokeStaleIngress(ctx, ec2Client, groupID, port, desired); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// revokeStaleIngress removes ingress rules, on the engine's own port, for
+// any consumer group not in desired. Only touches rules shaped like ones
+// this package creates, so anything unexpected is left alone.
+func revokeStaleIngress(ctx context.Context, ec2Client cloudctlaws.EC2Client, groupID string, port int32, desired map[string]bool) error {
+	describeOut, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: []string{groupID}})
+	if err != nil {
+		return wrapEC2Error(err, "checking current ingress rules before revoking stale ones")
+	}
+	if len(describeOut.SecurityGroups) == 0 {
+		return nil
+	}
+
+	var firstErr error
+	for _, perm := range describeOut.SecurityGroups[0].IpPermissions {
+		if aws.ToInt32(perm.FromPort) != port || aws.ToInt32(perm.ToPort) != port {
+			continue
+		}
+		for _, pair := range perm.UserIdGroupPairs {
+			if pair.GroupId == nil || desired[*pair.GroupId] {
+				continue
+			}
+			staleGroupID := *pair.GroupId
+			_, err := ec2Client.RevokeSecurityGroupIngress(ctx, &ec2.RevokeSecurityGroupIngressInput{
+				GroupId: &groupID,
+				IpPermissions: []types.IpPermission{{
+					IpProtocol:       aws.String("tcp"),
+					FromPort:         aws.Int32(port),
+					ToPort:           aws.Int32(port),
+					UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: &staleGroupID}},
+				}},
+			})
+			if err != nil && !isNotFoundPermission(err) && firstErr == nil {
+				firstErr = wrapEC2Error(err, fmt.Sprintf("revoking stale ingress for security group %q", staleGroupID))
 			}
 		}
 	}
@@ -210,6 +254,14 @@ func consumerPodSecurityGroupARN(ctx context.Context, k8sClient client.Client, n
 func isDuplicatePermission(err error) bool {
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidPermission.Duplicate"
+}
+
+// isNotFoundPermission reports a revoke racing against (or retrying
+// after) a rule that's already gone - treated as success, the same
+// idempotent tolerance isDuplicatePermission gives the add side.
+func isNotFoundPermission(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidPermission.NotFound"
 }
 
 func mapToEC2Tags(m map[string]string) []types.Tag {

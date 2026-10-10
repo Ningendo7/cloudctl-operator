@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 )
 
 const (
@@ -78,7 +79,7 @@ func TestEnsure_PopulatesOwnedResourceKeys(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -123,15 +124,99 @@ func TestEnsure_MirrorsAuthorizedConsumedResource(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, consumer); err != nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, consumer); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
 	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
-	wantKey := "SQS_PLATFORM_SERVICE_SHARED_CACHE_URL"
+	wantKey := "SQS_TEAM_B_PLATFORM_SERVICE_SHARED_CACHE_URL"
 	wantValue := "https://sqs.us-east-1.amazonaws.com/123456789012/team-b-platform-service-shared-cache"
 	if cm.Data[wantKey] != wantValue {
 		t.Errorf("Data[%q] = %q, want %q", wantKey, cm.Data[wantKey], wantValue)
+	}
+}
+
+// TestEnsure_ConsumedResourcesFromSameNamedProducersInDifferentNamespaces
+// guards against two different identities producing the same ConfigMap key.
+func TestEnsure_ConsumedResourcesFromSameNamedProducersInDifferentNamespaces(t *testing.T) {
+	newProducer := func(namespace string) *depsv1alpha1.AppDependencies {
+		return &depsv1alpha1.AppDependencies{
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "checkout-service"},
+			Spec: depsv1alpha1.AppDependenciesSpec{
+				SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+					{Name: "orders", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "platform", Name: "analytics"}}},
+				}},
+			},
+			Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:" + namespace + "-checkout-service-orders"},
+			}},
+		}
+	}
+	producerA := newProducer("team-a")
+	producerB := newProducer("team-b")
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producerA, producerB).Build()
+
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "analytics", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+				{Namespace: "team-a", Name: "checkout-service", ResourceName: "orders"},
+				{Namespace: "team-b", Name: "checkout-service", ResourceName: "orders"},
+			}},
+		},
+	}
+
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, consumer); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	cm := getConfigMap(t, c, "platform", ConfigMapName("analytics"))
+	wantA := "https://sqs.us-east-1.amazonaws.com/123456789012/team-a-checkout-service-orders"
+	wantB := "https://sqs.us-east-1.amazonaws.com/123456789012/team-b-checkout-service-orders"
+	if got := cm.Data["SQS_TEAM_A_CHECKOUT_SERVICE_ORDERS_URL"]; got != wantA {
+		t.Errorf("team-a's key = %q, want %q (data: %v)", got, wantA, cm.Data)
+	}
+	if got := cm.Data["SQS_TEAM_B_CHECKOUT_SERVICE_ORDERS_URL"]; got != wantB {
+		t.Errorf("team-b's key = %q, want %q (data: %v)", got, wantB, cm.Data)
+	}
+}
+
+func TestConnectionKV(t *testing.T) {
+	tests := []struct {
+		name              string
+		producerNamespace string
+		producerCRName    string
+		wantKey           string
+	}{
+		{name: "owned", wantKey: "SNS_EVENTS_ARN"},
+		{name: "consumed", producerNamespace: "team-b", producerCRName: "platform-service", wantKey: "SNS_TEAM_B_PLATFORM_SERVICE_EVENTS_ARN"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			key, _, err := connectionKV(resourceTypeSNS, "events", "arn:aws:sns:us-east-1:123456789012:events", testRegion, testAccountID, tc.producerNamespace, tc.producerCRName)
+			if err != nil {
+				t.Fatalf("connectionKV() error = %v", err)
+			}
+			if key != tc.wantKey {
+				t.Errorf("connectionKV() key = %q, want %q", key, tc.wantKey)
+			}
+		})
+	}
+}
+
+func TestSetRDSConnectionKeys(t *testing.T) {
+	info := rds.ConnectionInfo{Host: "host.example", Port: 5432, Engine: "postgres", DBInstanceIdentifier: "id"}
+
+	owned := map[string]string{}
+	setRDSConnectionKeys(owned, "orders-db", "", "", info)
+	if _, ok := owned["RDS_ORDERS_DB_HOST"]; !ok {
+		t.Errorf("owned: expected RDS_ORDERS_DB_HOST, got %v", owned)
+	}
+
+	consumed := map[string]string{}
+	setRDSConnectionKeys(consumed, "orders-db", "team-a", "checkout-service", info)
+	if _, ok := consumed["RDS_TEAM_A_CHECKOUT_SERVICE_ORDERS_DB_HOST"]; !ok {
+		t.Errorf("consumed: expected RDS_TEAM_A_CHECKOUT_SERVICE_ORDERS_DB_HOST, got %v", consumed)
 	}
 }
 
@@ -159,7 +244,7 @@ func TestEnsure_OmitsUnauthorizedConsumedResource(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, consumer); err != nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, consumer); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -187,7 +272,7 @@ func TestEnsure_SetsOwnerReferenceForNativeGC(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -211,14 +296,14 @@ func TestEnsure_UpdatesExistingConfigMapOnDataChange(t *testing.T) {
 			},
 		},
 	}
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
 	// Simulate the queue having been recreated with a new logical ARN
 	// (contrived, but exercises the update path deterministically).
 	cr.Status.ManagedResources[0].ARN = "arn:aws:sqs:us-east-1:123456789012:team-a-checkout-service-orders-v2"
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure (update): %v", err)
 	}
 
@@ -243,7 +328,7 @@ func TestEnsure_SanitizesKeysForEnvVarCompatibility(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -266,7 +351,7 @@ func TestEnsure_DeletesConfigMapWhenNothingRemainsToReport(t *testing.T) {
 			},
 		},
 	}
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -274,7 +359,7 @@ func TestEnsure_DeletesConfigMapWhenNothingRemainsToReport(t *testing.T) {
 	// would leave things once the queue itself is actually gone.
 	cr.Spec.SQS = nil
 	cr.Status.ManagedResources = nil
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err != nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
 		t.Fatalf("Ensure (now empty): %v", err)
 	}
 
@@ -308,7 +393,7 @@ func TestEnsure_PreExistingForeignConfigMap_Refused(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err == nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err == nil {
 		t.Fatal("expected Ensure to refuse overwriting a ConfigMap it doesn't own")
 	}
 
@@ -320,6 +405,56 @@ func TestEnsure_PreExistingForeignConfigMap_Refused(t *testing.T) {
 
 // TestEnsure_PreExistingForeignConfigMap_EmptyData_NotDeleted covers the
 // same guard on the delete path, which is more severe than an overwrite.
+func TestEnsure_ForeignConfigMapHiddenFromCache_Refused(t *testing.T) {
+	foreign := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: ConfigMapName("checkout-service")},
+		Data:       map[string]string{"UNRELATED": "keep-me"},
+	}
+	cached := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	apiServer := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(foreign).Build()
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:team-a-checkout-service-orders"},
+			},
+		},
+	}
+
+	if err := Ensure(context.Background(), cached, apiServer, nil, testRegion, testAccountID, cr); err == nil {
+		t.Fatal("expected Ensure to refuse a foreign ConfigMap the label-filtered cache can't see")
+	}
+	if cm := getConfigMap(t, apiServer, "team-a", ConfigMapName("checkout-service")); cm.Data["UNRELATED"] != "keep-me" {
+		t.Errorf("foreign ConfigMap was modified: %v", cm.Data)
+	}
+}
+
+func TestEnsure_LabelsConfigMapAsManaged(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:team-a-checkout-service-orders"},
+			},
+		},
+	}
+
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
+	if got := cm.Labels[depsv1alpha1.ManagedByLabelKey]; got != depsv1alpha1.ManagedByLabelValue {
+		t.Errorf("label %s = %q, want %q", depsv1alpha1.ManagedByLabelKey, got, depsv1alpha1.ManagedByLabelValue)
+	}
+}
+
 func TestEnsure_PreExistingForeignConfigMap_EmptyData_NotDeleted(t *testing.T) {
 	foreign := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -333,7 +468,7 @@ func TestEnsure_PreExistingForeignConfigMap_EmptyData_NotDeleted(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
 	}
 
-	if err := Ensure(context.Background(), c, nil, testRegion, testAccountID, cr); err == nil {
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err == nil {
 		t.Fatal("expected Ensure to refuse deleting a ConfigMap it doesn't own")
 	}
 

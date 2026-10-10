@@ -68,6 +68,7 @@ func EnsureCredentialsSecret(
 	secretsManagerClient cloudctlaws.SecretsManagerClient,
 	awsClient rdsAPI,
 	k8sClient client.Client,
+	apiReader client.Reader,
 	cr *depsv1alpha1.AppDependencies,
 ) error {
 	data, err := buildCredentialsData(ctx, secretsManagerClient, awsClient, k8sClient, cr)
@@ -77,7 +78,11 @@ func EnsureCredentialsSecret(
 
 	name := CredentialsSecretName(cr.Name)
 	existing := &corev1.Secret{}
-	getErr := k8sClient.Get(ctx, client.ObjectKey{Namespace: cr.Namespace, Name: name}, existing)
+	key := client.ObjectKey{Namespace: cr.Namespace, Name: name}
+	getErr := k8sClient.Get(ctx, key, existing)
+	if apierrors.IsNotFound(getErr) {
+		getErr = apiReader.Get(ctx, key, existing)
+	}
 	exists := getErr == nil
 	if getErr != nil && !apierrors.IsNotFound(getErr) {
 		return getErr
@@ -107,6 +112,7 @@ func EnsureCredentialsSecret(
 	}
 
 	apply := applycorev1.Secret(name, cr.Namespace).
+		WithLabels(map[string]string{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue}).
 		WithType(corev1.SecretTypeOpaque).
 		WithData(byteData).
 		WithOwnerReferences(applymetav1.OwnerReference().
@@ -140,7 +146,7 @@ func buildCredentialsData(
 		if entry == nil {
 			continue
 		}
-		if err := addCredentials(ctx, secretsManagerClient, awsClient, data, entry.ARN, r.Name, ""); err != nil {
+		if err := addCredentials(ctx, secretsManagerClient, awsClient, data, entry.ARN, r.Name, "", ""); err != nil {
 			return nil, err
 		}
 	}
@@ -157,7 +163,7 @@ func buildCredentialsData(
 		if entry == nil {
 			continue
 		}
-		if err := addCredentials(ctx, secretsManagerClient, awsClient, data, entry.ARN, ref.ResourceName, ref.Name); err != nil {
+		if err := addCredentials(ctx, secretsManagerClient, awsClient, data, entry.ARN, ref.ResourceName, ref.Namespace, ref.Name); err != nil {
 			return nil, err
 		}
 	}
@@ -174,7 +180,7 @@ func addCredentials(
 	secretsManagerClient cloudctlaws.SecretsManagerClient,
 	awsClient rdsAPI,
 	data map[string]string,
-	instanceARN, resourceName, producerCRName string,
+	instanceARN, resourceName, producerNamespace, producerCRName string,
 ) error {
 	info, ok, err := ResolveConnectionInfo(ctx, awsClient, instanceARN)
 	if err != nil {
@@ -197,8 +203,8 @@ func addCredentials(
 		return fmt.Errorf("parsing managed credentials secret for %q: %w", resourceName, err)
 	}
 
-	data[credentialsKey(resourceName, producerCRName, "USERNAME")] = parsed.Username
-	data[credentialsKey(resourceName, producerCRName, "PASSWORD")] = parsed.Password
+	data[credentialsKey(resourceName, producerNamespace, producerCRName, "USERNAME")] = parsed.Username
+	data[credentialsKey(resourceName, producerNamespace, producerCRName, "PASSWORD")] = parsed.Password
 	return nil
 }
 
@@ -223,10 +229,10 @@ var invalidEnvChars = regexp.MustCompile(`[^A-Z0-9_]`)
 // uppercase-underscore shape, same owned-vs-consumed key shape) without
 // importing that package - doing so would create an import cycle, since
 // configmap.go will need to call into this package for connection info.
-func credentialsKey(resourceName, producerCRName, suffix string) string {
+func credentialsKey(resourceName, producerNamespace, producerCRName, suffix string) string {
 	parts := []string{resourceType, resourceName, suffix}
 	if producerCRName != "" {
-		parts = []string{resourceType, producerCRName, resourceName, suffix}
+		parts = []string{resourceType, producerNamespace, producerCRName, resourceName, suffix}
 	}
 	joined := strings.ToUpper(strings.Join(parts, "_"))
 	return invalidEnvChars.ReplaceAllString(joined, "_")

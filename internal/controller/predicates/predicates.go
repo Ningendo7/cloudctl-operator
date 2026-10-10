@@ -19,6 +19,9 @@ package predicates
 import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 )
 
 // ForceReconcileAnnotation lets a human trigger a reconcile without a real
@@ -56,6 +59,34 @@ func AnnotationValueChangedPredicate(key string) predicate.Predicate {
 		GenericFunc: func(event.GenericEvent) bool { return true },
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			return e.ObjectOld.GetAnnotations()[key] != e.ObjectNew.GetAnnotations()[key]
+		},
+	}
+}
+
+// PodNetworkIdentityPublishedPredicate reconciles only when a CR's own
+// published pod-network-identity ARN actually changes - lets the RDS
+// producer-side ingress watch react immediately to a consumer publishing
+// (or losing) its identity, without firing on every unrelated status
+// write. Delete always passes through, so a deleted consumer's ingress
+// rule gets revoked promptly rather than waiting on the producer's next
+// unrelated reconcile.
+func PodNetworkIdentityPublishedPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return true },
+		DeleteFunc:  func(event.DeleteEvent) bool { return true },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldCR, ok := e.ObjectOld.(*depsv1alpha1.AppDependencies)
+			if !ok {
+				return false
+			}
+			newCR, ok := e.ObjectNew.(*depsv1alpha1.AppDependencies)
+			if !ok {
+				return false
+			}
+			oldARN, _ := rds.PodNetworkIdentityARN(oldCR)
+			newARN, _ := rds.PodNetworkIdentityARN(newCR)
+			return oldARN != newARN
 		},
 	}
 }

@@ -37,9 +37,8 @@ import (
 )
 
 // s3API is the subset of the S3 client this package needs. Stays private
-// here — like sqsAPI/snsAPI/dynamodbAPI originally did — until a second
-// real consumer (controller-level envtest fakes) needs to substitute a
-// fake here too.
+// here until a second real consumer (controller-level envtest fakes)
+// needs to substitute a fake here too.
 type s3API interface {
 	HeadBucket(ctx context.Context, in *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error)
 	CreateBucket(ctx context.Context, in *s3sdk.CreateBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.CreateBucketOutput, error)

@@ -243,8 +243,7 @@ func TestLive_Cleanup_DenyPolicyActuallyBlocksPublishThenClearingRestoresIt(t *t
 // TestLive_Ensure_RefusesTopicOwnedByADifferentRealCR confirms the
 // tag-based stale-UID/ownership check against real, round-tripped AWS
 // tags read via SNS's own ListTagsForResource shape (a []Tag slice, not
-// SQS's map) - this exact bug class was real and found live once already
-// in sqs's own ownership check before IsStaleUID existed everywhere.
+// SQS's map).
 func TestLive_Ensure_RefusesTopicOwnedByADifferentRealCR(t *testing.T) {
 	cfg := skipUnlessLiveAWSCredentials(t)
 	client := sns.NewFromConfig(cfg)

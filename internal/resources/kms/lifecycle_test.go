@@ -23,6 +23,8 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -41,6 +43,7 @@ func TestSharedLifecycleScenarios(t *testing.T) {
 
 type kmsLifecycleSubject struct {
 	client                   *fakeKMS
+	k8sClient                client.Client
 	namespace, crName, crUID string
 }
 
@@ -48,6 +51,7 @@ func newLifecycleSubject(t *testing.T) lifecycletest.Subject {
 	t.Helper()
 	return &kmsLifecycleSubject{
 		client:    newFakeKMS(),
+		k8sClient: fake.NewClientBuilder().WithScheme(newSchemeForSharedKeyTest(t)).Build(),
 		namespace: "default",
 		crName:    "lifecycle-test",
 		crUID:     "lifecycle-uid",
@@ -69,7 +73,7 @@ func (s *kmsLifecycleSubject) Cleanup(ctx context.Context, ledger []depsv1alpha1
 		resources = append(resources, depsv1alpha1.KMSKeySpec{Name: n})
 	}
 	spec := &depsv1alpha1.KMSSpec{Resources: resources}
-	updated, results, err := Cleanup(ctx, s.client, s.namespace, s.crName, s.crUID, spec, nil, ledger, deleting, nil)
+	updated, results, err := Cleanup(ctx, s.client, s.k8sClient, s.namespace, s.crName, s.crUID, spec, nil, ledger, deleting, nil)
 	return updated, convertResults(results), err
 }
 

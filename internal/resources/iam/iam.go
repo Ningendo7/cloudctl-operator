@@ -148,8 +148,22 @@ func ensurePermissionsPolicy(grants []grant) (string, error) {
 }
 
 // ensureRolePolicy attaches (or overwrites) the derived permissions policy
-// on the role as its single inline policy.
+// on the role as its single inline policy - skipping the write entirely
+// once GetRolePolicy shows it already matches, the same treatment
+// ensureRole already gives the trust policy. Any GetRolePolicy failure
+// (including the policy simply not existing yet) just falls through to
+// writing it, same as if this read never happened - the only way this
+// check can behave is to skip a write that was genuinely unnecessary,
+// never to add a new failure mode on top of what existed before it.
 func ensureRolePolicy(ctx context.Context, iamClient iamAPI, roleName, policyDocument string) error {
+	getOut, err := iamClient.GetRolePolicy(ctx, &iam.GetRolePolicyInput{
+		RoleName:   &roleName,
+		PolicyName: strPtr(roleInlinePolicyName),
+	})
+	if err == nil && getOut.PolicyDocument != nil && policyDocumentEquivalent(*getOut.PolicyDocument, policyDocument) {
+		return nil
+	}
+
 	if _, err := iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 		RoleName:       &roleName,
 		PolicyName:     strPtr(roleInlinePolicyName),
@@ -201,7 +215,7 @@ func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID,
 		return "", fmt.Errorf("IAM role %q already exists and is not owned by this CR — this looks like a naming collision", name)
 	}
 
-	if getOut.Role.AssumeRolePolicyDocument == nil || !trustPolicyEquivalent(*getOut.Role.AssumeRolePolicyDocument, trustPolicy) {
+	if getOut.Role.AssumeRolePolicyDocument == nil || !policyDocumentEquivalent(*getOut.Role.AssumeRolePolicyDocument, trustPolicy) {
 		if _, err := iamClient.UpdateAssumeRolePolicy(ctx, &iam.UpdateAssumeRolePolicyInput{
 			RoleName:       &name,
 			PolicyDocument: &trustPolicy,
@@ -213,13 +227,14 @@ func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID,
 	return *getOut.Role.Arn, nil
 }
 
-// trustPolicyEquivalent compares a freshly-built trust policy against
-// GetRole's response. IAM's own docs confirm policies returned by Get*
-// calls are URL-encoded (RFC 3986) — comparing the raw encoded string
-// against plain JSON would always mismatch and call
-// UpdateAssumeRolePolicy on every single reconcile regardless of whether
-// anything actually changed.
-func trustPolicyEquivalent(currentEncoded, desired string) bool {
+// policyDocumentEquivalent compares a freshly-built policy document
+// against one already stored on a role - used for both the trust policy
+// (GetRole) and the inline permissions policy (GetRolePolicy). IAM's own
+// docs confirm policies returned by Get* calls are URL-encoded (RFC
+// 3986) — comparing the raw encoded string against plain JSON would
+// always mismatch and trigger a write on every single reconcile
+// regardless of whether anything actually changed.
+func policyDocumentEquivalent(currentEncoded, desired string) bool {
 	current, err := url.QueryUnescape(currentEncoded)
 	if err != nil {
 		// Can't decode - treat as different. Safe direction: this

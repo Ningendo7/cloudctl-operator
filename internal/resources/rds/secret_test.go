@@ -39,7 +39,11 @@ func ownedCRWithCredentials(t *testing.T, rdsClient *fakeRDS, smClient *fakeSecr
 	instance := rdsClient.findByARN(entry.ARN)
 	instance.endpointAddress = resourceName + ".abc123.us-east-1.rds.amazonaws.com"
 	instance.endpointPort = 5432
-	secretARN := "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-" + resourceName
+	instanceID, err := instanceIDFromARN(entry.ARN)
+	if err != nil {
+		t.Fatalf("instanceIDFromARN(%q): %v", entry.ARN, err)
+	}
+	secretARN := "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-" + instanceID
 	instance.masterUserSecretARN = secretARN
 	smClient.secrets[secretARN] = `{"username":"` + username + `","password":"` + password + `"}`
 
@@ -63,7 +67,7 @@ func TestEnsureCredentialsSecret_OwnedInstance_HappyPath(t *testing.T) {
 	cr := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
 		t.Fatalf("EnsureCredentialsSecret() error = %v", err)
 	}
 
@@ -91,7 +95,7 @@ func TestEnsureCredentialsSecret_NilRDSSpec_NoSecretCreated(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service", UID: "uid-1"}}
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
 		t.Fatalf("EnsureCredentialsSecret() error = %v", err)
 	}
 	var secret corev1.Secret
@@ -117,7 +121,7 @@ func TestEnsureCredentialsSecret_SecretNotYetProvisioned_SkipsSilently(t *testin
 	}
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
 		t.Fatalf("EnsureCredentialsSecret() error = %v", err)
 	}
 	var secret corev1.Secret
@@ -131,7 +135,7 @@ func TestEnsureCredentialsSecret_DeletesSecretOnceEmpty(t *testing.T) {
 	smClient := newFakeSecretsManager()
 	cr := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
 		t.Fatalf("first EnsureCredentialsSecret() error = %v", err)
 	}
 
@@ -139,7 +143,7 @@ func TestEnsureCredentialsSecret_DeletesSecretOnceEmpty(t *testing.T) {
 	// not left around with stale credentials for a database that's no
 	// longer declared.
 	cr.Spec.RDS = nil
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
 		t.Fatalf("second EnsureCredentialsSecret() error = %v", err)
 	}
 	var secret corev1.Secret
@@ -156,9 +160,50 @@ func TestEnsureCredentialsSecret_RefusesForeignSecret(t *testing.T) {
 	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: CredentialsSecretName("checkout-service")}}
 	k8sClient := newFakeK8sClientWithScheme(t, cr, foreign)
 
-	err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr)
+	err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr)
 	if err == nil {
 		t.Fatal("expected EnsureCredentialsSecret to refuse a same-named Secret it doesn't own")
+	}
+}
+
+func TestEnsureCredentialsSecret_RefusesForeignSecretHiddenFromCache(t *testing.T) {
+	rdsClient := newFakeRDS()
+	smClient := newFakeSecretsManager()
+	cr := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: CredentialsSecretName("checkout-service")},
+		Data:       map[string][]byte{"UNRELATED": []byte("keep-me")},
+	}
+	cached := newFakeK8sClientWithScheme(t, cr)
+	apiServer := newFakeK8sClientWithScheme(t, cr, foreign)
+
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, cached, apiServer, cr); err == nil {
+		t.Fatal("expected EnsureCredentialsSecret to refuse a foreign Secret the label-filtered cache can't see")
+	}
+	var secret corev1.Secret
+	if err := apiServer.Get(context.Background(), client.ObjectKeyFromObject(foreign), &secret); err != nil {
+		t.Fatalf("get foreign Secret: %v", err)
+	}
+	if string(secret.Data["UNRELATED"]) != "keep-me" {
+		t.Errorf("foreign Secret was modified: %v", secret.Data)
+	}
+}
+
+func TestEnsureCredentialsSecret_LabelsSecretAsManaged(t *testing.T) {
+	rdsClient := newFakeRDS()
+	smClient := newFakeSecretsManager()
+	cr := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
+	k8sClient := newFakeK8sClientWithScheme(t, cr)
+
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
+		t.Fatalf("EnsureCredentialsSecret() error = %v", err)
+	}
+	var secret corev1.Secret
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: CredentialsSecretName("checkout-service")}, &secret); err != nil {
+		t.Fatalf("get Secret: %v", err)
+	}
+	if got := secret.Labels[depsv1alpha1.ManagedByLabelKey]; got != depsv1alpha1.ManagedByLabelValue {
+		t.Errorf("label %s = %q, want %q", depsv1alpha1.ManagedByLabelKey, got, depsv1alpha1.ManagedByLabelValue)
 	}
 }
 
@@ -176,7 +221,7 @@ func TestEnsureCredentialsSecret_ConsumedInstance_RequiresAuthorization(t *testi
 	}
 	k8sClient := newFakeK8sClientWithScheme(t, producer, consumer)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, consumer); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, consumer); err != nil {
 		t.Fatalf("EnsureCredentialsSecret() error = %v", err)
 	}
 	var secret corev1.Secret
@@ -201,16 +246,52 @@ func TestEnsureCredentialsSecret_ConsumedInstance_AuthorizedGetsCredentials(t *t
 	}
 	k8sClient := newFakeK8sClientWithScheme(t, producer, consumer)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, consumer); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, consumer); err != nil {
 		t.Fatalf("EnsureCredentialsSecret() error = %v", err)
 	}
 	var secret corev1.Secret
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "fulfillment", Name: CredentialsSecretName("fulfillment-service")}, &secret); err != nil {
 		t.Fatalf("getting consumer's mirrored Secret: %v", err)
 	}
-	wantKey := "RDS_CHECKOUT_SERVICE_ORDERS_DB_USERNAME"
+	wantKey := "RDS_DEFAULT_CHECKOUT_SERVICE_ORDERS_DB_USERNAME"
 	if string(secret.Data[wantKey]) != "cloudctl_admin" {
 		t.Errorf("secret data = %v, missing/wrong %s", secret.Data, wantKey)
+	}
+}
+
+// TestEnsureCredentialsSecret_ConsumedFromSameNamedProducersInDifferentNamespaces
+// guards against two different identities producing the same Secret key.
+func TestEnsureCredentialsSecret_ConsumedFromSameNamedProducersInDifferentNamespaces(t *testing.T) {
+	rdsClient := newFakeRDS()
+	smClient := newFakeSecretsManager()
+	producerA := ownedCRWithCredentials(t, rdsClient, smClient, "team-a", "checkout-service", "orders-db", "user-a", "pass-a")
+	producerA.Spec.RDS.Resources[0].SharedWith = []depsv1alpha1.SharedWithEntry{{Namespace: "platform", Name: "analytics"}}
+	producerB := ownedCRWithCredentials(t, rdsClient, smClient, "team-b", "checkout-service", "orders-db", "user-b", "pass-b")
+	producerB.Spec.RDS.Resources[0].SharedWith = []depsv1alpha1.SharedWithEntry{{Namespace: "platform", Name: "analytics"}}
+
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "analytics", UID: "uid-consumer"},
+		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+			{Namespace: "team-a", Name: "checkout-service", ResourceName: "orders-db"},
+			{Namespace: "team-b", Name: "checkout-service", ResourceName: "orders-db"},
+		}}},
+	}
+	k8sClient := newFakeK8sClientWithScheme(t, producerA, producerB, consumer)
+
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, consumer); err != nil {
+		t.Fatalf("EnsureCredentialsSecret() error = %v", err)
+	}
+	var secret corev1.Secret
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "platform", Name: CredentialsSecretName("analytics")}, &secret); err != nil {
+		t.Fatalf("getting mirrored Secret: %v", err)
+	}
+	gotA := string(secret.Data["RDS_TEAM_A_CHECKOUT_SERVICE_ORDERS_DB_USERNAME"])
+	gotB := string(secret.Data["RDS_TEAM_B_CHECKOUT_SERVICE_ORDERS_DB_USERNAME"])
+	if gotA != "user-a" {
+		t.Errorf("team-a username = %q, want %q (data: %v)", gotA, "user-a", secret.Data)
+	}
+	if gotB != "user-b" {
+		t.Errorf("team-b username = %q, want %q (data: %v)", gotB, "user-b", secret.Data)
 	}
 }
 
@@ -225,7 +306,7 @@ func TestEnsureCredentialsSecret_ConsumedInstance_ProducerNotFoundYet(t *testing
 	}
 	k8sClient := newFakeK8sClientWithScheme(t, consumer)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, consumer); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, consumer); err != nil {
 		t.Fatalf("expected no error for an unresolved forward reference, got %v", err)
 	}
 }
@@ -237,7 +318,7 @@ func TestEnsureCredentialsSecret_PropagatesGetSecretValueFailure(t *testing.T) {
 	smClient.getSecretValueErr = &fakeAWSError{code: "ThrottlingException"}
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err == nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err == nil {
 		t.Fatal("expected GetSecretValue's failure to propagate")
 	}
 }
@@ -251,7 +332,7 @@ func TestEnsureCredentialsSecret_MalformedSecretJSON_ReturnsError(t *testing.T) 
 	smClient.secrets[secretARN] = "not-json"
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err == nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err == nil {
 		t.Fatal("expected a malformed managed-secret payload to be surfaced as an error")
 	}
 }
@@ -294,7 +375,7 @@ func TestEnsureCredentialsSecret_MultipleOwnedInstances(t *testing.T) {
 	}
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
 		t.Fatalf("EnsureCredentialsSecret() error = %v", err)
 	}
 	var secret corev1.Secret
@@ -320,7 +401,7 @@ func TestEnsureCredentialsSecret_RotationFlowsThroughOnNextReconcile(t *testing.
 	cr := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "old-password")
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
 		t.Fatalf("first EnsureCredentialsSecret() error = %v", err)
 	}
 	secretName := CredentialsSecretName("checkout-service")
@@ -340,7 +421,7 @@ func TestEnsureCredentialsSecret_RotationFlowsThroughOnNextReconcile(t *testing.
 	secretARN := rdsClient.findByARN(entry.ARN).masterUserSecretARN
 	smClient.secrets[secretARN] = `{"username":"cloudctl_admin","password":"new-rotated-password"}`
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
 		t.Fatalf("second EnsureCredentialsSecret() error = %v", err)
 	}
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: secretName}, &secret); err != nil {
@@ -364,12 +445,12 @@ func TestEnsureCredentialsSecret_TransientFailureNeverOverwritesWithFabricatedDa
 	cr := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "good-password")
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
 
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err != nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
 		t.Fatalf("first EnsureCredentialsSecret() error = %v", err)
 	}
 
 	smClient.getSecretValueErr = &fakeAWSError{code: "ThrottlingException"}
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, cr); err == nil {
+	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err == nil {
 		t.Fatal("expected the transient GetSecretValue failure to propagate as an error")
 	}
 
@@ -385,19 +466,25 @@ func TestEnsureCredentialsSecret_TransientFailureNeverOverwritesWithFabricatedDa
 
 func TestCredentialsKey(t *testing.T) {
 	tests := []struct {
-		name           string
-		resourceName   string
-		producerCRName string
-		suffix         string
-		want           string
+		name              string
+		resourceName      string
+		producerNamespace string
+		producerCRName    string
+		suffix            string
+		want              string
 	}{
 		{name: "owned", resourceName: "orders-db", producerCRName: "", suffix: "USERNAME", want: "RDS_ORDERS_DB_USERNAME"},
-		{name: "consumed", resourceName: "orders-db", producerCRName: "checkout-service", suffix: "PASSWORD", want: "RDS_CHECKOUT_SERVICE_ORDERS_DB_PASSWORD"},
+		{name: "consumed", resourceName: "orders-db", producerNamespace: "default", producerCRName: "checkout-service", suffix: "PASSWORD", want: "RDS_DEFAULT_CHECKOUT_SERVICE_ORDERS_DB_PASSWORD"},
 		{name: "hyphens become underscores", resourceName: "orders-db", producerCRName: "", suffix: "USERNAME", want: "RDS_ORDERS_DB_USERNAME"},
+		{
+			name: "same producer name, different namespace, must not collide", resourceName: "orders-db",
+			producerNamespace: "team-a", producerCRName: "checkout-service", suffix: "USERNAME",
+			want: "RDS_TEAM_A_CHECKOUT_SERVICE_ORDERS_DB_USERNAME",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := credentialsKey(tc.resourceName, tc.producerCRName, tc.suffix); got != tc.want {
+			if got := credentialsKey(tc.resourceName, tc.producerNamespace, tc.producerCRName, tc.suffix); got != tc.want {
 				t.Errorf("credentialsKey() = %q, want %q", got, tc.want)
 			}
 		})

@@ -463,6 +463,12 @@ spec:
                         encryption flag, RDS's StorageEncrypted cannot be toggled on an
                         existing instance; enabling it later requires a full snapshot-and-
                         restore into a new instance, which this design doesn't attempt.
+                        engine is immutable - AWS never allows changing an instance's engine
+                        after creation, so this blocks the edit outright instead of silently
+                        accepting a change the controller could never apply.
+                        dbSubnetGroupName is immutable here (though AWS itself allows changing
+                        it): doing so would mean re-resolving the instance's VPC and moving its
+                        dedicated security group, which this design doesn't attempt yet.
                       properties:
                         adopt:
                           description: |-
@@ -471,6 +477,17 @@ spec:
                             already tagged as owned by this CR. Same semantics as every other
                             resource type's adopt field.
                           type: boolean
+                        allocatedStorage:
+                          description: |-
+                            allocatedStorage in GiB. AWS rejects any decrease via ModifyDBInstance,
+                            so this field can only grow once set.
+                          format: int32
+                          maximum: 65536
+                          minimum: 20
+                          type: integer
+                          x-kubernetes-validations:
+                          - message: allocatedStorage cannot be decreased
+                            rule: self >= oldSelf
                         backup:
                           description: RDSBackupSpec enables automated backups and
                             point-in-time recovery.
@@ -632,6 +649,7 @@ spec:
                           - name
                           x-kubernetes-list-type: map
                       required:
+                      - allocatedStorage
                       - dbSubnetGroupName
                       - engine
                       - engineVersion
@@ -641,7 +659,13 @@ spec:
                       x-kubernetes-validations:
                       - message: encryption is immutable on an RDS instance; AWS does
                           not support enabling storage encryption after creation
-                        rule: self.encryption == oldSelf.encryption
+                        rule: has(self.encryption) == has(oldSelf.encryption) && (!has(self.encryption)
+                          || self.encryption == oldSelf.encryption)
+                      - message: engine is immutable on an RDS instance
+                        rule: self.engine == oldSelf.engine
+                      - message: dbSubnetGroupName is immutable on an RDS instance
+                          for now - moving VPCs isn't supported
+                        rule: self.dbSubnetGroupName == oldSelf.dbSubnetGroupName
                     maxItems: 20
                     type: array
                     x-kubernetes-list-map-keys:

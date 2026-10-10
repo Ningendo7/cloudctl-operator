@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
@@ -56,6 +57,7 @@ type fakeInstance struct {
 	status                string
 	engine, engineVersion string
 	instanceClass         string
+	allocatedStorage      int32
 	dbSubnetGroupName     string
 	multiAZ               bool
 	backupRetentionPeriod int32
@@ -76,6 +78,7 @@ type fakeRDS struct {
 	snapshots map[string]*fakeSnapshot // keyed by DBSnapshotIdentifier
 
 	createDBInstanceErr       error
+	modifyDBInstanceErr       error
 	describeDBInstancesErr    error
 	listTagsForResourceErr    error
 	addTagsToResourceErr      error
@@ -83,13 +86,25 @@ type fakeRDS struct {
 	describeDBSubnetGroupsErr error
 	createDBSnapshotErr       error
 	describeDBSnapshotsErr    error
+	deleteDBSnapshotErr       error
 
 	// listTagsForResourceCalls counts real calls so trust-window tests can
 	// assert a within-window reconcile skips re-verifying ownership tags
 	// entirely, the same property every other resource package's own
 	// trust-window test already proves.
-	listTagsForResourceCalls int
+	listTagsForResourceCalls    int
+	describeDBSubnetGroupsCalls int
 	createDBSnapshotCalls    int
+	describeDBSnapshotsCalls int
+	deleteDBSnapshotCalls    int
+	// describeDBInstancesCalls counts every DescribeDBInstances call, keyed
+	// by instance ID - lets the describe-cache tests prove a cached lookup
+	// never reaches the client a second time.
+	describeDBInstancesCalls map[string]int
+	// deletedSnapshotIDs records every ID DeleteDBSnapshot was actually
+	// called with, in order - lets a test assert exactly which snapshot(s)
+	// were deleted, not just how many calls happened.
+	deletedSnapshotIDs []string
 
 	// lastCreateDBInstanceInput captures the raw input to the most recent
 	// CreateDBInstance call, so a test can assert directly on what this
@@ -98,6 +113,8 @@ type fakeRDS struct {
 	// competing source of truth for credentials instead of Secrets
 	// Manager.
 	lastCreateDBInstanceInput *rds.CreateDBInstanceInput
+	lastModifyDBInstanceInput *rds.ModifyDBInstanceInput
+	modifyDBInstanceCalls     int
 
 	// snapshotStatus overrides a newly created snapshot's status so cleanup
 	// tests can simulate the still-creating/available/failed progression
@@ -108,7 +125,11 @@ type fakeRDS struct {
 }
 
 func newFakeRDS() *fakeRDS {
-	return &fakeRDS{instances: map[string]*fakeInstance{}, snapshots: map[string]*fakeSnapshot{}}
+	return &fakeRDS{
+		instances:                map[string]*fakeInstance{},
+		snapshots:                map[string]*fakeSnapshot{},
+		describeDBInstancesCalls: map[string]int{},
+	}
 }
 
 func (f *fakeRDS) findByARN(arn string) *fakeInstance {
@@ -154,6 +175,7 @@ func (f *fakeRDS) CreateDBInstance(_ context.Context, in *rds.CreateDBInstanceIn
 		engine:                *in.Engine,
 		engineVersion:         *in.EngineVersion,
 		instanceClass:         *in.DBInstanceClass,
+		allocatedStorage:      aws.ToInt32(in.AllocatedStorage),
 		dbSubnetGroupName:     *in.DBSubnetGroupName,
 		multiAZ:               multiAZ,
 		backupRetentionPeriod: backupRetention,
@@ -170,7 +192,34 @@ func (f *fakeRDS) CreateDBInstance(_ context.Context, in *rds.CreateDBInstanceIn
 	}, nil
 }
 
+func (f *fakeRDS) ModifyDBInstance(_ context.Context, in *rds.ModifyDBInstanceInput, _ ...func(*rds.Options)) (*rds.ModifyDBInstanceOutput, error) {
+	f.modifyDBInstanceCalls++
+	f.lastModifyDBInstanceInput = in
+	if f.modifyDBInstanceErr != nil {
+		return nil, f.modifyDBInstanceErr
+	}
+	i, ok := f.instances[*in.DBInstanceIdentifier]
+	if !ok {
+		return nil, &types.DBInstanceNotFoundFault{}
+	}
+	if in.DBInstanceClass != nil {
+		i.instanceClass = *in.DBInstanceClass
+	}
+	if in.MultiAZ != nil {
+		i.multiAZ = *in.MultiAZ
+	}
+	if in.BackupRetentionPeriod != nil {
+		i.backupRetentionPeriod = *in.BackupRetentionPeriod
+	}
+	if in.AllocatedStorage != nil {
+		i.allocatedStorage = *in.AllocatedStorage
+	}
+	id := *in.DBInstanceIdentifier
+	return &rds.ModifyDBInstanceOutput{DBInstance: &types.DBInstance{DBInstanceIdentifier: &id}}, nil
+}
+
 func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInstancesInput, _ ...func(*rds.Options)) (*rds.DescribeDBInstancesOutput, error) {
+	f.describeDBInstancesCalls[*in.DBInstanceIdentifier]++
 	if f.describeDBInstancesErr != nil {
 		return nil, f.describeDBInstancesErr
 	}
@@ -200,6 +249,7 @@ func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInsta
 				Engine:                &i.engine,
 				EngineVersion:         &i.engineVersion,
 				DBInstanceClass:       &i.instanceClass,
+				AllocatedStorage:      &i.allocatedStorage,
 				DBSubnetGroup:         &types.DBSubnetGroup{DBSubnetGroupName: &i.dbSubnetGroupName},
 				MultiAZ:               &i.multiAZ,
 				BackupRetentionPeriod: &i.backupRetentionPeriod,
@@ -275,6 +325,7 @@ func (f *fakeRDS) CreateDBSnapshot(_ context.Context, in *rds.CreateDBSnapshotIn
 }
 
 func (f *fakeRDS) DescribeDBSnapshots(_ context.Context, in *rds.DescribeDBSnapshotsInput, _ ...func(*rds.Options)) (*rds.DescribeDBSnapshotsOutput, error) {
+	f.describeDBSnapshotsCalls++
 	if f.describeDBSnapshotsErr != nil {
 		return nil, f.describeDBSnapshotsErr
 	}
@@ -303,7 +354,21 @@ func (f *fakeRDS) DescribeDBSnapshots(_ context.Context, in *rds.DescribeDBSnaps
 	}, nil
 }
 
+func (f *fakeRDS) DeleteDBSnapshot(_ context.Context, in *rds.DeleteDBSnapshotInput, _ ...func(*rds.Options)) (*rds.DeleteDBSnapshotOutput, error) {
+	f.deleteDBSnapshotCalls++
+	f.deletedSnapshotIDs = append(f.deletedSnapshotIDs, *in.DBSnapshotIdentifier)
+	if f.deleteDBSnapshotErr != nil {
+		return nil, f.deleteDBSnapshotErr
+	}
+	if _, ok := f.snapshots[*in.DBSnapshotIdentifier]; !ok {
+		return nil, &types.DBSnapshotNotFoundFault{}
+	}
+	delete(f.snapshots, *in.DBSnapshotIdentifier)
+	return &rds.DeleteDBSnapshotOutput{}, nil
+}
+
 func (f *fakeRDS) DescribeDBSubnetGroups(_ context.Context, in *rds.DescribeDBSubnetGroupsInput, _ ...func(*rds.Options)) (*rds.DescribeDBSubnetGroupsOutput, error) {
+	f.describeDBSubnetGroupsCalls++
 	if f.describeDBSubnetGroupsErr != nil {
 		return nil, f.describeDBSubnetGroupsErr
 	}
@@ -351,10 +416,19 @@ type fakeEC2 struct {
 
 	createSecurityGroupErr           error
 	describeSecurityGroupsErr        error
+	describeSecurityGroupsByIDErr    error // scoped to the GroupIds-based lookup reconcileIngress's revoke check uses
 	authorizeSecurityGroupIngressErr error
 	revokeSecurityGroupIngressErr    error
 
+	deleteSecurityGroupErr error
+
 	authorizeSecurityGroupIngressCalls int
+	revokeSecurityGroupIngressCalls    int
+	deleteSecurityGroupCalls           int
+	// revokedGroupIDs records every consumer security group ID actually
+	// revoked, in order - lets a test assert exactly which one(s) were
+	// removed, not just how many calls happened.
+	revokedGroupIDs []string
 }
 
 func newFakeEC2() *fakeEC2 {
@@ -392,24 +466,44 @@ func (f *fakeEC2) DescribeSecurityGroups(_ context.Context, in *ec2.DescribeSecu
 	if f.describeSecurityGroupsErr != nil {
 		return nil, f.describeSecurityGroupsErr
 	}
-	var name, vpcID string
-	for _, filt := range in.Filters {
-		if filt.Name == nil || len(filt.Values) == 0 {
-			continue
+
+	var g *fakeSecurityGroup
+	if len(in.GroupIds) > 0 {
+		if f.describeSecurityGroupsByIDErr != nil {
+			return nil, f.describeSecurityGroupsByIDErr
 		}
-		switch *filt.Name {
-		case "group-name":
-			name = filt.Values[0]
-		case "vpc-id":
-			vpcID = filt.Values[0]
+		g = f.groups[in.GroupIds[0]]
+	} else {
+		var name, vpcID string
+		for _, filt := range in.Filters {
+			if filt.Name == nil || len(filt.Values) == 0 {
+				continue
+			}
+			switch *filt.Name {
+			case "group-name":
+				name = filt.Values[0]
+			case "vpc-id":
+				vpcID = filt.Values[0]
+			}
 		}
+		g = f.findByNameAndVPC(name, vpcID)
 	}
-	g := f.findByNameAndVPC(name, vpcID)
 	if g == nil {
 		return &ec2.DescribeSecurityGroupsOutput{}, nil
 	}
+
+	perms := make([]ec2types.IpPermission, 0, len(g.ingress))
+	for _, rule := range g.ingress {
+		sourceGroupID := rule.sourceGroupID
+		perms = append(perms, ec2types.IpPermission{
+			IpProtocol:       aws.String("tcp"),
+			FromPort:         aws.Int32(rule.fromPort),
+			ToPort:           aws.Int32(rule.toPort),
+			UserIdGroupPairs: []ec2types.UserIdGroupPair{{GroupId: &sourceGroupID}},
+		})
+	}
 	return &ec2.DescribeSecurityGroupsOutput{
-		SecurityGroups: []ec2types.SecurityGroup{{GroupId: &g.id, GroupName: &g.name, VpcId: &g.vpcID}},
+		SecurityGroups: []ec2types.SecurityGroup{{GroupId: &g.id, GroupName: &g.name, VpcId: &g.vpcID, IpPermissions: perms}},
 	}, nil
 }
 
@@ -436,6 +530,7 @@ func (f *fakeEC2) AuthorizeSecurityGroupIngress(_ context.Context, in *ec2.Autho
 }
 
 func (f *fakeEC2) RevokeSecurityGroupIngress(_ context.Context, in *ec2.RevokeSecurityGroupIngressInput, _ ...func(*ec2.Options)) (*ec2.RevokeSecurityGroupIngressOutput, error) {
+	f.revokeSecurityGroupIngressCalls++
 	if f.revokeSecurityGroupIngressErr != nil {
 		return nil, f.revokeSecurityGroupIngressErr
 	}
@@ -445,19 +540,33 @@ func (f *fakeEC2) RevokeSecurityGroupIngress(_ context.Context, in *ec2.RevokeSe
 	}
 	for _, perm := range in.IpPermissions {
 		for _, pair := range perm.UserIdGroupPairs {
+			found := false
 			filtered := g.ingress[:0]
 			for _, existing := range g.ingress {
-				if existing.sourceGroupID != *pair.GroupId {
-					filtered = append(filtered, existing)
+				if existing.sourceGroupID == *pair.GroupId {
+					found = true
+					continue
 				}
+				filtered = append(filtered, existing)
 			}
 			g.ingress = filtered
+			if !found {
+				return nil, &fakeAWSError{code: "InvalidPermission.NotFound", fault: smithy.FaultClient}
+			}
+			f.revokedGroupIDs = append(f.revokedGroupIDs, *pair.GroupId)
 		}
 	}
 	return &ec2.RevokeSecurityGroupIngressOutput{}, nil
 }
 
 func (f *fakeEC2) DeleteSecurityGroup(_ context.Context, in *ec2.DeleteSecurityGroupInput, _ ...func(*ec2.Options)) (*ec2.DeleteSecurityGroupOutput, error) {
+	f.deleteSecurityGroupCalls++
+	if f.deleteSecurityGroupErr != nil {
+		return nil, f.deleteSecurityGroupErr
+	}
+	if _, ok := f.groups[*in.GroupId]; !ok {
+		return nil, &fakeAWSError{code: "InvalidGroup.NotFound", fault: smithy.FaultClient}
+	}
 	delete(f.groups, *in.GroupId)
 	return &ec2.DeleteSecurityGroupOutput{}, nil
 }

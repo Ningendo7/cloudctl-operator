@@ -293,6 +293,223 @@ func TestEnsureSecurityGroup_PropagatesAuthorizeIngressFailure_WhenNotDuplicate(
 	}
 }
 
+// --- Ingress revocation ---
+
+func TestEnsureSecurityGroup_RevokesIngressForRemovedConsumer(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	consumer1 := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+	consumer2 := newConsumerWithPodIdentity("analytics", "analytics-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer2")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer1, consumer2).Build()
+
+	bothShared := []depsv1alpha1.SharedWithEntry{
+		{Namespace: "fulfillment", Name: "fulfillment-service"},
+		{Namespace: "analytics", Name: "analytics-service"},
+	}
+	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, bothShared)
+	if err != nil {
+		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
+	}
+	group := ec2Client.groups[SecurityGroupIDFromARN(arn)]
+	if len(group.ingress) != 2 {
+		t.Fatalf("expected both consumers granted, got %+v", group.ingress)
+	}
+
+	// fulfillment-service revoked from sharedWith - only analytics remains.
+	onlyAnalytics := []depsv1alpha1.SharedWithEntry{{Namespace: "analytics", Name: "analytics-service"}}
+	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, onlyAnalytics)
+	if err != nil {
+		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
+	}
+
+	if len(group.ingress) != 1 || group.ingress[0].sourceGroupID != "sg-consumer2" {
+		t.Fatalf("expected only sg-consumer2's ingress rule to remain, got %+v", group.ingress)
+	}
+	if len(ec2Client.revokedGroupIDs) != 1 || ec2Client.revokedGroupIDs[0] != "sg-consumer1" {
+		t.Errorf("expected sg-consumer1 to have been revoked, got %v", ec2Client.revokedGroupIDs)
+	}
+}
+
+func TestEnsureSecurityGroup_RevokesAllIngressWhenSharedWithEmptied(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	consumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
+	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
+
+	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith)
+	if err != nil {
+		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
+	}
+
+	// sharedWith emptied entirely - this consumer (and everyone else) is revoked.
+	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+	if err != nil {
+		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
+	}
+
+	group := ec2Client.groups[SecurityGroupIDFromARN(arn)]
+	if len(group.ingress) != 0 {
+		t.Errorf("expected no ingress rules left, got %+v", group.ingress)
+	}
+}
+
+// TestEnsureSecurityGroup_IgnoresRulesOnADifferentPort proves revocation
+// stays scoped to the engine's own port - a rule on some other port
+// (never one this package would create, but defensively left alone
+// rather than assumed to be ours) must survive even if its source group
+// isn't in the current desired set.
+func TestEnsureSecurityGroup_IgnoresRulesOnADifferentPort(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+	if err != nil {
+		t.Fatalf("EnsureSecurityGroup() error = %v", err)
+	}
+	groupID := SecurityGroupIDFromARN(arn)
+	ec2Client.groups[groupID].ingress = append(ec2Client.groups[groupID].ingress, fakeIngressRule{sourceGroupID: "sg-unrelated", fromPort: 9999, toPort: 9999})
+
+	// Reconcile again with still-empty sharedWith - must not touch the
+	// foreign, different-port rule.
+	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+	if err != nil {
+		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
+	}
+
+	group := ec2Client.groups[groupID]
+	if len(group.ingress) != 1 || group.ingress[0].sourceGroupID != "sg-unrelated" {
+		t.Errorf("expected the foreign, different-port rule to survive untouched, got %+v", group.ingress)
+	}
+	if len(ec2Client.revokedGroupIDs) != 0 {
+		t.Errorf("expected no revocation of a rule on a different port, got %v", ec2Client.revokedGroupIDs)
+	}
+}
+
+func TestEnsureSecurityGroup_NoRevokeCallsWhenNothingStale(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	consumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
+	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
+
+	if _, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith); err != nil {
+		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
+	}
+	if _, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith); err != nil {
+		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
+	}
+
+	if ec2Client.revokeSecurityGroupIngressCalls != 0 {
+		t.Errorf("expected zero Revoke calls when the desired set never shrank, got %d", ec2Client.revokeSecurityGroupIngressCalls)
+	}
+}
+
+func TestEnsureSecurityGroup_SwapsConsumer_RevokesOldGrantsNewInOnePass(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	oldConsumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-old")
+	newConsumer := newConsumerWithPodIdentity("analytics", "analytics-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-new")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(oldConsumer, newConsumer).Build()
+
+	oldShared := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, oldShared)
+	if err != nil {
+		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
+	}
+
+	newShared := []depsv1alpha1.SharedWithEntry{{Namespace: "analytics", Name: "analytics-service"}}
+	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, newShared)
+	if err != nil {
+		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
+	}
+
+	group := ec2Client.groups[SecurityGroupIDFromARN(arn)]
+	if len(group.ingress) != 1 || group.ingress[0].sourceGroupID != "sg-new" {
+		t.Fatalf("expected only sg-new to have access after the swap, got %+v", group.ingress)
+	}
+	if len(ec2Client.revokedGroupIDs) != 1 || ec2Client.revokedGroupIDs[0] != "sg-old" {
+		t.Errorf("expected sg-old to have been revoked, got %v", ec2Client.revokedGroupIDs)
+	}
+}
+
+func TestEnsureSecurityGroup_RevokeNotFound_TreatedAsSuccess(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+	if err != nil {
+		t.Fatalf("EnsureSecurityGroup() error = %v", err)
+	}
+	groupID := SecurityGroupIDFromARN(arn)
+	// Seed a stale rule directly into the fake's described state without
+	// it being removable via the normal path, simulating a rule that was
+	// already revoked out-of-band (e.g. by a human) between reconciles -
+	// DescribeSecurityGroups still reports it this one last time, but the
+	// actual Revoke call races against its own removal.
+	ec2Client.groups[groupID].ingress = append(ec2Client.groups[groupID].ingress, fakeIngressRule{sourceGroupID: "sg-ghost", fromPort: 5432, toPort: 5432})
+	ec2Client.revokeSecurityGroupIngressErr = &fakeAWSError{code: "InvalidPermission.NotFound", fault: smithy.FaultClient}
+
+	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+	if err != nil {
+		t.Fatalf("expected InvalidPermission.NotFound on revoke to be treated as success, got %v", err)
+	}
+}
+
+func TestEnsureSecurityGroup_PropagatesRevokeFailure_WhenNotNotFound(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+	if err != nil {
+		t.Fatalf("EnsureSecurityGroup() error = %v", err)
+	}
+	groupID := SecurityGroupIDFromARN(arn)
+	ec2Client.groups[groupID].ingress = append(ec2Client.groups[groupID].ingress, fakeIngressRule{sourceGroupID: "sg-stale", fromPort: 5432, toPort: 5432})
+	ec2Client.revokeSecurityGroupIngressErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
+
+	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+	if err == nil {
+		t.Fatal("expected a real (non-NotFound) Revoke failure to surface as an error")
+	}
+}
+
+func TestEnsureSecurityGroup_PropagatesDescribeFailureDuringRevokeCheck(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	_, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+	if err != nil {
+		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
+	}
+
+	ec2Client.describeSecurityGroupsByIDErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
+	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+	if err == nil {
+		t.Fatal("expected the Describe failure (needed to check current rules before revoking) to propagate")
+	}
+}
+
 func TestSecurityGroupIDFromARN(t *testing.T) {
 	tests := []struct {
 		arn  string
