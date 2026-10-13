@@ -164,6 +164,13 @@ func Ensure(
 			continue
 		}
 
+		if err := checkAdoptable(ctx, awsClient, namespace, crName, r, ledger); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("instance %q: %w", r.Name, err)
+			}
+			continue
+		}
+
 		sgARN, sgErr := EnsureSecurityGroup(ctx, awsClient, ec2Client, k8sClient, namespace, crName, crUID, r.Name, r.DBSubnetGroupName, r.Engine, region, accountID, r.Adopt, r.SharedWith)
 		if sgErr != nil {
 			if firstErr == nil {

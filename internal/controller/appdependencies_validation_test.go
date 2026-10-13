@@ -447,4 +447,101 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
 		})
 	})
+
+	Context("RDS immutable fields", func() {
+		newRDS := func(generateName string, mutate func(*depsv1alpha1.RDSInstanceSpec)) *depsv1alpha1.AppDependencies {
+			inst := depsv1alpha1.RDSInstanceSpec{
+				Name:              "orders-db",
+				DBSubnetGroupName: "prod-private-data-tier",
+				Engine:            "postgres",
+				EngineVersion:     "16.3",
+				InstanceClass:     "db.t4g.micro",
+				AllocatedStorage:  20,
+			}
+			if mutate != nil {
+				mutate(&inst)
+			}
+			return &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: generateName, Namespace: "default"},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{inst}},
+				},
+			}
+		}
+
+		It("rejects changing the engine", func() {
+			obj := newRDS("validation-rds-engine-", nil)
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			obj.Spec.RDS.Resources[0].Engine = "mysql"
+			err := k8sClient.Update(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("engine is immutable"))
+		})
+
+		It("rejects changing the DB subnet group", func() {
+			obj := newRDS("validation-rds-subnet-", nil)
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			obj.Spec.RDS.Resources[0].DBSubnetGroupName = "other-tier"
+			err := k8sClient.Update(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("dbSubnetGroupName is immutable"))
+		})
+
+		It("rejects adding encryption to an unencrypted instance", func() {
+			obj := newRDS("validation-rds-enc-add-", nil)
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			obj.Spec.RDS.Resources[0].Encryption = &depsv1alpha1.EncryptionSpec{Enabled: true}
+			err := k8sClient.Update(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("encryption is immutable"))
+		})
+
+		It("rejects removing encryption", func() {
+			obj := newRDS("validation-rds-enc-remove-", func(i *depsv1alpha1.RDSInstanceSpec) {
+				i.Encryption = &depsv1alpha1.EncryptionSpec{Enabled: true}
+			})
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			obj.Spec.RDS.Resources[0].Encryption = nil
+			err := k8sClient.Update(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("encryption is immutable"))
+		})
+
+		It("rejects switching the key reference", func() {
+			obj := newRDS("validation-rds-enc-key-", func(i *depsv1alpha1.RDSInstanceSpec) {
+				i.Encryption = &depsv1alpha1.EncryptionSpec{KMSKeyRef: "shared"}
+			})
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			obj.Spec.RDS.Resources[0].Encryption = &depsv1alpha1.EncryptionSpec{KMSKeyRef: "other"}
+			err := k8sClient.Update(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("encryption is immutable"))
+		})
+
+		It("still allows changing mutable fields", func() {
+			obj := newRDS("validation-rds-mutable-", func(i *depsv1alpha1.RDSInstanceSpec) {
+				i.Encryption = &depsv1alpha1.EncryptionSpec{Enabled: true}
+			})
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			obj.Spec.RDS.Resources[0].InstanceClass = "db.t4g.small"
+			obj.Spec.RDS.Resources[0].AllocatedStorage = 40
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+		})
+
+		It("rejects decreasing allocatedStorage", func() {
+			obj := newRDS("validation-rds-storage-", func(i *depsv1alpha1.RDSInstanceSpec) { i.AllocatedStorage = 40 })
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			obj.Spec.RDS.Resources[0].AllocatedStorage = 20
+			err := k8sClient.Update(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("allocatedStorage cannot be decreased"))
+		})
+	})
 })

@@ -709,7 +709,9 @@ type RDSInstanceSpec struct {
 	Replication *RDSReplicationSpec `json:"replication,omitempty"`
 
 	// encryption enables storage encryption with a KMS key. See
-	// EncryptionSpec. Immutable once set.
+	// EncryptionSpec. Immutable: AWS cannot change an instance's storage
+	// encryption in place, so it can be neither added to, changed on, nor
+	// removed from an existing entry.
 	// +optional
 	Encryption *EncryptionSpec `json:"encryption,omitempty"`
 }

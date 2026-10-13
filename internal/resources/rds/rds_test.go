@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -397,12 +398,9 @@ func TestEnsure_AdoptsUntaggedInstance(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
 	ec2Client := newFakeEC2()
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
-	client.instances[instanceID] = &fakeInstance{
-		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "available",
-	}
-
 	spec := baseInstanceSpec("orders-db")
 	spec.Adopt = true
+	client.instances[instanceID] = existingInstanceMatching(instanceID, spec)
 	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
@@ -832,12 +830,9 @@ func TestEnsure_AddTagsToResourceFails_DuringAdoption(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
 	ec2Client := newFakeEC2()
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
-	client.instances[instanceID] = &fakeInstance{
-		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "available",
-	}
-
 	spec := baseInstanceSpec("orders-db")
 	spec.Adopt = true
+	client.instances[instanceID] = existingInstanceMatching(instanceID, spec)
 	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when AddTagsToResource fails during adoption")
@@ -872,15 +867,13 @@ func TestEnsure_AdoptingInstance_EmitsAdoptedEvent(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
 	ec2Client := newFakeEC2()
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
-	client.instances[instanceID] = &fakeInstance{
-		arn: "arn:aws:rds:us-east-1:123456789012:db:" + instanceID, status: "available",
-	}
+	spec := baseInstanceSpec("orders-db")
+	spec.Adopt = true
+	client.instances[instanceID] = existingInstanceMatching(instanceID, spec)
 
 	var events []string
 	recordEvent := func(eventType, reason, message string) { events = append(events, reason) }
 
-	spec := baseInstanceSpec("orders-db")
-	spec.Adopt = true
 	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, recordEvent)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
@@ -1657,5 +1650,152 @@ func TestInstanceStatusReason(t *testing.T) {
 		if got := instanceStatusReason(in); got != want {
 			t.Errorf("instanceStatusReason(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// existingInstanceMatching is an untagged, pre-existing instance whose
+// settings equal spec's - the only kind adoption accepts.
+func existingInstanceMatching(instanceID string, spec depsv1alpha1.RDSInstanceSpec) *fakeInstance {
+	return &fakeInstance{
+		arn:               "arn:aws:rds:us-east-1:123456789012:db:" + instanceID,
+		status:            "available",
+		engine:            spec.Engine,
+		engineVersion:     spec.EngineVersion,
+		instanceClass:     spec.InstanceClass,
+		allocatedStorage:  spec.AllocatedStorage,
+		dbSubnetGroupName: spec.DBSubnetGroupName,
+	}
+}
+
+func TestEnsure_AdoptionRefusesMismatchedInstance(t *testing.T) {
+	cases := map[string]struct {
+		mutate  func(*fakeInstance)
+		wantMsg string
+	}{
+		"engine":                               {func(i *fakeInstance) { i.engine = "mysql" }, "engine is mysql (spec: postgres)"},
+		"subnet group":                         {func(i *fakeInstance) { i.dbSubnetGroupName = "other-vpc" }, "dbSubnetGroupName is other-vpc"},
+		"unencrypted but encryption requested": {func(i *fakeInstance) {}, "storage is not encrypted"},
+		"encrypted but none declared":          {func(i *fakeInstance) { i.kmsKeyARN = "arn:aws:kms:us-east-1:123456789012:key/abc" }, "storage is encrypted"},
+		"larger class than spec":               {func(i *fakeInstance) { i.instanceClass = "db.r6g.xlarge" }, "instanceClass is db.r6g.xlarge"},
+		"multi-AZ on, spec off":                {func(i *fakeInstance) { i.multiAZ = true }, "multiAZ is true (spec: false)"},
+		"smaller storage than spec":            {func(i *fakeInstance) { i.allocatedStorage = 10 }, "would grow it"},
+		"older version than spec":              {func(i *fakeInstance) { i.engineVersion = "15.4" }, "would upgrade it"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeRDS()
+			ec2Client := newFakeEC2()
+			grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+			k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+			instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+
+			spec := baseInstanceSpec("orders-db")
+			spec.Adopt = true
+			if name == "unencrypted but encryption requested" {
+				spec.Encryption = &depsv1alpha1.EncryptionSpec{Enabled: true}
+			}
+			existing := existingInstanceMatching(instanceID, spec)
+			tc.mutate(existing)
+			client.instances[instanceID] = existing
+
+			ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+			var reconcileErr *cloudctlaws.ReconcileError
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonAdoptionConflict || reconcileErr.Retryable {
+				t.Fatalf("expected a non-retryable AdoptionConflict error, got %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("expected the error to mention %q, got %v", tc.wantMsg, err)
+			}
+
+			// Nothing may have been touched: no tag, no modify, no security
+			// group, no ledger entry.
+			if _, owned := existing.tags[cloudctlaws.OwnerTagKey]; owned {
+				t.Error("expected the refused instance to stay untagged")
+			}
+			if client.modifyDBInstanceCalls != 0 {
+				t.Errorf("expected no ModifyDBInstance call, got %d", client.modifyDBInstanceCalls)
+			}
+			if len(ec2Client.groups) != 0 {
+				t.Errorf("expected no security group to be created, got %d", len(ec2Client.groups))
+			}
+			if status.HasManagedResource(ledger, resourceType, "orders-db") {
+				t.Error("expected no ledger entry for a refused adoption")
+			}
+		})
+	}
+}
+
+func TestEnsure_AdoptionReportsEveryConflictAtOnce(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	spec := baseInstanceSpec("orders-db")
+	spec.Adopt = true
+	existing := existingInstanceMatching(instanceID, spec)
+	existing.engine = "mysql"
+	existing.instanceClass = "db.r6g.xlarge"
+	client.instances[instanceID] = existing
+
+	_, err := Ensure(context.Background(), client, nil, newFakeEC2(), k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "engine is mysql") || !strings.Contains(err.Error(), "instanceClass is db.r6g.xlarge") {
+		t.Fatalf("expected both conflicts in one error, got %v", err)
+	}
+}
+
+func TestEnsure_AdoptionAcceptsInstanceAheadOfSpec(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	spec := baseInstanceSpec("orders-db")
+	spec.Adopt = true
+	existing := existingInstanceMatching(instanceID, spec)
+	existing.allocatedStorage = 500
+	existing.engineVersion = "16.9"
+	client.instances[instanceID] = existing
+
+	if _, err := Ensure(context.Background(), client, nil, newFakeEC2(), k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil); err != nil {
+		t.Fatalf("expected an instance with more storage and a newer version than the spec minimums to be adopted, got %v", err)
+	}
+}
+
+func TestEnsure_AdoptionRefusesDifferentKMSKeyThanKeyRef(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	spec := baseInstanceSpec("orders-db")
+	spec.Adopt = true
+	spec.Encryption = &depsv1alpha1.EncryptionSpec{KMSKeyRef: "shared"}
+	existing := existingInstanceMatching(instanceID, spec)
+	existing.kmsKeyARN = "arn:aws:kms:us-east-1:123456789012:key/someone-elses"
+	client.instances[instanceID] = existing
+	ledger := []depsv1alpha1.ManagedResource{{
+		Type: "kms", Name: "shared", ARN: "arn:aws:kms:us-east-1:123456789012:key/ours",
+		State: depsv1alpha1.ManagedResourceStateVerified, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+	}}
+
+	_, err := Ensure(context.Background(), client, nil, newFakeEC2(), k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, ledger, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "kms key is") {
+		t.Fatalf("expected a kms key conflict, got %v", err)
+	}
+}
+
+func TestEnsure_AdoptionConflictDoesNotMaskOwnershipRefusals(t *testing.T) {
+	client := newFakeRDS()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	spec := baseInstanceSpec("orders-db")
+	spec.Adopt = true
+	existing := existingInstanceMatching(instanceID, spec)
+	existing.engine = "mysql"
+	existing.tags = ownerTags("other-ns", "other-cr", "uid-9")
+	client.instances[instanceID] = existing
+
+	_, err := Ensure(context.Background(), client, nil, newFakeEC2(), k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "already owned by a different AppDependencies CR") {
+		t.Fatalf("expected the ownership refusal to win over the settings conflict, got %v", err)
 	}
 }

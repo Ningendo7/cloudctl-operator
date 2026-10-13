@@ -196,6 +196,14 @@ spec:
 
 **Network access.** Each instance gets its own security group, created and owned by the operator and never shared. `sharedWith` grants ingress from a consumer CR's pods, which therefore need EKS Security Groups for Pods: the consumer CR gets its own pod security group and a `SecurityGroupPolicy`. A security group found at the expected name is only reused if it carries this CR's ownership tags; `adopt: true` takes over an untagged one or one left by an earlier incarnation of the same CR.
 
+**Adopting an existing instance.** With `adopt: true`, an untagged instance at the expected name is adopted only if the spec describes it. Adoption never changes an instance, so it is refused with an `AdoptionConflict` reason, and before anything is created, tagged or modified, when the instance differs on any of:
+
+- `engine`, `dbSubnetGroupName`, or storage encryption (including the key, for a `kmsKeyRef`), none of which can be changed afterwards;
+- `instanceClass` or `highAvailability`, which the first reconcile would otherwise change, possibly downsizing a production instance;
+- an `engineVersion` or `allocatedStorage` higher than the instance has, which would upgrade or grow it.
+
+An instance with more storage or a newer version than the spec's minimums is adopted. All conflicts are listed in one message. Make the spec match what exists, adopt, then change the spec: from then on changes go through the normal flow below. An instance already owned by another CR is refused for that reason first.
+
 **Changing a running instance.** Class, Multi-AZ, backup, engine-version and storage changes wait for the instance's weekly maintenance window by default, with a `ChangeDeferred` event, because some of them restart the instance. Set `applyImmediately: true` to apply them at once. Storage growth is the exception: it applies at once when nothing else is pending, since an immediate change also applies every pending one. An edit made while a change is pending replaces the pending value. A security group change always applies at once. While an instance is `backing-up` or `storage-optimization` it is reported ready but not modified; any other status that isn't `available` is retried.
 
 **Observing an instance.** The status AWS reports for each instance is recorded on its `status.managedResources` entry as `observedStatus`, with `observedStatusSince` set when the value last changed (not on every poll). While the instance isn't usable, `RDSReady` is `False` with a reason derived from that status: `InstanceCreating`, `InstanceModifying`, `InstanceConfiguringEnhancedMonitoring` and so on, or `InstanceFailed`, which is not retried and needs manual investigation. The field is informational and never gates an action.
