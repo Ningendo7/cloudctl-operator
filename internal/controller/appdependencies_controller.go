@@ -22,10 +22,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierror "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -199,4 +201,21 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrent}).
 		Named("appdependencies").
 		Complete(r)
+}
+
+// ManagedObjectCache limits the manager's Secret and ConfigMap cache to
+// the objects this operator created, so it doesn't hold every Secret in the
+// cluster in memory. An object without the label is invisible to cached
+// reads, which is why the code that must notice such an object (a foreign
+// one sitting at a name the operator wants) falls back to the API reader.
+// Shared by main and the envtest managers so the tests run the production
+// configuration.
+func ManagedObjectCache() map[client.Object]cache.ByObject {
+	managed := cache.ByObject{Label: labels.SelectorFromSet(labels.Set{
+		depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue,
+	})}
+	return map[client.Object]cache.ByObject{
+		&corev1.Secret{}:    managed,
+		&corev1.ConfigMap{}: managed,
+	}
 }
