@@ -253,7 +253,7 @@ func ensureSecurityGroupPolicy(ctx context.Context, k8sClient client.Client, nam
 		return fmt.Errorf("building SecurityGroupPolicy spec: %w", err)
 	}
 
-	if err := k8sClient.Patch(ctx, policy, client.Apply, securityGroupPolicyFieldOwner, client.ForceOwnership); err != nil {
+	if err := k8sClient.Apply(ctx, client.ApplyConfigurationFromUnstructured(policy), securityGroupPolicyFieldOwner, client.ForceOwnership); err != nil {
 		return fmt.Errorf("applying SecurityGroupPolicy (is the EKS VPC resource controller installed? Security Groups for Pods is a hard prerequisite for RDS sharedWith): %w", err)
 	}
 	return nil
@@ -318,5 +318,5 @@ func securityGroupOwnedBy(ctx context.Context, ec2Client cloudctlaws.EC2Client, 
 
 func isGroupNotFound(err error) bool {
 	var apiErr smithy.APIError
-	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidGroup.NotFound"
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == errCodeInvalidGroupNotFound
 }

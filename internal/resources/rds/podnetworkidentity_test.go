@@ -458,7 +458,7 @@ func TestEnsurePodNetworkIdentity_RechecksVPCOnceTrustWindowExpires(t *testing.T
 		t.Errorf("expected exactly 1 DescribeDBSubnetGroups call once the trust window expired, got %d", rdsClient.describeDBSubnetGroupsCalls)
 	}
 	entry, entryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if !entryFound || entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Time.After(stale.Time) {
+	if !entryFound || entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.After(stale.Time) {
 		t.Error("expected LastVerifiedAt to be refreshed after a real re-verification")
 	}
 }

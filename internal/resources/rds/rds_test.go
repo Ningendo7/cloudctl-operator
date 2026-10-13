@@ -28,7 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientpkg "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -507,7 +507,7 @@ func TestEnsure_ListsSubnetGroupGrantsOnceAcrossMultipleResources(t *testing.T) 
 	k8sClient := interceptor.NewClient(
 		fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build(),
 		interceptor.Funcs{
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			List: func(ctx context.Context, c clientpkg.WithWatch, list clientpkg.ObjectList, opts ...clientpkg.ListOption) error {
 				if _, ok := list.(*depsv1alpha1.RDSSubnetGroupGrantList); ok {
 					listCalls++
 				}
@@ -675,12 +675,7 @@ func TestEnsure_ClassifiesTransientAWSErrorsAsRetryable(t *testing.T) {
 }
 
 func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, needle)
 }
 
 func TestEnsure_CreatesNewInstance_PassesThroughAllFields(t *testing.T) {
@@ -801,7 +796,6 @@ func TestEnsure_WithinTrustWindow_SkipsReVerification(t *testing.T) {
 	entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
 	stale := metav1.NewTime(entry.LastVerifiedAt.Add(-2 * status.TrustWindow))
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, entry)
 	status.UpsertManagedResource(&ledger, entry)
 
 	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil); err != nil {

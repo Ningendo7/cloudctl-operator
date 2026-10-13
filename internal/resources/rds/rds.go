@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
@@ -58,6 +59,17 @@ const resourceType = "rds"
 // credential set (including this value) from the mirrored Secret rather
 // than supplying its own.
 const masterUsername = "cloudctl_admin"
+
+// Values this package matches against AWS responses and inputs.
+const (
+	statusAvailable = "available"
+	statusFailed    = "failed"
+	enginePostgres  = "postgres"
+
+	errCodeInvalidDBInstanceState    = "InvalidDBInstanceState"
+	errCodeInvalidGroupNotFound      = "InvalidGroup.NotFound"
+	errCodeInvalidPermissionNotFound = "InvalidPermission.NotFound"
+)
 
 // defaultBackupRetentionDays is AWS's own long-standing default retention
 // window for automated backups, applied when backup.enabled is true.
@@ -235,10 +247,8 @@ func isAuthorizedByGrants(grants []depsv1alpha1.RDSSubnetGroupGrant, namespace, 
 		if g.Spec.DBSubnetGroupName != dbSubnetGroupName {
 			continue
 		}
-		for _, ns := range g.Spec.AllowedNamespaces {
-			if ns == namespace {
-				return true
-			}
+		if slices.Contains(g.Spec.AllowedNamespaces, namespace) {
+			return true
 		}
 	}
 	return false
@@ -317,9 +327,9 @@ func ensureInstance(
 	// set is large and open-ended (unlike DynamoDB's).
 	servingOnly := false
 	switch instanceStatus {
-	case "failed":
+	case statusFailed:
 		return ledger, fmt.Errorf("instance %q entered status %q - this requires manual investigation, not an automatic retry", instanceID, instanceStatus)
-	case "available":
+	case statusAvailable:
 	case "backing-up", "storage-optimization":
 		// Still serving connections, but AWS limits modifications meanwhile.
 		servingOnly = true
@@ -602,7 +612,7 @@ func isInTransitionError(err error) bool {
 		return false
 	}
 	switch apiErr.ErrorCode() {
-	case "InvalidDBInstanceState", "InvalidDBSnapshotState":
+	case errCodeInvalidDBInstanceState, "InvalidDBSnapshotState":
 		return true
 	}
 	return false

@@ -680,7 +680,6 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	entry, _ := status.FindManagedResource(ledger, "s3", "receipts")
 	entry.LastVerifiedAt = &stale
 	status.UpsertManagedResource(&ledger, entry)
-	status.UpsertManagedResource(&ledger, entry)
 
 	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {

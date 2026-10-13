@@ -49,7 +49,7 @@ const podNetworkIdentityLedgerName = "pod-network-identity"
 // needed to scope the ingress rule to exactly the port the database
 // actually listens on, not a wide-open range.
 func enginePort(engine string) int32 {
-	if engine == "postgres" {
+	if engine == enginePostgres {
 		return 5432
 	}
 	return 3306 // mysql, mariadb
@@ -280,7 +280,7 @@ func isDuplicatePermission(err error) bool {
 // idempotent tolerance isDuplicatePermission gives the add side.
 func isNotFoundPermission(err error) bool {
 	var apiErr smithy.APIError
-	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidPermission.NotFound"
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == errCodeInvalidPermissionNotFound
 }
 
 func ec2TagsToMap(tags []types.Tag) map[string]string {

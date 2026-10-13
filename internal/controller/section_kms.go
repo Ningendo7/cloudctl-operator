@@ -118,7 +118,7 @@ func undeclaredKMSKeyRefs(cr *depsv1alpha1.AppDependencies) []string {
 func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	awsClients := r.AWSClients
 	return section{
-		name: "KMSReady",
+		name: conditionTypeKMSReady,
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
 			declared := 0
 			if cr.Spec.KMS != nil {
@@ -155,7 +155,7 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 					}
 				}
 			}
-			setSectionCondition(ctx, cr, "KMSReady", conditionErr, eventRecorderFor(r, cr))
+			setSectionCondition(ctx, cr, conditionTypeKMSReady, conditionErr, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

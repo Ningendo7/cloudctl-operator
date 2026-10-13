@@ -242,7 +242,7 @@ func ensureFinalSnapshot(
 	}
 
 	switch aws.ToString(describeOut.DBSnapshots[0].Status) {
-	case "available":
+	case statusAvailable:
 		updated := existing
 		now := metav1.Now()
 		updated.State = depsv1alpha1.ManagedResourceStateVerified
@@ -251,7 +251,7 @@ func ensureFinalSnapshot(
 		if recordEvent != nil {
 			recordEvent("Normal", "FinalSnapshotReady", fmt.Sprintf("Final snapshot %q of stuck RDS instance %s is available", existing.ARN, entry.Name))
 		}
-	case "failed":
+	case statusFailed:
 		if recordEvent != nil {
 			recordEvent("Warning", "FinalSnapshotFailed", fmt.Sprintf("Final snapshot %q of stuck RDS instance %s failed - manual intervention needed before deleting it", existing.ARN, entry.Name))
 		}
@@ -290,9 +290,9 @@ func retireFinalSnapshot(
 			return ledger, nil
 		}
 		switch aws.ToString(describeOut.DBSnapshots[0].Status) {
-		case "available":
+		case statusAvailable:
 			// proceed to delete below
-		case "failed":
+		case statusFailed:
 			status.RemoveManagedResource(&ledger, snapshotResourceType, resourceName)
 			return ledger, nil
 		default:

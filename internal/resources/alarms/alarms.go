@@ -61,6 +61,9 @@ const resourceType = "sns" // ConsumeRef resolution for snsTopicRef always targe
 // package always uses: a resource that's momentarily stopped reporting
 // metrics (not necessarily broken) shouldn't flip an alarm to ALARM on
 // absence alone.
+// queueNameDimension is the CloudWatch dimension SQS metrics are keyed by.
+const queueNameDimension = "QueueName"
+
 const treatMissingDataNotBreaching = "notBreaching"
 
 // Alarm name suffixes. Combined with cloudctlaws.ResourceName's own
@@ -179,7 +182,7 @@ func desiredAlarms(
 				description:        fmt.Sprintf("Queue %q has a message older than 15 minutes - processing is falling behind.", q.Name),
 				namespace:          "AWS/SQS",
 				metricName:         "ApproximateAgeOfOldestMessage",
-				dimensionName:      "QueueName",
+				dimensionName:      queueNameDimension,
 				dimensionValue:     queueName,
 				statistic:          types.StatisticMaximum,
 				comparisonOperator: types.ComparisonOperatorGreaterThanThreshold,
@@ -201,7 +204,7 @@ func desiredAlarms(
 					description:        fmt.Sprintf("Queue %q's dead-letter queue has at least one message - something is failing repeatedly.", q.Name),
 					namespace:          "AWS/SQS",
 					metricName:         "ApproximateNumberOfMessagesVisible",
-					dimensionName:      "QueueName",
+					dimensionName:      queueNameDimension,
 					dimensionValue:     dlqName,
 					statistic:          types.StatisticMaximum,
 					comparisonOperator: types.ComparisonOperatorGreaterThanThreshold,

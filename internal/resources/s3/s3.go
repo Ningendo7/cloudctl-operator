@@ -419,7 +419,7 @@ func lifecycleRulesMatch(current, desired []types.LifecycleRule) bool {
 }
 
 func lifecycleRuleFingerprint(r types.LifecycleRule) (string, bool) {
-	if r.AbortIncompleteMultipartUpload != nil || len(r.NoncurrentVersionTransitions) > 0 || len(r.Transitions) > 1 || aws.ToString(r.Prefix) != "" {
+	if r.AbortIncompleteMultipartUpload != nil || len(r.NoncurrentVersionTransitions) > 0 || len(r.Transitions) > 1 || aws.ToString(r.Prefix) != "" { //nolint:staticcheck // a rule using the legacy prefix is never one we wrote
 		return "", false
 	}
 	prefix := ""

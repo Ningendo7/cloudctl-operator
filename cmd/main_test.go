@@ -78,10 +78,10 @@ func TestWaitForAWSClients_SucceedsOnFirstAttemptWithoutWaitingAFullInterval(t *
 func TestAWSBootstrap_BecomesReadyOnlyAfterSetupSucceeds(t *testing.T) {
 	want := &cloudctlaws.Clients{Region: "us-east-1"}
 	var got *cloudctlaws.Clients
-	var attempts int32
+	var attempts atomic.Int32
 	b := &awsBootstrap{
 		newClients: func(context.Context) (*cloudctlaws.Clients, error) {
-			if atomic.AddInt32(&attempts, 1) < 2 {
+			if attempts.Add(1) < 2 {
 				return nil, errors.New("SignatureDoesNotMatch")
 			}
 			return want, nil

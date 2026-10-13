@@ -18,6 +18,7 @@ package rds
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -947,10 +948,5 @@ func TestInstanceIDFromARN(t *testing.T) {
 }
 
 func containsString(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, needle)
 }

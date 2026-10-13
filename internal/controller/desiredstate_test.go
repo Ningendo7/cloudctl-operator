@@ -232,7 +232,6 @@ var _ = Describe("AppDependencies Controller", func() {
 			past := metav1.NewTime(time.Now().Add(-1 * time.Hour))
 			entry.PendingDeletionSince = &past
 			status.UpsertManagedResource(&pending.Status.ManagedResources, entry)
-			status.UpsertManagedResource(&pending.Status.ManagedResources, entry)
 			Expect(k8sClient.Status().Update(ctx, &pending)).To(Succeed())
 
 			_, err = reconciler.Reconcile(ctx, req)
@@ -379,7 +378,7 @@ var _ = Describe("AppDependencies Controller", func() {
 
 			instanceID := cloudctlaws.ResourceName(cr.Namespace, cr.Name, "rds", "orders-db", 63)
 			Expect(fakeRDS.instances).To(HaveKey(instanceID))
-			Expect(fakeEC2.groups).NotTo(BeEmpty())
+			Expect(fakeEC2.groupCount()).NotTo(BeZero())
 
 			// First pass only ever creates and marks Creating - same
 			// two-pass create-then-verify behavior as every other
@@ -516,7 +515,6 @@ var _ = Describe("AppDependencies Controller", func() {
 			// as a human would observe after enough real time passed.
 			past := metav1.NewTime(time.Now().Add(-2 * time.Hour))
 			entry.PendingDeletionSince = &past
-			status.UpsertManagedResource(&updated.Status.ManagedResources, entry)
 			status.UpsertManagedResource(&updated.Status.ManagedResources, entry)
 			Expect(k8sClient.Status().Update(ctx, &updated)).To(Succeed())
 
@@ -709,7 +707,7 @@ func TestJitteredDriftRequeue_WithinBoundsAndVaries(t *testing.T) {
 	hi := time.Duration(float64(DriftDetectionInterval) * (1 + driftRequeueJitterFraction))
 
 	seen := map[time.Duration]bool{}
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		d := jitteredDriftRequeue()
 		if d < lo || d > hi {
 			t.Fatalf("jitteredDriftRequeue() = %v, want within [%v, %v]", d, lo, hi)
@@ -771,7 +769,7 @@ func TestCheckpointFor_LaterCheckpointSurvivesAConcurrentSpecEdit(t *testing.T) 
 		t.Fatalf("concurrent spec edit: %v", err)
 	}
 
-	second := append(first, depsv1alpha1.ManagedResource{Type: "sns", Name: "events", ARN: "arn:aws:sns:us-east-1:111111111111:events"})
+	second := []depsv1alpha1.ManagedResource{first[0], {Type: "sns", Name: "events", ARN: "arn:aws:sns:us-east-1:111111111111:events"}}
 	if err := checkpoint(context.Background(), second); err != nil {
 		t.Fatalf("second checkpoint() rejected by a spec edit made after the first: %v", err)
 	}

@@ -17,10 +17,10 @@ limitations under the License.
 package watches
 
 import (
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"

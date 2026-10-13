@@ -624,7 +624,6 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	entry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	entry.LastVerifiedAt = &stale
 	status.UpsertManagedResource(&ledger, entry)
-	status.UpsertManagedResource(&ledger, entry)
 
 	updatedLedger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
 	if err != nil {
@@ -732,7 +731,6 @@ func TestEnsure_CorrectsVisibilityTimeoutDriftOnExistingQueue(t *testing.T) {
 	entry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	entry.LastVerifiedAt = &stale
 	status.UpsertManagedResource(&ledger, entry)
-	status.UpsertManagedResource(&ledger, entry)
 
 	updated := int32(300)
 	spec.Resources[0].Overrides.VisibilityTimeoutSeconds = &updated
@@ -839,7 +837,6 @@ func TestEnsure_ClearsRedrivePolicyWhenDLQRemoved_AfterTrustWindowExpires(t *tes
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
 	entry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, entry)
 	status.UpsertManagedResource(&ledger, entry)
 
 	spec = &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}

@@ -156,7 +156,7 @@ func TestEnsure_ReVerifiesOnceTrustWindowExpires(t *testing.T) {
 		t.Errorf("expected exactly 1 ListResourceTags call once the trust window expired, got %d", client.listResourceTagsCalls[arn])
 	}
 	entry, entryFound := status.FindManagedResource(updated, resourceType, "primary")
-	if !entryFound || entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Time.After(stale.Time) {
+	if !entryFound || entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.After(stale.Time) {
 		t.Error("expected LastVerifiedAt to be refreshed after a real re-verification")
 	}
 }

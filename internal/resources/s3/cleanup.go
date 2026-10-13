@@ -216,10 +216,12 @@ func Cleanup(
 		}
 		if err := abortMultipartUploads(ctx, client, bucket); err != nil {
 			if firstErr == nil {
-				firstErr = wrapAWSError(err, fmt.Sprintf("aborting multipart uploads in bucket %q", entry.Name))
-				if errors.Is(err, errUploadsRemain) {
-					firstErr.(*cloudctlaws.ReconcileError).Retryable = true
+				wrapped := wrapAWSError(err, fmt.Sprintf("aborting multipart uploads in bucket %q", entry.Name))
+				var reconcileErr *cloudctlaws.ReconcileError
+				if errors.As(wrapped, &reconcileErr) && errors.Is(err, errUploadsRemain) {
+					reconcileErr.Retryable = true
 				}
+				firstErr = wrapped
 			}
 			continue
 		}

@@ -43,7 +43,6 @@ func snsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 				ctx,
 				r.AWSClients.SNS,
 				r.AWSClients.KMS,
-				r.Client,
 				cr.Namespace,
 				cr.Name,
 				string(cr.UID),

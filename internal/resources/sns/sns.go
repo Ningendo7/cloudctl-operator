@@ -24,7 +24,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sns/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -59,7 +58,6 @@ func Ensure(
 	ctx context.Context,
 	awsClient snsAPI,
 	kmsClient cloudctlaws.KMSClient,
-	k8sClient client.Client,
 	namespace,
 	crName,
 	crUID,
@@ -77,7 +75,7 @@ func Ensure(
 	var firstErr error
 	for _, t := range spec.Resources {
 		var err error
-		ledger, err = ensureTopic(ctx, awsClient, kmsClient, k8sClient, namespace, crName, crUID, region, accountID, t, ledger, checkpoint, recordEvent)
+		ledger, err = ensureTopic(ctx, awsClient, kmsClient, namespace, crName, crUID, region, accountID, t, ledger, checkpoint, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("topic %q: %w", t.Name, err)
 		}
@@ -89,7 +87,6 @@ func ensureTopic(
 	ctx context.Context,
 	awsClient snsAPI,
 	kmsClient cloudctlaws.KMSClient,
-	k8sClient client.Client,
 	namespace,
 	crName,
 	crUID,

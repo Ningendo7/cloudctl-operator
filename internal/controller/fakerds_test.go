@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"maps"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
@@ -50,7 +51,11 @@ type fakeRDSSnapshot struct {
 	id, instanceID, status string
 }
 
+// mu guards the maps: the reconciler goroutine mutates them while a test
+// goroutine may be reading.
 type fakeRDSClient struct {
+	mu sync.Mutex
+
 	instances map[string]*fakeRDSInstance // keyed by DBInstanceIdentifier
 	snapshots map[string]*fakeRDSSnapshot // keyed by DBSnapshotIdentifier
 
@@ -81,6 +86,8 @@ func (f *fakeRDSClient) findByARN(arn string) *fakeRDSInstance {
 }
 
 func (f *fakeRDSClient) CreateDBInstance(_ context.Context, in *rds.CreateDBInstanceInput, _ ...func(*rds.Options)) (*rds.CreateDBInstanceOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.createDBInstanceErr != nil {
 		return nil, f.createDBInstanceErr
 	}
@@ -105,6 +112,8 @@ func (f *fakeRDSClient) CreateDBInstance(_ context.Context, in *rds.CreateDBInst
 }
 
 func (f *fakeRDSClient) ModifyDBInstance(_ context.Context, in *rds.ModifyDBInstanceInput, _ ...func(*rds.Options)) (*rds.ModifyDBInstanceOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	i, ok := f.instances[*in.DBInstanceIdentifier]
 	if !ok {
 		return nil, &types.DBInstanceNotFoundFault{}
@@ -123,6 +132,8 @@ func (f *fakeRDSClient) ModifyDBInstance(_ context.Context, in *rds.ModifyDBInst
 }
 
 func (f *fakeRDSClient) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInstancesInput, _ ...func(*rds.Options)) (*rds.DescribeDBInstancesOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.describeDBInstancesCalls[*in.DBInstanceIdentifier]++
 	i, ok := f.instances[*in.DBInstanceIdentifier]
 	if !ok {
@@ -143,6 +154,8 @@ func (f *fakeRDSClient) DescribeDBInstances(_ context.Context, in *rds.DescribeD
 }
 
 func (f *fakeRDSClient) DescribeDBSubnetGroups(_ context.Context, in *rds.DescribeDBSubnetGroupsInput, _ ...func(*rds.Options)) (*rds.DescribeDBSubnetGroupsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	vpcID := "vpc-" + *in.DBSubnetGroupName
 	return &rds.DescribeDBSubnetGroupsOutput{
 		DBSubnetGroups: []types.DBSubnetGroup{{DBSubnetGroupName: in.DBSubnetGroupName, VpcId: &vpcID}},
@@ -150,10 +163,14 @@ func (f *fakeRDSClient) DescribeDBSubnetGroups(_ context.Context, in *rds.Descri
 }
 
 func (f *fakeRDSClient) DescribeDBEngineVersions(_ context.Context, _ *rds.DescribeDBEngineVersionsInput, _ ...func(*rds.Options)) (*rds.DescribeDBEngineVersionsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return &rds.DescribeDBEngineVersionsOutput{}, nil
 }
 
 func (f *fakeRDSClient) ListTagsForResource(_ context.Context, in *rds.ListTagsForResourceInput, _ ...func(*rds.Options)) (*rds.ListTagsForResourceOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	i := f.findByARN(*in.ResourceName)
 	if i == nil {
 		return nil, &types.DBInstanceNotFoundFault{}
@@ -162,6 +179,8 @@ func (f *fakeRDSClient) ListTagsForResource(_ context.Context, in *rds.ListTagsF
 }
 
 func (f *fakeRDSClient) AddTagsToResource(_ context.Context, in *rds.AddTagsToResourceInput, _ ...func(*rds.Options)) (*rds.AddTagsToResourceOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	i := f.findByARN(*in.ResourceName)
 	if i == nil {
 		return nil, &types.DBInstanceNotFoundFault{}
@@ -174,6 +193,8 @@ func (f *fakeRDSClient) AddTagsToResource(_ context.Context, in *rds.AddTagsToRe
 }
 
 func (f *fakeRDSClient) RemoveTagsFromResource(_ context.Context, in *rds.RemoveTagsFromResourceInput, _ ...func(*rds.Options)) (*rds.RemoveTagsFromResourceOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	i := f.findByARN(*in.ResourceName)
 	if i == nil {
 		return nil, &types.DBInstanceNotFoundFault{}
@@ -185,6 +206,8 @@ func (f *fakeRDSClient) RemoveTagsFromResource(_ context.Context, in *rds.Remove
 }
 
 func (f *fakeRDSClient) CreateDBSnapshot(_ context.Context, in *rds.CreateDBSnapshotInput, _ ...func(*rds.Options)) (*rds.CreateDBSnapshotOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	id := *in.DBSnapshotIdentifier
 	if _, exists := f.snapshots[id]; exists {
 		return nil, &types.DBSnapshotAlreadyExistsFault{}
@@ -194,6 +217,8 @@ func (f *fakeRDSClient) CreateDBSnapshot(_ context.Context, in *rds.CreateDBSnap
 }
 
 func (f *fakeRDSClient) DescribeDBSnapshots(_ context.Context, in *rds.DescribeDBSnapshotsInput, _ ...func(*rds.Options)) (*rds.DescribeDBSnapshotsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	s, ok := f.snapshots[*in.DBSnapshotIdentifier]
 	if !ok {
 		return &rds.DescribeDBSnapshotsOutput{}, nil
@@ -202,6 +227,8 @@ func (f *fakeRDSClient) DescribeDBSnapshots(_ context.Context, in *rds.DescribeD
 }
 
 func (f *fakeRDSClient) DeleteDBSnapshot(_ context.Context, in *rds.DeleteDBSnapshotInput, _ ...func(*rds.Options)) (*rds.DeleteDBSnapshotOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if _, ok := f.snapshots[*in.DBSnapshotIdentifier]; !ok {
 		return nil, &types.DBSnapshotNotFoundFault{}
 	}
@@ -225,4 +252,11 @@ func fakeMapToTags(m map[string]string) []types.Tag {
 		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
 	}
 	return tags
+}
+
+func (f *fakeRDSClient) hasInstance(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.instances[id]
+	return ok
 }

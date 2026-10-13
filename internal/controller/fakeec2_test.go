@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -41,7 +42,10 @@ type fakeSecurityGroup struct {
 	ingress         []fakeIngressRule
 }
 
+// mu guards groups: the reconciler goroutine mutates them while a test
+// goroutine is polling for the result.
 type fakeEC2Client struct {
+	mu     sync.Mutex
 	groups map[string]*fakeSecurityGroup // keyed by GroupId
 	nextID int
 }
@@ -60,6 +64,8 @@ func (f *fakeEC2Client) findByNameAndVPC(name, vpcID string) *fakeSecurityGroup 
 }
 
 func (f *fakeEC2Client) CreateSecurityGroup(_ context.Context, in *ec2.CreateSecurityGroupInput, _ ...func(*ec2.Options)) (*ec2.CreateSecurityGroupOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.nextID++
 	id := fmt.Sprintf("sg-%08d", f.nextID)
 	tags := map[string]string{}
@@ -75,6 +81,8 @@ func (f *fakeEC2Client) CreateSecurityGroup(_ context.Context, in *ec2.CreateSec
 }
 
 func (f *fakeEC2Client) DescribeSecurityGroups(_ context.Context, in *ec2.DescribeSecurityGroupsInput, _ ...func(*ec2.Options)) (*ec2.DescribeSecurityGroupsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if len(in.GroupIds) > 0 {
 		g, ok := f.groups[in.GroupIds[0]]
 		if !ok {
@@ -124,6 +132,8 @@ func toSecurityGroupType(g *fakeSecurityGroup) types.SecurityGroup {
 }
 
 func (f *fakeEC2Client) AuthorizeSecurityGroupIngress(_ context.Context, in *ec2.AuthorizeSecurityGroupIngressInput, _ ...func(*ec2.Options)) (*ec2.AuthorizeSecurityGroupIngressOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	g, ok := f.groups[*in.GroupId]
 	if !ok {
 		return nil, &fakeAWSError{code: "InvalidGroup.NotFound"}
@@ -141,6 +151,8 @@ func (f *fakeEC2Client) AuthorizeSecurityGroupIngress(_ context.Context, in *ec2
 }
 
 func (f *fakeEC2Client) RevokeSecurityGroupIngress(_ context.Context, in *ec2.RevokeSecurityGroupIngressInput, _ ...func(*ec2.Options)) (*ec2.RevokeSecurityGroupIngressOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	g, ok := f.groups[*in.GroupId]
 	if !ok {
 		return nil, &fakeAWSError{code: "InvalidGroup.NotFound"}
@@ -158,6 +170,8 @@ func (f *fakeEC2Client) RevokeSecurityGroupIngress(_ context.Context, in *ec2.Re
 }
 
 func (f *fakeEC2Client) DeleteSecurityGroup(_ context.Context, in *ec2.DeleteSecurityGroupInput, _ ...func(*ec2.Options)) (*ec2.DeleteSecurityGroupOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	delete(f.groups, *in.GroupId)
 	return &ec2.DeleteSecurityGroupOutput{}, nil
 }
@@ -168,4 +182,33 @@ func (f *fakeEC2Client) CreateTags(context.Context, *ec2.CreateTagsInput, ...fun
 
 func (f *fakeEC2Client) DescribeTags(context.Context, *ec2.DescribeTagsInput, ...func(*ec2.Options)) (*ec2.DescribeTagsOutput, error) {
 	panic("not used - this package tags security groups atomically at creation via TagSpecifications")
+}
+
+// groupIDByName and ingressOf let a test read the fake while the reconciler
+// is writing it.
+func (f *fakeEC2Client) groupIDByName(name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id, g := range f.groups {
+		if g.name == name {
+			return id
+		}
+	}
+	return ""
+}
+
+func (f *fakeEC2Client) ingressOf(groupID string) []fakeIngressRule {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g, ok := f.groups[groupID]
+	if !ok {
+		return nil
+	}
+	return append([]fakeIngressRule(nil), g.ingress...)
+}
+
+func (f *fakeEC2Client) groupCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.groups)
 }

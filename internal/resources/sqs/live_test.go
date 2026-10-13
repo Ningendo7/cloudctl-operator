@@ -264,7 +264,6 @@ func TestLive_Ensure_RedrivePolicyClearsWhenDLQRemoved(t *testing.T) {
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
 	mainEntry.LastVerifiedAt = &stale
 	status.UpsertManagedResource(&ledger, mainEntry)
-	status.UpsertManagedResource(&ledger, mainEntry)
 
 	spec.Resources[0].DLQ = false
 	if _, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil); err != nil {
@@ -373,7 +372,6 @@ func TestLive_Cleanup_BlocksDeletingQueueWithARealMessage(t *testing.T) {
 	entry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, entry)
 	status.UpsertManagedResource(&ledger, entry)
 
 	if _, _, err := Cleanup(ctx, client, nil, nil, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil); err != nil {
@@ -508,7 +506,6 @@ func TestLive_Ensure_RecreatesQueueDeletedExternally(t *testing.T) {
 	entry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, entry)
 	status.UpsertManagedResource(&ledger, entry)
 
 	// AWS enforces a ~60s cooldown before a deleted queue's name can be

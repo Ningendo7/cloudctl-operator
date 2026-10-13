@@ -247,7 +247,7 @@ func addOwnedRDS(ctx context.Context, rdsClient cloudctlaws.RDSClient, data map[
 func addConsumedRDS(ctx context.Context, k8sClient client.Client, rdsClient cloudctlaws.RDSClient, data map[string]string, consumer *depsv1alpha1.AppDependencies, ref depsv1alpha1.ConsumeRef) error {
 	var producer depsv1alpha1.AppDependencies
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, &producer); err != nil {
-		return nil // forward reference not resolved yet
+		return nil //nolint:nilerr // forward reference: resolves on a later pass
 	}
 	if !rds.IsConsumerAuthorized(&producer, ref.ResourceName, consumer.Namespace, consumer.Name) {
 		return nil

@@ -91,7 +91,7 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 				if names := stuckInstanceNames(results); len(names) > 0 {
 					conditionErr = &cloudctlaws.ReconcileError{
 						Err:    fmt.Errorf("instance(s) %s removed from spec and stuck pending manual deletion - billing continues, this operator will never delete them automatically", strings.Join(names, ", ")),
-						Reason: "InstanceStuckPendingDeletion",
+						Reason: reasonInstanceStuckPendingDeletion,
 					}
 				}
 			}

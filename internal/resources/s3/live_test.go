@@ -424,7 +424,6 @@ func TestLive_Cleanup_BlocksDeletingBucketWithARealObjectThenSucceedsOnceEmpty(t
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
 	entry.PendingDeletionSince = &past
 	status.UpsertManagedResource(&ledger, entry)
-	status.UpsertManagedResource(&ledger, entry)
 
 	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {

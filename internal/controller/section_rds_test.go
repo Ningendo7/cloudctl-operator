@@ -185,7 +185,7 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 		}, 10*time.Second, 100*time.Millisecond).Should(BeTrue(), "expected the grant's creation to immediately unblock the CR")
 
 		instanceID := cloudctlaws.ResourceName(cr.Namespace, cr.Name, "rds", "orders-db", 63)
-		Expect(fakeRDS.instances).To(HaveKey(instanceID))
+		Expect(fakeRDS.hasInstance(instanceID)).To(BeTrue())
 	})
 
 	It("grants ingress to a consumer's security group the moment it publishes its pod identity, with no manual producer reconcile", func() {
@@ -228,14 +228,9 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 			return entryFound && entry.State == depsv1alpha1.ManagedResourceStateVerified
 		}, 10*time.Second, 100*time.Millisecond).Should(BeTrue(), "expected the producer's instance to become Verified")
 
-		for id, g := range fakeEC2.groups {
-			if g.name == producerSGName {
-				producerSGID = id
-				break
-			}
-		}
+		producerSGID = fakeEC2.groupIDByName(producerSGName)
 		Expect(producerSGID).NotTo(BeEmpty())
-		Expect(fakeEC2.groups[producerSGID].ingress).To(BeEmpty(), "expected no ingress yet - the consumer hasn't published an identity")
+		Expect(fakeEC2.ingressOf(producerSGID)).To(BeEmpty(), "expected no ingress yet - the consumer hasn't published an identity")
 
 		var updatedProducer depsv1alpha1.AppDependencies
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(producer), &updatedProducer)).To(Succeed())
@@ -254,7 +249,7 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 		Expect(k8sClient.Update(ctx, &updatedConsumer)).To(Succeed())
 
 		Eventually(func() []fakeIngressRule {
-			return fakeEC2.groups[producerSGID].ingress
+			return fakeEC2.ingressOf(producerSGID)
 		}, 10*time.Second, 100*time.Millisecond).ShouldNot(BeEmpty(), "expected the producer to grant ingress without any manual reconcile")
 	})
 })

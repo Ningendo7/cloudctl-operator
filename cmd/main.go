@@ -105,7 +105,7 @@ func (b *awsBootstrap) Start(ctx context.Context) error {
 	clients, err := waitForAWSClients(ctx, b.interval, b.newClients)
 	if err != nil {
 		// Only reachable via ctx cancellation, i.e. a normal shutdown.
-		return nil
+		return nil //nolint:nilerr // not a failure
 	}
 	if err := b.onReady(ctx, clients); err != nil {
 		return err
@@ -255,7 +255,8 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	managedBySelector := labels.SelectorFromSet(labels.Set{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue})
+	managedBy := labels.Set{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue}
+	managedBySelector := labels.SelectorFromSet(managedBy)
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,

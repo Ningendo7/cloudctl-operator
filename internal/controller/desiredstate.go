@@ -98,7 +98,7 @@ const driftRequeueJitterFraction = 0.2
 
 func jitteredDriftRequeue() time.Duration {
 	span := float64(DriftDetectionInterval) * driftRequeueJitterFraction
-	return DriftDetectionInterval + time.Duration(rand.Float64()*2*span-span)
+	return DriftDetectionInterval + time.Duration(rand.Float64()*2*span-span) //nolint:gosec // jitter, not a secret
 }
 
 // transientRequeueInterval is how soon a transient AWS error (throttling,
@@ -118,14 +118,19 @@ const (
 	resourceTypeS3       = "s3"
 	resourceTypeRDS      = "rds"
 
-	conditionTypeS3Ready = "S3Ready"
+	conditionTypeS3Ready  = "S3Ready"
+	conditionTypeKMSReady = "KMSReady"
+
+	reasonError                        = "Error"
+	reasonTransientError               = "TransientError"
+	reasonInstanceStuckPendingDeletion = "InstanceStuckPendingDeletion"
 )
 
 // sectionTypes lists every per-section Ready condition type this CR can
 // produce, used to compute the aggregate Ready condition. Kept in sync
 // with allSections above — each entry here should have a matching
 // section constructor registered there.
-var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", conditionTypeS3Ready, "RDSReady", "KMSReady", "AlarmsReady", "IAMReady", "ConnectionInfoReady"}
+var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", conditionTypeS3Ready, "RDSReady", conditionTypeKMSReady, "AlarmsReady", "IAMReady", "ConnectionInfoReady"}
 
 type section struct {
 	name      string
@@ -173,7 +178,7 @@ func finalizeOrder(sections []section) []section {
 	ordered := make([]section, 0, len(sections))
 	var keys []section
 	for _, s := range sections {
-		if s.name == "KMSReady" {
+		if s.name == conditionTypeKMSReady {
 			keys = append(keys, s)
 			continue
 		}
@@ -277,7 +282,7 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 		return
 	}
 
-	reason := "Error"
+	reason := reasonError
 	var reconcileErr *cloudctlaws.ReconcileError
 	switch {
 	case errors.As(err, &reconcileErr) && reconcileErr.Reason != "":
@@ -285,7 +290,7 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 	case cloudctlaws.IsPermissionDenied(err):
 		reason = "PermissionDenied"
 	case isRetryable(err):
-		reason = "TransientError"
+		reason = reasonTransientError
 	}
 
 	logf.FromContext(ctx).Error(err, "Section failed to reconcile", "section", conditionType, "reason", reason)

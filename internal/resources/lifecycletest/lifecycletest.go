@@ -126,7 +126,6 @@ func markPastQuietWindow(ledger []depsv1alpha1.ManagedResource, resourceType, na
 	past := metav1.NewTime(time.Now().Add(-preTestQuietWindow))
 	entry.PendingDeletionSince = &past
 	status.UpsertManagedResource(&ledger, entry)
-	status.UpsertManagedResource(&ledger, entry)
 	return ledger
 }
 

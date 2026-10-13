@@ -91,7 +91,7 @@ func EnsureCredentialsSecret(
 
 	if exists {
 		if owner := metav1.GetControllerOf(existing); owner == nil || owner.UID != cr.UID {
-			return fmt.Errorf("Secret %q already exists and is not owned by this CR - refusing to manage it", name)
+			return fmt.Errorf("secret %q already exists and is not owned by this CR - refusing to manage it", name)
 		}
 	}
 

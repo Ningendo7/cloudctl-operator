@@ -64,7 +64,6 @@ func advancePastQuietWindow(t *testing.T, ledger []depsv1alpha1.ManagedResource,
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
 	entry.PendingDeletionSince = &past
 	status.UpsertManagedResource(&ledger, entry)
-	status.UpsertManagedResource(&ledger, entry)
 }
 
 // advancePastEmptyCheckBackoffStart pushes PendingDeletionSince back far
@@ -78,7 +77,6 @@ func advancePastEmptyCheckBackoffStart(t *testing.T, ledger []depsv1alpha1.Manag
 	past := metav1.NewTime(time.Now().Add(-status.EmptyCheckBackoffStartAfter - time.Minute))
 	entry.PendingDeletionSince = &past
 	status.UpsertManagedResource(&ledger, entry)
-	status.UpsertManagedResource(&ledger, entry)
 }
 
 // pushLastEmptyCheckIntoThePast backdates a ledger entry's LastEmptyCheckAt
@@ -91,7 +89,6 @@ func pushLastEmptyCheckIntoThePast(t *testing.T, ledger []depsv1alpha1.ManagedRe
 	}
 	past := metav1.NewTime(time.Now().Add(-d))
 	entry.LastEmptyCheckAt = &past
-	status.UpsertManagedResource(&ledger, entry)
 	status.UpsertManagedResource(&ledger, entry)
 }
 
@@ -402,7 +399,6 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 	longAgo := metav1.NewTime(time.Now().Add(-2 * PendingDeletionGracePeriod))
 	entry, _ := status.FindManagedResource(ledger, "dynamodb", "sessions")
 	entry.PendingDeletionSince = &longAgo
-	status.UpsertManagedResource(&ledger, entry)
 	status.UpsertManagedResource(&ledger, entry)
 
 	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
