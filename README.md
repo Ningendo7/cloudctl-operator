@@ -210,7 +210,8 @@ integration, lint, Helm chart, E2E, and the manifests/chart drift check —
 passes for that exact commit; see
 [Releases](https://github.com/Ningendo7/cloudctl-operator/releases) for
 the current version. SQS, SNS, DynamoDB, S3, and IAM are implemented and
-covered by all three test tiers. KMS's dedicated-key path (the common
+covered by all three test tiers. RDS is implemented with unit, envtest and
+live coverage only (LocalStack's community edition has no RDS). KMS's dedicated-key path (the common
 case — `encryption.enabled` on any other resource type) rides along
 inside those same tiers. The standalone `kms.resources` type and
 CloudWatch alarms have unit and live coverage but no integration tier —
@@ -219,10 +220,7 @@ that testing against it risked false confidence rather than real
 coverage (confirmed directly for alarms, not just assumed from KMS's own
 prior history).
 
-Still ahead: RDS support (deferred deliberately — it's the first resource
-touching VPC-level infrastructure and a Secret rather than a ConfigMap,
-and gets its own design pass rather than being bolted on), and
-Prometheus/OpenTelemetry instrumentation.
+Still ahead: Prometheus/OpenTelemetry instrumentation.
 
 ## License
 

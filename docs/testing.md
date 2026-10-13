@@ -76,7 +76,7 @@ standard AWS credential chain, creates its own uniquely-named real
 resource(s), and cleans up via `t.Cleanup` even on failure.
 
 **Current coverage:** SQS (including subscriptions), SNS, S3, DynamoDB,
-IAM, KMS, and alarms (CloudWatch). Each tier is deliberately
+IAM, KMS, alarms (CloudWatch), and RDS. Each tier is deliberately
 lean — a handful of tests per service, not exhaustive scenario coverage —
 and targets specifically the kind of thing a fake or LocalStack can't be
 trusted to catch: real, undocumented, or easy-to-mismodel API behavior
@@ -104,6 +104,16 @@ by the unit tier's fakes, and the only difference would be the literal
 window value (30 days here vs. 7 there) — not a class of bug this tier
 exists to catch. Still no integration tier for standalone KMS (see the
 note above on why LocalStack is deferred for it).
+
+RDS is live-only: LocalStack's community edition doesn't implement it, so
+there is no integration or e2e tier for it. Its single long test creates one
+real `db.t4g.micro` instance and walks the whole lifecycle (ownership tags,
+credentials delivery, drift correction, ingress grant and revoke, adoption,
+credential rotation, the final-snapshot safety net, storage growth), taking
+about 20 minutes plus teardown and costing a few cents. It needs a
+pre-existing DB subnet group (`RDS_LIVE_TEST_SUBNET_GROUP`) and optionally an
+existing enabled KMS key (`RDS_LIVE_TEST_KMS_KEY_ARN`, never modified by the
+test); it skips if the subnet group isn't set.
 
 Run it locally with whatever already authenticates your AWS CLI:
 
