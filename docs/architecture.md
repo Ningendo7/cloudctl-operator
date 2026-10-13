@@ -42,7 +42,13 @@ from that:
   skips the AWS round trip to re-verify on every single reconcile — but only
   for read-level trust. Any destructive action, and always a delete, still
   requires the freshest tag check available before acting; cached trust
-  alone never authorizes destroying something.
+  alone never authorizes destroying something. The window exempts the
+  ownership check only: every reconcile still confirms an SQS queue, SNS
+  topic, S3 bucket, DynamoDB table or RDS instance exists, so one deleted
+  out-of-band is reported (a `*Missing` warning event) and recreated on the
+  next pass, not after the window lapses. KMS keys are the exception by
+  design: a missing key is an error, never silently replaced, since
+  everything encrypted under it is already unrecoverable.
 
 ## Deletion is a lifecycle, not a single API call
 

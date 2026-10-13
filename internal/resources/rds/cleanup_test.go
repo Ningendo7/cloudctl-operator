@@ -623,7 +623,7 @@ func TestCleanup_BackInUse_OnlyTouchesItsOwnInstanceSnapshot(t *testing.T) {
 	client := newFakeRDS()
 	ledgerA := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
 	ledgerB, err := createInstance(context.Background(), client, "default", "checkout-service", "uid-1",
-		"default-checkout-service-invoices-db", "invoices-db",
+		cloudctlaws.ResourceName("default", "checkout-service", resourceType, "invoices-db", 63), "invoices-db",
 		instanceOptions{deletionPolicy: depsv1alpha1.DeletionPolicyDelete, engine: "mysql", engineVersion: "8.0", instanceClass: "db.t4g.micro", dbSubnetGroupName: "sg", securityGroupID: "sg-2"},
 		ledgerA, nil)
 	if err != nil {
@@ -1046,5 +1046,22 @@ func TestCleanup_BackInUse_DoesNotDeleteSnapshotNoLongerOwned(t *testing.T) {
 	}
 	if !containsString(events, "FinalSnapshotNotOwned") {
 		t.Errorf("expected a FinalSnapshotNotOwned warning, got %v", events)
+	}
+}
+
+func TestCleanup_RetainedInstanceDeletedByHand_IsForgotten(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyRetain)
+	delete(client.instances, cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63))
+
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if status.HasManagedResource(updated, resourceType, "orders-db") {
+		t.Error("expected the ledger entry to be dropped once the retained instance is gone, so declaring it again creates a fresh one")
+	}
+	if findCleanupResult(results, "orders-db") != nil {
+		t.Errorf("expected nothing to report for an instance that no longer exists, got %+v", results)
 	}
 }

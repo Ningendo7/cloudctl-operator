@@ -1847,3 +1847,82 @@ func TestEnsure_AdoptionRefusesPubliclyAccessibleInstance(t *testing.T) {
 		t.Fatalf("expected adoption to be refused for a public instance, got %v", err)
 	}
 }
+
+func TestEnsure_InstanceDeletedOutOfBand_IsALoudErrorNotARecreate(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	// Past the just-created grace period, as any real deletion would be.
+	entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
+	entry.State = depsv1alpha1.ManagedResourceStateVerified
+	entry.CreatedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+	status.UpsertManagedResource(&ledger, entry)
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	delete(client.instances, instanceID)
+	client.lastCreateDBInstanceInput = nil
+
+	var reasons []string
+	_, err = ensureRecording(t, client, spec, ledger, &reasons)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonInstanceMissing || reconcileErr.Retryable {
+		t.Fatalf("expected a non-retryable InstanceMissing error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "adopt: true") || !strings.Contains(err.Error(), "remove it from spec") {
+		t.Errorf("expected the error to say how to recover, got %v", err)
+	}
+	if client.lastCreateDBInstanceInput != nil {
+		t.Error("expected no replacement instance to be created")
+	}
+	if !contains(reasons, "InstanceMissing") {
+		t.Errorf("expected an InstanceMissing warning, got %v", reasons)
+	}
+}
+
+func TestEnsure_JustCreatedInstanceNotYetVisible_IsRetryable(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	delete(client.instances, instanceID)
+
+	_, err = ensureOnce(t, client, spec, ledger)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable || reconcileErr.Reason == reasonInstanceMissing {
+		t.Fatalf("expected a retryable not-visible-yet error right after creation, got %v", err)
+	}
+}
+
+func TestEnsure_RestoredInstanceCanBeAdoptedAfterItWasMissing(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
+	entry.State = depsv1alpha1.ManagedResourceStateVerified
+	entry.CreatedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+	status.UpsertManagedResource(&ledger, entry)
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	delete(client.instances, instanceID)
+
+	// A human restores it under the same identifier; it comes back untagged.
+	spec.Adopt = true
+	client.instances[instanceID] = existingInstanceMatching(instanceID, spec)
+	ledger, err = ensureOnce(t, client, spec, ledger)
+	if err != nil {
+		t.Fatalf("expected the restored instance to be adopted, got %v", err)
+	}
+	if !cloudctlaws.IsOwnedBy(client.instances[instanceID].tags, "default", "checkout-service", "uid-1") {
+		t.Error("expected the restored instance to be tagged as owned after adoption")
+	}
+	if entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db"); entry.State != depsv1alpha1.ManagedResourceStateVerified {
+		t.Errorf("expected a Verified entry, got %+v", entry)
+	}
+}

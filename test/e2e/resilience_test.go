@@ -498,12 +498,9 @@ spec:
 		Expect(queueCount(nextAWSPod("during-queue"), queueNameFor("during-outage"))).To(Equal(1),
 			"the CR created during the outage should get its queue once AWS is back")
 
-		// A queue with no managed attributes isn't re-checked in AWS while
-		// its ledger entry is inside the trust window, so a queue AWS lost
-		// stays unnoticed (and the CR Ready) until the window lapses. Lapse
-		// it the way time would, instead of waiting ten minutes.
-		By("letting the trust window lapse on the queue AWS lost")
-		expireTrustWindow(resilienceNamespace, "outage", "sqs", "orders")
+		// Existence is checked every pass even inside the ledger's trust
+		// window, so the queue AWS lost must come back without waiting for
+		// that window to lapse.
 		Eventually(func() int {
 			_ = tryForceReconcile(resilienceNamespace, "outage")
 			return queueCount(nextAWSPod("outage-queue"), queueNameFor("outage"))
@@ -621,22 +618,6 @@ func (c crView) ledgerCreatedAt(resourceType, name string) string {
 		}
 	}
 	return ""
-}
-
-// expireTrustWindow backdates a ledger entry's last verification past
-// status.TrustWindow, so the next reconcile re-checks it against AWS.
-func expireTrustWindow(ns, name, resourceType, resourceName string) {
-	GinkgoHelper()
-	cr, err := getCR(ns, name)
-	Expect(err).NotTo(HaveOccurred())
-	for i, r := range cr.Status.ManagedResources {
-		if r.Type == resourceType && r.Name == resourceName {
-			mustKubectl("patch", "appdependencies", name, "-n", ns, "--subresource=status", "--type=json",
-				"-p", fmt.Sprintf(`[{"op":"add","path":"/status/managedResources/%d/lastVerifiedAt","value":"2000-01-01T00:00:00Z"}]`, i))
-			return
-		}
-	}
-	Fail(fmt.Sprintf("no %s/%s ledger entry on %s/%s", resourceType, resourceName, ns, name))
 }
 
 // crReady asserts the CR's aggregate Ready condition is True for its

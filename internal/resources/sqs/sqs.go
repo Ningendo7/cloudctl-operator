@@ -268,13 +268,9 @@ func ensureSingleQueue(
 		updated.Force = opts.force
 		status.UpsertManagedResource(&ledger, updated)
 
-		if len(desiredAttributes(opts)) == 0 {
-			// Nothing this package manages could have drifted - skip the
-			// AWS round trip entirely rather than resolving a URL just to
-			// find there's nothing to compare.
-			return ledger, nil
-		}
-
+		// Existence is checked on every pass, trust window or not: the
+		// window only exempts the ownership-tag re-check, and a queue
+		// deleted out-of-band must not stay reported Ready until it lapses.
 		queueName, nameErr := queueNameFromARN(existing.ARN)
 		if nameErr != nil {
 			return ledger, nameErr
@@ -282,13 +278,23 @@ func ensureSingleQueue(
 		urlOut, err := awsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 			QueueName: &queueName,
 		})
-		if err != nil {
+		var gone *types.QueueDoesNotExist
+		switch {
+		case errors.As(err, &gone):
+			if recordEvent != nil {
+				recordEvent("Warning", "QueueMissing", fmt.Sprintf("SQS queue %s no longer exists in AWS; recreating it", queueName))
+			}
+			// Falls through to the full path below, which recreates it.
+		case err != nil:
 			return ledger, wrapAWSError(err, "resolving queue URL for drift correction")
+		default:
+			if len(desiredAttributes(opts)) > 0 {
+				if err := reconcileAttributes(ctx, awsClient, *urlOut.QueueUrl, opts); err != nil {
+					return ledger, wrapAWSError(err, "reconciling queue attributes")
+				}
+			}
+			return ledger, nil
 		}
-		if err := reconcileAttributes(ctx, awsClient, *urlOut.QueueUrl, opts); err != nil {
-			return ledger, wrapAWSError(err, "reconciling queue attributes")
-		}
-		return ledger, nil
 	}
 
 	const sqsNameMaxLen = 80

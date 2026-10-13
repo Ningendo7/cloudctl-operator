@@ -116,11 +116,18 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			relinquished, relErr := relinquishIfStillTagged(ctx, awsClient, namespace, crName, crUID, entry)
+			relinquished, gone, relErr := relinquishIfStillTagged(ctx, awsClient, namespace, crName, crUID, entry)
 			if relErr != nil {
 				if firstErr == nil {
 					firstErr = relErr
 				}
+				continue
+			}
+			if gone {
+				// Deleted by hand after being retained: forget it, so
+				// declaring it again creates a fresh instance instead of
+				// tripping over a ledger entry for one that no longer exists.
+				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 				continue
 			}
 			if relinquished && recordEvent != nil {
@@ -377,25 +384,25 @@ func instanceIDFromARN(arn string) (string, error) {
 // relinquishIfStillTagged removes this operator's ownership tags from an
 // instance whose deletionPolicy is Retain and is no longer declared.
 // Idempotent - safe on every reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
 	tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &entry.ARN})
 	if tErr != nil {
 		var notFound *types.DBInstanceNotFoundFault
 		if errors.As(tErr, &notFound) {
-			return false, nil // already gone, nothing to relinquish
+			return false, true, nil // already gone, nothing to relinquish
 		}
-		return false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained instance %q", entry.Name))
+		return false, false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained instance %q", entry.Name))
 	}
 	currentTags := tagsToMap(tagsOut.TagList)
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		return false, nil // already relinquished, or never verified as ours
+		return false, false, nil // already relinquished, or never verified as ours
 	}
 
 	if _, uErr := awsClient.RemoveTagsFromResource(ctx, &rds.RemoveTagsFromResourceInput{
 		ResourceName: &entry.ARN,
 		TagKeys:      []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
 	}); uErr != nil {
-		return false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained instance %q", entry.Name))
+		return false, false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained instance %q", entry.Name))
 	}
-	return true, nil
+	return true, false, nil
 }

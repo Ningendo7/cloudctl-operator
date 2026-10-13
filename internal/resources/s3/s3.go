@@ -206,10 +206,21 @@ func ensureBucket(
 		updated.Force = opts.force
 		status.UpsertManagedResource(&ledger, updated)
 
-		if err := reconcileBucketAttributes(ctx, awsClient, bucket, opts); err != nil {
+		// A bucket deleted out-of-band must not stay reported Ready until
+		// the window lapses: this already reads the bucket every pass, so a
+		// missing one is recreated by the full path below.
+		err := reconcileBucketAttributes(ctx, awsClient, bucket, opts)
+		switch {
+		case err != nil && isNotFoundError(err):
+			if recordEvent != nil {
+				recordEvent("Warning", "BucketMissing", fmt.Sprintf("S3 bucket %s no longer exists in AWS; recreating it", bucket))
+			}
+			// Falls through to the full path below, which recreates it.
+		case err != nil:
 			return ledger, wrapAWSError(err, "reconciling bucket attributes")
+		default:
+			return ledger, nil
 		}
-		return ledger, nil
 	}
 
 	_, err := awsClient.HeadBucket(ctx, &s3sdk.HeadBucketInput{
