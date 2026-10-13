@@ -909,6 +909,18 @@ type ManagedResource struct {
 	// pendingDeletionSince.
 	// +optional
 	LastEmptyCheckAt *metav1.Time `json:"lastEmptyCheckAt,omitempty"`
+
+	// observedStatus is the provider-reported lifecycle status last seen for
+	// this resource (RDS DBInstanceStatus, e.g. "creating", "modifying",
+	// "available"). Only set for resource types with a long-running
+	// lifecycle; informational, never used to gate any action.
+	// +optional
+	ObservedStatus string `json:"observedStatus,omitempty"`
+
+	// observedStatusSince is when observedStatus last changed value, not
+	// when it was last polled.
+	// +optional
+	ObservedStatusSince *metav1.Time `json:"observedStatusSince,omitempty"`
 }
 
 // AppDependenciesStatus defines the observed state of AppDependencies.

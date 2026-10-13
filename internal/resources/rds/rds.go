@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
@@ -63,6 +64,7 @@ const masterUsername = "cloudctl_admin"
 // Values this package matches against AWS responses and inputs.
 const (
 	statusAvailable = "available"
+	statusCreating  = "creating"
 	statusFailed    = "failed"
 	enginePostgres  = "postgres"
 
@@ -254,6 +256,8 @@ func isAuthorizedByGrants(grants []depsv1alpha1.RDSSubnetGroupGrant, namespace, 
 	return false
 }
 
+// ensureInstance records the AWS-reported status on the ledger entry on
+// every path, including the retryable/failed ones that return early.
 func ensureInstance(
 	ctx context.Context,
 	awsClient rdsAPI,
@@ -262,23 +266,47 @@ func ensureInstance(
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
+	var observed string
+	ledger, err := ensureInstanceObserving(ctx, awsClient, namespace, crName, crUID, resourceName, opts, ledger, recordEvent, &observed)
+	recordObservedStatus(&ledger, resourceName, observed)
+	return ledger, err
+}
+
+func ensureInstanceObserving(
+	ctx context.Context,
+	awsClient rdsAPI,
+	namespace, crName, crUID, resourceName string,
+	opts instanceOptions,
+	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
+	observed *string,
+) ([]depsv1alpha1.ManagedResource, error) {
 	instanceID := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, 63)
 
 	describeOut, err := describeDBInstanceCached(ctx, awsClient, instanceID)
 
+	create := func() ([]depsv1alpha1.ManagedResource, error) {
+		created, createErr := createInstance(ctx, awsClient, namespace, crName, crUID, instanceID, resourceName, opts, ledger, recordEvent)
+		if createErr == nil {
+			*observed = statusCreating
+		}
+		return created, createErr
+	}
+
 	var notFound *types.DBInstanceNotFoundFault
 	if errors.As(err, &notFound) {
-		return createInstance(ctx, awsClient, namespace, crName, crUID, instanceID, resourceName, opts, ledger, recordEvent)
+		return create()
 	}
 	if err != nil {
 		return ledger, wrapAWSError(err, "looking up instance")
 	}
 	if len(describeOut.DBInstances) == 0 {
-		return createInstance(ctx, awsClient, namespace, crName, crUID, instanceID, resourceName, opts, ledger, recordEvent)
+		return create()
 	}
 
 	instance := describeOut.DBInstances[0]
 	instanceStatus := aws.ToString(instance.DBInstanceStatus)
+	*observed = instanceStatus
 	instanceARN := aws.ToString(instance.DBInstanceArn)
 	existingBeforeCheck, existingBeforeCheckFound := status.FindManagedResource(ledger, resourceType, resourceName)
 
@@ -328,7 +356,10 @@ func ensureInstance(
 	servingOnly := false
 	switch instanceStatus {
 	case statusFailed:
-		return ledger, fmt.Errorf("instance %q entered status %q - this requires manual investigation, not an automatic retry", instanceID, instanceStatus)
+		return ledger, &cloudctlaws.ReconcileError{
+			Err:    fmt.Errorf("instance %q entered status %q - this requires manual investigation, not an automatic retry", instanceID, instanceStatus),
+			Reason: instanceStatusReason(instanceStatus),
+		}
 	case statusAvailable:
 	case "backing-up", "storage-optimization":
 		// Still serving connections, but AWS limits modifications meanwhile.
@@ -337,6 +368,7 @@ func ensureInstance(
 		return ledger, &cloudctlaws.ReconcileError{
 			Err:       fmt.Errorf("instance %q is still %s", instanceID, instanceStatus),
 			Retryable: true,
+			Reason:    instanceStatusReason(instanceStatus),
 		}
 	}
 
@@ -550,21 +582,52 @@ func effectiveAttributes(instance types.DBInstance) instanceAttributes {
 	return attrs
 }
 
+// recordObservedStatus stamps the ledger entry with the AWS-reported
+// status. The timestamp moves only when the value changes, so steady
+// polling never rewrites status.
+func recordObservedStatus(ledger *[]depsv1alpha1.ManagedResource, resourceName, observed string) {
+	if observed == "" {
+		return
+	}
+	entry, found := status.FindManagedResource(*ledger, resourceType, resourceName)
+	if !found || entry.ObservedStatus == observed {
+		return
+	}
+	now := metav1.Now()
+	entry.ObservedStatus = observed
+	entry.ObservedStatusSince = &now
+	status.UpsertManagedResource(ledger, entry)
+}
+
+// instanceStatusReason turns a DBInstanceStatus such as
+// "configuring-enhanced-monitoring" into a valid condition reason
+// ("InstanceConfiguringEnhancedMonitoring").
+func instanceStatusReason(instanceStatus string) string {
+	var b strings.Builder
+	b.WriteString("Instance")
+	for _, word := range strings.FieldsFunc(instanceStatus, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
+	}) {
+		b.WriteString(strings.ToUpper(word[:1]) + word[1:])
+	}
+	return b.String()
+}
+
 func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn string, deletionPolicy depsv1alpha1.DeletionPolicy) []depsv1alpha1.ManagedResource {
 	now := metav1.Now()
-	createdAt := now
+	entry := depsv1alpha1.ManagedResource{CreatedAt: now}
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, ledgerName); existingFound {
-		createdAt = existing.CreatedAt
+		entry.CreatedAt = existing.CreatedAt
+		entry.ObservedStatus = existing.ObservedStatus
+		entry.ObservedStatusSince = existing.ObservedStatusSince
 	}
-	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{
-		Type:           resourceType,
-		Name:           ledgerName,
-		ARN:            arn,
-		State:          depsv1alpha1.ManagedResourceStateVerified,
-		DeletionPolicy: deletionPolicy,
-		CreatedAt:      createdAt,
-		LastVerifiedAt: &now,
-	})
+	entry.Type = resourceType
+	entry.Name = ledgerName
+	entry.ARN = arn
+	entry.State = depsv1alpha1.ManagedResourceStateVerified
+	entry.DeletionPolicy = deletionPolicy
+	entry.LastVerifiedAt = &now
+	status.UpsertManagedResource(&ledger, entry)
 	return ledger
 }
 

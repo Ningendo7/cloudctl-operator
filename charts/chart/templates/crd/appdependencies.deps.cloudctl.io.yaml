@@ -1320,6 +1320,19 @@ spec:
                       description: name is the resource-key from spec (e.g. the queue's
                         `name`).
                       type: string
+                    observedStatus:
+                      description: |-
+                        observedStatus is the provider-reported lifecycle status last seen for
+                        this resource (RDS DBInstanceStatus, e.g. "creating", "modifying",
+                        "available"). Only set for resource types with a long-running
+                        lifecycle; informational, never used to gate any action.
+                      type: string
+                    observedStatusSince:
+                      description: |-
+                        observedStatusSince is when observedStatus last changed value, not
+                        when it was last polled.
+                      format: date-time
+                      type: string
                     pendingDeletionSince:
                       description: |-
                         pendingDeletionSince is set the first time this resource was found

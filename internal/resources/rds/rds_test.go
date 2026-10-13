@@ -21,6 +21,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds/types"
@@ -1570,5 +1571,91 @@ func TestEnsure_StorageGrowthOnProvisionedIOPSVolumeCarriesIops(t *testing.T) {
 	}
 	if got := aws.ToInt32(client.lastModifyDBInstanceInput.Iops); got != 3000 {
 		t.Errorf("Iops = %d, want the current 3000 carried through", got)
+	}
+}
+
+func TestEnsure_RecordsObservedStatusOnTheLedger(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
+	if entry.ObservedStatus != "creating" || entry.ObservedStatusSince == nil {
+		t.Fatalf("expected the fresh instance to be recorded as creating, got %+v", entry)
+	}
+
+	// Backdate so "moved" and "unchanged" are distinguishable.
+	old := metav1.NewTime(time.Now().Add(-time.Hour))
+	entry.ObservedStatusSince = &old
+	status.UpsertManagedResource(&ledger, entry)
+
+	ledger, err = ensureOnce(t, client, spec, ledger)
+	if err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	entry, _ = status.FindManagedResource(ledger, resourceType, "orders-db")
+	if entry.ObservedStatus != "available" || entry.ObservedStatusSince == nil || !entry.ObservedStatusSince.After(old.Time) {
+		t.Fatalf("expected available with a refreshed since-time, got %+v", entry)
+	}
+
+	entry.ObservedStatusSince = &old
+	status.UpsertManagedResource(&ledger, entry)
+	ledger, err = ensureOnce(t, client, spec, ledger)
+	if err != nil {
+		t.Fatalf("third Ensure() error = %v", err)
+	}
+	entry, _ = status.FindManagedResource(ledger, resourceType, "orders-db")
+	if !entry.ObservedStatusSince.Equal(&old) {
+		t.Errorf("expected an unchanged status not to move the since-time, got %v", entry.ObservedStatusSince)
+	}
+
+	client.instances[instanceID].status = "modifying"
+	ledger, err = ensureOnce(t, client, spec, ledger)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != "InstanceModifying" {
+		t.Fatalf("expected a retryable error with reason InstanceModifying, got %v", err)
+	}
+	entry, _ = status.FindManagedResource(ledger, resourceType, "orders-db")
+	if entry.ObservedStatus != "modifying" || !entry.ObservedStatusSince.After(old.Time) {
+		t.Errorf("expected the status to be recorded even on the early-return path, got %+v", entry)
+	}
+}
+
+func TestEnsure_FailedStatus_HasInstanceFailedReasonAndIsRecorded(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].status = "failed"
+
+	ledger, err = ensureOnce(t, client, spec, ledger)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != "InstanceFailed" || reconcileErr.Retryable {
+		t.Fatalf("expected a non-retryable InstanceFailed error, got %v", err)
+	}
+	if entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db"); entry.ObservedStatus != "failed" {
+		t.Errorf("expected failed to be recorded, got %q", entry.ObservedStatus)
+	}
+}
+
+func TestInstanceStatusReason(t *testing.T) {
+	cases := map[string]string{
+		"creating":                        "InstanceCreating",
+		"configuring-enhanced-monitoring": "InstanceConfiguringEnhancedMonitoring",
+		"incompatible-parameters":         "InstanceIncompatibleParameters",
+		"some_status.aws-adds":            "InstanceSomeStatusAwsAdds",
+		"":                                "Instance",
+	}
+	for in, want := range cases {
+		if got := instanceStatusReason(in); got != want {
+			t.Errorf("instanceStatusReason(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
