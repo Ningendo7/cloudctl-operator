@@ -49,8 +49,8 @@ const securityGroupPolicyFieldOwner = client.FieldOwner("cloudctl-operator-netwo
 // package (a watch predicate, specifically) detect when it changes
 // without needing to know the ledger key it's stored under.
 func PodNetworkIdentityARN(cr *depsv1alpha1.AppDependencies) (string, bool) {
-	entry := status.FindManagedResource(cr.Status.ManagedResources, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(cr.Status.ManagedResources, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !entryFound {
 		return "", false
 	}
 	return entry.ARN, true
@@ -90,10 +90,10 @@ func EnsurePodNetworkIdentity(
 	// own trust window expires - re-verifying it every single pass would
 	// mean a DescribeDBSubnetGroups call per consumes entry forever, for an
 	// invariant that's already settled the vast majority of passes.
-	existingEntry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	existingEntry, existingEntryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
 	freshlyVerified := false
 	vpcID, stickyOK := existingPodIdentityVPCID(ctx, ec2Client, ledger)
-	if stickyOK && existingEntry != nil && !status.NeedsRevalidation(*existingEntry) {
+	if stickyOK && existingEntryFound && !status.NeedsRevalidation(existingEntry) {
 		// Within the trust window - trust the existing VPC as-is.
 	} else if stickyOK {
 		stickyOK = anyConsumedVPCMatches(ctx, rdsClient, k8sClient, consumes, vpcID)
@@ -116,7 +116,7 @@ func EnsurePodNetworkIdentity(
 	}
 
 	groupName := cloudctlaws.ResourceName(namespace, crName, "rds-pod-sg", "network-identity", 255)
-	groupID, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID)
+	groupID, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, false)
 	if err != nil {
 		return ledger, err
 	}
@@ -132,7 +132,7 @@ func EnsurePodNetworkIdentity(
 	now := metav1.Now()
 	createdAt := now
 	lastVerifiedAt := now
-	if existingEntry != nil {
+	if existingEntryFound {
 		createdAt = existingEntry.CreatedAt
 		if !freshlyVerified && existingEntry.LastVerifiedAt != nil {
 			lastVerifiedAt = *existingEntry.LastVerifiedAt
@@ -187,8 +187,8 @@ func firstConsumedSubnetGroupName(ctx context.Context, k8sClient client.Client, 
 // never the VPC itself. False if nothing's published yet, or the group
 // it points at is already gone.
 func existingPodIdentityVPCID(ctx context.Context, ec2Client cloudctlaws.EC2Client, ledger []depsv1alpha1.ManagedResource) (string, bool) {
-	entry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !entryFound {
 		return "", false
 	}
 	groupID := SecurityGroupIDFromARN(entry.ARN)
@@ -267,17 +267,23 @@ func CleanupPodNetworkIdentity(
 	ctx context.Context,
 	ec2Client cloudctlaws.EC2Client,
 	k8sClient client.Client,
-	namespace, crName, serviceAccountName string,
+	namespace, crName, crUID, serviceAccountName string,
 	ledger []depsv1alpha1.ManagedResource,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	entry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !entryFound {
 		return ledger, nil
 	}
 
 	groupID := SecurityGroupIDFromARN(entry.ARN)
-	if _, err := ec2Client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: &groupID}); err != nil && !isGroupNotFound(err) {
-		return ledger, wrapEC2Error(err, "deleting pod network identity security group")
+	owned, err := securityGroupOwnedBy(ctx, ec2Client, groupID, namespace, crName, crUID)
+	if err != nil {
+		return ledger, err
+	}
+	if owned {
+		if _, err := ec2Client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: &groupID}); err != nil && !isGroupNotFound(err) {
+			return ledger, wrapEC2Error(err, "deleting pod network identity security group")
+		}
 	}
 
 	policy := securityGroupPolicyObject(namespace, crName)
@@ -291,6 +297,23 @@ func CleanupPodNetworkIdentity(
 
 	status.RemoveManagedResource(&ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
 	return ledger, nil
+}
+
+// securityGroupOwnedBy reports whether groupID still carries this CR's
+// ownership tags. A group that no longer exists counts as not owned, so
+// there is nothing to delete.
+func securityGroupOwnedBy(ctx context.Context, ec2Client cloudctlaws.EC2Client, groupID, namespace, crName, crUID string) (bool, error) {
+	out, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: []string{groupID}})
+	if err != nil {
+		if isGroupNotFound(err) {
+			return false, nil
+		}
+		return false, wrapEC2Error(err, "checking security group ownership before deleting it")
+	}
+	if len(out.SecurityGroups) == 0 {
+		return false, nil
+	}
+	return cloudctlaws.IsOwnedBy(ec2TagsToMap(out.SecurityGroups[0].Tags), namespace, crName, crUID), nil
 }
 
 func isGroupNotFound(err error) bool {

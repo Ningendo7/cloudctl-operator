@@ -318,7 +318,7 @@ func TestLive_Ensure_ServerSideEncryptionNotFoundThenDedicatedKeyApplies(t *test
 		// package's own Cleanup won't schedule deletion within a single
 		// pass (it only starts a quiet window) - delete the real key
 		// directly instead of leaving it dangling.
-		if keyEntry := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "receipts")); keyEntry != nil {
+		if keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "receipts")); keyEntryFound {
 			windowDays := int32(7)
 			if _, err := kmsClient.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{KeyId: &keyEntry.ARN, PendingWindowInDays: &windowDays}); err != nil {
 				t.Logf("key cleanup warning: %v", err)
@@ -326,8 +326,8 @@ func TestLive_Ensure_ServerSideEncryptionNotFoundThenDedicatedKeyApplies(t *test
 		}
 	})
 
-	keyEntry := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "receipts"))
-	if keyEntry == nil {
+	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "receipts"))
+	if !keyEntryFound {
 		t.Fatal("expected a dedicated KMS key ledger entry for the encrypted bucket")
 	}
 
@@ -420,10 +420,11 @@ func TestLive_Cleanup_BlocksDeletingBucketWithARealObjectThenSucceedsOnceEmpty(t
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
-	entry := status.FindManagedResource(ledger, "s3", "receipts")
+	entry, _ := status.FindManagedResource(ledger, "s3", "receipts")
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {

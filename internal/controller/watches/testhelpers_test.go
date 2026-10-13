@@ -17,6 +17,7 @@ limitations under the License.
 package watches
 
 import (
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,6 +38,17 @@ func newScheme(t *testing.T) *runtime.Scheme {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 	return scheme
+}
+
+// newIndexedClientBuilder is a fake client builder with the same field
+// indexes the manager registers, since the map functions query them.
+func newIndexedClientBuilder(t *testing.T) *fake.ClientBuilder {
+	t.Helper()
+	builder := fake.NewClientBuilder().WithScheme(newScheme(t))
+	for field, extract := range Indexes {
+		builder = builder.WithIndex(&depsv1alpha1.AppDependencies{}, field, extract)
+	}
+	return builder
 }
 
 func requestedNames(requests []reconcile.Request) []string {

@@ -35,6 +35,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 const credentialsSecretNameSuffix = "-rds-credentials"
@@ -53,16 +54,16 @@ func CredentialsSecretName(crName string) string {
 	return crName + credentialsSecretNameSuffix
 }
 
-// EnsureCredentialsSecret mirrors AWS's own managed master-user secret
-// (one per owned or authorized-consumed RDS instance) into a single
-// Kubernetes Secret this operator owns, keyed the same way the connection
-// ConfigMap keys non-secret connection info - split into two objects
-// rather than one, since this project treats "only credentials go in a
-// Secret" as a hard rule for every resource type, not just RDS. Refuses to
-// touch a same-named Secret this CR doesn't already own, deletes the
-// Secret entirely once there's nothing left to mirror, and regenerates it
-// every reconcile so it can never drift from status - all the same rules
-// configmap.Ensure already follows, deliberately kept in lockstep with it.
+// EnsureCredentialsSecret mirrors AWS's own managed master-user secret for
+// each RDS instance this CR owns into a single Kubernetes Secret this
+// operator owns. Consumers never receive credentials: the master user can
+// do anything in the database, which is far more than the network access
+// sharedWith grants, so the owner creates per-app database users instead.
+// Credentials stay out of the connection ConfigMap, since this project
+// keeps only credentials in a Secret. Refuses to touch a same-named Secret
+// this CR doesn't already own, deletes the Secret once there's nothing left
+// to mirror, and regenerates it every reconcile so it can't drift from
+// status.
 func EnsureCredentialsSecret(
 	ctx context.Context,
 	secretsManagerClient cloudctlaws.SecretsManagerClient,
@@ -71,7 +72,7 @@ func EnsureCredentialsSecret(
 	apiReader client.Reader,
 	cr *depsv1alpha1.AppDependencies,
 ) error {
-	data, err := buildCredentialsData(ctx, secretsManagerClient, awsClient, k8sClient, cr)
+	data, err := buildCredentialsData(ctx, secretsManagerClient, awsClient, cr)
 	if err != nil {
 		return err
 	}
@@ -126,14 +127,12 @@ func EnsureCredentialsSecret(
 	return k8sClient.Apply(ctx, apply, secretFieldOwner, client.ForceOwnership)
 }
 
-// buildCredentialsData walks this CR's own owned instances and its
-// authorized-consumed ones, producing one flat map ready to become a
-// Secret's StringData.
+// buildCredentialsData collects the credentials of the instances this CR
+// owns into one flat map, ready to become a Secret's data.
 func buildCredentialsData(
 	ctx context.Context,
 	secretsManagerClient cloudctlaws.SecretsManagerClient,
 	awsClient rdsAPI,
-	k8sClient client.Client,
 	cr *depsv1alpha1.AppDependencies,
 ) (map[string]string, error) {
 	data := map[string]string{}
@@ -142,32 +141,14 @@ func buildCredentialsData(
 	}
 
 	for _, r := range cr.Spec.RDS.Resources {
-		entry := findLedgerEntryByType(cr.Status.ManagedResources, resourceType, r.Name)
-		if entry == nil {
+		entry, found := status.FindManagedResource(cr.Status.ManagedResources, resourceType, r.Name)
+		if !found {
 			continue
 		}
-		if err := addCredentials(ctx, secretsManagerClient, awsClient, data, entry.ARN, r.Name, "", ""); err != nil {
+		if err := addCredentials(ctx, secretsManagerClient, awsClient, data, entry.ARN, r.Name); err != nil {
 			return nil, err
 		}
 	}
-
-	for _, ref := range cr.Spec.RDS.Consumes {
-		var producer depsv1alpha1.AppDependencies
-		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, &producer); err != nil {
-			continue // forward reference not resolved yet - self-resolves later
-		}
-		if !IsConsumerAuthorized(&producer, ref.ResourceName, cr.Namespace, cr.Name) {
-			continue
-		}
-		entry := findLedgerEntryByType(producer.Status.ManagedResources, resourceType, ref.ResourceName)
-		if entry == nil {
-			continue
-		}
-		if err := addCredentials(ctx, secretsManagerClient, awsClient, data, entry.ARN, ref.ResourceName, ref.Namespace, ref.Name); err != nil {
-			return nil, err
-		}
-	}
-
 	return data, nil
 }
 
@@ -180,7 +161,7 @@ func addCredentials(
 	secretsManagerClient cloudctlaws.SecretsManagerClient,
 	awsClient rdsAPI,
 	data map[string]string,
-	instanceARN, resourceName, producerNamespace, producerCRName string,
+	instanceARN, resourceName string,
 ) error {
 	info, ok, err := ResolveConnectionInfo(ctx, awsClient, instanceARN)
 	if err != nil {
@@ -203,37 +184,16 @@ func addCredentials(
 		return fmt.Errorf("parsing managed credentials secret for %q: %w", resourceName, err)
 	}
 
-	data[credentialsKey(resourceName, producerNamespace, producerCRName, "USERNAME")] = parsed.Username
-	data[credentialsKey(resourceName, producerNamespace, producerCRName, "PASSWORD")] = parsed.Password
-	return nil
-}
-
-// findLedgerEntryByType is a plain linear lookup, deliberately not
-// status.FindManagedResource: that helper is tuned to the common case of
-// a single resource name per lookup already known ahead of time, which
-// this package's own rds.go also uses directly - this one exists purely
-// so secret.go and configmap-facing code don't need to import the status
-// package just to do the same walk this file already repeats twice above.
-func findLedgerEntryByType(ledger []depsv1alpha1.ManagedResource, ledgerType, name string) *depsv1alpha1.ManagedResource {
-	for i := range ledger {
-		if ledger[i].Type == ledgerType && ledger[i].Name == name {
-			return &ledger[i]
-		}
-	}
+	data[credentialsKey(resourceName, "USERNAME")] = parsed.Username
+	data[credentialsKey(resourceName, "PASSWORD")] = parsed.Password
 	return nil
 }
 
 var invalidEnvChars = regexp.MustCompile(`[^A-Z0-9_]`)
 
-// credentialsKey mirrors configmap.go's own envKey scheme exactly (same
-// uppercase-underscore shape, same owned-vs-consumed key shape) without
-// importing that package - doing so would create an import cycle, since
-// configmap.go will need to call into this package for connection info.
-func credentialsKey(resourceName, producerNamespace, producerCRName, suffix string) string {
-	parts := []string{resourceType, resourceName, suffix}
-	if producerCRName != "" {
-		parts = []string{resourceType, producerNamespace, producerCRName, resourceName, suffix}
-	}
-	joined := strings.ToUpper(strings.Join(parts, "_"))
+// credentialsKey uses configmap.go's owned-resource key shape without
+// importing that package, which would create an import cycle.
+func credentialsKey(resourceName, suffix string) string {
+	joined := strings.ToUpper(strings.Join([]string{resourceType, resourceName, suffix}, "_"))
 	return invalidEnvChars.ReplaceAllString(joined, "_")
 }

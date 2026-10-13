@@ -29,15 +29,25 @@ import (
 // window has expired.
 const TrustWindow = 10 * time.Minute
 
-// FindManagedResource returns the ledger entry for the given type/name, or
-// nil if none exists.
-func FindManagedResource(resources []depsv1alpha1.ManagedResource, resourceType, name string) *depsv1alpha1.ManagedResource {
-	for i := range resources {
-		if resources[i].Type == resourceType && resources[i].Name == name {
-			return &resources[i]
+// FindManagedResource returns a copy of the ledger entry for the given
+// type/name. A copy, not a pointer into resources: a later Upsert can
+// reallocate the slice and leave a pointer reading stale data, and a write
+// through one would silently not reach the ledger. Change an entry by
+// passing the modified copy to UpsertManagedResource.
+func FindManagedResource(resources []depsv1alpha1.ManagedResource, resourceType, name string) (depsv1alpha1.ManagedResource, bool) {
+	for _, r := range resources {
+		if r.Type == resourceType && r.Name == name {
+			return r, true
 		}
 	}
-	return nil
+	return depsv1alpha1.ManagedResource{}, false
+}
+
+// HasManagedResource reports whether the ledger has an entry for the given
+// type/name.
+func HasManagedResource(resources []depsv1alpha1.ManagedResource, resourceType, name string) bool {
+	_, ok := FindManagedResource(resources, resourceType, name)
+	return ok
 }
 
 // UpsertManagedResource inserts or updates a ledger entry, matched by

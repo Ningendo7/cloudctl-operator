@@ -107,4 +107,3 @@ func TestDescribeDBInstanceCached_DoesNotCacheNotFound(t *testing.T) {
 		t.Errorf("expected both calls to reach the client (the first wasn't cacheable), got %d", got)
 	}
 }
-

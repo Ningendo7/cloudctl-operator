@@ -58,60 +58,25 @@ import (
 // sharedWith change, which is a staleness window on an access-control
 // decision, not just an efficiency one.
 //
-// Lists every AppDependencies CR cluster-wide on every producer event -
-// fine at the scale this operator targets (one CR per app team), but
-// doesn't scale indefinitely; revisit with a client.IndexField on a
-// computed "consumes" key if this ever shows up as a real cost.
+// Looks consumers up through IndexConsumesFrom, so the cost of an event
+// doesn't grow with the number of CRs in the cluster.
 func ProducerToConsumers(reader client.Reader) handler.MapFunc {
 	return func(ctx context.Context, producer client.Object) []reconcile.Request {
 		producerNS, producerName := producer.GetNamespace(), producer.GetName()
 
-		var all depsv1alpha1.AppDependenciesList
-		if err := reader.List(ctx, &all); err != nil {
+		var consumers depsv1alpha1.AppDependenciesList
+		if err := reader.List(ctx, &consumers, client.MatchingFields{IndexConsumesFrom: NamespacedKey(producerNS, producerName)}); err != nil {
 			return nil
 		}
 
 		var requests []reconcile.Request
-		for i := range all.Items {
-			consumer := &all.Items[i]
+		for i := range consumers.Items {
+			consumer := &consumers.Items[i]
 			if consumer.Namespace == producerNS && consumer.Name == producerName {
 				continue // never need to map a CR to itself
 			}
-			if consumesFrom(consumer, producerNS, producerName) {
-				requests = append(requests, reconcile.Request{
-					NamespacedName: client.ObjectKeyFromObject(consumer),
-				})
-			}
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(consumer)})
 		}
 		return requests
 	}
-}
-
-// consumesFrom reports whether consumer has any consumes entry, in any
-// section, naming the given producer.
-func consumesFrom(consumer *depsv1alpha1.AppDependencies, producerNS, producerName string) bool {
-	refsInclude := func(refs []depsv1alpha1.ConsumeRef) bool {
-		for _, ref := range refs {
-			if ref.Namespace == producerNS && ref.Name == producerName {
-				return true
-			}
-		}
-		return false
-	}
-	if consumer.Spec.SQS != nil && refsInclude(consumer.Spec.SQS.Consumes) {
-		return true
-	}
-	if consumer.Spec.SNS != nil && refsInclude(consumer.Spec.SNS.Consumes) {
-		return true
-	}
-	if consumer.Spec.DynamoDB != nil && refsInclude(consumer.Spec.DynamoDB.Consumes) {
-		return true
-	}
-	if consumer.Spec.S3 != nil && refsInclude(consumer.Spec.S3.Consumes) {
-		return true
-	}
-	if consumer.Spec.RDS != nil && refsInclude(consumer.Spec.RDS.Consumes) {
-		return true
-	}
-	return false
 }

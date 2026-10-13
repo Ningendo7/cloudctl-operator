@@ -18,8 +18,10 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -215,6 +217,9 @@ func Cleanup(
 		if err := abortMultipartUploads(ctx, client, bucket); err != nil {
 			if firstErr == nil {
 				firstErr = wrapAWSError(err, fmt.Sprintf("aborting multipart uploads in bucket %q", entry.Name))
+				if errors.Is(err, errUploadsRemain) {
+					firstErr.(*cloudctlaws.ReconcileError).Retryable = true
+				}
 			}
 			continue
 		}
@@ -320,35 +325,72 @@ func deleteAllObjectVersions(ctx context.Context, client s3API, bucket string) e
 	}
 }
 
+// errUploadsRemain marks a pass that ran out of time with uploads still to
+// abort - progress is kept, so the next pass simply continues.
+var errUploadsRemain = errors.New("deadline reached with multipart uploads still to abort")
+
+// abortConcurrency bounds parallel aborts. The S3 rate limiter, not this, is
+// the real ceiling; this just keeps a single pass from being latency-bound.
+const abortConcurrency = 8
+
 // abortMultipartUploads cleans up any in-progress multipart uploads left in
 // the bucket - if skipped, DeleteBucket fails with an opaque BucketNotEmpty
 // much later with no indication why, since these don't show up as objects
-// or versions at all.
+// or versions at all. Pages through every upload; if ctx expires first it
+// returns errUploadsRemain.
 func abortMultipartUploads(ctx context.Context, client s3API, bucket string) error {
-	uploads, err := client.ListMultipartUploads(ctx, &s3sdk.ListMultipartUploadsInput{Bucket: &bucket})
-	if err != nil {
-		if isNotFoundError(err) {
-			return nil
-		}
-		return fmt.Errorf("listing multipart uploads: %w", err)
-	}
-
+	var keyMarker, uploadIDMarker *string
 	var failed int
 	var firstErr error
-	for _, u := range uploads.Uploads {
-		_, err := client.AbortMultipartUpload(ctx, &s3sdk.AbortMultipartUploadInput{
-			Bucket:   &bucket,
-			Key:      u.Key,
-			UploadId: u.UploadId,
+	for {
+		page, err := client.ListMultipartUploads(ctx, &s3sdk.ListMultipartUploadsInput{
+			Bucket: &bucket, KeyMarker: keyMarker, UploadIdMarker: uploadIDMarker,
 		})
-		// An upload already aborted/completed by the time we get to it
-		// (e.g. a concurrent retry) is fine, not a failure.
-		if err != nil && !isNotFoundError(err) {
-			failed++
-			if firstErr == nil {
-				firstErr = err
+		if err != nil {
+			if isNotFoundError(err) {
+				return nil
 			}
+			if ctx.Err() != nil {
+				return errUploadsRemain
+			}
+			return fmt.Errorf("listing multipart uploads: %w", err)
 		}
+
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		slots := make(chan struct{}, abortConcurrency)
+		for _, u := range page.Uploads {
+			slots <- struct{}{}
+			wg.Add(1)
+			go func() {
+				defer func() { <-slots; wg.Done() }()
+				if ctx.Err() != nil {
+					return
+				}
+				_, err := client.AbortMultipartUpload(ctx, &s3sdk.AbortMultipartUploadInput{
+					Bucket: &bucket, Key: u.Key, UploadId: u.UploadId,
+				})
+				// An upload already aborted/completed by the time we get to
+				// it (e.g. a concurrent retry) is fine, not a failure.
+				if err != nil && !isNotFoundError(err) && ctx.Err() == nil {
+					mu.Lock()
+					failed++
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+
+		if ctx.Err() != nil {
+			return errUploadsRemain
+		}
+		if page.IsTruncated == nil || !*page.IsTruncated {
+			break
+		}
+		keyMarker, uploadIDMarker = page.NextKeyMarker, page.NextUploadIdMarker
 	}
 	if failed > 0 {
 		return fmt.Errorf("failed to abort %d multipart upload(s), first error: %w", failed, firstErr)

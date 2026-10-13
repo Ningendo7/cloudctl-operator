@@ -57,39 +57,42 @@ func findResult(results []CleanupResult, name string) *CleanupResult {
 
 func advancePastQuietWindow(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string) {
 	t.Helper()
-	entry := status.FindManagedResource(ledger, "dynamodb", name)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "dynamodb", name)
+	if !entryFound {
 		t.Fatalf("test setup broken: no ledger entry named %q", name)
 	}
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 }
 
 // advancePastEmptyCheckBackoffStart pushes PendingDeletionSince back far
 // enough that status.NeedsEmptyCheck's backoff window has started.
 func advancePastEmptyCheckBackoffStart(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string) {
 	t.Helper()
-	entry := status.FindManagedResource(ledger, "dynamodb", name)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "dynamodb", name)
+	if !entryFound {
 		t.Fatalf("test setup broken: no ledger entry named %q", name)
 	}
 	past := metav1.NewTime(time.Now().Add(-status.EmptyCheckBackoffStartAfter - time.Minute))
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 }
 
 // pushLastEmptyCheckIntoThePast backdates a ledger entry's LastEmptyCheckAt
 // by d, so a subsequent Cleanup() call sees the backoff interval as elapsed.
 func pushLastEmptyCheckIntoThePast(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string, d time.Duration) {
 	t.Helper()
-	entry := status.FindManagedResource(ledger, "dynamodb", name)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "dynamodb", name)
+	if !entryFound {
 		t.Fatalf("test setup broken: no ledger entry named %q", name)
 	}
 	past := metav1.NewTime(time.Now().Add(-d))
 	entry.LastEmptyCheckAt = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 }
 
 func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
@@ -103,7 +106,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	if r := findResult(results, "sessions"); r == nil || r.Reason != CleanupReasonRetained {
 		t.Errorf("expected sessions to be reported Retained, got %+v", results)
 	}
-	if status.FindManagedResource(updated, "dynamodb", "sessions") == nil {
+	if !status.HasManagedResource(updated, "dynamodb", "sessions") {
 		t.Error("expected retained entry to stay in the ledger")
 	}
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
@@ -149,7 +152,7 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 	if _, stillExists := client.tables[tableName]; !stillExists {
 		t.Error("expected the table to survive - an unset DeletionPolicy must never be treated as Delete")
 	}
-	if status.FindManagedResource(updated, "dynamodb", "sessions") == nil {
+	if !status.HasManagedResource(updated, "dynamodb", "sessions") {
 		t.Error("expected the retained entry to stay in the ledger")
 	}
 }
@@ -200,7 +203,7 @@ func TestCleanup_HoldsNewlyEligibleTableForQuietWindowBeforeDeleting(t *testing.
 	if _, stillExists := client.tables[tableName]; stillExists {
 		t.Error("expected the table to be deleted once the quiet window elapsed and it's confirmed empty")
 	}
-	if status.FindManagedResource(updated, "dynamodb", "sessions") != nil {
+	if status.HasManagedResource(updated, "dynamodb", "sessions") {
 		t.Error("expected the ledger entry to be removed after deletion")
 	}
 }
@@ -227,7 +230,7 @@ func TestCleanup_BlocksDeletingNonEmptyTableWithoutForce(t *testing.T) {
 	if _, stillExists := client.tables[tableName]; !stillExists {
 		t.Error("expected the non-empty table to NOT be deleted")
 	}
-	if entry := status.FindManagedResource(updated, "dynamodb", "sessions"); entry == nil || entry.PendingDeletionSince == nil {
+	if entry, entryFound := status.FindManagedResource(updated, "dynamodb", "sessions"); !entryFound || entry.PendingDeletionSince == nil {
 		t.Error("expected PendingDeletionSince to remain recorded")
 	}
 }
@@ -252,8 +255,8 @@ func TestCleanup_PendingDeletion_FirstCheckPastBackoffStartStillRunsAndStamps(t 
 	if client.scanCalls != 1 {
 		t.Errorf("expected a real check on first encounter past the backoff start, got %d calls", client.scanCalls)
 	}
-	entry := status.FindManagedResource(updated, "dynamodb", "sessions")
-	if entry == nil || entry.LastEmptyCheckAt == nil {
+	entry, entryFound := status.FindManagedResource(updated, "dynamodb", "sessions")
+	if !entryFound || entry.LastEmptyCheckAt == nil {
 		t.Error("expected LastEmptyCheckAt to be stamped after a real check")
 	}
 }
@@ -337,7 +340,7 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
-	if entry := status.FindManagedResource(ledger, "dynamodb", "sessions"); entry == nil || entry.LastEmptyCheckAt == nil {
+	if entry, entryFound := status.FindManagedResource(ledger, "dynamodb", "sessions"); !entryFound || entry.LastEmptyCheckAt == nil {
 		t.Fatal("test setup broken: expected LastEmptyCheckAt to be stamped before the reappearance check")
 	}
 
@@ -348,8 +351,8 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup (reappeared) error = %v", err)
 	}
-	entry := status.FindManagedResource(updated, "dynamodb", "sessions")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(updated, "dynamodb", "sessions")
+	if !entryFound {
 		t.Fatal("expected the ledger entry to survive reappearance")
 	}
 	if entry.LastEmptyCheckAt != nil {
@@ -397,9 +400,10 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 	client.tables[tableName].itemCount = 5
 
 	longAgo := metav1.NewTime(time.Now().Add(-2 * PendingDeletionGracePeriod))
-	entry := status.FindManagedResource(ledger, "dynamodb", "sessions")
+	entry, _ := status.FindManagedResource(ledger, "dynamodb", "sessions")
 	entry.PendingDeletionSince = &longAgo
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {
@@ -433,7 +437,7 @@ func TestCleanup_TreatsAlreadyDeletedTableAsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v — expected an already-gone table to be treated as already cleaned up, not a failure", err)
 	}
-	if status.FindManagedResource(updated, "dynamodb", "sessions") != nil {
+	if status.HasManagedResource(updated, "dynamodb", "sessions") {
 		t.Error("expected the ledger entry to be removed for an already-gone table")
 	}
 }
@@ -465,10 +469,10 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 	// its mandatory quiet window rather than deleting it outright - what
 	// matters here is that it was processed at all despite sessions
 	// failing first in the same loop.
-	if entry := status.FindManagedResource(updated, "dynamodb", "orders"); entry == nil || entry.PendingDeletionSince == nil {
+	if entry, entryFound := status.FindManagedResource(updated, "dynamodb", "orders"); !entryFound || entry.PendingDeletionSince == nil {
 		t.Error("expected orders to still be processed into its own pending-deletion window despite sessions failing")
 	}
-	if status.FindManagedResource(updated, "dynamodb", "sessions") == nil {
+	if !status.HasManagedResource(updated, "dynamodb", "sessions") {
 		t.Error("expected the failed sessions entry to remain in the ledger for retry")
 	}
 }

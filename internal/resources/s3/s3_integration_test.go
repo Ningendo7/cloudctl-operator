@@ -117,8 +117,8 @@ func TestIntegration_Ensure_ReconcilesVersioningLifecycleAndTagsOnExistingBucket
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
-	entry := status.FindManagedResource(ledger, resourceType, "receipts")
-	if entry == nil {
+	_, entryFound := status.FindManagedResource(ledger, resourceType, "receipts")
+	if !entryFound {
 		t.Fatal("expected a ledger entry for receipts")
 	}
 

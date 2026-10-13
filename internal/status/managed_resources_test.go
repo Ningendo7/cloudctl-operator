@@ -29,7 +29,7 @@ func TestUpsertAndFindManagedResource(t *testing.T) {
 	var ledger []depsv1alpha1.ManagedResource
 
 	UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{Type: "sqs", Name: "orders", ARN: "arn:1"})
-	if got := FindManagedResource(ledger, "sqs", "orders"); got == nil || got.ARN != "arn:1" {
+	if got, ok := FindManagedResource(ledger, "sqs", "orders"); !ok || got.ARN != "arn:1" {
 		t.Fatalf("expected to find inserted entry, got %+v", got)
 	}
 
@@ -37,7 +37,7 @@ func TestUpsertAndFindManagedResource(t *testing.T) {
 	if len(ledger) != 1 {
 		t.Fatalf("expected upsert to update in place, not append; got %d entries", len(ledger))
 	}
-	if got := FindManagedResource(ledger, "sqs", "orders"); got.ARN != "arn:2" {
+	if got, _ := FindManagedResource(ledger, "sqs", "orders"); got.ARN != "arn:2" {
 		t.Fatalf("expected updated ARN, got %+v", got)
 	}
 }

@@ -25,6 +25,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 // actionSet enumerates the AWS IAM actions granted for one resource type,
@@ -143,25 +144,14 @@ type grant struct {
 func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDependencies) (grants []grant, skipped []string) {
 	if cr.Spec.SQS != nil {
 		for _, q := range cr.Spec.SQS.Resources {
-			grants, skipped = recordOwned(grants, skipped, resourceTypeSQS, q.Name, findLedgerEntry(cr, resourceTypeSQS, q.Name))
+			grants, skipped = recordOwned(grants, skipped, cr, resourceTypeSQS, q.Name)
 			if q.Encryption != nil {
 				if q.Encryption.Enabled {
 					// The dedicated key is owned by this CR exactly as much as
 					// the queue it protects - same "always full access to what
 					// you own" rule, via the same recordOwned helper, keyed to
 					// the same ledger name kms.EnsureDedicatedKey uses.
-					grants, skipped = recordOwned(grants, skipped, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSQS, q.Name), findLedgerEntry(cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSQS, q.Name)))
-				} else if q.Encryption.KMSKeyRef != nil {
-					// A shared key still has to be usable: the queue's own
-					// Ensure path already resolves this ref to configure SSE,
-					// so the role needs the matching kms grant too, gated on
-					// the same sharedWith authorization as any other
-					// cross-CR reference.
-					if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeKMS, *q.Encryption.KMSKeyRef); reason != "" {
-						skipped = append(skipped, reason)
-					} else {
-						grants = append(grants, g)
-					}
+					grants, skipped = recordOwned(grants, skipped, cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSQS, q.Name))
 				}
 			}
 		}
@@ -175,16 +165,10 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	}
 	if cr.Spec.SNS != nil {
 		for _, t := range cr.Spec.SNS.Resources {
-			grants, skipped = recordOwned(grants, skipped, resourceTypeSNS, t.Name, findLedgerEntry(cr, resourceTypeSNS, t.Name))
+			grants, skipped = recordOwned(grants, skipped, cr, resourceTypeSNS, t.Name)
 			if t.Encryption != nil {
 				if t.Encryption.Enabled {
-					grants, skipped = recordOwned(grants, skipped, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSNS, t.Name), findLedgerEntry(cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSNS, t.Name)))
-				} else if t.Encryption.KMSKeyRef != nil {
-					if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeKMS, *t.Encryption.KMSKeyRef); reason != "" {
-						skipped = append(skipped, reason)
-					} else {
-						grants = append(grants, g)
-					}
+					grants, skipped = recordOwned(grants, skipped, cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSNS, t.Name))
 				}
 			}
 		}
@@ -198,16 +182,10 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	}
 	if cr.Spec.DynamoDB != nil {
 		for _, tbl := range cr.Spec.DynamoDB.Resources {
-			grants, skipped = recordOwned(grants, skipped, resourceTypeDynamoDB, tbl.Name, findLedgerEntry(cr, resourceTypeDynamoDB, tbl.Name))
+			grants, skipped = recordOwned(grants, skipped, cr, resourceTypeDynamoDB, tbl.Name)
 			if tbl.Encryption != nil {
 				if tbl.Encryption.Enabled {
-					grants, skipped = recordOwned(grants, skipped, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeDynamoDB, tbl.Name), findLedgerEntry(cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeDynamoDB, tbl.Name)))
-				} else if tbl.Encryption.KMSKeyRef != nil {
-					if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeKMS, *tbl.Encryption.KMSKeyRef); reason != "" {
-						skipped = append(skipped, reason)
-					} else {
-						grants = append(grants, g)
-					}
+					grants, skipped = recordOwned(grants, skipped, cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeDynamoDB, tbl.Name))
 				}
 			}
 		}
@@ -221,16 +199,10 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	}
 	if cr.Spec.S3 != nil {
 		for _, b := range cr.Spec.S3.Resources {
-			grants, skipped = recordOwned(grants, skipped, resourceTypeS3, b.Name, findLedgerEntry(cr, resourceTypeS3, b.Name))
+			grants, skipped = recordOwned(grants, skipped, cr, resourceTypeS3, b.Name)
 			if b.Encryption != nil {
 				if b.Encryption.Enabled {
-					grants, skipped = recordOwned(grants, skipped, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeS3, b.Name), findLedgerEntry(cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeS3, b.Name)))
-				} else if b.Encryption.KMSKeyRef != nil {
-					if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeKMS, *b.Encryption.KMSKeyRef); reason != "" {
-						skipped = append(skipped, reason)
-					} else {
-						grants = append(grants, g)
-					}
+					grants, skipped = recordOwned(grants, skipped, cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeS3, b.Name))
 				}
 			}
 		}
@@ -243,21 +215,11 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 		}
 	}
 	if cr.Spec.KMS != nil {
-		// A standalone kms.resources entry (as opposed to a dedicated key
-		// EnsureDedicatedKey provisions for another section's own
-		// resource) gets an owned grant exactly like every other resource
-		// type - and its consumes entries resolve exactly the same way,
-		// via the same sharedWith authorization every other cross-CR
-		// reference already uses (see producerSharedWith's resourceTypeKMS case).
+		// Every key this CR declares gets an owned grant, which also covers
+		// any of its resources that reference one through encryption.kmsKeyRef.
+		// Keys are never shared across CRs, so there's nothing to resolve.
 		for _, k := range cr.Spec.KMS.Resources {
-			grants, skipped = recordOwned(grants, skipped, resourceTypeKMS, k.Name, findLedgerEntry(cr, resourceTypeKMS, k.Name))
-		}
-		for _, ref := range cr.Spec.KMS.Consumes {
-			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeKMS, ref); reason != "" {
-				skipped = append(skipped, reason)
-			} else {
-				grants = append(grants, g)
-			}
+			grants, skipped = recordOwned(grants, skipped, cr, resourceTypeKMS, k.Name)
 		}
 	}
 
@@ -271,21 +233,11 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 // owned resource silently missing from the derived policy with no
 // explanation would be a real regression in visibility compared to a
 // consumed one.
-func recordOwned(grants []grant, skipped []string, resourceType, name string, entry *depsv1alpha1.ManagedResource) ([]grant, []string) {
-	if entry != nil {
+func recordOwned(grants []grant, skipped []string, cr *depsv1alpha1.AppDependencies, resourceType, name string) ([]grant, []string) {
+	if entry, found := status.FindManagedResource(cr.Status.ManagedResources, resourceType, name); found {
 		return append(grants, grant{resourceType: resourceType, arn: entry.ARN, readWrite: true}), skipped
 	}
 	return grants, append(skipped, fmt.Sprintf("owned %s resource %q not reconciled yet", resourceType, name))
-}
-
-func findLedgerEntry(cr *depsv1alpha1.AppDependencies, resourceType, name string) *depsv1alpha1.ManagedResource {
-	for i := range cr.Status.ManagedResources {
-		e := &cr.Status.ManagedResources[i]
-		if e.Type == resourceType && e.Name == name {
-			return e
-		}
-	}
-	return nil
 }
 
 // resolveConsume fetches the producer CR, finds the matching sharedWith
@@ -317,8 +269,8 @@ func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *deps
 		return grant{}, prefix + ": not authorized - owner hasn't granted this CR in sharedWith"
 	}
 
-	entry := findLedgerEntry(&producer, resourceType, ref.ResourceName)
-	if entry == nil {
+	entry, found := status.FindManagedResource(producer.Status.ManagedResources, resourceType, ref.ResourceName)
+	if !found {
 		return grant{}, prefix + ": not reconciled there yet"
 	}
 
@@ -388,15 +340,6 @@ func producerSharedWith(producer *depsv1alpha1.AppDependencies, resourceType, re
 		for _, b := range producer.Spec.S3.Resources {
 			if b.Name == resourceName {
 				return b.SharedWith, true
-			}
-		}
-	case resourceTypeKMS:
-		if producer.Spec.KMS == nil {
-			return nil, false
-		}
-		for _, k := range producer.Spec.KMS.Resources {
-			if k.Name == resourceName {
-				return k.SharedWith, true
 			}
 		}
 	}

@@ -175,9 +175,7 @@ func main() {
 			"call volume is independently bounded by the per-service rate-limit "+
 			"env vars (AWS_SQS_RATE_LIMIT_QPS, etc.), so raising this mainly "+
 			"improves fairness/latency at higher CR counts rather than raw AWS throughput.")
-	opts := zap.Options{
-		Development: true,
-	}
+	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 

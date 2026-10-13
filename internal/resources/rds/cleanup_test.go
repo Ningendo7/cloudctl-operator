@@ -65,9 +65,9 @@ func backdatePendingDeletion(ledger []depsv1alpha1.ManagedResource, name string,
 }
 
 func setPendingDeletionSince(ledger []depsv1alpha1.ManagedResource, name string, since time.Time) []depsv1alpha1.ManagedResource {
-	entry := status.FindManagedResource(ledger, resourceType, name)
+	entry, _ := status.FindManagedResource(ledger, resourceType, name)
 	t := metav1.NewTime(since)
-	updated := *entry
+	updated := entry
 	updated.PendingDeletionSince = &t
 	status.UpsertManagedResource(&ledger, updated)
 	return ledger
@@ -84,7 +84,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	if r := findCleanupResult(results, "orders-db"); r == nil || r.Reason != CleanupReasonRetained {
 		t.Errorf("expected orders-db to be reported Retained, got %+v", results)
 	}
-	if status.FindManagedResource(updated, resourceType, "orders-db") == nil {
+	if !status.HasManagedResource(updated, resourceType, "orders-db") {
 		t.Error("expected retained entry to stay in the ledger")
 	}
 	if client.createDBSnapshotCalls != 0 {
@@ -95,7 +95,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 func TestCleanup_RelinquishesOwnershipTagOnRetainedInstance(t *testing.T) {
 	client := newFakeRDS()
 	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyRetain)
-	entry := status.FindManagedResource(ledger, resourceType, "orders-db")
+	entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
 	instance := client.findByARN(entry.ARN)
 
 	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
@@ -137,7 +137,7 @@ func TestCleanup_ReappearingInSpecCancelsPendingDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	entry := status.FindManagedResource(ledger, resourceType, "orders-db")
+	entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
 	if entry.PendingDeletionSince == nil {
 		t.Fatal("expected PendingDeletionSince to be set once removed from spec")
 	}
@@ -150,7 +150,7 @@ func TestCleanup_ReappearingInSpecCancelsPendingDeletion(t *testing.T) {
 	if len(results) != 0 {
 		t.Errorf("expected no CleanupResult for a re-declared instance, got %+v", results)
 	}
-	entry = status.FindManagedResource(ledger, resourceType, "orders-db")
+	entry, _ = status.FindManagedResource(ledger, resourceType, "orders-db")
 	if entry.PendingDeletionSince != nil {
 		t.Error("expected PendingDeletionSince to be cleared once the instance reappeared in spec")
 	}
@@ -167,7 +167,7 @@ func TestCleanup_DeletePolicy_FirstPassMarksPendingDeletion(t *testing.T) {
 	if r := findCleanupResult(results, "orders-db"); r == nil || r.Reason != CleanupReasonPendingDeletion {
 		t.Errorf("expected PendingDeletion, got %+v", results)
 	}
-	if status.FindManagedResource(ledger, resourceType, "orders-db") == nil {
+	if !status.HasManagedResource(ledger, resourceType, "orders-db") {
 		t.Error("expected the instance to remain in the ledger - this package never deletes it")
 	}
 	if client.createDBSnapshotCalls != 0 {
@@ -217,7 +217,7 @@ func TestCleanup_SnapshotFiresBeforeStuck(t *testing.T) {
 	if client.createDBSnapshotCalls != 1 {
 		t.Errorf("expected the snapshot to already be taken despite not being Stuck yet, got %d CreateDBSnapshot calls", client.createDBSnapshotCalls)
 	}
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") == nil {
+	if !status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
 		t.Error("expected a snapshot ledger entry before the instance is ever Stuck")
 	}
 }
@@ -251,8 +251,8 @@ func TestCleanup_DeletePolicy_PastGracePeriodEscalatesToStuck(t *testing.T) {
 	if client.createDBSnapshotCalls != 1 {
 		t.Errorf("expected exactly one CreateDBSnapshot call, got %d", client.createDBSnapshotCalls)
 	}
-	snapshotEntry := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
-	if snapshotEntry == nil {
+	snapshotEntry, snapshotEntryFound := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	if !snapshotEntryFound {
 		t.Fatal("expected a proactive final-snapshot ledger entry")
 	}
 	if snapshotEntry.State != depsv1alpha1.ManagedResourceStateCreating {
@@ -262,7 +262,7 @@ func TestCleanup_DeletePolicy_PastGracePeriodEscalatesToStuck(t *testing.T) {
 		t.Errorf("a final snapshot must never be auto-deleted itself, got policy %s", snapshotEntry.DeletionPolicy)
 	}
 	// The instance itself is never actually deleted.
-	if status.FindManagedResource(ledger, resourceType, "orders-db") == nil {
+	if !status.HasManagedResource(ledger, resourceType, "orders-db") {
 		t.Error("expected the stuck instance to remain in the ledger - DeleteDBInstance is never called")
 	}
 }
@@ -294,7 +294,7 @@ func TestCleanup_StuckInstance_SnapshotRequestedOnlyOnce(t *testing.T) {
 	if r := findCleanupResult(results, "orders-db"); r == nil || r.Reason != CleanupReasonStuckPendingDeletion {
 		t.Errorf("expected to remain StuckPendingDeletion, got %+v", results)
 	}
-	snapshotEntry := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	snapshotEntry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
 	if snapshotEntry.State != depsv1alpha1.ManagedResourceStateCreating {
 		t.Errorf("expected snapshot entry to remain Creating while AWS reports %q, got %s", "creating", snapshotEntry.State)
 	}
@@ -311,7 +311,8 @@ func TestCleanup_StuckInstance_SnapshotBecomesAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first stuck Cleanup() error = %v", err)
 	}
-	snapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	snapshotIDEntry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	snapshotID := snapshotIDEntry.ARN
 	client.setSnapshotStatus(snapshotID, "available")
 
 	var events []string
@@ -320,7 +321,7 @@ func TestCleanup_StuckInstance_SnapshotBecomesAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second stuck Cleanup() error = %v", err)
 	}
-	snapshotEntry := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	snapshotEntry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
 	if snapshotEntry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected snapshot entry to become Verified once AWS reports available, got %s", snapshotEntry.State)
 	}
@@ -366,7 +367,7 @@ func TestCleanup_StuckInstance_SnapshotFailureIsSurfacedAsEvent(t *testing.T) {
 	if !containsString(events, "FinalSnapshotFailed") {
 		t.Errorf("expected a FinalSnapshotFailed event, got %v", events)
 	}
-	snapshotEntry := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	snapshotEntry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
 	if snapshotEntry.State == depsv1alpha1.ManagedResourceStateVerified {
 		t.Error("a failed snapshot must never be marked Verified")
 	}
@@ -384,7 +385,7 @@ func TestCleanup_CreateDBSnapshotAlreadyExists_RecoversGracefully(t *testing.T) 
 	// ID this package will compute - which folds in this episode's own
 	// PendingDeletionSince, not just the resource name (see
 	// ensureFinalSnapshot's own comment for why).
-	instanceEntry := status.FindManagedResource(ledger, resourceType, "orders-db")
+	instanceEntry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
 	episodeID := strconv.FormatInt(instanceEntry.PendingDeletionSince.Unix(), 10)
 	snapshotID := cloudctlaws.DerivedResourceName("default", "checkout-service", resourceType, 255, "orders-db", "final-snapshot", episodeID)
 	instanceID, err := instanceIDFromARN(instanceEntry.ARN)
@@ -400,8 +401,8 @@ func TestCleanup_CreateDBSnapshotAlreadyExists_RecoversGracefully(t *testing.T) 
 	if r := findCleanupResult(results, "orders-db"); r == nil || r.Reason != CleanupReasonStuckPendingDeletion {
 		t.Fatalf("expected StuckPendingDeletion despite the AlreadyExists recovery, got %+v", results)
 	}
-	snapshotEntry := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
-	if snapshotEntry == nil {
+	snapshotEntry, snapshotEntryFound := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	if !snapshotEntryFound {
 		t.Fatal("expected the ledger to record the pre-existing snapshot rather than erroring out")
 	}
 	if snapshotEntry.ARN != snapshotID {
@@ -423,7 +424,8 @@ func TestCleanup_BackInUse_DeletesVerifiedSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot-creating Cleanup() error = %v", err)
 	}
-	snapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	snapshotIDEntry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	snapshotID := snapshotIDEntry.ARN
 	client.setSnapshotStatus(snapshotID, "available")
 
 	var events []string
@@ -434,7 +436,7 @@ func TestCleanup_BackInUse_DeletesVerifiedSnapshot(t *testing.T) {
 		t.Fatalf("redeclare Cleanup() error = %v", err)
 	}
 
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+	if status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
 		t.Error("expected the snapshot's ledger entry to be removed once retired")
 	}
 	if _, stillExists := client.snapshots[snapshotID]; stillExists {
@@ -468,7 +470,8 @@ func TestCleanup_BackInUse_SnapshotStillCreating_KeepsPollingUntilDeletable(t *t
 	if err != nil {
 		t.Fatalf("snapshot-creating Cleanup() error = %v", err)
 	}
-	snapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	snapshotIDEntry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	snapshotID := snapshotIDEntry.ARN
 
 	// Redeclared while the snapshot is still mid-creation - must not
 	// attempt to delete it (AWS only allows deleting an available/failed
@@ -481,7 +484,7 @@ func TestCleanup_BackInUse_SnapshotStillCreating_KeepsPollingUntilDeletable(t *t
 	if client.deleteDBSnapshotCalls != 0 {
 		t.Errorf("expected no DeleteDBSnapshot call while still creating, got %d", client.deleteDBSnapshotCalls)
 	}
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") == nil {
+	if !status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
 		t.Fatal("expected the snapshot to still be tracked, not abandoned")
 	}
 
@@ -495,7 +498,7 @@ func TestCleanup_BackInUse_SnapshotStillCreating_KeepsPollingUntilDeletable(t *t
 	if client.deleteDBSnapshotCalls != 1 {
 		t.Errorf("expected the now-available snapshot to be deleted, got %d DeleteDBSnapshot calls", client.deleteDBSnapshotCalls)
 	}
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+	if status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
 		t.Error("expected the snapshot's ledger entry to finally be removed")
 	}
 }
@@ -519,7 +522,7 @@ func TestCleanup_BackInUse_FailedSnapshot_DropsTrackingWithoutDeleteCall(t *test
 	if client.deleteDBSnapshotCalls != 0 {
 		t.Errorf("expected no DeleteDBSnapshot call for a failed snapshot, got %d", client.deleteDBSnapshotCalls)
 	}
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+	if status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
 		t.Error("expected the failed snapshot's tracking entry to be dropped")
 	}
 }
@@ -559,7 +562,7 @@ func TestCleanup_BackInUse_PropagatesDescribeFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected DescribeDBSnapshots' failure to propagate")
 	}
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") == nil {
+	if !status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
 		t.Error("expected the snapshot to remain tracked after a failed check, not silently dropped")
 	}
 }
@@ -573,7 +576,8 @@ func TestCleanup_BackInUse_PropagatesDeleteFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot-creating Cleanup() error = %v", err)
 	}
-	snapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	snapshotIDEntry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	snapshotID := snapshotIDEntry.ARN
 	client.setSnapshotStatus(snapshotID, "available")
 
 	client.deleteDBSnapshotErr = &fakeAWSError{code: "ThrottlingException"}
@@ -582,7 +586,7 @@ func TestCleanup_BackInUse_PropagatesDeleteFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected DeleteDBSnapshot's failure to propagate")
 	}
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") == nil {
+	if !status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
 		t.Error("expected the snapshot to remain tracked after a failed delete, not silently dropped")
 	}
 }
@@ -596,7 +600,8 @@ func TestCleanup_BackInUse_DeleteNotFound_TreatedAsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot-creating Cleanup() error = %v", err)
 	}
-	snapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	snapshotIDEntry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	snapshotID := snapshotIDEntry.ARN
 	client.setSnapshotStatus(snapshotID, "available")
 	// Simulate the snapshot having already been deleted out-of-band (e.g.
 	// by a human in the AWS console) between our last check and now.
@@ -607,7 +612,7 @@ func TestCleanup_BackInUse_DeleteNotFound_TreatedAsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected a NotFound on delete to be treated as success, got error: %v", err)
 	}
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+	if status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
 		t.Error("expected the ledger entry to be removed even though AWS already lacked the snapshot")
 	}
 }
@@ -638,7 +643,8 @@ func TestCleanup_BackInUse_OnlyTouchesItsOwnInstanceSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	ordersSnapshotID := status.FindManagedResource(ledgerB, snapshotResourceType, "orders-db").ARN
+	ordersSnapshotIDEntry, _ := status.FindManagedResource(ledgerB, snapshotResourceType, "orders-db")
+	ordersSnapshotID := ordersSnapshotIDEntry.ARN
 	client.setSnapshotStatus(ordersSnapshotID, "available")
 
 	// Redeclare orders-db too - must only ever retire orders-db's own
@@ -651,7 +657,7 @@ func TestCleanup_BackInUse_OnlyTouchesItsOwnInstanceSnapshot(t *testing.T) {
 	if client.deleteDBSnapshotCalls != 1 || client.deletedSnapshotIDs[0] != ordersSnapshotID {
 		t.Errorf("expected exactly one delete, for orders-db's own snapshot, got calls=%d ids=%v", client.deleteDBSnapshotCalls, client.deletedSnapshotIDs)
 	}
-	if status.FindManagedResource(ledgerB, snapshotResourceType, "invoices-db") != nil {
+	if status.HasManagedResource(ledgerB, snapshotResourceType, "invoices-db") {
 		t.Error("expected invoices-db to have no snapshot entry at all - it was never removed from spec")
 	}
 }
@@ -689,7 +695,8 @@ func TestCleanup_SupersededEpisode_FullLifecycle(t *testing.T) {
 	if client.createDBSnapshotCalls != 1 {
 		t.Fatalf("expected one CreateDBSnapshot call for episode 1, got %d", client.createDBSnapshotCalls)
 	}
-	firstSnapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	firstSnapshotIDEntry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	firstSnapshotID := firstSnapshotIDEntry.ARN
 
 	// Redeclared while episode 1's snapshot is still mid-creation -
 	// trigger A can't retire it yet, so it stays tracked.
@@ -727,8 +734,8 @@ func TestCleanup_SupersededEpisode_FullLifecycle(t *testing.T) {
 	if client.deleteDBSnapshotCalls != 0 {
 		t.Errorf("expected no delete yet - episode 1's snapshot is still creating, got %d", client.deleteDBSnapshotCalls)
 	}
-	stillTracked := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
-	if stillTracked == nil || stillTracked.ARN != firstSnapshotID {
+	stillTracked, stillTrackedFound := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	if !stillTrackedFound || stillTracked.ARN != firstSnapshotID {
 		t.Fatalf("expected episode 1's snapshot %q to still be the tracked one, got %+v", firstSnapshotID, stillTracked)
 	}
 
@@ -746,7 +753,7 @@ func TestCleanup_SupersededEpisode_FullLifecycle(t *testing.T) {
 	if client.createDBSnapshotCalls != 1 {
 		t.Errorf("expected episode 2's snapshot to still not have started in the same pass as the retirement, got %d total CreateDBSnapshot calls", client.createDBSnapshotCalls)
 	}
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+	if status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
 		t.Fatal("expected the slot to be free after retirement")
 	}
 
@@ -759,8 +766,8 @@ func TestCleanup_SupersededEpisode_FullLifecycle(t *testing.T) {
 	if client.createDBSnapshotCalls != 2 {
 		t.Errorf("expected episode 2's own CreateDBSnapshot call now, got %d total calls", client.createDBSnapshotCalls)
 	}
-	secondEntry := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
-	if secondEntry == nil {
+	secondEntry, secondEntryFound := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	if !secondEntryFound {
 		t.Fatal("expected episode 2's snapshot to now be tracked")
 	}
 	if secondEntry.ARN == firstSnapshotID {
@@ -780,7 +787,8 @@ func TestCleanup_SupersededEpisode_PropagatesRetireFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("episode-1 Cleanup() error = %v", err)
 	}
-	firstSnapshotID := status.FindManagedResource(ledger, snapshotResourceType, "orders-db").ARN
+	firstSnapshotIDEntry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	firstSnapshotID := firstSnapshotIDEntry.ARN
 	client.setSnapshotStatus(firstSnapshotID, "available")
 
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
@@ -791,7 +799,7 @@ func TestCleanup_SupersededEpisode_PropagatesRetireFailure(t *testing.T) {
 	// Redeclaring with the snapshot already available retires it via
 	// trigger A, before episode 2 ever gets a chance to - re-verify that
 	// happened so the next step genuinely exercises trigger B, not A.
-	if status.FindManagedResource(ledger, snapshotResourceType, "orders-db") != nil {
+	if status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
 		t.Fatal("test setup: expected trigger A to have already retired episode 1's snapshot")
 	}
 

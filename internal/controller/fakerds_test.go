@@ -149,6 +149,10 @@ func (f *fakeRDSClient) DescribeDBSubnetGroups(_ context.Context, in *rds.Descri
 	}, nil
 }
 
+func (f *fakeRDSClient) DescribeDBEngineVersions(_ context.Context, _ *rds.DescribeDBEngineVersionsInput, _ ...func(*rds.Options)) (*rds.DescribeDBEngineVersionsOutput, error) {
+	return &rds.DescribeDBEngineVersionsOutput{}, nil
+}
+
 func (f *fakeRDSClient) ListTagsForResource(_ context.Context, in *rds.ListTagsForResourceInput, _ ...func(*rds.Options)) (*rds.ListTagsForResourceOutput, error) {
 	i := f.findByARN(*in.ResourceName)
 	if i == nil {

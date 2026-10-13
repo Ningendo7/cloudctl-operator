@@ -60,7 +60,9 @@ func NewLimiter(qps float64, burst int) *rate.Limiter {
 // limiter.Wait before letting a request proceed, until a token is
 // available or the call's own context ends. A nil limiter is a no-op
 // rather than a panic, the same defensive floor NewLimiter applies to a
-// misconfigured QPS/burst.
+// misconfigured QPS/burst. Installed ahead of the SDK's retry middleware,
+// so each operation takes one token and the SDK's own backoff, not this
+// limiter, paces retries of a throttled call.
 func RateLimitMiddleware(limiter *rate.Limiter) func(*smithymiddleware.Stack) error {
 	return func(stack *smithymiddleware.Stack) error {
 		return stack.Finalize.Add(

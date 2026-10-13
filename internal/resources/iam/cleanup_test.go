@@ -62,7 +62,7 @@ func TestCleanup_KeepsRoleWhenStillNeeded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	if status.FindManagedResource(ledger, resourceType, roleLedgerName) == nil {
+	if !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the role's ledger entry to remain - it's still needed")
 	}
 	if _, ok := client.roles[name]; !ok {
@@ -87,7 +87,7 @@ func TestCleanup_DeletesRoleWhenNoLongerNeeded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	if status.FindManagedResource(ledger, resourceType, roleLedgerName) != nil {
+	if status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the role's ledger entry to be removed")
 	}
 	if _, ok := client.roles[name]; ok {
@@ -110,7 +110,7 @@ func TestCleanup_AlwaysDeletesOnCRDeletionRegardlessOfGrants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	if status.FindManagedResource(ledger, resourceType, roleLedgerName) != nil {
+	if status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the role's ledger entry to be removed on CR deletion, regardless of still-active grants")
 	}
 	if _, ok := client.roles[name]; ok {
@@ -130,7 +130,7 @@ func TestCleanup_TreatsAlreadyGoneRoleAsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v — expected an already-gone role to be treated as success", err)
 	}
-	if status.FindManagedResource(ledger, resourceType, roleLedgerName) != nil {
+	if status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the ledger entry to be removed for an already-gone role")
 	}
 }
@@ -150,7 +150,7 @@ func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 	if _, ok := client.roles[name]; !ok {
 		t.Error("expected the role to NOT be deleted when ownership can't be re-verified")
 	}
-	if status.FindManagedResource(ledger, resourceType, roleLedgerName) == nil {
+	if !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the ledger entry to remain for retry")
 	}
 }
@@ -187,7 +187,7 @@ func TestCleanup_ReturnsMalformedARNErrorWithoutTouchingLedger(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a malformed role ARN")
 	}
-	if status.FindManagedResource(ledger, resourceType, roleLedgerName) == nil {
+	if !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the ledger entry to survive a parse failure, not be silently dropped")
 	}
 }
@@ -210,7 +210,7 @@ func TestCleanup_PropagatesGenericListRoleTagsFailureWithoutTouchingLedger(t *te
 	if err == nil {
 		t.Fatal("expected a transient ListRoleTags failure to be reported as an error")
 	}
-	if status.FindManagedResource(ledger, resourceType, roleLedgerName) == nil {
+	if !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the ledger entry to survive a transient failure, not be silently dropped")
 	}
 	if _, ok := client.roles[name]; !ok {
@@ -235,7 +235,7 @@ func TestCleanup_PropagatesGenericDeleteRolePolicyFailureWithoutTouchingLedger(t
 	if err == nil {
 		t.Fatal("expected a real DeleteRolePolicy failure to be reported as an error")
 	}
-	if status.FindManagedResource(ledger, resourceType, roleLedgerName) == nil {
+	if !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the ledger entry to survive the failure, not be silently dropped")
 	}
 	if _, ok := client.roles[name]; !ok {
@@ -265,7 +265,7 @@ func TestCleanup_PropagatesGenericDeleteRoleFailureWithoutTouchingLedger(t *test
 	if err == nil {
 		t.Fatal("expected a real DeleteRole failure to be reported as an error")
 	}
-	if status.FindManagedResource(ledger, resourceType, roleLedgerName) == nil {
+	if !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the ledger entry to survive the failure - removing it here would leak the still-existing role")
 	}
 	if _, ok := client.roles[name]; !ok {
@@ -292,7 +292,7 @@ func TestCleanup_TreatsAlreadyGoneInlinePolicyAsSuccess(t *testing.T) {
 	if _, ok := client.roles[name]; ok {
 		t.Error("expected the role to still be deleted")
 	}
-	if status.FindManagedResource(ledger, resourceType, roleLedgerName) != nil {
+	if status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the ledger entry to be removed")
 	}
 }

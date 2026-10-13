@@ -28,27 +28,42 @@ import (
 const resourceTypeIAM = "iam"
 
 // iamWorkloadCount approximates how much work deriving this CR's IAM
-// policy actually involves, for sectionContext's timeout scaling. Unlike
-// every other section, IAM never manages more than one ledger entry (the
-// role itself) regardless of how many resources drive its policy, so
-// ledger count alone (sectionContext's other input) would never reflect a
-// CR with many owned/consumed resources needing a proportionally larger
-// timeout. Counts owned resources (each contributes a policy statement)
-// plus consumes entries (each requires a cross-namespace CR lookup to
-// check sharedWith) across every implemented resource type.
+// policy involves, for sectionContext's timeout scaling. IAM only ever has
+// one ledger entry (the role), so ledger count alone can't reflect a CR with
+// many resources behind it. Counts each owned resource (a policy statement),
+// each consumes entry (a cross-namespace CR lookup), and each encryption key
+// grant (a ledger lookup, or a CR lookup for a shared key). RDS never feeds
+// IAM policy, so it isn't counted.
 func iamWorkloadCount(cr *depsv1alpha1.AppDependencies) int {
 	count := 0
+	encrypted := func(e *depsv1alpha1.EncryptionSpec) {
+		if e != nil && (e.Enabled || e.KMSKeyRef != "") {
+			count++
+		}
+	}
 	if cr.Spec.SQS != nil {
 		count += len(cr.Spec.SQS.Resources) + len(cr.Spec.SQS.Consumes)
+		for _, r := range cr.Spec.SQS.Resources {
+			encrypted(r.Encryption)
+		}
 	}
 	if cr.Spec.SNS != nil {
 		count += len(cr.Spec.SNS.Resources) + len(cr.Spec.SNS.Consumes)
+		for _, r := range cr.Spec.SNS.Resources {
+			encrypted(r.Encryption)
+		}
 	}
 	if cr.Spec.DynamoDB != nil {
 		count += len(cr.Spec.DynamoDB.Resources) + len(cr.Spec.DynamoDB.Consumes)
+		for _, r := range cr.Spec.DynamoDB.Resources {
+			encrypted(r.Encryption)
+		}
 	}
 	if cr.Spec.S3 != nil {
 		count += len(cr.Spec.S3.Resources) + len(cr.Spec.S3.Consumes)
+		for _, r := range cr.Spec.S3.Resources {
+			encrypted(r.Encryption)
+		}
 	}
 	return count
 }
@@ -83,7 +98,7 @@ func iamSection(r *AppDependenciesReconciler) section {
 			// already does - not just at CR deletion time.
 			ledger, cleanupErr := iam.Cleanup(ctx, r.AWSClients.IAM, r.Client, cr, cr.Status.ManagedResources, false)
 			cr.Status.ManagedResources = ledger
-			if status.FindManagedResource(ledger, resourceTypeIAM, "role") == nil {
+			if !status.HasManagedResource(ledger, resourceTypeIAM, "role") {
 				cr.Status.IAMRoleARN = ""
 			}
 

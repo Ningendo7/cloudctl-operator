@@ -26,6 +26,11 @@ limitations under the License.
 // RDS_LIVE_TEST_SUBNET_GROUP to a real subnet group name in the account
 // these credentials resolve to; the test skips cleanly if it's unset.
 //
+// RDS_LIVE_TEST_KMS_KEY_ARN is optional: the ARN of an existing, enabled
+// KMS key to encrypt the instance with, which also exercises the shared-key
+// path. The test never changes that key's state. Without it the instance is
+// created unencrypted.
+//
 // Run explicitly with whatever already authenticates your AWS CLI:
 //
 //	RDS_LIVE_TEST_SUBNET_GROUP=my-subnet-group go test -tags=live ./internal/resources/rds/... -v -timeout 30m
@@ -46,11 +51,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/rds/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -199,65 +206,47 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: subnetGroup, AllowedNamespaces: []string{namespace}},
 	}
 
-	// Reuses a pre-existing real key via the shared kmsKeyRef path rather
-	// than the dedicated-key path - exercises the shared-key resolution
-	// code for RDS (never otherwise covered live) and avoids paying for a
-	// second real key just to prove encryption works at all.
-	const reusedKeyARN = "arn:aws:kms:us-east-1:807906459006:key/223e5f35-d55d-46e3-b3a4-e47edcb8aac8"
-	kmsProducerName := "kms-producer-" + crName
-	kmsProducer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: kmsProducerName},
-		Spec: depsv1alpha1.AppDependenciesSpec{KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
-			{Name: "shared", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: namespace, Name: crName}}},
-		}}},
-		Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
-			{Type: "kms", Name: "shared", ARN: reusedKeyARN, State: depsv1alpha1.ManagedResourceStateVerified},
-		}},
-	}
-	// Self-heals regardless of how the previous run's own Cleanup below left
-	// this key - a failed prior run still reaches that Cleanup and
-	// re-schedules deletion, which disables the key for whichever run
-	// comes next. CancelKeyDeletion errors when the key isn't actually
-	// pending deletion, which is the common case, so that error is expected
-	// and ignored; EnableKey is a no-op when already enabled.
-	_, _ = kmsClient.CancelKeyDeletion(ctx, &kms.CancelKeyDeletionInput{KeyId: aws.String(reusedKeyARN)})
-	if _, err := kmsClient.EnableKey(ctx, &kms.EnableKeyInput{KeyId: aws.String(reusedKeyARN)}); err != nil {
-		t.Fatalf("EnableKey(%q) error = %v", reusedKeyARN, err)
-	}
-	t.Cleanup(func() {
-		windowDays := int32(7)
-		_, _ = kmsClient.ScheduleKeyDeletion(context.Background(), &kms.ScheduleKeyDeletionInput{
-			KeyId: aws.String(reusedKeyARN), PendingWindowInDays: &windowDays,
+	// An existing key, if supplied, is used through kmsKeyRef by seeding it
+	// into the ledger as if this CR had created it. Its state is never
+	// changed here.
+	keyARN := os.Getenv("RDS_LIVE_TEST_KMS_KEY_ARN")
+	objects := []client.Object{grant}
+	var encryption *depsv1alpha1.EncryptionSpec
+	var ledger []depsv1alpha1.ManagedResource
+	if keyARN != "" {
+		described, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: aws.String(keyARN)})
+		if err != nil || described.KeyMetadata.KeyState != kmstypes.KeyStateEnabled {
+			t.Fatalf("RDS_LIVE_TEST_KMS_KEY_ARN %q must be an existing enabled key (describe error: %v)", keyARN, err)
+		}
+		ledger = append(ledger, depsv1alpha1.ManagedResource{
+			Type: "kms", Name: "shared", ARN: keyARN, State: depsv1alpha1.ManagedResourceStateVerified,
 		})
-	})
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant, kmsProducer).Build()
+		// Enabled and KMSKeyRef are alternatives, and KMSKeyRef alone
+		// already turns on StorageEncrypted.
+		encryption = &depsv1alpha1.EncryptionSpec{KMSKeyRef: "shared"}
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objects...).Build()
 
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 		Name: resourceName, DBSubnetGroupName: subnetGroup,
 		Engine: "postgres", EngineVersion: "16.4", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
-		DeletionPolicy: depsv1alpha1.DeletionPolicyDelete,
-		// Enabled and KMSKeyRef are alternatives, not both-settable - every
-		// resource type runs Enabled's dedicated-key provisioning
-		// unconditionally after resolving KMSKeyRef, silently overriding it
-		// if both are set. KMSKeyRef alone already turns on StorageEncrypted.
-		Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: &depsv1alpha1.ConsumeRef{
-			Namespace: namespace, Name: kmsProducerName, ResourceName: "shared",
-		}},
+		ApplyImmediately: true,
+		DeletionPolicy:   depsv1alpha1.DeletionPolicyDelete,
+		Encryption:       encryption,
 	}}}
 
-	var ledger []depsv1alpha1.ManagedResource
-	if ledger, err = Ensure(ctx, rdsClient, kmsClient, ec2Client, k8sClient, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil); err != nil {
+	if ledger, err = Ensure(ctx, rdsClient, kmsClient, ec2Client, k8sClient, namespace, crName, "uid-1", region, accountID, spec, ledger, nil, nil); err != nil {
 		t.Fatalf("Ensure() (create) error = %v", err)
 	}
-	entry := status.FindManagedResource(ledger, resourceType, resourceName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, resourceName)
+	if !entryFound {
 		t.Fatal("expected a ledger entry after the first Ensure() call")
 	}
+	var consumerGroupID string
 	t.Cleanup(func() {
 		spec.Resources[0].DeletionPolicy = depsv1alpha1.DeletionPolicyRetain // keep Cleanup from re-entering the snapshot dance during teardown
-		_, _ = rdsClient.DeleteDBInstance(context.Background(), &rds.DeleteDBInstanceInput{
-			DBInstanceIdentifier: &instanceID, SkipFinalSnapshot: aws.Bool(true),
-		})
+		deleteInstanceWithRetry(t, rdsClient, instanceID)
+		deleteSecurityGroupsAfterInstanceGone(t, rdsClient, ec2Client, instanceID, cloudctlaws.ResourceName(namespace, crName, "rds-sg", resourceName, 255), consumerGroupID)
 	})
 
 	instance := waitForInstanceStatus(t, rdsClient, instanceID, []string{"available"}, false, 20*time.Minute)
@@ -267,8 +256,8 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ensure() (settle) error = %v", err)
 	}
-	entry = status.FindManagedResource(ledger, resourceType, resourceName)
-	if entry == nil || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+	entry, entryFound = status.FindManagedResource(ledger, resourceType, resourceName)
+	if !entryFound || entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Fatalf("expected a Verified ledger entry once available, got %+v", entry)
 	}
 
@@ -284,11 +273,11 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		if !cloudctlaws.IsOwnedBy(tags, namespace, crName, "uid-1") {
 			t.Errorf("real instance tags don't satisfy IsOwnedBy: %+v", tags)
 		}
-		if !aws.ToBool(instance.StorageEncrypted) {
+		if keyARN != "" && !aws.ToBool(instance.StorageEncrypted) {
 			t.Error("expected the real instance to be encrypted")
 		}
-		if gotKeyID := aws.ToString(instance.KmsKeyId); gotKeyID != reusedKeyARN {
-			t.Errorf("expected the instance to be encrypted under the shared key %q, got %q", reusedKeyARN, gotKeyID)
+		if gotKeyID := aws.ToString(instance.KmsKeyId); keyARN != "" && gotKeyID != keyARN {
+			t.Errorf("expected the instance to be encrypted under the shared key %q, got %q", keyARN, gotKeyID)
 		}
 	})
 
@@ -342,9 +331,20 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		if aws.ToInt32(describeOut.DBInstances[0].BackupRetentionPeriod) != defaultBackupRetentionDays {
 			t.Errorf("expected ModifyDBInstance to have actually applied the new backup retention, got %d", aws.ToInt32(describeOut.DBInstances[0].BackupRetentionPeriod))
 		}
+
+		spec.Resources[0].Backup = nil
+		if ledger, err = Ensure(ctx, rdsClient, kmsClient, ec2Client, k8sClient, namespace, crName, "uid-1", region, accountID, spec, ledger, nil, nil); err != nil {
+			t.Fatalf("Ensure() (backup omitted) error = %v", err)
+		}
+		describeOut, err = rdsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
+		if err != nil {
+			t.Fatalf("DescribeDBInstances() error = %v", err)
+		}
+		if got := aws.ToInt32(describeOut.DBInstances[0].BackupRetentionPeriod); got != defaultBackupRetentionDays {
+			t.Errorf("omitting backup from spec must not turn backups off, retention is now %d", got)
+		}
 	})
 
-	var consumerGroupID string
 	t.Run("ingress grant and revoke", func(t *testing.T) {
 		vpcID, err := resolveVPCID(ctx, rdsClient, subnetGroup)
 		if err != nil {
@@ -358,9 +358,6 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 			t.Fatalf("CreateSecurityGroup() (consumer) error = %v", err)
 		}
 		consumerGroupID = aws.ToString(consumerOut.GroupId)
-		t.Cleanup(func() {
-			_, _ = ec2Client.DeleteSecurityGroup(context.Background(), &ec2.DeleteSecurityGroupInput{GroupId: &consumerGroupID})
-		})
 		consumerGroupARN := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, consumerGroupID)
 
 		consumer := &depsv1alpha1.AppDependencies{
@@ -399,9 +396,9 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		// real wall-clock time happened to pass earlier in the test, the
 		// same way the stuck-deletion subtest already backdates
 		// PendingDeletionSince to skip its own quiet window deterministically.
-		if verified := status.FindManagedResource(ledger, resourceType, resourceName); verified != nil {
+		if verified, verifiedFound := status.FindManagedResource(ledger, resourceType, resourceName); verifiedFound {
 			backdated := metav1.NewTime(time.Now().Add(-(status.TrustWindow + time.Minute)))
-			backdatedEntry := *verified
+			backdatedEntry := verified
 			backdatedEntry.LastVerifiedAt = &backdated
 			status.UpsertManagedResource(&ledger, backdatedEntry)
 		}
@@ -469,12 +466,12 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Cleanup() (mark pending) error = %v", err)
 		}
-		pending := status.FindManagedResource(ledger, resourceType, resourceName)
-		if pending == nil || pending.PendingDeletionSince == nil {
+		pending, pendingFound := status.FindManagedResource(ledger, resourceType, resourceName)
+		if !pendingFound || pending.PendingDeletionSince == nil {
 			t.Fatal("expected the instance to be marked pending deletion once removed from spec")
 		}
 		backdated := metav1.NewTime(pending.PendingDeletionSince.Time.Add(-(deletionQuietWindow + time.Minute)))
-		backdatedEntry := *pending
+		backdatedEntry := pending
 		backdatedEntry.PendingDeletionSince = &backdated
 		status.UpsertManagedResource(&ledger, backdatedEntry)
 
@@ -482,8 +479,8 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Cleanup() (create snapshot) error = %v", err)
 		}
-		snapEntry := status.FindManagedResource(ledger, snapshotResourceType, resourceName)
-		if snapEntry == nil {
+		snapEntry, snapEntryFound := status.FindManagedResource(ledger, snapshotResourceType, resourceName)
+		if !snapEntryFound {
 			t.Fatal("expected a real CreateDBSnapshot call to have been made")
 		}
 		snapshotID = snapEntry.ARN
@@ -497,8 +494,8 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Cleanup() (verify snapshot) error = %v", err)
 		}
-		snapEntry = status.FindManagedResource(ledger, snapshotResourceType, resourceName)
-		if snapEntry == nil || snapEntry.State != depsv1alpha1.ManagedResourceStateVerified {
+		snapEntry, snapEntryFound = status.FindManagedResource(ledger, snapshotResourceType, resourceName)
+		if !snapEntryFound || snapEntry.State != depsv1alpha1.ManagedResourceStateVerified {
 			t.Errorf("expected the snapshot ledger entry to reach Verified, got %+v", snapEntry)
 		}
 
@@ -506,6 +503,107 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		// t.Cleanup's real DeleteDBInstance call expects to find.
 		spec.Resources[0].DeletionPolicy = depsv1alpha1.DeletionPolicyRetain
 	})
+
+	// Last: a storage change leaves the instance in storage-optimization,
+	// which blocks some other operations for a while.
+	t.Run("storage growth applies at once", func(t *testing.T) {
+		spec.Resources[0].ApplyImmediately = false
+		before := waitForInstanceStatus(t, rdsClient, instanceID, []string{"available"}, false, 15*time.Minute)
+		t.Logf("storage type %q, iops %v, allocated %d GiB", aws.ToString(before.StorageType), before.Iops, aws.ToInt32(before.AllocatedStorage))
+
+		// AWS rounds growth up to at least 10%.
+		target := aws.ToInt32(before.AllocatedStorage) * 11 / 10
+		spec.Resources[0].AllocatedStorage = target
+		if ledger, err = Ensure(ctx, rdsClient, kmsClient, ec2Client, k8sClient, namespace, crName, "uid-1", region, accountID, spec, ledger, nil, nil); err != nil {
+			t.Fatalf("Ensure() (grow storage) error = %v", err)
+		}
+
+		deadline := time.Now().Add(5 * time.Minute)
+		for {
+			out, err := rdsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
+			if err != nil {
+				t.Fatalf("DescribeDBInstances() error = %v", err)
+			}
+			got := out.DBInstances[0]
+			if aws.ToInt32(got.AllocatedStorage) >= target || (got.PendingModifiedValues != nil && aws.ToInt32(got.PendingModifiedValues.AllocatedStorage) >= target) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("storage growth to %d GiB never started, instance is at %d GiB with status %q", target, aws.ToInt32(got.AllocatedStorage), aws.ToString(got.DBInstanceStatus))
+			}
+			time.Sleep(10 * time.Second)
+		}
+	})
+}
+
+// deleteSecurityGroupsAfterInstanceGone removes the instance's dedicated
+// security group and the throwaway consumer group. The instance has to be
+// fully gone first, and the dedicated group before the consumer group,
+// since its ingress rule references the consumer group.
+func deleteSecurityGroupsAfterInstanceGone(t *testing.T, rdsClient *rds.Client, ec2Client *ec2.Client, instanceID, dedicatedGroupName, consumerGroupID string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Minute)
+	for {
+		_, err := rdsClient.DescribeDBInstances(context.Background(), &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
+		var notFound *types.DBInstanceNotFoundFault
+		if errors.As(err, &notFound) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("instance %q still exists, delete security groups %q and %q manually afterwards", instanceID, dedicatedGroupName, consumerGroupID)
+			return
+		}
+		time.Sleep(30 * time.Second)
+	}
+
+	if out, err := ec2Client.DescribeSecurityGroups(context.Background(), &ec2.DescribeSecurityGroupsInput{
+		Filters: []ec2types.Filter{{Name: aws.String("group-name"), Values: []string{dedicatedGroupName}}},
+	}); err == nil && len(out.SecurityGroups) > 0 {
+		deleteSecurityGroupWithRetry(t, ec2Client, aws.ToString(out.SecurityGroups[0].GroupId))
+	}
+	if consumerGroupID != "" {
+		deleteSecurityGroupWithRetry(t, ec2Client, consumerGroupID)
+	}
+}
+
+// deleteSecurityGroupWithRetry retries while the group is still in use,
+// which lingers briefly after its instance or referencing group goes away.
+func deleteSecurityGroupWithRetry(t *testing.T, ec2Client *ec2.Client, groupID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		_, err := ec2Client.DeleteSecurityGroup(context.Background(), &ec2.DeleteSecurityGroupInput{GroupId: &groupID})
+		if err == nil || strings.Contains(err.Error(), "InvalidGroup.NotFound") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("could not delete security group %q, delete it manually: %v", groupID, err)
+			return
+		}
+		time.Sleep(15 * time.Second)
+	}
+}
+
+// deleteInstanceWithRetry keeps trying: an instance mid-modification
+// rejects deletion, and a silently failed delete would leave a billing
+// instance behind.
+func deleteInstanceWithRetry(t *testing.T, client *rds.Client, instanceID string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Minute)
+	for {
+		_, err := client.DeleteDBInstance(context.Background(), &rds.DeleteDBInstanceInput{
+			DBInstanceIdentifier: &instanceID, SkipFinalSnapshot: aws.Bool(true),
+		})
+		var notFound *types.DBInstanceNotFoundFault
+		if err == nil || errors.As(err, &notFound) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("could not delete instance %q, delete it manually: %v", instanceID, err)
+			return
+		}
+		time.Sleep(30 * time.Second)
+	}
 }
 
 // isRetryableStillProvisioning reports whether err is specifically this

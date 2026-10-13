@@ -68,8 +68,8 @@ type Clients struct {
 
 	// RateLimiters paces this operator's own outgoing calls to each AWS
 	// service independently (see ratelimit.go), keyed by the same lowercase
-	// service name each client uses internally (sqs, sns, s3, dynamodb,
-	// kms, iam, cloudwatch). Exposed so the caller can ramp each one up
+	// service name each client uses internally (see rateLimiterDefaults).
+	// Exposed so the caller can ramp each one up
 	// gradually right after winning leader election.
 	RateLimiters map[string]*rate.Limiter
 }
@@ -97,6 +97,7 @@ const serviceNameIAM = "iam"
 const serviceNameCloudWatch = "cloudwatch"
 const serviceNameRDS = "rds"
 const serviceNameEC2 = "ec2"
+const serviceNameSecretsManager = "secretsmanager"
 
 var rateLimiterDefaults = []rateLimiterDefault{
 	{serviceNameSQS, "AWS_SQS_RATE_LIMIT_QPS", "AWS_SQS_RATE_LIMIT_BURST", 20, 40},
@@ -105,9 +106,14 @@ var rateLimiterDefaults = []rateLimiterDefault{
 	{serviceNameDynamoDB, "AWS_DYNAMODB_RATE_LIMIT_QPS", "AWS_DYNAMODB_RATE_LIMIT_BURST", 20, 40},
 	{serviceNameKMS, "AWS_KMS_RATE_LIMIT_QPS", "AWS_KMS_RATE_LIMIT_BURST", 10, 20},
 	{serviceNameIAM, "AWS_IAM_RATE_LIMIT_QPS", "AWS_IAM_RATE_LIMIT_BURST", 8, 16},
-	{serviceNameCloudWatch, "AWS_CLOUDWATCH_RATE_LIMIT_QPS", "AWS_CLOUDWATCH_RATE_LIMIT_BURST", 20, 40},
+	// CloudWatch's per-account-per-region quotas are far lower than the
+	// others: PutMetricAlarm 3/s, DescribeAlarms 9/s, ListTagsForResource
+	// 10/s. Alarm writes are rare (unchanged alarms are never rewritten), so
+	// this sits at the steady-state describe/tag-read ceiling.
+	{serviceNameCloudWatch, "AWS_CLOUDWATCH_RATE_LIMIT_QPS", "AWS_CLOUDWATCH_RATE_LIMIT_BURST", 5, 10},
 	{serviceNameRDS, "AWS_RDS_RATE_LIMIT_QPS", "AWS_RDS_RATE_LIMIT_BURST", 20, 40},
 	{serviceNameEC2, "AWS_EC2_RATE_LIMIT_QPS", "AWS_EC2_RATE_LIMIT_BURST", 20, 40},
+	{serviceNameSecretsManager, "AWS_SECRETSMANAGER_RATE_LIMIT_QPS", "AWS_SECRETSMANAGER_RATE_LIMIT_BURST", 20, 40},
 }
 
 func newRateLimiters() map[string]*rate.Limiter {
@@ -184,9 +190,11 @@ func NewClients(ctx context.Context) (*Clients, error) {
 		EC2: ec2.NewFromConfig(cfg, func(o *ec2.Options) {
 			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameEC2]))
 		}),
-		SecretsManager: secretsmanager.NewFromConfig(cfg),
-		AccountID:      *identity.Account,
-		Region:         cfg.Region,
-		RateLimiters:   limiters,
+		SecretsManager: secretsmanager.NewFromConfig(cfg, func(o *secretsmanager.Options) {
+			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameSecretsManager]))
+		}),
+		AccountID:    *identity.Account,
+		Region:       cfg.Region,
+		RateLimiters: limiters,
 	}, nil
 }

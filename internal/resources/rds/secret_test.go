@@ -18,9 +18,11 @@ package rds
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -207,18 +209,23 @@ func TestEnsureCredentialsSecret_LabelsSecretAsManaged(t *testing.T) {
 	}
 }
 
-func TestEnsureCredentialsSecret_ConsumedInstance_RequiresAuthorization(t *testing.T) {
-	rdsClient := newFakeRDS()
-	smClient := newFakeSecretsManager()
-	producer := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
-	// Producer declares no sharedWith at all - the consumer must get
-	// nothing.
-	consumer := &depsv1alpha1.AppDependencies{
+func authorizedConsumerOf(producer *depsv1alpha1.AppDependencies) *depsv1alpha1.AppDependencies {
+	producer.Spec.RDS.Resources[0].SharedWith = []depsv1alpha1.SharedWithEntry{
+		{Namespace: "fulfillment", Name: "fulfillment-service"},
+	}
+	return &depsv1alpha1.AppDependencies{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service", UID: "uid-2"},
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"},
 		}}},
 	}
+}
+
+func TestEnsureCredentialsSecret_ConsumerNeverReceivesProducersCredentials(t *testing.T) {
+	rdsClient := newFakeRDS()
+	smClient := newFakeSecretsManager()
+	producer := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
+	consumer := authorizedConsumerOf(producer)
 	k8sClient := newFakeK8sClientWithScheme(t, producer, consumer)
 
 	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, consumer); err != nil {
@@ -226,24 +233,17 @@ func TestEnsureCredentialsSecret_ConsumedInstance_RequiresAuthorization(t *testi
 	}
 	var secret corev1.Secret
 	err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "fulfillment", Name: CredentialsSecretName("fulfillment-service")}, &secret)
-	if err == nil {
-		t.Error("expected no Secret for a consumer the producer never authorized via sharedWith")
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("expected no Secret for an authorized consumer, got err=%v data=%v", err, secret.Data)
 	}
 }
 
-func TestEnsureCredentialsSecret_ConsumedInstance_AuthorizedGetsCredentials(t *testing.T) {
+func TestEnsureCredentialsSecret_ConsumerWithOwnInstance_GetsOnlyItsOwn(t *testing.T) {
 	rdsClient := newFakeRDS()
 	smClient := newFakeSecretsManager()
-	producer := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
-	producer.Spec.RDS.Resources[0].SharedWith = []depsv1alpha1.SharedWithEntry{
-		{Namespace: "fulfillment", Name: "fulfillment-service"},
-	}
-	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service", UID: "uid-2"},
-		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
-			{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"},
-		}}},
-	}
+	producer := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "producer-user", "producer-pass")
+	consumer := ownedCRWithCredentials(t, rdsClient, smClient, "fulfillment", "fulfillment-service", "ledger-db", "own-user", "own-pass")
+	consumer.Spec.RDS.Consumes = authorizedConsumerOf(producer).Spec.RDS.Consumes
 	k8sClient := newFakeK8sClientWithScheme(t, producer, consumer)
 
 	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, consumer); err != nil {
@@ -251,65 +251,46 @@ func TestEnsureCredentialsSecret_ConsumedInstance_AuthorizedGetsCredentials(t *t
 	}
 	var secret corev1.Secret
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "fulfillment", Name: CredentialsSecretName("fulfillment-service")}, &secret); err != nil {
-		t.Fatalf("getting consumer's mirrored Secret: %v", err)
+		t.Fatalf("getting Secret: %v", err)
 	}
-	wantKey := "RDS_DEFAULT_CHECKOUT_SERVICE_ORDERS_DB_USERNAME"
-	if string(secret.Data[wantKey]) != "cloudctl_admin" {
-		t.Errorf("secret data = %v, missing/wrong %s", secret.Data, wantKey)
+	if string(secret.Data["RDS_LEDGER_DB_USERNAME"]) != "own-user" {
+		t.Errorf("expected the consumer's own credentials, got %v", secret.Data)
+	}
+	for k := range secret.Data {
+		if strings.Contains(k, "ORDERS_DB") {
+			t.Errorf("the producer's credentials leaked into the consumer's Secret: %s", k)
+		}
 	}
 }
 
-// TestEnsureCredentialsSecret_ConsumedFromSameNamedProducersInDifferentNamespaces
-// guards against two different identities producing the same Secret key.
-func TestEnsureCredentialsSecret_ConsumedFromSameNamedProducersInDifferentNamespaces(t *testing.T) {
+func TestEnsureCredentialsSecret_RemovesCredentialsAnEarlierVersionDeliveredToAConsumer(t *testing.T) {
 	rdsClient := newFakeRDS()
 	smClient := newFakeSecretsManager()
-	producerA := ownedCRWithCredentials(t, rdsClient, smClient, "team-a", "checkout-service", "orders-db", "user-a", "pass-a")
-	producerA.Spec.RDS.Resources[0].SharedWith = []depsv1alpha1.SharedWithEntry{{Namespace: "platform", Name: "analytics"}}
-	producerB := ownedCRWithCredentials(t, rdsClient, smClient, "team-b", "checkout-service", "orders-db", "user-b", "pass-b")
-	producerB.Spec.RDS.Resources[0].SharedWith = []depsv1alpha1.SharedWithEntry{{Namespace: "platform", Name: "analytics"}}
-
-	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "analytics", UID: "uid-consumer"},
-		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
-			{Namespace: "team-a", Name: "checkout-service", ResourceName: "orders-db"},
-			{Namespace: "team-b", Name: "checkout-service", ResourceName: "orders-db"},
-		}}},
+	producer := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
+	consumer := authorizedConsumerOf(producer)
+	delivered := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "fulfillment", Name: CredentialsSecretName("fulfillment-service"),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: depsv1alpha1.GroupVersion.String(), Kind: "AppDependencies",
+				Name: consumer.Name, UID: consumer.UID, Controller: ptrTo(true),
+			}},
+		},
+		Data: map[string][]byte{"RDS_DEFAULT_CHECKOUT_SERVICE_ORDERS_DB_PASSWORD": []byte("s3cr3t-pw")},
 	}
-	k8sClient := newFakeK8sClientWithScheme(t, producerA, producerB, consumer)
+	k8sClient := newFakeK8sClientWithScheme(t, producer, consumer, delivered)
 
 	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, consumer); err != nil {
 		t.Fatalf("EnsureCredentialsSecret() error = %v", err)
 	}
 	var secret corev1.Secret
-	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "platform", Name: CredentialsSecretName("analytics")}, &secret); err != nil {
-		t.Fatalf("getting mirrored Secret: %v", err)
-	}
-	gotA := string(secret.Data["RDS_TEAM_A_CHECKOUT_SERVICE_ORDERS_DB_USERNAME"])
-	gotB := string(secret.Data["RDS_TEAM_B_CHECKOUT_SERVICE_ORDERS_DB_USERNAME"])
-	if gotA != "user-a" {
-		t.Errorf("team-a username = %q, want %q (data: %v)", gotA, "user-a", secret.Data)
-	}
-	if gotB != "user-b" {
-		t.Errorf("team-b username = %q, want %q (data: %v)", gotB, "user-b", secret.Data)
+	err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(delivered), &secret)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("expected the previously delivered Secret to be removed, got err=%v", err)
 	}
 }
 
-func TestEnsureCredentialsSecret_ConsumedInstance_ProducerNotFoundYet(t *testing.T) {
-	rdsClient := newFakeRDS()
-	smClient := newFakeSecretsManager()
-	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service", UID: "uid-2"},
-		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
-			{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"},
-		}}},
-	}
-	k8sClient := newFakeK8sClientWithScheme(t, consumer)
-
-	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, consumer); err != nil {
-		t.Fatalf("expected no error for an unresolved forward reference, got %v", err)
-	}
-}
+func ptrTo[T any](v T) *T { return &v }
 
 func TestEnsureCredentialsSecret_PropagatesGetSecretValueFailure(t *testing.T) {
 	rdsClient := newFakeRDS()
@@ -465,28 +446,12 @@ func TestEnsureCredentialsSecret_TransientFailureNeverOverwritesWithFabricatedDa
 }
 
 func TestCredentialsKey(t *testing.T) {
-	tests := []struct {
-		name              string
-		resourceName      string
-		producerNamespace string
-		producerCRName    string
-		suffix            string
-		want              string
-	}{
-		{name: "owned", resourceName: "orders-db", producerCRName: "", suffix: "USERNAME", want: "RDS_ORDERS_DB_USERNAME"},
-		{name: "consumed", resourceName: "orders-db", producerNamespace: "default", producerCRName: "checkout-service", suffix: "PASSWORD", want: "RDS_DEFAULT_CHECKOUT_SERVICE_ORDERS_DB_PASSWORD"},
-		{name: "hyphens become underscores", resourceName: "orders-db", producerCRName: "", suffix: "USERNAME", want: "RDS_ORDERS_DB_USERNAME"},
-		{
-			name: "same producer name, different namespace, must not collide", resourceName: "orders-db",
-			producerNamespace: "team-a", producerCRName: "checkout-service", suffix: "USERNAME",
-			want: "RDS_TEAM_A_CHECKOUT_SERVICE_ORDERS_DB_USERNAME",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := credentialsKey(tc.resourceName, tc.producerNamespace, tc.producerCRName, tc.suffix); got != tc.want {
-				t.Errorf("credentialsKey() = %q, want %q", got, tc.want)
-			}
-		})
+	for in, want := range map[string]string{
+		"orders-db": "RDS_ORDERS_DB_USERNAME",
+		"a.b":       "RDS_A_B_USERNAME",
+	} {
+		if got := credentialsKey(in, "USERNAME"); got != want {
+			t.Errorf("credentialsKey(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

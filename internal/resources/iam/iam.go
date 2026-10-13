@@ -302,7 +302,7 @@ func listAllRoleTags(ctx context.Context, iamClient iamAPI, roleName string) ([]
 func recordVerified(ledger []depsv1alpha1.ManagedResource, arn string) []depsv1alpha1.ManagedResource {
 	now := metav1.Now()
 	createdAt := now
-	if existing := status.FindManagedResource(ledger, resourceType, roleLedgerName); existing != nil {
+	if existing, existingFound := status.FindManagedResource(ledger, resourceType, roleLedgerName); existingFound {
 		createdAt = existing.CreatedAt
 	}
 	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{

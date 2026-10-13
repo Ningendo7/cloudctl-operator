@@ -70,6 +70,7 @@ func EnsureSecurityGroup(
 	ec2Client cloudctlaws.EC2Client,
 	k8sClient client.Client,
 	namespace, crName, crUID, resourceName, dbSubnetGroupName, engine, region, accountID string,
+	adopt bool,
 	sharedWith []depsv1alpha1.SharedWithEntry,
 ) (securityGroupARN string, err error) {
 	vpcID, err := resolveVPCID(ctx, rdsClient, dbSubnetGroupName)
@@ -78,7 +79,7 @@ func EnsureSecurityGroup(
 	}
 
 	groupName := cloudctlaws.ResourceName(namespace, crName, "rds-sg", resourceName, 255)
-	groupID, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID)
+	groupID, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, adopt)
 	if err != nil {
 		return "", err
 	}
@@ -117,7 +118,13 @@ func resolveVPCID(ctx context.Context, rdsClient rdsAPI, dbSubnetGroupName strin
 	return *out.DBSubnetGroups[0].VpcId, nil
 }
 
-func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Client, namespace, crName, crUID, groupName, vpcID string) (string, error) {
+// findOrCreateSecurityGroup returns the group named groupName in vpcID,
+// creating it if absent. An existing group is only reused if it carries
+// this CR's ownership tags: a name match alone is not ownership, and the
+// operator goes on to rewrite this group's ingress rules. adopt takes over
+// an untagged group, or one left by an earlier incarnation of this same CR
+// (a retained instance outlives its CR); another CR's group is never taken.
+func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Client, namespace, crName, crUID, groupName, vpcID string, adopt bool) (string, error) {
 	describeOut, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
 		Filters: []types.Filter{
 			{Name: aws.String("group-name"), Values: []string{groupName}},
@@ -128,13 +135,25 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 		return "", wrapEC2Error(err, "looking up security group")
 	}
 	if len(describeOut.SecurityGroups) > 0 {
-		// Already exists - this operator created it at this exact
-		// deterministic name and it's never shared, so there's no
-		// adopt-vs-refuse ownership check needed the way every AWS
-		// resource elsewhere in this project needs one. A human
-		// hand-creating something at this exact name is the same
-		// vanishingly-rare collision class already accepted for alarms.
-		return *describeOut.SecurityGroups[0].GroupId, nil
+		existing := describeOut.SecurityGroups[0]
+		groupID := aws.ToString(existing.GroupId)
+		tags := ec2TagsToMap(existing.Tags)
+		if cloudctlaws.IsOwnedBy(tags, namespace, crName, crUID) {
+			return groupID, nil
+		}
+		if owner, ok := tags[cloudctlaws.OwnerTagKey]; ok && owner != cloudctlaws.OwnerTagValue(namespace, crName) {
+			return "", fmt.Errorf("security group %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", groupID, owner)
+		}
+		if !adopt {
+			return "", fmt.Errorf("security group %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", groupID)
+		}
+		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
+			Resources: []string{groupID},
+			Tags:      mapToEC2Tags(ownerTags(namespace, crName, crUID)),
+		}); err != nil {
+			return "", wrapEC2Error(err, "adopting security group (tagging)")
+		}
+		return groupID, nil
 	}
 
 	createOut, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
@@ -244,8 +263,8 @@ func consumerPodSecurityGroupARN(ctx context.Context, k8sClient client.Client, n
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: crName}, &consumer); err != nil {
 		return "", false
 	}
-	entry := status.FindManagedResource(consumer.Status.ManagedResources, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(consumer.Status.ManagedResources, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !entryFound {
 		return "", false
 	}
 	return entry.ARN, true
@@ -262,6 +281,16 @@ func isDuplicatePermission(err error) bool {
 func isNotFoundPermission(err error) bool {
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidPermission.NotFound"
+}
+
+func ec2TagsToMap(tags []types.Tag) map[string]string {
+	m := make(map[string]string, len(tags))
+	for _, t := range tags {
+		if t.Key != nil && t.Value != nil {
+			m[*t.Key] = *t.Value
+		}
+	}
+	return m
 }
 
 func mapToEC2Tags(m map[string]string) []types.Tag {

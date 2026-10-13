@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,7 +67,7 @@ var _ = Describe("AppDependencies Controller", func() {
 		reconciler = &AppDependenciesReconciler{
 			Client:    k8sClient,
 			APIReader: k8sClient,
-			Scheme: k8sClient.Scheme(),
+			Scheme:    k8sClient.Scheme(),
 			AWSClients: &cloudctlaws.Clients{
 				SQS: fakeSQS, SNS: fakeSNS, IAM: fakeIAM, KMS: fakeKMS, CloudWatch: fakeCloudWatch,
 				RDS: fakeRDS, EC2: fakeEC2,
@@ -139,7 +140,7 @@ var _ = Describe("AppDependencies Controller", func() {
 			alias := "alias/" + cloudctlaws.ResourceName(updated.Namespace, updated.Name, "kms", "primary", 256-len("alias/"))
 			Expect(fakeKMS.aliases).To(HaveKey(alias))
 
-			entry := status.FindManagedResource(updated.Status.ManagedResources, "kms", "primary")
+			entry, _ := status.FindManagedResource(updated.Status.ManagedResources, "kms", "primary")
 			Expect(entry).NotTo(BeNil())
 			Expect(entry.State).To(Equal(depsv1alpha1.ManagedResourceStateVerified))
 			Expect(fakeKMS.aliases[alias]).To(Equal(entry.ARN))
@@ -226,11 +227,12 @@ var _ = Describe("AppDependencies Controller", func() {
 			// Push the ledger entry's PendingDeletionSince into the past so
 			// the next reconcile evaluates the real emptiness check instead
 			// of just holding through the quiet window.
-			entry := status.FindManagedResource(pending.Status.ManagedResources, "sqs", "orders")
+			entry, _ := status.FindManagedResource(pending.Status.ManagedResources, "sqs", "orders")
 			Expect(entry).NotTo(BeNil())
 			past := metav1.NewTime(time.Now().Add(-1 * time.Hour))
 			entry.PendingDeletionSince = &past
-			status.UpsertManagedResource(&pending.Status.ManagedResources, *entry)
+			status.UpsertManagedResource(&pending.Status.ManagedResources, entry)
+			status.UpsertManagedResource(&pending.Status.ManagedResources, entry)
 			Expect(k8sClient.Status().Update(ctx, &pending)).To(Succeed())
 
 			_, err = reconciler.Reconcile(ctx, req)
@@ -388,7 +390,7 @@ var _ = Describe("AppDependencies Controller", func() {
 			var updated depsv1alpha1.AppDependencies
 			Expect(k8sClient.Get(ctx, req.NamespacedName, &updated)).To(Succeed())
 
-			entry := status.FindManagedResource(updated.Status.ManagedResources, resourceTypeRDS, "orders-db")
+			entry, _ := status.FindManagedResource(updated.Status.ManagedResources, resourceTypeRDS, "orders-db")
 			Expect(entry).NotTo(BeNil())
 			Expect(entry.State).To(Equal(depsv1alpha1.ManagedResourceStateVerified))
 
@@ -505,7 +507,7 @@ var _ = Describe("AppDependencies Controller", func() {
 			_, err = reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, req.NamespacedName, &updated)).To(Succeed())
-			entry := status.FindManagedResource(updated.Status.ManagedResources, resourceTypeRDS, "orders-db")
+			entry, _ := status.FindManagedResource(updated.Status.ManagedResources, resourceTypeRDS, "orders-db")
 			Expect(entry).NotTo(BeNil())
 			Expect(entry.PendingDeletionSince).NotTo(BeNil())
 
@@ -514,7 +516,8 @@ var _ = Describe("AppDependencies Controller", func() {
 			// as a human would observe after enough real time passed.
 			past := metav1.NewTime(time.Now().Add(-2 * time.Hour))
 			entry.PendingDeletionSince = &past
-			status.UpsertManagedResource(&updated.Status.ManagedResources, *entry)
+			status.UpsertManagedResource(&updated.Status.ManagedResources, entry)
+			status.UpsertManagedResource(&updated.Status.ManagedResources, entry)
 			Expect(k8sClient.Status().Update(ctx, &updated)).To(Succeed())
 
 			_, err = reconciler.Reconcile(ctx, req)
@@ -566,7 +569,7 @@ func newCountingReconciler(t *testing.T, patchCount *int, objs ...client.Object)
 	return &AppDependenciesReconciler{
 		Client:    c,
 		APIReader: c,
-		Scheme: scheme,
+		Scheme:    scheme,
 		AWSClients: &cloudctlaws.Clients{
 			SQS: newFakeSQSClient(), SNS: newFakeSNSClient(), IAM: newFakeIAMClient(),
 			KMS: newFakeKMSClient(), CloudWatch: newFakeCloudWatchClient(),
@@ -715,5 +718,61 @@ func TestJitteredDriftRequeue_WithinBoundsAndVaries(t *testing.T) {
 	}
 	if len(seen) < 2 {
 		t.Error("expected jitteredDriftRequeue() to vary across calls, not return a fixed value")
+	}
+}
+
+func TestStatusPatch_DoesNotCarryResourceVersion(t *testing.T) {
+	original := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", ResourceVersion: "1"}}
+	cr := original.DeepCopy()
+	cr.ResourceVersion = "7"
+	cr.Status.IAMRoleARN = "arn:aws:iam::123456789012:role/x"
+
+	data, err := statusPatch(original, cr).Data(cr)
+	if err != nil {
+		t.Fatalf("Data() error = %v", err)
+	}
+	if strings.Contains(string(data), "resourceVersion") {
+		t.Errorf("patch must not carry resourceVersion as an implicit precondition, got %s", data)
+	}
+	if !strings.Contains(string(data), "iamRoleARN") {
+		t.Errorf("expected the status change to be in the patch, got %s", data)
+	}
+}
+
+func TestCheckpointFor_LaterCheckpointSurvivesAConcurrentSpecEdit(t *testing.T) {
+	scheme := newSharedWithScheme(t)
+	seed := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(seed).
+		WithStatusSubresource(&depsv1alpha1.AppDependencies{}).
+		Build()
+
+	var reconcilerCR depsv1alpha1.AppDependencies
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(seed), &reconcilerCR); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	r := &AppDependenciesReconciler{Client: c, Scheme: scheme}
+	checkpoint := checkpointFor(r, &reconcilerCR, reconcilerCR.DeepCopy())
+
+	first := []depsv1alpha1.ManagedResource{{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:111111111111:orders"}}
+	if err := checkpoint(context.Background(), first); err != nil {
+		t.Fatalf("first checkpoint() error = %v", err)
+	}
+
+	var editor depsv1alpha1.AppDependencies
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(seed), &editor); err != nil {
+		t.Fatalf("Get (editor): %v", err)
+	}
+	editor.Spec.SQS = &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	if err := c.Update(context.Background(), &editor); err != nil {
+		t.Fatalf("concurrent spec edit: %v", err)
+	}
+
+	second := append(first, depsv1alpha1.ManagedResource{Type: "sns", Name: "events", ARN: "arn:aws:sns:us-east-1:111111111111:events"})
+	if err := checkpoint(context.Background(), second); err != nil {
+		t.Fatalf("second checkpoint() rejected by a spec edit made after the first: %v", err)
 	}
 }

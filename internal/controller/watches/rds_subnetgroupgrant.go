@@ -36,9 +36,7 @@ import (
 // sharedWith changes, just for this cluster-scoped grant instead of
 // another AppDependencies CR.
 //
-// Lists every AppDependencies CR cluster-wide on every grant event - see
-// ProducerToConsumers for why that's an accepted tradeoff at this
-// project's target scale.
+// Looks CRs up through IndexRDSSubnetGroup rather than listing them all.
 func SubnetGroupGrantToAffectedCRs(reader client.Reader) handler.MapFunc {
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
 		grant, ok := obj.(*depsv1alpha1.RDSSubnetGroupGrant)
@@ -46,34 +44,15 @@ func SubnetGroupGrantToAffectedCRs(reader client.Reader) handler.MapFunc {
 			return nil
 		}
 
-		var all depsv1alpha1.AppDependenciesList
-		if err := reader.List(ctx, &all); err != nil {
+		var affected depsv1alpha1.AppDependenciesList
+		if err := reader.List(ctx, &affected, client.MatchingFields{IndexRDSSubnetGroup: grant.Spec.DBSubnetGroupName}); err != nil {
 			return nil
 		}
 
 		var requests []reconcile.Request
-		for i := range all.Items {
-			cr := &all.Items[i]
-			if declaresSubnetGroup(cr, grant.Spec.DBSubnetGroupName) {
-				requests = append(requests, reconcile.Request{
-					NamespacedName: client.ObjectKeyFromObject(cr),
-				})
-			}
+		for i := range affected.Items {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&affected.Items[i])})
 		}
 		return requests
 	}
-}
-
-// declaresSubnetGroup reports whether cr declares any rds resource
-// referencing dbSubnetGroupName.
-func declaresSubnetGroup(cr *depsv1alpha1.AppDependencies, dbSubnetGroupName string) bool {
-	if cr.Spec.RDS == nil {
-		return false
-	}
-	for _, res := range cr.Spec.RDS.Resources {
-		if res.DBSubnetGroupName == dbSubnetGroupName {
-			return true
-		}
-	}
-	return false
 }

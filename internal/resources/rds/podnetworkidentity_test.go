@@ -24,6 +24,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,8 +78,8 @@ func TestEnsurePodNetworkIdentity_HappyPath(t *testing.T) {
 		t.Fatalf("EnsurePodNetworkIdentity() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !entryFound {
 		t.Fatal("expected a published pod-network-identity ledger entry")
 	}
 	groupID := SecurityGroupIDFromARN(entry.ARN)
@@ -130,7 +131,7 @@ func TestEnsurePodNetworkIdentity_NoResolvedProducer_SkipsSilently(t *testing.T)
 	if err != nil {
 		t.Fatalf("expected no error for an unresolved forward reference, got %v", err)
 	}
-	if status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) != nil {
+	if status.HasManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) {
 		t.Error("expected no ledger entry to be published yet")
 	}
 	if len(ec2Client.groups) != 0 {
@@ -175,8 +176,7 @@ func TestEnsurePodNetworkIdentity_UsesFirstResolvedProducer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsurePodNetworkIdentity() error = %v", err)
 	}
-	entry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if entry == nil {
+	if !status.HasManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) {
 		t.Fatal("expected a published ledger entry using the second, resolved producer")
 	}
 }
@@ -194,14 +194,16 @@ func TestEnsurePodNetworkIdentity_IsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first EnsurePodNetworkIdentity() error = %v", err)
 	}
-	firstARN := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName).ARN
+	firstARNEntry, _ := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	firstARN := firstARNEntry.ARN
 
 	ledger, err = EnsurePodNetworkIdentity(context.Background(), rdsClient, ec2Client, k8sClient,
 		"fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", testRegion, testAccountID, consumes, ledger)
 	if err != nil {
 		t.Fatalf("second EnsurePodNetworkIdentity() error = %v", err)
 	}
-	secondARN := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName).ARN
+	secondARNEntry, _ := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	secondARN := secondARNEntry.ARN
 
 	if firstARN != secondARN {
 		t.Errorf("expected the same security group across reconciles, got %q then %q", firstARN, secondARN)
@@ -255,7 +257,7 @@ func TestEnsurePodNetworkIdentity_DoesNotPublishLedgerEntryOnFailure(t *testing.
 
 	ledger, _ := EnsurePodNetworkIdentity(context.Background(), rdsClient, ec2Client, k8sClient,
 		"fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", testRegion, testAccountID, consumes, nil)
-	if status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) != nil {
+	if status.HasManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) {
 		t.Error("expected no ledger entry to be published when a dependent step failed")
 	}
 }
@@ -275,6 +277,10 @@ func TestEnsurePodNetworkIdentity_StaysInExistingVPC_WhenStillJustified(t *testi
 	groupName := cloudctlaws.ResourceName("fulfillment", "fulfillment-service", "rds-pod-sg", "network-identity", 255)
 	existing, err := ec2Client.CreateSecurityGroup(context.Background(), &ec2.CreateSecurityGroupInput{
 		GroupName: &groupName, VpcId: aws.String("vpc-vpc-a-subnets"),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeSecurityGroup,
+			Tags:         mapToEC2Tags(ownerTags("fulfillment", "fulfillment-service", "uid-1")),
+		}},
 	})
 	if err != nil {
 		t.Fatalf("setup: creating pre-existing security group: %v", err)
@@ -301,8 +307,8 @@ func TestEnsurePodNetworkIdentity_StaysInExistingVPC_WhenStillJustified(t *testi
 	if len(ec2Client.groups) != 1 {
 		t.Fatalf("expected no new security group to be created, got %d groups", len(ec2Client.groups))
 	}
-	entry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if entry == nil || SecurityGroupIDFromARN(entry.ARN) != *existing.GroupId {
+	entry, entryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !entryFound || SecurityGroupIDFromARN(entry.ARN) != *existing.GroupId {
 		t.Errorf("expected the ledger to keep pointing at the existing group %q, got %v", *existing.GroupId, entry)
 	}
 }
@@ -321,6 +327,10 @@ func TestEnsurePodNetworkIdentity_MigratesVPC_WhenNoLongerJustified(t *testing.T
 	groupName := cloudctlaws.ResourceName("fulfillment", "fulfillment-service", "rds-pod-sg", "network-identity", 255)
 	existing, err := ec2Client.CreateSecurityGroup(context.Background(), &ec2.CreateSecurityGroupInput{
 		GroupName: &groupName, VpcId: aws.String("vpc-vpc-a-subnets"),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeSecurityGroup,
+			Tags:         mapToEC2Tags(ownerTags("fulfillment", "fulfillment-service", "uid-1")),
+		}},
 	})
 	if err != nil {
 		t.Fatalf("setup: creating pre-existing security group: %v", err)
@@ -342,8 +352,8 @@ func TestEnsurePodNetworkIdentity_MigratesVPC_WhenNoLongerJustified(t *testing.T
 		t.Fatalf("EnsurePodNetworkIdentity() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !entryFound {
 		t.Fatal("expected a published ledger entry")
 	}
 	newGroupID := SecurityGroupIDFromARN(entry.ARN)
@@ -370,6 +380,10 @@ func TestEnsurePodNetworkIdentity_SkipsVPCRecheckWithinTrustWindow(t *testing.T)
 	groupName := cloudctlaws.ResourceName("fulfillment", "fulfillment-service", "rds-pod-sg", "network-identity", 255)
 	existing, err := ec2Client.CreateSecurityGroup(context.Background(), &ec2.CreateSecurityGroupInput{
 		GroupName: &groupName, VpcId: aws.String("vpc-vpc-a-subnets"),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeSecurityGroup,
+			Tags:         mapToEC2Tags(ownerTags("fulfillment", "fulfillment-service", "uid-1")),
+		}},
 	})
 	if err != nil {
 		t.Fatalf("setup: creating pre-existing security group: %v", err)
@@ -377,7 +391,7 @@ func TestEnsurePodNetworkIdentity_SkipsVPCRecheckWithinTrustWindow(t *testing.T)
 	recentlyVerified := metav1.Now()
 	existingLedger := []depsv1alpha1.ManagedResource{{
 		Type: podNetworkIdentityResourceType, Name: podNetworkIdentityLedgerName,
-		ARN: "arn:aws:ec2:" + testRegion + ":" + testAccountID + ":security-group/" + *existing.GroupId,
+		ARN:   "arn:aws:ec2:" + testRegion + ":" + testAccountID + ":security-group/" + *existing.GroupId,
 		State: depsv1alpha1.ManagedResourceStateVerified, LastVerifiedAt: &recentlyVerified,
 	}}
 	consumes := []depsv1alpha1.ConsumeRef{
@@ -397,8 +411,8 @@ func TestEnsurePodNetworkIdentity_SkipsVPCRecheckWithinTrustWindow(t *testing.T)
 	if rdsClient.describeDBSubnetGroupsCalls != 0 {
 		t.Errorf("expected no DescribeDBSubnetGroups call within the trust window, got %d", rdsClient.describeDBSubnetGroupsCalls)
 	}
-	entry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if entry == nil || SecurityGroupIDFromARN(entry.ARN) != *existing.GroupId {
+	entry, entryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !entryFound || SecurityGroupIDFromARN(entry.ARN) != *existing.GroupId {
 		t.Errorf("expected the ledger to keep pointing at the existing group %q, got %v", *existing.GroupId, entry)
 	}
 	if entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Time.Equal(recentlyVerified.Time) {
@@ -417,6 +431,10 @@ func TestEnsurePodNetworkIdentity_RechecksVPCOnceTrustWindowExpires(t *testing.T
 	groupName := cloudctlaws.ResourceName("fulfillment", "fulfillment-service", "rds-pod-sg", "network-identity", 255)
 	existing, err := ec2Client.CreateSecurityGroup(context.Background(), &ec2.CreateSecurityGroupInput{
 		GroupName: &groupName, VpcId: aws.String("vpc-vpc-a-subnets"),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeSecurityGroup,
+			Tags:         mapToEC2Tags(ownerTags("fulfillment", "fulfillment-service", "uid-1")),
+		}},
 	})
 	if err != nil {
 		t.Fatalf("setup: creating pre-existing security group: %v", err)
@@ -424,7 +442,7 @@ func TestEnsurePodNetworkIdentity_RechecksVPCOnceTrustWindowExpires(t *testing.T
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
 	existingLedger := []depsv1alpha1.ManagedResource{{
 		Type: podNetworkIdentityResourceType, Name: podNetworkIdentityLedgerName,
-		ARN: "arn:aws:ec2:" + testRegion + ":" + testAccountID + ":security-group/" + *existing.GroupId,
+		ARN:   "arn:aws:ec2:" + testRegion + ":" + testAccountID + ":security-group/" + *existing.GroupId,
 		State: depsv1alpha1.ManagedResourceStateVerified, LastVerifiedAt: &stale,
 	}}
 	consumes := []depsv1alpha1.ConsumeRef{
@@ -439,8 +457,8 @@ func TestEnsurePodNetworkIdentity_RechecksVPCOnceTrustWindowExpires(t *testing.T
 	if rdsClient.describeDBSubnetGroupsCalls != 1 {
 		t.Errorf("expected exactly 1 DescribeDBSubnetGroups call once the trust window expired, got %d", rdsClient.describeDBSubnetGroupsCalls)
 	}
-	entry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if entry == nil || entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Time.After(stale.Time) {
+	entry, entryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !entryFound || entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Time.After(stale.Time) {
 		t.Error("expected LastVerifiedAt to be refreshed after a real re-verification")
 	}
 }
@@ -473,7 +491,7 @@ func setUpPodNetworkIdentity(t *testing.T, rdsClient rdsAPI, ec2Client cloudctla
 	if err != nil {
 		t.Fatalf("setup EnsurePodNetworkIdentity() error = %v", err)
 	}
-	if status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) == nil {
+	if !status.HasManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) {
 		t.Fatal("setup: expected a published pod-network-identity ledger entry")
 	}
 	return ledger
@@ -483,7 +501,7 @@ func TestCleanupPodNetworkIdentity_NoEntryIsNoOp(t *testing.T) {
 	ec2Client := newFakeEC2()
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
-	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "fulfillment-service", nil)
+	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", nil)
 	if err != nil {
 		t.Fatalf("CleanupPodNetworkIdentity() error = %v", err)
 	}
@@ -500,7 +518,7 @@ func TestCleanupPodNetworkIdentity_TearsDownEverything(t *testing.T) {
 	ec2Client := newFakeEC2()
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	ledger := setUpPodNetworkIdentity(t, rdsClient, ec2Client, k8sClient)
-	entry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	entry, _ := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
 	groupID := SecurityGroupIDFromARN(entry.ARN)
 	policyName := cloudctlaws.ResourceName("fulfillment", "fulfillment-service", "rds-pod-sg-policy", "network-identity", 255)
 
@@ -511,7 +529,7 @@ func TestCleanupPodNetworkIdentity_TearsDownEverything(t *testing.T) {
 		t.Fatal("setup: expected the SecurityGroupPolicy to exist before cleanup")
 	}
 
-	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "fulfillment-service", ledger)
+	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", ledger)
 	if err != nil {
 		t.Fatalf("CleanupPodNetworkIdentity() error = %v", err)
 	}
@@ -529,7 +547,7 @@ func TestCleanupPodNetworkIdentity_TearsDownEverything(t *testing.T) {
 	if _, stillLabeled := sa.Labels[serviceaccount.NetworkIdentityLabelKey]; stillLabeled {
 		t.Error("expected the network-identity label to be released from the ServiceAccount")
 	}
-	if status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) != nil {
+	if status.HasManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) {
 		t.Error("expected the ledger entry to be removed")
 	}
 }
@@ -539,15 +557,15 @@ func TestCleanupPodNetworkIdentity_SecurityGroupAlreadyGone_TreatedAsSuccess(t *
 	ec2Client := newFakeEC2()
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	ledger := setUpPodNetworkIdentity(t, rdsClient, ec2Client, k8sClient)
-	entry := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	entry, _ := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
 	groupID := SecurityGroupIDFromARN(entry.ARN)
 	delete(ec2Client.groups, groupID) // deleted out-of-band already
 
-	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "fulfillment-service", ledger)
+	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", ledger)
 	if err != nil {
 		t.Fatalf("expected an already-gone security group to be treated as success, got %v", err)
 	}
-	if status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) != nil {
+	if status.HasManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) {
 		t.Error("expected the ledger entry to still be removed")
 	}
 }
@@ -559,11 +577,11 @@ func TestCleanupPodNetworkIdentity_PropagatesDeleteSecurityGroupFailure(t *testi
 	ledger := setUpPodNetworkIdentity(t, rdsClient, ec2Client, k8sClient)
 
 	ec2Client.deleteSecurityGroupErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
-	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "fulfillment-service", ledger)
+	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", ledger)
 	if err == nil {
 		t.Fatal("expected a real (non-NotFound) DeleteSecurityGroup failure to propagate")
 	}
-	if status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) == nil {
+	if !status.HasManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) {
 		t.Error("expected the ledger entry to remain tracked after a failed cleanup, not silently dropped")
 	}
 }
@@ -584,11 +602,11 @@ func TestCleanupPodNetworkIdentity_PropagatesSecurityGroupPolicyDeleteFailure(t 
 	)
 	ledger := setUpPodNetworkIdentity(t, rdsClient, ec2Client, failingClient)
 
-	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, failingClient, "fulfillment", "fulfillment-service", "fulfillment-service", ledger)
+	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, failingClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", ledger)
 	if err == nil {
 		t.Fatal("expected the SecurityGroupPolicy delete failure to propagate")
 	}
-	if status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) == nil {
+	if !status.HasManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) {
 		t.Error("expected the ledger entry to remain tracked after a failed cleanup, not silently dropped")
 	}
 }
@@ -599,13 +617,13 @@ func TestCleanupPodNetworkIdentity_IsIdempotent(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	ledger := setUpPodNetworkIdentity(t, rdsClient, ec2Client, k8sClient)
 
-	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "fulfillment-service", ledger)
+	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", ledger)
 	if err != nil {
 		t.Fatalf("first CleanupPodNetworkIdentity() error = %v", err)
 	}
 	callsBefore := ec2Client.deleteSecurityGroupCalls
 
-	ledger, err = CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "fulfillment-service", ledger)
+	ledger, err = CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", ledger)
 	if err != nil {
 		t.Fatalf("second CleanupPodNetworkIdentity() error = %v", err)
 	}
@@ -647,5 +665,36 @@ func TestPodNetworkIdentityARN_IgnoresOtherLedgerEntries(t *testing.T) {
 	}}
 	if _, ok := PodNetworkIdentityARN(cr); ok {
 		t.Error("expected false when only unrelated ledger entries are present")
+	}
+}
+
+func TestCleanupPodNetworkIdentity_DoesNotDeleteAGroupItNoLongerOwns(t *testing.T) {
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	groupName := cloudctlaws.ResourceName("fulfillment", "fulfillment-service", "rds-pod-sg", "network-identity", 255)
+	created, err := ec2Client.CreateSecurityGroup(context.Background(), &ec2.CreateSecurityGroupInput{
+		GroupName: &groupName, VpcId: aws.String("vpc-a"),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeSecurityGroup,
+			Tags:         mapToEC2Tags(ownerTags("someone", "else", "uid-9")),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	ledger := []depsv1alpha1.ManagedResource{{
+		Type: podNetworkIdentityResourceType, Name: podNetworkIdentityLedgerName,
+		ARN: "arn:aws:ec2:" + testRegion + ":" + testAccountID + ":security-group/" + *created.GroupId,
+	}}
+
+	ledger, err = CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", ledger)
+	if err != nil {
+		t.Fatalf("CleanupPodNetworkIdentity() error = %v", err)
+	}
+	if _, stillThere := ec2Client.groups[*created.GroupId]; !stillThere {
+		t.Error("a group that isn't tagged as ours must not be deleted")
+	}
+	if len(ledger) != 0 {
+		t.Errorf("expected the ledger entry dropped even though the group was left alone, got %+v", ledger)
 	}
 }

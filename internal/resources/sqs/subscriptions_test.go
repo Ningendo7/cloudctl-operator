@@ -158,8 +158,8 @@ func TestEnsureSubscriptions_CreatesSubscriptionAndGrantsQueuePolicy(t *testing.
 	}
 
 	ledgerName := subscriptionLedgerName("orders", ref)
-	entry := status.FindManagedResource(ledger, subscriptionResourceType, ledgerName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, subscriptionResourceType, ledgerName)
+	if !entryFound {
 		t.Fatal("expected a ledger entry for the new subscription")
 	}
 	if entry.ARN == "" {
@@ -261,7 +261,7 @@ func TestCleanupSubscriptions_RemovedFromSpec_Unsubscribes(t *testing.T) {
 		t.Fatalf("expected exactly one Unsubscribe call, got %d", len(snsClient.unsubscribed))
 	}
 	ledgerName := subscriptionLedgerName("orders", ref)
-	if status.FindManagedResource(ledger, subscriptionResourceType, ledgerName) != nil {
+	if status.HasManagedResource(ledger, subscriptionResourceType, ledgerName) {
 		t.Error("expected the ledger entry to be removed")
 	}
 	if policyStatementCount(t, sqsClient.queues["orders"].policy) != 0 {
@@ -303,7 +303,7 @@ func TestCleanupSubscriptions_SharedWithRevoked_StillDeclared_Unsubscribes(t *te
 		t.Fatalf("expected the revoked subscription to be torn down, got %d Unsubscribe calls", len(snsClient.unsubscribed))
 	}
 	ledgerName := subscriptionLedgerName("orders", ref)
-	if status.FindManagedResource(ledger, subscriptionResourceType, ledgerName) != nil {
+	if status.HasManagedResource(ledger, subscriptionResourceType, ledgerName) {
 		t.Error("expected the ledger entry to be removed")
 	}
 }
@@ -335,7 +335,7 @@ func TestCleanupSubscriptions_StillDeclaredAndAuthorized_LeavesAlone(t *testing.
 		t.Errorf("expected the still-authorized subscription to be left alone, got %d Unsubscribe calls", len(snsClient.unsubscribed))
 	}
 	ledgerName := subscriptionLedgerName("orders", ref)
-	if status.FindManagedResource(ledger, subscriptionResourceType, ledgerName) == nil {
+	if !status.HasManagedResource(ledger, subscriptionResourceType, ledgerName) {
 		t.Error("expected the ledger entry to still be present")
 	}
 }

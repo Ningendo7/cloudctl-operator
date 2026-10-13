@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 )
@@ -45,7 +44,7 @@ func TestSubnetGroupGrantToAffectedCRs_MapsMatchingCRsOnly(t *testing.T) {
 	}
 	noRDS := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "checkout", Name: "no-rds-service"}}
 
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant, matching, differentSubnetGroup, noRDS).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(grant, matching, differentSubnetGroup, noRDS).Build()
 
 	requests := SubnetGroupGrantToAffectedCRs(k8sClient)(context.Background(), grant)
 	if !containsRequest(requests, "checkout", "orders-service") {
@@ -68,7 +67,7 @@ func TestSubnetGroupGrantToAffectedCRs_MultipleResourcesSameCR_MapsOnce(t *testi
 			{Name: "invoices-db", DBSubnetGroupName: "prod-private-data-tier"},
 		}}},
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant, cr).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(grant, cr).Build()
 
 	requests := SubnetGroupGrantToAffectedCRs(k8sClient)(context.Background(), grant)
 	count := 0
@@ -84,7 +83,7 @@ func TestSubnetGroupGrantToAffectedCRs_MultipleResourcesSameCR_MapsOnce(t *testi
 
 func TestSubnetGroupGrantToAffectedCRs_WrongObjectType_ReturnsNil(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"}}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(cr).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(cr).Build()
 
 	// The watch is registered against RDSSubnetGroupGrant, so this should
 	// never actually happen in practice - exercised anyway, since silently
@@ -101,7 +100,7 @@ func TestSubnetGroupGrantToAffectedCRs_NoMatchingCRs(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "prod-grant"},
 		Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "prod-private-data-tier"},
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(grant).Build()
 
 	requests := SubnetGroupGrantToAffectedCRs(k8sClient)(context.Background(), grant)
 	if len(requests) != 0 {

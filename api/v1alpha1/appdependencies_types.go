@@ -92,23 +92,26 @@ type ConsumeRef struct {
 	ResourceName string `json:"resourceName"`
 }
 
-// EncryptionSpec configures server-side encryption with a KMS key for one
+// EncryptionSpec configures storage encryption with a KMS key for one
 // resource. enabled provisions a dedicated, operator-owned key just for
 // this resource — the common case, no kms section ever needs to be
-// touched. kmsKeyRef instead points at an explicitly declared kms
-// resource (this CR's own, or another CR's, shared via its sharedWith,
-// resolved through the exact same authorization path as any other
-// consumes reference) for deliberate reuse of one key across multiple
-// resources. The two are mutually exclusive: reusing a key and owning a
-// dedicated one are different decisions, not a spectrum.
+// touched. kmsKeyRef instead names a key declared under this CR's own
+// kms.resources, for deliberate reuse of one key across several of this
+// CR's resources. Keys are never shared across CRs: a resource encrypted
+// with another team's key would depend on that team for its own data's
+// availability. The two are mutually exclusive: reusing a key and owning
+// a dedicated one are different decisions, not a spectrum.
 // +kubebuilder:validation:XValidation:rule="!(self.enabled == true && has(self.kmsKeyRef))",message="enabled and kmsKeyRef are mutually exclusive"
 type EncryptionSpec struct {
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
+	// kmsKeyRef is the name of an entry in this CR's kms.resources.
 	// +optional
-	KMSKeyRef *ConsumeRef `json:"kmsKeyRef,omitempty"`
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9_/-]+$`
+	KMSKeyRef string `json:"kmsKeyRef,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -633,8 +636,13 @@ type RDSInstanceSpec struct {
 	// +kubebuilder:validation:Enum=postgres;mysql;mariadb
 	Engine string `json:"engine"`
 
+	// engineVersion is the minimum engine version, as dotted numbers such as
+	// "16" or "16.4". A higher version upgrades the instance (a major
+	// upgrade included); an instance already at or past it is left alone,
+	// since AWS applies minor upgrades itself and never downgrades.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)*$`
 	EngineVersion string `json:"engineVersion"`
 
 	// +kubebuilder:validation:Required
@@ -642,8 +650,9 @@ type RDSInstanceSpec struct {
 	// +kubebuilder:validation:Pattern=`^db\.[a-z0-9]+\.[a-z0-9]+$`
 	InstanceClass string `json:"instanceClass"`
 
-	// allocatedStorage in GiB. AWS rejects any decrease via ModifyDBInstance,
-	// so this field can only grow once set.
+	// allocatedStorage in GiB. Can only grow once set. AWS rounds a growth
+	// up to at least 10% more than the current size. Growth applies at once
+	// when nothing else is pending, otherwise with the other changes.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=20
 	// +kubebuilder:validation:Maximum=65536
@@ -654,6 +663,19 @@ type RDSInstanceSpec struct {
 	// +kubebuilder:default=Retain
 	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
 
+	// allowMajorVersionUpgrade lets engineVersion move the instance to a new
+	// major version. Without it a major upgrade is refused, since it can't be
+	// undone and can break applications.
+	// +optional
+	AllowMajorVersionUpgrade bool `json:"allowMajorVersionUpgrade,omitempty"`
+
+	// applyImmediately applies instance class, engine version, Multi-AZ,
+	// backup and storage changes now instead of in the instance's next
+	// weekly maintenance window. Class and engine changes cause downtime,
+	// and an immediate change also applies any change already pending.
+	// +optional
+	ApplyImmediately bool `json:"applyImmediately,omitempty"`
+
 	// adopt allows this CR to take ownership of a pre-existing AWS
 	// resource found under this entry's deterministic name that isn't
 	// already tagged as owned by this CR. Same semantics as every other
@@ -663,9 +685,9 @@ type RDSInstanceSpec struct {
 
 	// sharedWith grants other AppDependencies CRs network access to this
 	// instance via a dedicated, operator-owned security group - not an
-	// IAM grant. Connecting with a mirrored Secret username/password is a
-	// plain TCP+SQL login, so sharedWith here authorizes network reachability,
-	// never API permissions.
+	// IAM grant. It authorizes network reachability only: a consumer gets
+	// the host and port in its ConfigMap but never credentials, which stay
+	// with the owner, who creates per-app database users.
 	// Requires EKS Security Groups for Pods to be enabled on the cluster.
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
@@ -677,6 +699,9 @@ type RDSInstanceSpec struct {
 	// +optional
 	HighAvailability *RDSHighAvailabilitySpec `json:"highAvailability,omitempty"`
 
+	// backup enables automated backups. They are only ever turned on or
+	// extended, never turned off or shortened: that deletes existing
+	// backups, so do it in AWS directly if intended.
 	// +optional
 	Backup *RDSBackupSpec `json:"backup,omitempty"`
 
@@ -737,13 +762,6 @@ type KMSKeySpec struct {
 	// not just gone from this CR.
 	// +optional
 	Adopt bool `json:"adopt,omitempty"`
-
-	// +optional
-	// +kubebuilder:validation:MaxItems=20
-	// +listType=map
-	// +listMapKey=namespace
-	// +listMapKey=name
-	SharedWith []SharedWithEntry `json:"sharedWith,omitempty"`
 }
 
 type KMSSpec struct {
@@ -752,14 +770,6 @@ type KMSSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	Resources []KMSKeySpec `json:"resources,omitempty"`
-
-	// +optional
-	// +kubebuilder:validation:MaxItems=50
-	// +listType=map
-	// +listMapKey=namespace
-	// +listMapKey=name
-	// +listMapKey=resourceName
-	Consumes []ConsumeRef `json:"consumes,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

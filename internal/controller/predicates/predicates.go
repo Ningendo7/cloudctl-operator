@@ -17,6 +17,8 @@ limitations under the License.
 package predicates
 
 import (
+	"maps"
+
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -44,6 +46,41 @@ func AppDependenciesPredicate() predicate.Predicate {
 			},
 		},
 	)
+}
+
+// ProducerChangedPredicate is AppDependenciesPredicate plus updates where a
+// resource's ARN appeared, changed or disappeared in status.managedResources.
+// Consumers resolve producers through those ARNs, which only change in
+// status, so a spec-only filter would leave them stale until their own
+// next requeue. Other ledger churn (timestamps, state) is ignored.
+func ProducerChangedPredicate() predicate.Predicate {
+	return predicate.Or(
+		AppDependenciesPredicate(),
+		predicate.Funcs{
+			CreateFunc:  func(event.CreateEvent) bool { return false },
+			DeleteFunc:  func(event.DeleteEvent) bool { return false },
+			GenericFunc: func(event.GenericEvent) bool { return false },
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				oldCR, ok := e.ObjectOld.(*depsv1alpha1.AppDependencies)
+				if !ok {
+					return false
+				}
+				newCR, ok := e.ObjectNew.(*depsv1alpha1.AppDependencies)
+				if !ok {
+					return false
+				}
+				return !maps.Equal(ledgerARNs(oldCR), ledgerARNs(newCR))
+			},
+		},
+	)
+}
+
+func ledgerARNs(cr *depsv1alpha1.AppDependencies) map[string]string {
+	arns := make(map[string]string, len(cr.Status.ManagedResources))
+	for _, r := range cr.Status.ManagedResources {
+		arns[r.Type+"/"+r.Name] = r.ARN
+	}
+	return arns
 }
 
 // AnnotationValueChangedPredicate reconciles on Create/Delete/Generic

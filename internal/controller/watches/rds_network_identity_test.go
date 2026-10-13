@@ -40,7 +40,7 @@ func TestConsumerPodIdentityToRDSProducers_MapsProducerThatSharesWithConsumer(t 
 			Name: "invoices-db", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "analytics", Name: "analytics-service"}},
 		}}}},
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer, producer, unrelatedProducer).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(consumer, producer, unrelatedProducer).Build()
 
 	requests := ConsumerPodIdentityToRDSProducers(k8sClient)(context.Background(), consumer)
 
@@ -64,7 +64,7 @@ func TestConsumerPodIdentityToRDSProducers_MapsOnlyOncePerProducerWithMultipleRe
 			{Name: "invoices-db", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}},
 		}}},
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer, producer).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(consumer, producer).Build()
 
 	requests := ConsumerPodIdentityToRDSProducers(k8sClient)(context.Background(), consumer)
 
@@ -90,7 +90,7 @@ func TestConsumerPodIdentityToRDSProducers_NeverMapsConsumerToItself(t *testing.
 			Name: "orders-db", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "default", Name: "checkout-service"}},
 		}}}},
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(self).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(self).Build()
 
 	requests := ConsumerPodIdentityToRDSProducers(k8sClient)(context.Background(), self)
 	if len(requests) != 0 {
@@ -100,7 +100,7 @@ func TestConsumerPodIdentityToRDSProducers_NeverMapsConsumerToItself(t *testing.
 
 func TestConsumerPodIdentityToRDSProducers_NoSharingProducers(t *testing.T) {
 	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(consumer).Build()
 
 	requests := ConsumerPodIdentityToRDSProducers(k8sClient)(context.Background(), consumer)
 	if len(requests) != 0 {
@@ -111,7 +111,7 @@ func TestConsumerPodIdentityToRDSProducers_NoSharingProducers(t *testing.T) {
 func TestConsumerPodIdentityToRDSProducers_IgnoresProducerWithNoRDSSpec(t *testing.T) {
 	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
 	noRDS := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "no-rds-service"}}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer, noRDS).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(consumer, noRDS).Build()
 
 	requests := ConsumerPodIdentityToRDSProducers(k8sClient)(context.Background(), consumer)
 	if len(requests) != 0 {

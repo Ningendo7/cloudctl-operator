@@ -100,7 +100,7 @@ var _ = Describe("AppDependencies watches on its generated ConfigMap", Ordered, 
 		reconciler := &AppDependenciesReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),
-			Scheme: mgr.GetScheme(),
+			Scheme:    mgr.GetScheme(),
 			AWSClients: &cloudctlaws.Clients{
 				SQS: newFakeSQSClient(), SNS: newFakeSNSClient(), IAM: newFakeIAMClient(),
 				KMS: newFakeKMSClient(), CloudWatch: newFakeCloudWatchClient(),

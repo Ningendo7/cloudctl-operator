@@ -318,7 +318,7 @@ var _ = Describe("AppDependencies CRD validation", func() {
 								Name: "orders",
 								Encryption: &depsv1alpha1.EncryptionSpec{
 									Enabled:   true,
-									KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "default", Name: "checkout-service", ResourceName: "primary"},
+									KMSKeyRef: "primary",
 								},
 							},
 						},
@@ -359,7 +359,7 @@ var _ = Describe("AppDependencies CRD validation", func() {
 							{
 								Name: "orders",
 								Encryption: &depsv1alpha1.EncryptionSpec{
-									KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "default", Name: "checkout-service", ResourceName: "primary"},
+									KMSKeyRef: "primary",
 								},
 							},
 						},

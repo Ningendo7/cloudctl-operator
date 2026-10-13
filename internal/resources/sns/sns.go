@@ -114,11 +114,11 @@ func ensureTopic(
 
 	var kmsKeyARN *string
 	if t.Encryption != nil {
-		if t.Encryption.KMSKeyRef != nil {
-			arn, ok := kms.ResolveSharedKeyARN(ctx, k8sClient, namespace, crName, *t.Encryption.KMSKeyRef)
+		if t.Encryption.KMSKeyRef != "" {
+			arn, ok := kms.SharedKeyARN(ledger, t.Encryption.KMSKeyRef)
 			if !ok {
 				return ledger, &cloudctlaws.ReconcileError{
-					Err:       fmt.Errorf("encryption.kmsKeyRef %s/%s/%s is not yet authorized (producer must list this CR in the key's sharedWith) or does not exist yet", t.Encryption.KMSKeyRef.Namespace, t.Encryption.KMSKeyRef.Name, t.Encryption.KMSKeyRef.ResourceName),
+					Err:       fmt.Errorf("encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources", t.Encryption.KMSKeyRef),
 					Retryable: true,
 				}
 			}
@@ -134,7 +134,7 @@ func ensureTopic(
 		}
 	}
 
-	if existing := status.FindManagedResource(ledger, resourceType, t.Name); existing != nil && !status.NeedsRevalidation(*existing) {
+	if existing, existingFound := status.FindManagedResource(ledger, resourceType, t.Name); existingFound && !status.NeedsRevalidation(existing) {
 		// Still within the trust window - skip re-verifying ownership, but
 		// attribute drift correction is a different concern and must still
 		// run every reconcile regardless of the trust window. Local-only
@@ -142,7 +142,7 @@ func ensureTopic(
 		// with no AWS call needed, so refresh those against the cached
 		// entry; ARN and LastVerifiedAt stay as they were until the window
 		// actually expires and a real ownership check runs again.
-		updated := *existing
+		updated := existing
 		updated.DeletionPolicy = t.DeletionPolicy
 		updated.Force = t.Force
 		status.UpsertManagedResource(&ledger, updated)
@@ -288,7 +288,7 @@ func reconcileTopicAttributes(ctx context.Context, awsClient snsAPI, topicArn st
 func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn string, deletionPolicy depsv1alpha1.DeletionPolicy, force bool) []depsv1alpha1.ManagedResource {
 	now := metav1.Now()
 	createdAt := now
-	if existing := status.FindManagedResource(ledger, resourceType, ledgerName); existing != nil {
+	if existing, existingFound := status.FindManagedResource(ledger, resourceType, ledgerName); existingFound {
 		createdAt = existing.CreatedAt
 	}
 

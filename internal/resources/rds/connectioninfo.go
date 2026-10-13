@@ -88,9 +88,8 @@ func ResolveConnectionInfo(ctx context.Context, awsClient rdsAPI, instanceARN st
 // IsConsumerAuthorized reports whether producer's declared rds resource
 // named resourceName lists namespace/name in its sharedWith - the same
 // network-authorization check EnsureSecurityGroup's ingress rule already
-// applies, reused here so connection-info delivery (the ConfigMap/Secret
-// a consumer reads) can never expose more than the security group itself
-// would actually let that consumer reach.
+// applies, reused so the ConfigMap a consumer reads (host and port, never
+// credentials) only describes an instance it can actually reach.
 func IsConsumerAuthorized(producer *depsv1alpha1.AppDependencies, resourceName, namespace, name string) bool {
 	if producer.Spec.RDS == nil {
 		return false

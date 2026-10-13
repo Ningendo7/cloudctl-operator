@@ -35,45 +35,24 @@ import (
 // predicates.PodNetworkIdentityPublishedPredicate, which keeps this from
 // firing on unrelated status churn.
 //
-// Lists every AppDependencies CR cluster-wide on every qualifying event -
-// same accepted tradeoff as ProducerToConsumers and
-// SubnetGroupGrantToAffectedCRs, fine at this operator's target scale,
-// revisit with a client.IndexField if it ever shows up as a real cost.
+// Looks producers up through IndexRDSSharedWith rather than listing every CR.
 func ConsumerPodIdentityToRDSProducers(reader client.Reader) handler.MapFunc {
 	return func(ctx context.Context, consumer client.Object) []reconcile.Request {
 		consumerNS, consumerName := consumer.GetNamespace(), consumer.GetName()
 
-		var all depsv1alpha1.AppDependenciesList
-		if err := reader.List(ctx, &all); err != nil {
+		var producers depsv1alpha1.AppDependenciesList
+		if err := reader.List(ctx, &producers, client.MatchingFields{IndexRDSSharedWith: NamespacedKey(consumerNS, consumerName)}); err != nil {
 			return nil
 		}
 
 		var requests []reconcile.Request
-		for i := range all.Items {
-			producer := &all.Items[i]
+		for i := range producers.Items {
+			producer := &producers.Items[i]
 			if producer.Namespace == consumerNS && producer.Name == consumerName {
 				continue
 			}
-			if producer.Spec.RDS == nil {
-				continue
-			}
-			if sharesAnyResourceWith(producer.Spec.RDS.Resources, consumerNS, consumerName) {
-				requests = append(requests, reconcile.Request{
-					NamespacedName: client.ObjectKeyFromObject(producer),
-				})
-			}
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(producer)})
 		}
 		return requests
 	}
-}
-
-func sharesAnyResourceWith(resources []depsv1alpha1.RDSInstanceSpec, namespace, name string) bool {
-	for _, r := range resources {
-		for _, sw := range r.SharedWith {
-			if sw.Namespace == namespace && sw.Name == name {
-				return true
-			}
-		}
-	}
-	return false
 }

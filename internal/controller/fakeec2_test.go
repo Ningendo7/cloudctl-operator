@@ -116,7 +116,11 @@ func toSecurityGroupType(g *fakeSecurityGroup) types.SecurityGroup {
 			UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: aws.String(rule.consumerGroupID)}},
 		})
 	}
-	return types.SecurityGroup{GroupId: &g.id, GroupName: &g.name, VpcId: &g.vpcID, IpPermissions: perms}
+	tags := make([]types.Tag, 0, len(g.tags))
+	for k, v := range g.tags {
+		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	return types.SecurityGroup{GroupId: &g.id, GroupName: &g.name, VpcId: &g.vpcID, IpPermissions: perms, Tags: tags}
 }
 
 func (f *fakeEC2Client) AuthorizeSecurityGroupIngress(_ context.Context, in *ec2.AuthorizeSecurityGroupIngressInput, _ ...func(*ec2.Options)) (*ec2.AuthorizeSecurityGroupIngressOutput, error) {

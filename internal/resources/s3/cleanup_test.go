@@ -18,6 +18,7 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -54,39 +55,42 @@ func findResult(results []CleanupResult, name string) *CleanupResult {
 
 func advancePastQuietWindow(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string) {
 	t.Helper()
-	entry := status.FindManagedResource(ledger, "s3", name)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "s3", name)
+	if !entryFound {
 		t.Fatalf("test setup broken: no ledger entry named %q", name)
 	}
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 }
 
 // advancePastEmptyCheckBackoffStart pushes PendingDeletionSince back far
 // enough that status.NeedsEmptyCheck's backoff window has started.
 func advancePastEmptyCheckBackoffStart(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string) {
 	t.Helper()
-	entry := status.FindManagedResource(ledger, "s3", name)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "s3", name)
+	if !entryFound {
 		t.Fatalf("test setup broken: no ledger entry named %q", name)
 	}
 	past := metav1.NewTime(time.Now().Add(-status.EmptyCheckBackoffStartAfter - time.Minute))
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 }
 
 // pushLastEmptyCheckIntoThePast backdates a ledger entry's LastEmptyCheckAt
 // by d, so a subsequent Cleanup() call sees the backoff interval as elapsed.
 func pushLastEmptyCheckIntoThePast(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string, d time.Duration) {
 	t.Helper()
-	entry := status.FindManagedResource(ledger, "s3", name)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "s3", name)
+	if !entryFound {
 		t.Fatalf("test setup broken: no ledger entry named %q", name)
 	}
 	past := metav1.NewTime(time.Now().Add(-d))
 	entry.LastEmptyCheckAt = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 }
 
 func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
@@ -104,7 +108,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	if _, stillExists := client.buckets[bucket]; !stillExists {
 		t.Error("expected Retain policy to leave the AWS bucket in place")
 	}
-	if status.FindManagedResource(updated, "s3", "receipts") == nil {
+	if !status.HasManagedResource(updated, "s3", "receipts") {
 		t.Error("expected retained entry to stay in the ledger")
 	}
 }
@@ -130,7 +134,7 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 	if _, stillExists := client.buckets[bucket]; !stillExists {
 		t.Error("expected the bucket to survive - an unset DeletionPolicy must never be treated as Delete")
 	}
-	if status.FindManagedResource(updated, "s3", "receipts") == nil {
+	if !status.HasManagedResource(updated, "s3", "receipts") {
 		t.Error("expected the retained entry to stay in the ledger")
 	}
 }
@@ -181,7 +185,7 @@ func TestCleanup_HoldsNewlyEligibleBucketForQuietWindowBeforeDeleting(t *testing
 	if _, stillExists := client.buckets[bucket]; stillExists {
 		t.Error("expected the bucket to be deleted once the quiet window elapsed and it's confirmed empty")
 	}
-	if status.FindManagedResource(updated, "s3", "receipts") != nil {
+	if status.HasManagedResource(updated, "s3", "receipts") {
 		t.Error("expected the ledger entry to be removed after deletion")
 	}
 }
@@ -250,7 +254,7 @@ func TestCleanup_BlocksDeletingNonEmptyBucketWithoutForce(t *testing.T) {
 	if _, stillExists := client.buckets[bucket]; !stillExists {
 		t.Error("expected the non-empty bucket to NOT be deleted")
 	}
-	if entry := status.FindManagedResource(updated, "s3", "receipts"); entry == nil || entry.PendingDeletionSince == nil {
+	if entry, entryFound := status.FindManagedResource(updated, "s3", "receipts"); !entryFound || entry.PendingDeletionSince == nil {
 		t.Error("expected PendingDeletionSince to remain recorded")
 	}
 }
@@ -275,8 +279,8 @@ func TestCleanup_PendingDeletion_FirstCheckPastBackoffStartStillRunsAndStamps(t 
 	if client.listObjectVersionsCalls != 1 {
 		t.Errorf("expected a real check on first encounter past the backoff start, got %d calls", client.listObjectVersionsCalls)
 	}
-	entry := status.FindManagedResource(updated, "s3", "receipts")
-	if entry == nil || entry.LastEmptyCheckAt == nil {
+	entry, entryFound := status.FindManagedResource(updated, "s3", "receipts")
+	if !entryFound || entry.LastEmptyCheckAt == nil {
 		t.Error("expected LastEmptyCheckAt to be stamped after a real check")
 	}
 }
@@ -362,7 +366,7 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
-	if entry := status.FindManagedResource(ledger, "s3", "receipts"); entry == nil || entry.LastEmptyCheckAt == nil {
+	if entry, entryFound := status.FindManagedResource(ledger, "s3", "receipts"); !entryFound || entry.LastEmptyCheckAt == nil {
 		t.Fatal("test setup broken: expected LastEmptyCheckAt to be stamped before the reappearance check")
 	}
 
@@ -373,8 +377,8 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup (reappeared) error = %v", err)
 	}
-	entry := status.FindManagedResource(updated, "s3", "receipts")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(updated, "s3", "receipts")
+	if !entryFound {
 		t.Fatal("expected the ledger entry to survive reappearance")
 	}
 	if entry.LastEmptyCheckAt != nil {
@@ -473,9 +477,10 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 	client.buckets[bucket].versions = []fakeObjectVersion{{key: "file.txt", versionID: "v1"}}
 
 	longAgo := metav1.NewTime(time.Now().Add(-2 * PendingDeletionGracePeriod))
-	entry := status.FindManagedResource(ledger, "s3", "receipts")
+	entry, _ := status.FindManagedResource(ledger, "s3", "receipts")
 	entry.PendingDeletionSince = &longAgo
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
 	if err != nil {
@@ -506,7 +511,7 @@ func TestCleanup_TreatsAlreadyDeletedBucketAsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v — expected an already-gone bucket to be treated as already cleaned up, not a failure", err)
 	}
-	if status.FindManagedResource(updated, "s3", "receipts") != nil {
+	if status.HasManagedResource(updated, "s3", "receipts") {
 		t.Error("expected the ledger entry to be removed for an already-gone bucket")
 	}
 }
@@ -533,6 +538,85 @@ func TestAbortMultipartUploads_PropagatesRealFailures(t *testing.T) {
 
 	if err := abortMultipartUploads(context.Background(), client, bucket); err == nil {
 		t.Error("expected a genuine abort failure to be reported, not silently swallowed")
+	}
+}
+
+func uploadsFixture(n int) []fakeUpload {
+	uploads := make([]fakeUpload, 0, n)
+	for i := range n {
+		uploads = append(uploads, fakeUpload{key: fmt.Sprintf("file-%03d.bin", i), uploadID: fmt.Sprintf("upload-%03d", i)})
+	}
+	return uploads
+}
+
+func TestAbortMultipartUploads_AbortsEveryPage(t *testing.T) {
+	client := newFakeS3()
+	bucket := "receipts-test"
+	client.multipartPageSize = 7
+	client.buckets[bucket] = &fakeBucket{uploads: uploadsFixture(50)}
+
+	if err := abortMultipartUploads(context.Background(), client, bucket); err != nil {
+		t.Fatalf("abortMultipartUploads() error = %v", err)
+	}
+	if left := len(client.buckets[bucket].uploads); left != 0 {
+		t.Errorf("expected all 50 uploads aborted across 8 pages, %d remain", left)
+	}
+}
+
+func TestAbortMultipartUploads_DeadlineLeavesAResumableRemainder(t *testing.T) {
+	client := newFakeS3()
+	bucket := "receipts-test"
+	client.multipartPageSize = 7
+	client.buckets[bucket] = &fakeBucket{uploads: uploadsFixture(50)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client.afterAborts = func(n int) {
+		if n == 10 {
+			cancel()
+		}
+	}
+
+	err := abortMultipartUploads(ctx, client, bucket)
+	if !errors.Is(err, errUploadsRemain) {
+		t.Fatalf("expected errUploadsRemain once the deadline hit, got %v", err)
+	}
+	left := len(client.buckets[bucket].uploads)
+	if left == 0 || left == 50 {
+		t.Fatalf("expected partial progress, %d of 50 remain", left)
+	}
+
+	client.afterAborts = nil
+	if err := abortMultipartUploads(context.Background(), client, bucket); err != nil {
+		t.Fatalf("resumed abortMultipartUploads() error = %v", err)
+	}
+	if left := len(client.buckets[bucket].uploads); left != 0 {
+		t.Errorf("expected the next pass to finish the job, %d remain", left)
+	}
+}
+
+func TestCleanup_DeadlineWhileAbortingUploadsIsRetryable(t *testing.T) {
+	client := newFakeS3()
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	client.buckets[bucket] = &fakeBucket{
+		tags:    map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+		uploads: uploadsFixture(20),
+	}
+	ledger := []depsv1alpha1.ManagedResource{{
+		Type: "s3", Name: "receipts", ARN: "arn:aws:s3:::" + bucket,
+		State: depsv1alpha1.ManagedResourceStateVerified, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete,
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client.afterAborts = func(n int) {
+		if n == 5 {
+			cancel()
+		}
+	}
+
+	_, _, err := Cleanup(ctx, client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, true, true, nil)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable error so the drain resumes, got %v", err)
 	}
 }
 
@@ -596,10 +680,10 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 		t.Fatal("expected an error reported for the corrupted-ownership receipts bucket")
 	}
 
-	if entry := status.FindManagedResource(updated, "s3", "logs"); entry == nil || entry.PendingDeletionSince == nil {
+	if entry, entryFound := status.FindManagedResource(updated, "s3", "logs"); !entryFound || entry.PendingDeletionSince == nil {
 		t.Error("expected logs to still be processed into its own pending-deletion window despite receipts failing")
 	}
-	if status.FindManagedResource(updated, "s3", "receipts") == nil {
+	if !status.HasManagedResource(updated, "s3", "receipts") {
 		t.Error("expected the failed receipts entry to remain in the ledger for retry")
 	}
 }

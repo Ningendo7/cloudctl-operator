@@ -99,3 +99,43 @@ func TestPodNetworkIdentityPublishedPredicate_IgnoresNonAppDependenciesObjects(t
 		t.Error("expected false for objects that aren't *AppDependencies")
 	}
 }
+
+func withLedger(entries ...depsv1alpha1.ManagedResource) *depsv1alpha1.AppDependencies {
+	return &depsv1alpha1.AppDependencies{Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: entries}}
+}
+
+func TestProducerChangedPredicate_UpdateFunc(t *testing.T) {
+	pred := ProducerChangedPredicate()
+	queue := depsv1alpha1.ManagedResource{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:orders"}
+	verified := queue
+	verified.State = depsv1alpha1.ManagedResourceStateVerified
+	now := metav1.Now()
+	verified.LastVerifiedAt = &now
+
+	tests := []struct {
+		name     string
+		old, new *depsv1alpha1.AppDependencies
+		want     bool
+	}{
+		{name: "ARN appears", old: withLedger(), new: withLedger(queue), want: true},
+		{name: "ARN disappears", old: withLedger(queue), new: withLedger(), want: true},
+		{name: "ARN changes", old: withLedger(queue), new: withLedger(depsv1alpha1.ManagedResource{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:other"}), want: true},
+		{name: "state and timestamps only", old: withLedger(queue), new: withLedger(verified), want: false},
+		{name: "no ledger change", old: withLedger(queue), new: withLedger(queue), want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pred.Update(event.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}); got != tc.want {
+				t.Errorf("Update() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProducerChangedPredicate_StillPassesSpecChanges(t *testing.T) {
+	old := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+	updated := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
+	if !ProducerChangedPredicate().Update(event.UpdateEvent{ObjectOld: old, ObjectNew: updated}) {
+		t.Error("expected a generation bump to still pass")
+	}
+}

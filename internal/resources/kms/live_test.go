@@ -111,8 +111,8 @@ func TestLive_Ensure_CreatesRealKeyWithAliasTagsAndRotation(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(ledger, resourceType, "primary")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, "primary")
+	if !entryFound {
 		t.Fatal("expected a ledger entry for the created key")
 	}
 	t.Cleanup(func() { deleteRealKeyDirectly(t, client, entry.ARN) })

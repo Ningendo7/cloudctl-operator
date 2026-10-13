@@ -55,26 +55,28 @@ func findResult(results []CleanupResult, name string) *CleanupResult {
 // enough that status.NeedsEmptyCheck's backoff window has started.
 func advancePastEmptyCheckBackoffStart(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string) {
 	t.Helper()
-	entry := status.FindManagedResource(ledger, "sns", name)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "sns", name)
+	if !entryFound {
 		t.Fatalf("test setup broken: no ledger entry named %q", name)
 	}
 	past := metav1.NewTime(time.Now().Add(-status.EmptyCheckBackoffStartAfter - time.Minute))
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 }
 
 // pushLastEmptyCheckIntoThePast backdates a ledger entry's LastEmptyCheckAt
 // by d, so a subsequent Cleanup() call sees the backoff interval as elapsed.
 func pushLastEmptyCheckIntoThePast(t *testing.T, ledger []depsv1alpha1.ManagedResource, name string, d time.Duration) {
 	t.Helper()
-	entry := status.FindManagedResource(ledger, "sns", name)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "sns", name)
+	if !entryFound {
 		t.Fatalf("test setup broken: no ledger entry named %q", name)
 	}
 	past := metav1.NewTime(time.Now().Add(-d))
 	entry.LastEmptyCheckAt = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 }
 
 func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
@@ -88,7 +90,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	if r := findResult(results, "events"); r == nil || r.Reason != CleanupReasonRetained {
 		t.Errorf("expected events to be reported Retained, got %+v", results)
 	}
-	if status.FindManagedResource(updated, "sns", "events") == nil {
+	if !status.HasManagedResource(updated, "sns", "events") {
 		t.Error("expected retained entry to stay in the ledger")
 	}
 	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
@@ -133,7 +135,7 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 	if _, stillExists := client.topics[topicArn]; !stillExists {
 		t.Error("expected the topic to survive - an unset DeletionPolicy must never be treated as Delete")
 	}
-	if status.FindManagedResource(updated, "sns", "events") == nil {
+	if !status.HasManagedResource(updated, "sns", "events") {
 		t.Error("expected the retained entry to stay in the ledger")
 	}
 }
@@ -177,8 +179,8 @@ func TestCleanup_HoldsNewlyEligibleTopicForQuietWindowBeforeDeleting(t *testing.
 	if _, stillExists := client.topics[topicArn]; !stillExists {
 		t.Fatal("expected the topic to survive the first pass even though it's empty right now")
 	}
-	entry := status.FindManagedResource(updated, "sns", "events")
-	if entry == nil || entry.PendingDeletionSince == nil {
+	entry, entryFound := status.FindManagedResource(updated, "sns", "events")
+	if !entryFound || entry.PendingDeletionSince == nil {
 		t.Fatal("expected PendingDeletionSince to be recorded on first encounter")
 	}
 
@@ -194,9 +196,11 @@ func TestCleanup_HoldsNewlyEligibleTopicForQuietWindowBeforeDeleting(t *testing.
 	}
 
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
-	entry = status.FindManagedResource(updated, "sns", "events")
+	entry, entryFound = status.FindManagedResource(updated, "sns", "events")
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&updated, *entry)
+	status.UpsertManagedResource(&updated, entry)
+	status.UpsertManagedResource(&updated, entry)
+	status.UpsertManagedResource(&updated, entry)
 
 	updated, results, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, updated, false, false, nil)
 	if err != nil {
@@ -208,7 +212,7 @@ func TestCleanup_HoldsNewlyEligibleTopicForQuietWindowBeforeDeleting(t *testing.
 	if _, stillExists := client.topics[topicArn]; stillExists {
 		t.Error("expected the topic to be deleted once the quiet window elapsed and it's confirmed empty")
 	}
-	if status.FindManagedResource(updated, "sns", "events") != nil {
+	if status.HasManagedResource(updated, "sns", "events") {
 		t.Error("expected the ledger entry to be removed after deletion")
 	}
 }
@@ -227,9 +231,10 @@ func TestCleanup_BlocksDeletingTopicWithActiveSubscriptions(t *testing.T) {
 	}
 
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
-	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry, _ := status.FindManagedResource(ledger, "sns", "events")
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, false, nil)
 	if err != nil {
@@ -241,7 +246,7 @@ func TestCleanup_BlocksDeletingTopicWithActiveSubscriptions(t *testing.T) {
 	if _, stillExists := client.topics[topicArn]; !stillExists {
 		t.Error("expected the topic with active subscriptions to NOT be deleted")
 	}
-	if entry := status.FindManagedResource(updated, "sns", "events"); entry == nil || entry.PendingDeletionSince == nil {
+	if entry, entryFound := status.FindManagedResource(updated, "sns", "events"); !entryFound || entry.PendingDeletionSince == nil {
 		t.Error("expected PendingDeletionSince to remain recorded")
 	}
 }
@@ -266,8 +271,8 @@ func TestCleanup_PendingDeletion_FirstCheckPastBackoffStartStillRunsAndStamps(t 
 	if client.listSubscriptionsByTopicCalls < 1 {
 		t.Errorf("expected a real check on first encounter past the backoff start, got %d calls", client.listSubscriptionsByTopicCalls)
 	}
-	entry := status.FindManagedResource(updated, "sns", "events")
-	if entry == nil || entry.LastEmptyCheckAt == nil {
+	entry, entryFound := status.FindManagedResource(updated, "sns", "events")
+	if !entryFound || entry.LastEmptyCheckAt == nil {
 		t.Error("expected LastEmptyCheckAt to be stamped after a real check")
 	}
 }
@@ -351,7 +356,7 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
 	}
-	if entry := status.FindManagedResource(ledger, "sns", "events"); entry == nil || entry.LastEmptyCheckAt == nil {
+	if entry, entryFound := status.FindManagedResource(ledger, "sns", "events"); !entryFound || entry.LastEmptyCheckAt == nil {
 		t.Fatal("test setup broken: expected LastEmptyCheckAt to be stamped before the reappearance check")
 	}
 
@@ -362,8 +367,8 @@ func TestCleanup_ReappearedInSpec_ClearsLastEmptyCheckAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup (reappeared) error = %v", err)
 	}
-	entry := status.FindManagedResource(updated, "sns", "events")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(updated, "sns", "events")
+	if !entryFound {
 		t.Fatal("expected the ledger entry to survive reappearance")
 	}
 	if entry.LastEmptyCheckAt != nil {
@@ -414,7 +419,7 @@ func TestCleanup_RemovesDenyPolicyWhenTopicReturnsToSpec(t *testing.T) {
 	if strings.Contains(client.topics[topicArn].policy, pendingDeletionDenySid) {
 		t.Errorf("expected the deny policy to be removed once the topic is declared again, got policy=%s", client.topics[topicArn].policy)
 	}
-	if entry := status.FindManagedResource(ledger, "sns", "events"); entry == nil || entry.PendingDeletionSince != nil {
+	if entry, entryFound := status.FindManagedResource(ledger, "sns", "events"); !entryFound || entry.PendingDeletionSince != nil {
 		t.Errorf("expected PendingDeletionSince to be cleared once the topic is declared again, got %+v", entry)
 	}
 }
@@ -426,9 +431,10 @@ func TestCleanup_EscalatesToStuckAfterGracePeriod(t *testing.T) {
 	client.topics[topicArn].subscriptions = 1
 
 	longAgo := metav1.NewTime(time.Now().Add(-2 * PendingDeletionGracePeriod))
-	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry, _ := status.FindManagedResource(ledger, "sns", "events")
 	entry.PendingDeletionSince = &longAgo
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, false, nil)
 	if err != nil {
@@ -490,9 +496,10 @@ func TestCleanup_TreatsAlreadyDeletedTopicAsSuccess(t *testing.T) {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
-	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry, _ := status.FindManagedResource(ledger, "sns", "events")
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	// Simulate the topic already having been deleted out from under us.
 	delete(client.topics, topicArn)
@@ -501,7 +508,7 @@ func TestCleanup_TreatsAlreadyDeletedTopicAsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Cleanup() error = %v — expected an already-gone topic to be treated as already cleaned up, not a failure", err)
 	}
-	if status.FindManagedResource(updated, "sns", "events") != nil {
+	if status.HasManagedResource(updated, "sns", "events") {
 		t.Error("expected the ledger entry to be removed for an already-gone topic")
 	}
 }
@@ -520,9 +527,10 @@ func TestCleanup_DoesNotForgetTopicOnTransientLookupError(t *testing.T) {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
-	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry, _ := status.FindManagedResource(ledger, "sns", "events")
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	client.listTagsForResourceErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultServer}
 
@@ -530,7 +538,7 @@ func TestCleanup_DoesNotForgetTopicOnTransientLookupError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a transient ListTagsForResource failure to be reported as an error, not silently swallowed")
 	}
-	if status.FindManagedResource(updated, "sns", "events") == nil {
+	if !status.HasManagedResource(updated, "sns", "events") {
 		t.Error("expected the ledger entry to survive a transient lookup failure, not be silently forgotten")
 	}
 }
@@ -593,10 +601,10 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 	// enters its mandatory quiet window rather than deleting it outright -
 	// what matters for this regression test is that it was processed at all
 	// (i.e. orders-events failing didn't stop the loop before reaching it).
-	if entry := status.FindManagedResource(updated, "sns", "user-events"); entry == nil || entry.PendingDeletionSince == nil {
+	if entry, entryFound := status.FindManagedResource(updated, "sns", "user-events"); !entryFound || entry.PendingDeletionSince == nil {
 		t.Error("expected user-events to still be processed into its own pending-deletion window despite orders-events failing")
 	}
-	if status.FindManagedResource(updated, "sns", "orders-events") == nil {
+	if !status.HasManagedResource(updated, "sns", "orders-events") {
 		t.Error("expected the failed orders-events entry to remain in the ledger for retry")
 	}
 }
@@ -658,9 +666,10 @@ func TestCleanup_DeletingTopic_EmitsDeletedEvent(t *testing.T) {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
-	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry, _ := status.FindManagedResource(ledger, "sns", "events")
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	recordEvent, events := newEventCollector()
 	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, false, recordEvent); err != nil {

@@ -222,8 +222,8 @@ func buildConnectionData(
 // ResolveConnectionInfo's ok is false) is skipped silently, same as every
 // other resource type's own forward-reference tolerance.
 func addOwnedRDS(ctx context.Context, rdsClient cloudctlaws.RDSClient, data map[string]string, cr *depsv1alpha1.AppDependencies, resourceName string) error {
-	entry := status.FindManagedResource(cr.Status.ManagedResources, resourceTypeRDS, resourceName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(cr.Status.ManagedResources, resourceTypeRDS, resourceName)
+	if !entryFound {
 		return nil
 	}
 	info, ok, err := rds.ResolveConnectionInfo(ctx, rdsClient, entry.ARN)
@@ -252,8 +252,8 @@ func addConsumedRDS(ctx context.Context, k8sClient client.Client, rdsClient clou
 	if !rds.IsConsumerAuthorized(&producer, ref.ResourceName, consumer.Namespace, consumer.Name) {
 		return nil
 	}
-	entry := status.FindManagedResource(producer.Status.ManagedResources, resourceTypeRDS, ref.ResourceName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(producer.Status.ManagedResources, resourceTypeRDS, ref.ResourceName)
+	if !entryFound {
 		return nil
 	}
 	info, ok, err := rds.ResolveConnectionInfo(ctx, rdsClient, entry.ARN)
@@ -297,8 +297,8 @@ func addOwned(
 	region,
 	accountID string,
 ) error {
-	entry := status.FindManagedResource(cr.Status.ManagedResources, resourceType, resourceName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(cr.Status.ManagedResources, resourceType, resourceName)
+	if !entryFound {
 		return nil
 	}
 	key, value, err := connectionKV(resourceType, resourceName, entry.ARN, region, accountID, "", "")

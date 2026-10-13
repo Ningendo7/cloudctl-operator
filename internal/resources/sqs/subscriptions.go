@@ -99,7 +99,7 @@ func EnsureSubscriptions(
 		}
 
 		ledgerName := subscriptionLedgerName(queueName, ref)
-		if status.FindManagedResource(ledger, subscriptionResourceType, ledgerName) == nil {
+		if !status.HasManagedResource(ledger, subscriptionResourceType, ledgerName) {
 			protocol := "sqs"
 			endpoint := queueARN
 			topicARNCopy := topicARN

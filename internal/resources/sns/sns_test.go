@@ -63,8 +63,8 @@ func TestEnsure_CreatesNewTopic(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(ledger, "sns", "events")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "sns", "events")
+	if !entryFound {
 		t.Fatal("expected a ledger entry for events")
 	}
 	if entry.State != depsv1alpha1.ManagedResourceStateVerified {
@@ -95,8 +95,8 @@ func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sns", "events"))
-	if keyEntry == nil {
+	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sns", "events"))
+	if !keyEntryFound {
 		t.Fatal("expected a dedicated KMS key ledger entry named \"events-key\"")
 	}
 
@@ -132,18 +132,18 @@ func TestEnsure_CorrectsKmsMasterKeyIdDriftOnExistingTopic(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sns", "events"))
+	keyEntry, _ := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sns", "events"))
 	if client.topics[topicArn].attributes["KmsMasterKeyId"] != keyEntry.ARN {
 		t.Errorf("expected drift correction to set KmsMasterKeyId to %q, got %q", keyEntry.ARN, client.topics[topicArn].attributes["KmsMasterKeyId"])
 	}
 }
 
-func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefRetriesWhenKeyNotYetCreated(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{
 		Resources: []depsv1alpha1.SNSTopicSpec{
 			{Name: "events", Encryption: &depsv1alpha1.EncryptionSpec{
-				KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+				KMSKeyRef: "shared-key",
 			}},
 		},
 	}
@@ -159,33 +159,19 @@ func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
 	}
 }
 
-func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefResolvesAKeyInThisCRsLedger(t *testing.T) {
 	client := newFakeSNS()
-	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
-		Spec: depsv1alpha1.AppDependenciesSpec{
-			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
-				{Name: "shared-key", SharedWith: []depsv1alpha1.SharedWithEntry{
-					{Namespace: "default", Name: "checkout-service"},
-				}},
-			}},
-		},
-		Status: depsv1alpha1.AppDependenciesStatus{
-			ManagedResources: []depsv1alpha1.ManagedResource{
-				{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"},
-			},
-		},
-	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	ledger := []depsv1alpha1.ManagedResource{{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"}}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
 	spec := &depsv1alpha1.SNSSpec{
 		Resources: []depsv1alpha1.SNSTopicSpec{
 			{Name: "events", Encryption: &depsv1alpha1.EncryptionSpec{
-				KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+				KMSKeyRef: "shared-key",
 			}},
 		},
 	}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -208,7 +194,8 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	firstCreatedAt := status.FindManagedResource(ledger, "sns", "events").CreatedAt
+	firstEntry, _ := status.FindManagedResource(ledger, "sns", "events")
+	firstCreatedAt := firstEntry.CreatedAt
 
 	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
@@ -217,7 +204,8 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	if len(client.topics) != 1 {
 		t.Fatalf("expected exactly one topic after re-reconciling, got %d", len(client.topics))
 	}
-	got := status.FindManagedResource(ledger, "sns", "events").CreatedAt
+	gotEntry, _ := status.FindManagedResource(ledger, "sns", "events")
+	got := gotEntry.CreatedAt
 	if !got.Equal(&firstCreatedAt) {
 		t.Errorf("expected CreatedAt to be preserved across reconciles, got %v want %v", got, firstCreatedAt)
 	}
@@ -433,7 +421,7 @@ func TestEnsure_ContinuesToOtherTopicsAfterOneFails(t *testing.T) {
 	if _, ok := client.topics[goodArn]; !ok {
 		t.Error("expected the second topic to still be created despite the first one failing")
 	}
-	if status.FindManagedResource(ledger, "sns", "user-events") == nil {
+	if !status.HasManagedResource(ledger, "sns", "user-events") {
 		t.Error("expected a ledger entry for the successfully-created second topic")
 	}
 }
@@ -481,8 +469,8 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 		t.Fatalf("Ensure() error = %v — expected the trust window to skip the AWS call entirely", err)
 	}
 
-	entry := status.FindManagedResource(updatedLedger, "sns", "events")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(updatedLedger, "sns", "events")
+	if !entryFound {
 		t.Fatal("expected the ledger entry to survive the skip path")
 	}
 	if entry.ARN != topicArn {
@@ -520,7 +508,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(updatedLedger, "sns", "events")
+	entry, _ := status.FindManagedResource(updatedLedger, "sns", "events")
 	if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
 		t.Errorf("expected deletionPolicy to update to Delete even while skipping revalidation, got %s", entry.DeletionPolicy)
 	}
@@ -538,16 +526,17 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	}
 
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
-	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry, _ := status.FindManagedResource(ledger, "sns", "events")
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	updatedEntry := status.FindManagedResource(updatedLedger, "sns", "events")
+	updatedEntry, _ := status.FindManagedResource(updatedLedger, "sns", "events")
 	if updatedEntry.LastVerifiedAt.Equal(&stale) {
 		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
 	}

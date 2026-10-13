@@ -130,12 +130,12 @@ func Ensure(
 			opts.billingMode = t.Overrides.BillingMode
 		}
 		if t.Encryption != nil {
-			if t.Encryption.KMSKeyRef != nil {
-				arn, ok := kms.ResolveSharedKeyARN(ctx, k8sClient, namespace, crName, *t.Encryption.KMSKeyRef)
+			if t.Encryption.KMSKeyRef != "" {
+				arn, ok := kms.SharedKeyARN(ledger, t.Encryption.KMSKeyRef)
 				if !ok {
 					if firstErr == nil {
 						firstErr = &cloudctlaws.ReconcileError{
-							Err:       fmt.Errorf("table %q: encryption.kmsKeyRef %s/%s/%s is not yet authorized (producer must list this CR in the key's sharedWith) or does not exist yet", t.Name, t.Encryption.KMSKeyRef.Namespace, t.Encryption.KMSKeyRef.Name, t.Encryption.KMSKeyRef.ResourceName),
+							Err:       fmt.Errorf("table %q: encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources", t.Name, t.Encryption.KMSKeyRef),
 							Retryable: true,
 						}
 					}
@@ -216,9 +216,9 @@ func ensureTable(
 	// TableActive) from "a foreign table being adopted for the first time"
 	// (fires TableAdopted) - the trust-window branch below re-derives its
 	// own copy since Go scopes the if-statement's own existing to that block.
-	existingBeforeCheck := status.FindManagedResource(ledger, resourceType, resourceName)
+	existingBeforeCheck, existingBeforeCheckFound := status.FindManagedResource(ledger, resourceType, resourceName)
 
-	if existing := existingBeforeCheck; existing != nil && !status.NeedsRevalidation(*existing) {
+	if existingBeforeCheckFound && !status.NeedsRevalidation(existingBeforeCheck) {
 		// Still within the trust window - skip re-verifying ownership via
 		// tags (a paginated ListTagsOfResource call), but attribute drift
 		// correction is a different concern and still runs every reconcile
@@ -230,7 +230,7 @@ func ensureTable(
 		// AWS call needed, so refresh those against the cached entry;
 		// LastVerifiedAt stays as it was until the window actually expires
 		// and a real ownership check runs again.
-		updated := *existing
+		updated := existingBeforeCheck
 		updated.DeletionPolicy = opts.deletionPolicy
 		updated.Force = opts.force
 		status.UpsertManagedResource(&ledger, updated)
@@ -289,7 +289,7 @@ func ensureTable(
 		return ledger, wrapAWSError(err, "reconciling table attributes")
 	}
 
-	if recordEvent != nil && existingBeforeCheck != nil && existingBeforeCheck.State == depsv1alpha1.ManagedResourceStateCreating {
+	if recordEvent != nil && existingBeforeCheckFound && existingBeforeCheck.State == depsv1alpha1.ManagedResourceStateCreating {
 		recordEvent("Normal", "TableActive", fmt.Sprintf("DynamoDB table %s is now ACTIVE", tableArn))
 	}
 
@@ -491,7 +491,7 @@ func reconcileTableAttributes(ctx context.Context, awsClient dynamodbAPI, tableN
 func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn string, deletionPolicy depsv1alpha1.DeletionPolicy, force bool) []depsv1alpha1.ManagedResource {
 	now := metav1.Now()
 	createdAt := now
-	if existing := status.FindManagedResource(ledger, resourceType, ledgerName); existing != nil {
+	if existing, existingFound := status.FindManagedResource(ledger, resourceType, ledgerName); existingFound {
 		createdAt = existing.CreatedAt
 	}
 	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{

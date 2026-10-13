@@ -19,8 +19,11 @@ package rds
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/rds/types"
 	"github.com/aws/smithy-go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -96,8 +99,8 @@ func TestEnsure_CreatesNewInstance(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(ledger, resourceType, "orders-db")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, "orders-db")
+	if !entryFound {
 		t.Fatal("expected a ledger entry for the created instance")
 	}
 	if entry.State != depsv1alpha1.ManagedResourceStateCreating {
@@ -182,7 +185,7 @@ func TestEnsure_ReplicationRequested_DoesNotBlockOtherInstances(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error from the replication-enabled instance")
 	}
-	if status.FindManagedResource(ledger, resourceType, "invoices-db") == nil {
+	if !status.HasManagedResource(ledger, resourceType, "invoices-db") {
 		t.Error("expected the unaffected instance to still be created despite the other one's unsupported replication request")
 	}
 }
@@ -200,7 +203,7 @@ func TestEnsure_ReplicationDisabled_ProceedsNormally(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
-	if status.FindManagedResource(ledger, resourceType, "orders-db") == nil {
+	if !status.HasManagedResource(ledger, resourceType, "orders-db") {
 		t.Error("expected the instance to be created normally when replication is declared but disabled")
 	}
 }
@@ -248,7 +251,7 @@ func TestEnsure_UnrecognizedStatus_DefaultsToRetryable(t *testing.T) {
 	}
 
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
-	client.instances[instanceID].status = "storage-optimization"
+	client.instances[instanceID].status = "some-status-aws-adds-later"
 
 	_, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil)
 	if err == nil {
@@ -324,7 +327,8 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	firstCreatedAt := status.FindManagedResource(ledger, resourceType, "orders-db").CreatedAt
+	firstCreatedAtEntry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
+	firstCreatedAt := firstCreatedAtEntry.CreatedAt
 
 	ledger, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil)
 	if err != nil {
@@ -333,7 +337,8 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	if len(client.instances) != 1 {
 		t.Fatalf("expected exactly one instance after re-reconciling, got %d", len(client.instances))
 	}
-	got := status.FindManagedResource(ledger, resourceType, "orders-db").CreatedAt
+	gotEntry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
+	got := gotEntry.CreatedAt
 	if !got.Equal(&firstCreatedAt) {
 		t.Errorf("expected CreatedAt to be preserved across reconciles, got %v want %v", got, firstCreatedAt)
 	}
@@ -401,7 +406,7 @@ func TestEnsure_AdoptsUntaggedInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
-	if entry := status.FindManagedResource(ledger, resourceType, "orders-db"); entry == nil || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+	if entry, entryFound := status.FindManagedResource(ledger, resourceType, "orders-db"); !entryFound || entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected a Verified ledger entry after adoption, got %+v", entry)
 	}
 	if !cloudctlaws.IsOwnedBy(client.instances[instanceID].tags, "default", "checkout-service", "uid-1") {
@@ -539,8 +544,8 @@ func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName(resourceType, "orders-db"))
-	if keyEntry == nil {
+	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName(resourceType, "orders-db"))
+	if !keyEntryFound {
 		t.Fatal("expected a dedicated KMS key ledger entry")
 	}
 
@@ -554,7 +559,7 @@ func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 	}
 }
 
-func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefRetriesWhenKeyNotYetCreated(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
@@ -562,12 +567,12 @@ func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
 
 	spec := baseInstanceSpec("orders-db")
 	spec.Encryption = &depsv1alpha1.EncryptionSpec{
-		KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+		KMSKeyRef: "shared-key",
 	}
 
 	_, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 	if err == nil {
-		t.Fatal("expected an error - the producer CR doesn't exist yet")
+		t.Fatal("expected an error - the key isn't in the ledger yet")
 	}
 	var reconcileErr *cloudctlaws.ReconcileError
 	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
@@ -575,33 +580,19 @@ func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
 	}
 }
 
-func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefResolvesAKeyInThisCRsLedger(t *testing.T) {
 	client := newFakeRDS()
-	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
-		Spec: depsv1alpha1.AppDependenciesSpec{
-			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
-				{Name: "shared-key", SharedWith: []depsv1alpha1.SharedWithEntry{
-					{Namespace: "default", Name: "checkout-service"},
-				}},
-			}},
-		},
-		Status: depsv1alpha1.AppDependenciesStatus{
-			ManagedResources: []depsv1alpha1.ManagedResource{
-				{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"},
-			},
-		},
-	}
+	keyLedger := []depsv1alpha1.ManagedResource{{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"}}
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, grant).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
 	ec2Client := newFakeEC2()
 
 	spec := baseInstanceSpec("orders-db")
 	spec.Encryption = &depsv1alpha1.EncryptionSpec{
-		KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+		KMSKeyRef: "shared-key",
 	}
 
-	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, keyLedger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -609,7 +600,7 @@ func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
 	if client.instances[instanceID].kmsKeyARN != "arn:aws:kms:us-east-1:123456789012:key/shared-id" {
 		t.Errorf("expected the instance to be encrypted with the shared key ARN, got %q", client.instances[instanceID].kmsKeyARN)
 	}
-	if status.FindManagedResource(ledger, resourceType, "orders-db") == nil {
+	if !status.HasManagedResource(ledger, resourceType, "orders-db") {
 		t.Fatal("expected a ledger entry for the instance")
 	}
 }
@@ -632,10 +623,10 @@ func TestEnsure_ContinuesToOtherInstancesAfterOneFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error from the failing instance")
 	}
-	if status.FindManagedResource(ledger, resourceType, "sessions-db") == nil {
+	if !status.HasManagedResource(ledger, resourceType, "sessions-db") {
 		t.Error("expected the second instance to still be created despite the first one failing")
 	}
-	if status.FindManagedResource(ledger, resourceType, "orders-db") != nil {
+	if status.HasManagedResource(ledger, resourceType, "orders-db") {
 		t.Error("expected no ledger entry for the unauthorized instance")
 	}
 }
@@ -807,10 +798,11 @@ func TestEnsure_WithinTrustWindow_SkipsReVerification(t *testing.T) {
 
 	// Backdating LastVerifiedAt past the trust window should make the
 	// next reconcile re-verify for real.
-	entry := status.FindManagedResource(ledger, resourceType, "orders-db")
+	entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
 	stale := metav1.NewTime(entry.LastVerifiedAt.Add(-2 * status.TrustWindow))
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", spec, ledger, nil, nil); err != nil {
 		t.Fatalf("fourth Ensure() error = %v", err)
@@ -920,6 +912,7 @@ func TestEnsure_UpdatesInstanceClassWhenChanged(t *testing.T) {
 
 	// User resizes the instance in spec.
 	spec.InstanceClass = "db.t4g.small"
+	spec.ApplyImmediately = true
 	rdsSpec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
 	ledger, err = Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, ledger, nil, nil)
 	if err != nil {
@@ -937,7 +930,7 @@ func TestEnsure_UpdatesInstanceClassWhenChanged(t *testing.T) {
 	if client.instances[instanceID].instanceClass != "db.t4g.small" {
 		t.Errorf("expected the fake instance's class to actually update, got %q", client.instances[instanceID].instanceClass)
 	}
-	entry := status.FindManagedResource(ledger, resourceType, "orders-db")
+	entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
 	if entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected the instance to still verify successfully after a modify, got state %s", entry.State)
 	}
@@ -1111,26 +1104,477 @@ func TestEnsure_ModifiesMultipleAttributesInOneCall(t *testing.T) {
 	}
 }
 
-func TestEnsure_ModifyAppliesImmediately(t *testing.T) {
-	client := newFakeRDS()
+func ensureOnce(t *testing.T, client *fakeRDS, spec depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	t.Helper()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
-	ec2Client := newFakeEC2()
+	return Ensure(context.Background(), client, nil, newFakeEC2(), k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, ledger, nil, nil)
+}
+
+func TestEnsure_ModifyRejectedWhileInTransition_IsRetryable(t *testing.T) {
+	client := newFakeRDS()
 	spec := baseInstanceSpec("orders-db")
-	rdsSpec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
-	ledger, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, nil, nil, nil)
+	ledger, err := ensureOnce(t, client, spec, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 
 	spec.InstanceClass = "db.t4g.small"
-	rdsSpec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
-	if _, err := Ensure(context.Background(), client, nil, ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, ledger, nil, nil); err != nil {
+	client.modifyDBInstanceErr = &fakeAWSError{code: "InvalidDBInstanceState", fault: smithy.FaultClient}
+	_, err = ensureOnce(t, client, spec, ledger)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable ReconcileError for an in-transition rejection, got %v", err)
+	}
+}
+
+func TestIsInTransitionError(t *testing.T) {
+	for code, want := range map[string]bool{
+		"InvalidDBInstanceState": true,
+		"InvalidDBSnapshotState": true,
+		"InvalidParameterValue":  false,
+	} {
+		if got := isInTransitionError(&fakeAWSError{code: code}); got != want {
+			t.Errorf("isInTransitionError(%q) = %v, want %v", code, got, want)
+		}
+	}
+	if isInTransitionError(errors.New("plain error")) {
+		t.Error("a non-AWS error must not count as in-transition")
+	}
+}
+
+func TestEnsure_PendingModificationIsNotResent(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].pending = &types.PendingModifiedValues{DBInstanceClass: aws.String("db.t4g.small")}
+	spec.InstanceClass = "db.t4g.small"
+	if _, err := ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if client.modifyDBInstanceCalls != 0 {
+		t.Errorf("expected no ModifyDBInstance for a change AWS already accepted, got %d calls", client.modifyDBInstanceCalls)
+	}
+
+	spec.InstanceClass = "db.t4g.medium"
+	if _, err := ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("third Ensure() error = %v", err)
+	}
+	if client.modifyDBInstanceCalls != 1 {
+		t.Errorf("expected a spec edit differing from the pending value to still be sent, got %d calls", client.modifyDBInstanceCalls)
+	}
+}
+
+func TestEnsure_ReattachesDedicatedSecurityGroupKeepingExistingOnes(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	dedicated := client.lastCreateDBInstanceInput.VpcSecurityGroupIds[0]
+
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].securityGroupIDs = []string{"sg-pre-existing"}
+	if _, err := ensureOnce(t, client, spec, ledger); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
-	in := client.lastModifyDBInstanceInput
-	if in.ApplyImmediately == nil || !*in.ApplyImmediately {
-		t.Error("expected ApplyImmediately=true so the operator's desired state takes effect promptly, not on AWS's own maintenance window")
+	if got := client.instances[instanceID].securityGroupIDs; !slices.Equal(got, []string{"sg-pre-existing", dedicated}) {
+		t.Errorf("security groups = %v, want the pre-existing group plus %s", got, dedicated)
+	}
+}
+
+func TestEnsure_ServingStatuses_AreReadyButNotModified(t *testing.T) {
+	for _, serving := range []string{"backing-up", "storage-optimization"} {
+		t.Run(serving, func(t *testing.T) {
+			client := newFakeRDS()
+			spec := baseInstanceSpec("orders-db")
+			ledger, err := ensureOnce(t, client, spec, nil)
+			if err != nil {
+				t.Fatalf("first Ensure() error = %v", err)
+			}
+			instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+			client.instances[instanceID].status = serving
+
+			spec.InstanceClass = "db.t4g.small"
+			ledger, err = ensureOnce(t, client, spec, ledger)
+			if err != nil {
+				t.Fatalf("expected %q to count as ready, got %v", serving, err)
+			}
+			if entry, entryFound := status.FindManagedResource(ledger, resourceType, "orders-db"); !entryFound || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+				t.Errorf("expected a Verified ledger entry, got %+v", entry)
+			}
+			if client.modifyDBInstanceCalls != 0 {
+				t.Errorf("expected no ModifyDBInstance while %s, got %d calls", serving, client.modifyDBInstanceCalls)
+			}
+		})
+	}
+}
+
+func TestEnsure_ModifyingStatus_StillRetries(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].status = "modifying"
+
+	_, err = ensureOnce(t, client, spec, ledger)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable error while modifying, got %v", err)
+	}
+}
+
+func ensureRecording(t *testing.T, client *fakeRDS, spec depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource, reasons *[]string) ([]depsv1alpha1.ManagedResource, error) {
+	t.Helper()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	record := func(_, reason, _ string) { *reasons = append(*reasons, reason) }
+	return Ensure(context.Background(), client, nil, newFakeEC2(), k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, ledger, nil, record)
+}
+
+func TestEnsure_ChangesDeferToMaintenanceWindowByDefault(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	spec.InstanceClass = "db.t4g.small"
+	var reasons []string
+	ledger, err = ensureRecording(t, client, spec, ledger, &reasons)
+	if err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if in := client.lastModifyDBInstanceInput; in.ApplyImmediately == nil || *in.ApplyImmediately {
+		t.Errorf("expected ApplyImmediately=false by default, got %v", in.ApplyImmediately)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	if got := client.instances[instanceID].instanceClass; got != "db.t4g.micro" {
+		t.Errorf("expected the live class untouched until the window, got %q", got)
+	}
+	if !contains(reasons, "ChangeDeferred") {
+		t.Errorf("expected a ChangeDeferred event so the wait is visible, got %v", reasons)
+	}
+
+	if _, err := ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+		t.Fatalf("third Ensure() error = %v", err)
+	}
+	if client.modifyDBInstanceCalls != 1 {
+		t.Errorf("expected the pending change not to be re-sent, got %d modify calls", client.modifyDBInstanceCalls)
+	}
+}
+
+func TestEnsure_SecondEditBeforeTheWindowReplacesThePendingChange(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	spec.InstanceClass = "db.t4g.small"
+	if ledger, err = ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	spec.InstanceClass = "db.t4g.medium"
+	if _, err = ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("third Ensure() error = %v", err)
+	}
+
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	pending := client.instances[instanceID].pending
+	if client.modifyDBInstanceCalls != 2 || pending == nil || aws.ToString(pending.DBInstanceClass) != "db.t4g.medium" {
+		t.Errorf("expected the second edit to replace the pending class, calls=%d pending=%+v", client.modifyDBInstanceCalls, pending)
+	}
+}
+
+func TestEnsure_ApplyImmediately_AppliesNow(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	spec.InstanceClass = "db.t4g.small"
+	spec.ApplyImmediately = true
+	var reasons []string
+	if _, err := ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if in := client.lastModifyDBInstanceInput; in.ApplyImmediately == nil || !*in.ApplyImmediately {
+		t.Error("expected ApplyImmediately=true when the spec opts in")
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	if got := client.instances[instanceID].instanceClass; got != "db.t4g.small" {
+		t.Errorf("expected the class applied now, got %q", got)
+	}
+	if contains(reasons, "ChangeDeferred") {
+		t.Error("an immediate change must not report itself as deferred")
+	}
+}
+
+func TestEnsure_SecurityGroupReattach_NeedsNoDeferralEvent(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].securityGroupIDs = []string{"sg-pre-existing"}
+
+	var reasons []string
+	if _, err := ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if contains(reasons, "ChangeDeferred") {
+		t.Error("a security group change applies at once and must not be reported as deferred")
+	}
+}
+
+func TestEnsure_EngineVersionUpgrade(t *testing.T) {
+	minor := types.UpgradeTarget{EngineVersion: aws.String("16.6"), IsMajorVersionUpgrade: aws.Bool(false)}
+	major := types.UpgradeTarget{EngineVersion: aws.String("17.2"), IsMajorVersionUpgrade: aws.Bool(true)}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+
+	t.Run("minor upgrade is deferred and not major", func(t *testing.T) {
+		client := newFakeRDS()
+		client.upgradeTargets = []types.UpgradeTarget{minor, major}
+		spec := baseInstanceSpec("orders-db")
+		ledger, err := ensureOnce(t, client, spec, nil)
+		if err != nil {
+			t.Fatalf("first Ensure() error = %v", err)
+		}
+		spec.EngineVersion = "16.6"
+		if ledger, err = ensureOnce(t, client, spec, ledger); err != nil {
+			t.Fatalf("second Ensure() error = %v", err)
+		}
+		in := client.lastModifyDBInstanceInput
+		if aws.ToString(in.EngineVersion) != "16.6" || in.AllowMajorVersionUpgrade != nil || *in.ApplyImmediately {
+			t.Errorf("unexpected modify input: %+v", in)
+		}
+		if _, err := ensureOnce(t, client, spec, ledger); err != nil {
+			t.Fatalf("third Ensure() error = %v", err)
+		}
+		if client.modifyDBInstanceCalls != 1 {
+			t.Errorf("expected the pending upgrade not to be re-sent, got %d modify calls", client.modifyDBInstanceCalls)
+		}
+	})
+
+	t.Run("major upgrade sets the allow flag", func(t *testing.T) {
+		client := newFakeRDS()
+		client.upgradeTargets = []types.UpgradeTarget{minor, major}
+		spec := baseInstanceSpec("orders-db")
+		ledger, err := ensureOnce(t, client, spec, nil)
+		if err != nil {
+			t.Fatalf("first Ensure() error = %v", err)
+		}
+		spec.EngineVersion = "17"
+		spec.AllowMajorVersionUpgrade = true
+		if _, err = ensureOnce(t, client, spec, ledger); err != nil {
+			t.Fatalf("second Ensure() error = %v", err)
+		}
+		if in := client.lastModifyDBInstanceInput; !aws.ToBool(in.AllowMajorVersionUpgrade) {
+			t.Errorf("expected AllowMajorVersionUpgrade for a major upgrade, got %+v", in)
+		}
+	})
+
+	t.Run("major upgrade is refused without the opt-in", func(t *testing.T) {
+		client := newFakeRDS()
+		client.upgradeTargets = []types.UpgradeTarget{minor, major}
+		spec := baseInstanceSpec("orders-db")
+		ledger, err := ensureOnce(t, client, spec, nil)
+		if err != nil {
+			t.Fatalf("first Ensure() error = %v", err)
+		}
+		spec.EngineVersion = "17"
+		_, err = ensureOnce(t, client, spec, ledger)
+		var reconcileErr *cloudctlaws.ReconcileError
+		if err == nil || (errors.As(err, &reconcileErr) && reconcileErr.Retryable) {
+			t.Fatalf("expected a non-retryable refusal, got %v", err)
+		}
+		if client.modifyDBInstanceCalls != 0 {
+			t.Errorf("a refused major upgrade must send nothing, got %d modify calls", client.modifyDBInstanceCalls)
+		}
+	})
+
+	t.Run("instance already ahead of spec is left alone", func(t *testing.T) {
+		client := newFakeRDS()
+		spec := baseInstanceSpec("orders-db")
+		ledger, err := ensureOnce(t, client, spec, nil)
+		if err != nil {
+			t.Fatalf("first Ensure() error = %v", err)
+		}
+		client.instances[instanceID].engineVersion = "16.8"
+		if _, err = ensureOnce(t, client, spec, ledger); err != nil {
+			t.Fatalf("second Ensure() error = %v", err)
+		}
+		if client.modifyDBInstanceCalls != 0 || client.describeEngineVersionsCalls != 0 {
+			t.Errorf("expected no AWS calls for an instance past spec, got modify=%d describe=%d", client.modifyDBInstanceCalls, client.describeEngineVersionsCalls)
+		}
+	})
+
+	t.Run("invalid target is a permanent error", func(t *testing.T) {
+		client := newFakeRDS()
+		client.upgradeTargets = []types.UpgradeTarget{minor}
+		spec := baseInstanceSpec("orders-db")
+		ledger, err := ensureOnce(t, client, spec, nil)
+		if err != nil {
+			t.Fatalf("first Ensure() error = %v", err)
+		}
+		spec.EngineVersion = "18.1"
+		_, err = ensureOnce(t, client, spec, ledger)
+		var reconcileErr *cloudctlaws.ReconcileError
+		if err == nil || (errors.As(err, &reconcileErr) && reconcileErr.Retryable) {
+			t.Errorf("expected a non-retryable error for an unreachable version, got %v", err)
+		}
+	})
+}
+
+func TestEnsure_BackupsAreNeverTurnedOffByDrift(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	spec.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: true}
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	for name, backup := range map[string]*depsv1alpha1.RDSBackupSpec{
+		"omitted":  nil,
+		"disabled": {Enabled: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec.Backup = backup
+			var reasons []string
+			if _, err := ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+			if got := client.instances[instanceID].backupRetentionPeriod; got != defaultBackupRetentionDays {
+				t.Errorf("retention = %d, want it left at %d", got, defaultBackupRetentionDays)
+			}
+			if client.modifyDBInstanceCalls != 0 {
+				t.Errorf("expected no modify call, got %d", client.modifyDBInstanceCalls)
+			}
+			if !contains(reasons, "BackupsLeftEnabled") {
+				t.Errorf("expected a warning that backups were left on, got %v", reasons)
+			}
+		})
+	}
+}
+
+func TestEnsure_BackupRetentionIsOnlyRaised(t *testing.T) {
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	spec := baseInstanceSpec("orders-db")
+	spec.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: true}
+
+	t.Run("longer retention set elsewhere is kept", func(t *testing.T) {
+		client := newFakeRDS()
+		ledger, err := ensureOnce(t, client, spec, nil)
+		if err != nil {
+			t.Fatalf("first Ensure() error = %v", err)
+		}
+		client.instances[instanceID].backupRetentionPeriod = 14
+		if _, err := ensureOnce(t, client, spec, ledger); err != nil {
+			t.Fatalf("second Ensure() error = %v", err)
+		}
+		if client.modifyDBInstanceCalls != 0 {
+			t.Errorf("expected 14 days to satisfy a 7-day spec, got %d modify calls", client.modifyDBInstanceCalls)
+		}
+	})
+
+	t.Run("shorter retention is raised", func(t *testing.T) {
+		client := newFakeRDS()
+		ledger, err := ensureOnce(t, client, spec, nil)
+		if err != nil {
+			t.Fatalf("first Ensure() error = %v", err)
+		}
+		client.instances[instanceID].backupRetentionPeriod = 3
+		if _, err := ensureOnce(t, client, spec, ledger); err != nil {
+			t.Fatalf("second Ensure() error = %v", err)
+		}
+		if got := aws.ToInt32(client.lastModifyDBInstanceInput.BackupRetentionPeriod); got != defaultBackupRetentionDays {
+			t.Errorf("requested retention = %d, want %d", got, defaultBackupRetentionDays)
+		}
+	})
+}
+
+func TestEnsure_StorageGrowthAlone_AppliesAtOnce(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	spec.AllocatedStorage = 40
+	var reasons []string
+	if _, err := ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	if !aws.ToBool(client.lastModifyDBInstanceInput.ApplyImmediately) || client.instances[instanceID].allocatedStorage != 40 {
+		t.Errorf("expected storage growth applied at once, got input %+v", client.lastModifyDBInstanceInput)
+	}
+	if contains(reasons, "ChangeDeferred") {
+		t.Error("an immediate growth must not report itself as deferred")
+	}
+}
+
+func TestEnsure_StorageGrowthWaitsBehindAPendingChange(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	spec.InstanceClass = "db.t4g.small"
+	if ledger, err = ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+
+	spec.AllocatedStorage = 40
+	if _, err := ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("third Ensure() error = %v", err)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	if aws.ToBool(client.lastModifyDBInstanceInput.ApplyImmediately) {
+		t.Error("an immediate growth would apply the pending class change too")
+	}
+	if got := client.instances[instanceID].instanceClass; got != "db.t4g.micro" {
+		t.Errorf("expected the pending class change untouched, got %q", got)
+	}
+}
+
+func TestEnsure_StorageGrowthOnProvisionedIOPSVolumeCarriesIops(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].storageType = "io1"
+	client.instances[instanceID].iops = aws.Int32(3000)
+
+	spec.AllocatedStorage = 40
+	if _, err := ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if got := aws.ToInt32(client.lastModifyDBInstanceInput.Iops); got != 3000 {
+		t.Errorf("Iops = %d, want the current 3000 carried through", got)
 	}
 }

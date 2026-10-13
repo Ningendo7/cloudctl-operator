@@ -41,8 +41,8 @@ func TestEnsure_CreatesKeyWithOwnerTagsAliasAndRotation(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(ledger, resourceType, "primary")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, "primary")
+	if !entryFound {
 		t.Fatal("expected a ledger entry for the created key")
 	}
 	if entry.State != depsv1alpha1.ManagedResourceStateVerified {
@@ -91,7 +91,7 @@ func TestEnsure_ResumesFromLedgerWithoutRecreatingKeyWhenAliasIsMissing(t *testi
 	if len(client.keys) != 1 {
 		t.Fatalf("expected no second key to be created, got %d keys", len(client.keys))
 	}
-	entry := status.FindManagedResource(updated, resourceType, "primary")
+	entry, _ := status.FindManagedResource(updated, resourceType, "primary")
 	if entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected State Verified after finishing alias creation, got %v", entry.State)
 	}
@@ -126,8 +126,8 @@ func TestEnsure_SkipsReVerificationWithinTrustWindow(t *testing.T) {
 	if client.listResourceTagsCalls[arn] != 0 {
 		t.Errorf("expected no ListResourceTags call within the trust window, got %d", client.listResourceTagsCalls[arn])
 	}
-	entry := status.FindManagedResource(updated, resourceType, "primary")
-	if entry == nil || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+	entry, entryFound := status.FindManagedResource(updated, resourceType, "primary")
+	if !entryFound || entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected the entry to remain Verified, got %+v", entry)
 	}
 }
@@ -155,8 +155,8 @@ func TestEnsure_ReVerifiesOnceTrustWindowExpires(t *testing.T) {
 	if client.listResourceTagsCalls[arn] != 1 {
 		t.Errorf("expected exactly 1 ListResourceTags call once the trust window expired, got %d", client.listResourceTagsCalls[arn])
 	}
-	entry := status.FindManagedResource(updated, resourceType, "primary")
-	if entry == nil || entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Time.After(stale.Time) {
+	entry, entryFound := status.FindManagedResource(updated, resourceType, "primary")
+	if !entryFound || entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Time.After(stale.Time) {
 		t.Error("expected LastVerifiedAt to be refreshed after a real re-verification")
 	}
 }
@@ -192,8 +192,8 @@ func TestEnsure_AdoptsUntaggedKeyWhenRequested(t *testing.T) {
 	if client.keys[arn].tags["team"] != "someone-else" {
 		t.Error("expected pre-existing tags to be preserved during adoption")
 	}
-	entry := status.FindManagedResource(ledger, resourceType, "primary")
-	if entry == nil || entry.ARN != arn {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, "primary")
+	if !entryFound || entry.ARN != arn {
 		t.Fatal("expected a ledger entry pointing at the adopted key")
 	}
 }
@@ -303,7 +303,7 @@ func TestEnsure_TruncatesAliasExceedingKMSLimit(t *testing.T) {
 	if len(client.keys) != 1 {
 		t.Errorf("expected a key to have been created despite the over-length name, got %d keys", len(client.keys))
 	}
-	if status.FindManagedResource(ledger, resourceType, longKey) == nil {
+	if !status.HasManagedResource(ledger, resourceType, longKey) {
 		t.Error("expected a ledger entry for the key")
 	}
 }
@@ -334,8 +334,8 @@ func TestEnsureDedicatedKey_CreatesKeyUnderDerivedLedgerName(t *testing.T) {
 	}
 
 	ledgerName := DedicatedKeyLedgerName("sqs", "orders")
-	entry := status.FindManagedResource(ledger, resourceType, ledgerName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, ledgerName)
+	if !entryFound {
 		t.Fatalf("expected a ledger entry named %q, not \"orders\" - must never collide with a user's own kms.resources entry of the same base name", ledgerName)
 	}
 	if entry.ARN != arn {
@@ -423,7 +423,7 @@ func TestEnsureDedicatedKey_UpdatesDeletionPolicyOnEachCall(t *testing.T) {
 		t.Fatalf("EnsureDedicatedKey() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(ledger, resourceType, DedicatedKeyLedgerName("sqs", "orders"))
+	entry, _ := status.FindManagedResource(ledger, resourceType, DedicatedKeyLedgerName("sqs", "orders"))
 	if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
 		t.Errorf("expected DeletionPolicy to track the owning resource's current policy, got %v", entry.DeletionPolicy)
 	}

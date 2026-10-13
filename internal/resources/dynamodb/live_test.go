@@ -394,7 +394,7 @@ func TestLive_Ensure_DedicatedKMSKeyEncryptsRealTable(t *testing.T) {
 		// kms package's own Cleanup won't schedule deletion within a single
 		// pass (it only starts a quiet window) - delete the real key
 		// directly instead of leaving it dangling.
-		if keyEntry := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "sessions")); keyEntry != nil {
+		if keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "sessions")); keyEntryFound {
 			windowDays := int32(7)
 			if _, err := kmsClient.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{KeyId: &keyEntry.ARN, PendingWindowInDays: &windowDays}); err != nil {
 				t.Logf("key cleanup warning: %v", err)
@@ -408,8 +408,8 @@ func TestLive_Ensure_DedicatedKMSKeyEncryptsRealTable(t *testing.T) {
 		t.Fatalf("second Ensure() (once ACTIVE) error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "sessions"))
-	if keyEntry == nil {
+	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "sessions"))
+	if !keyEntryFound {
 		t.Fatal("expected a dedicated KMS key ledger entry for the encrypted table")
 	}
 	describeOut, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
@@ -484,10 +484,11 @@ func TestLive_Cleanup_BlocksDeletingTableWithARealItemThenSucceedsOnceEmpty(t *t
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
-	entry := status.FindManagedResource(ledger, resourceType, "sessions")
+	entry, _ := status.FindManagedResource(ledger, resourceType, "sessions")
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
 	if err != nil {

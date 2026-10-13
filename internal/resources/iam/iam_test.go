@@ -119,8 +119,8 @@ func TestEnsure_CreatesRoleWithTrustPolicyAndPermissions(t *testing.T) {
 		t.Errorf("expected the owned queue's full access to be in the policy, got %s", policy)
 	}
 
-	entry := status.FindManagedResource(ledger, "iam", "role")
-	if entry == nil || entry.State != depsv1alpha1.ManagedResourceStateVerified || entry.ARN != arn {
+	entry, entryFound := status.FindManagedResource(ledger, "iam", "role")
+	if !entryFound || entry.State != depsv1alpha1.ManagedResourceStateVerified || entry.ARN != arn {
 		t.Errorf("expected a Verified iam/role ledger entry matching the returned ARN, got %+v", entry)
 	}
 }
@@ -150,13 +150,13 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	firstEntry := status.FindManagedResource(ledger, "iam", "role")
+	firstEntry, _ := status.FindManagedResource(ledger, "iam", "role")
 
 	ledger, _, err = Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, ledger)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
-	secondEntry := status.FindManagedResource(ledger, "iam", "role")
+	secondEntry, _ := status.FindManagedResource(ledger, "iam", "role")
 
 	if !firstEntry.CreatedAt.Equal(&secondEntry.CreatedAt) {
 		t.Errorf("expected CreatedAt to be preserved across reconciles, got %v then %v", firstEntry.CreatedAt, secondEntry.CreatedAt)

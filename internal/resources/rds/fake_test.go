@@ -67,6 +67,10 @@ type fakeInstance struct {
 	endpointAddress       string
 	endpointPort          int32
 	masterUserSecretARN   string
+	securityGroupIDs      []string
+	pending               *types.PendingModifiedValues
+	storageType           string
+	iops                  *int32
 }
 
 type fakeSnapshot struct {
@@ -94,9 +98,9 @@ type fakeRDS struct {
 	// trust-window test already proves.
 	listTagsForResourceCalls    int
 	describeDBSubnetGroupsCalls int
-	createDBSnapshotCalls    int
-	describeDBSnapshotsCalls int
-	deleteDBSnapshotCalls    int
+	createDBSnapshotCalls       int
+	describeDBSnapshotsCalls    int
+	deleteDBSnapshotCalls       int
 	// describeDBInstancesCalls counts every DescribeDBInstances call, keyed
 	// by instance ID - lets the describe-cache tests prove a cached lookup
 	// never reaches the client a second time.
@@ -115,6 +119,9 @@ type fakeRDS struct {
 	lastCreateDBInstanceInput *rds.CreateDBInstanceInput
 	lastModifyDBInstanceInput *rds.ModifyDBInstanceInput
 	modifyDBInstanceCalls     int
+
+	upgradeTargets              []types.UpgradeTarget
+	describeEngineVersionsCalls int
 
 	// snapshotStatus overrides a newly created snapshot's status so cleanup
 	// tests can simulate the still-creating/available/failed progression
@@ -176,6 +183,7 @@ func (f *fakeRDS) CreateDBInstance(_ context.Context, in *rds.CreateDBInstanceIn
 		engineVersion:         *in.EngineVersion,
 		instanceClass:         *in.DBInstanceClass,
 		allocatedStorage:      aws.ToInt32(in.AllocatedStorage),
+		securityGroupIDs:      in.VpcSecurityGroupIds,
 		dbSubnetGroupName:     *in.DBSubnetGroupName,
 		multiAZ:               multiAZ,
 		backupRetentionPeriod: backupRetention,
@@ -202,20 +210,58 @@ func (f *fakeRDS) ModifyDBInstance(_ context.Context, in *rds.ModifyDBInstanceIn
 	if !ok {
 		return nil, &types.DBInstanceNotFoundFault{}
 	}
+	// Like AWS: security groups always apply at once; everything else goes
+	// to pending values unless ApplyImmediately, which also applies
+	// whatever was already pending.
+	if in.VpcSecurityGroupIds != nil {
+		i.securityGroupIDs = in.VpcSecurityGroupIds
+	}
+	if i.pending == nil {
+		i.pending = &types.PendingModifiedValues{}
+	}
 	if in.DBInstanceClass != nil {
-		i.instanceClass = *in.DBInstanceClass
+		i.pending.DBInstanceClass = in.DBInstanceClass
 	}
 	if in.MultiAZ != nil {
-		i.multiAZ = *in.MultiAZ
+		i.pending.MultiAZ = in.MultiAZ
 	}
 	if in.BackupRetentionPeriod != nil {
-		i.backupRetentionPeriod = *in.BackupRetentionPeriod
+		i.pending.BackupRetentionPeriod = in.BackupRetentionPeriod
 	}
 	if in.AllocatedStorage != nil {
-		i.allocatedStorage = *in.AllocatedStorage
+		i.pending.AllocatedStorage = in.AllocatedStorage
+	}
+	if in.EngineVersion != nil {
+		i.pending.EngineVersion = in.EngineVersion
+	}
+	if aws.ToBool(in.ApplyImmediately) {
+		p := i.pending
+		if p.DBInstanceClass != nil {
+			i.instanceClass = *p.DBInstanceClass
+		}
+		if p.MultiAZ != nil {
+			i.multiAZ = *p.MultiAZ
+		}
+		if p.BackupRetentionPeriod != nil {
+			i.backupRetentionPeriod = *p.BackupRetentionPeriod
+		}
+		if p.AllocatedStorage != nil {
+			i.allocatedStorage = *p.AllocatedStorage
+		}
+		if p.EngineVersion != nil {
+			i.engineVersion = *p.EngineVersion
+		}
+		i.pending = nil
 	}
 	id := *in.DBInstanceIdentifier
 	return &rds.ModifyDBInstanceOutput{DBInstance: &types.DBInstance{DBInstanceIdentifier: &id}}, nil
+}
+
+func (f *fakeRDS) DescribeDBEngineVersions(_ context.Context, _ *rds.DescribeDBEngineVersionsInput, _ ...func(*rds.Options)) (*rds.DescribeDBEngineVersionsOutput, error) {
+	f.describeEngineVersionsCalls++
+	return &rds.DescribeDBEngineVersionsOutput{
+		DBEngineVersions: []types.DBEngineVersion{{ValidUpgradeTarget: f.upgradeTargets}},
+	}, nil
 }
 
 func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInstancesInput, _ ...func(*rds.Options)) (*rds.DescribeDBInstancesOutput, error) {
@@ -240,6 +286,10 @@ func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInsta
 	if i.masterUserSecretARN != "" {
 		masterUserSecret = &types.MasterUserSecret{SecretArn: &i.masterUserSecretARN}
 	}
+	var securityGroups []types.VpcSecurityGroupMembership
+	for _, g := range i.securityGroupIDs {
+		securityGroups = append(securityGroups, types.VpcSecurityGroupMembership{VpcSecurityGroupId: aws.String(g), Status: aws.String("active")})
+	}
 	return &rds.DescribeDBInstancesOutput{
 		DBInstances: []types.DBInstance{
 			{
@@ -250,6 +300,10 @@ func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInsta
 				EngineVersion:         &i.engineVersion,
 				DBInstanceClass:       &i.instanceClass,
 				AllocatedStorage:      &i.allocatedStorage,
+				VpcSecurityGroups:     securityGroups,
+				StorageType:           aws.String(i.storageType),
+				Iops:                  i.iops,
+				PendingModifiedValues: i.pending,
 				DBSubnetGroup:         &types.DBSubnetGroup{DBSubnetGroupName: &i.dbSubnetGroupName},
 				MultiAZ:               &i.multiAZ,
 				BackupRetentionPeriod: &i.backupRetentionPeriod,
@@ -425,6 +479,7 @@ type fakeEC2 struct {
 	authorizeSecurityGroupIngressCalls int
 	revokeSecurityGroupIngressCalls    int
 	deleteSecurityGroupCalls           int
+	createTagsCalls                    int
 	// revokedGroupIDs records every consumer security group ID actually
 	// revoked, in order - lets a test assert exactly which one(s) were
 	// removed, not just how many calls happened.
@@ -503,7 +558,7 @@ func (f *fakeEC2) DescribeSecurityGroups(_ context.Context, in *ec2.DescribeSecu
 		})
 	}
 	return &ec2.DescribeSecurityGroupsOutput{
-		SecurityGroups: []ec2types.SecurityGroup{{GroupId: &g.id, GroupName: &g.name, VpcId: &g.vpcID, IpPermissions: perms}},
+		SecurityGroups: []ec2types.SecurityGroup{{GroupId: &g.id, GroupName: &g.name, VpcId: &g.vpcID, IpPermissions: perms, Tags: mapToEC2Tags(g.tags)}},
 	}, nil
 }
 
@@ -571,8 +626,18 @@ func (f *fakeEC2) DeleteSecurityGroup(_ context.Context, in *ec2.DeleteSecurityG
 	return &ec2.DeleteSecurityGroupOutput{}, nil
 }
 
-func (f *fakeEC2) CreateTags(context.Context, *ec2.CreateTagsInput, ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error) {
-	panic("not used - this package tags security groups atomically at creation via TagSpecifications")
+func (f *fakeEC2) CreateTags(_ context.Context, in *ec2.CreateTagsInput, _ ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error) {
+	f.createTagsCalls++
+	for _, id := range in.Resources {
+		g, ok := f.groups[id]
+		if !ok {
+			return nil, &fakeAWSError{code: "InvalidGroup.NotFound", fault: smithy.FaultClient}
+		}
+		for _, t := range in.Tags {
+			g.tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+		}
+	}
+	return &ec2.CreateTagsOutput{}, nil
 }
 
 func (f *fakeEC2) DescribeTags(context.Context, *ec2.DescribeTagsInput, ...func(*ec2.Options)) (*ec2.DescribeTagsOutput, error) {

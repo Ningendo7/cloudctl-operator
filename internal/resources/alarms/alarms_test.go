@@ -23,6 +23,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -333,4 +334,67 @@ func mapKeys(m map[string]*fakeAlarm) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+func TestEnsure_UnchangedAlarm_CostsNoTagReadOrWrite(t *testing.T) {
+	client := newFakeCloudWatch()
+	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	run := func() error {
+		return Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+			&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, nil, nil)
+	}
+	if err := run(); err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	puts, tagReads := client.putCalls, client.listTagsCalls
+
+	if err := run(); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if client.putCalls != puts || client.listTagsCalls != tagReads {
+		t.Errorf("expected no further put/tag-read for an unchanged alarm, got puts %d->%d, tag reads %d->%d", puts, client.putCalls, tagReads, client.listTagsCalls)
+	}
+}
+
+func TestEnsure_DriftedAlarm_IsCorrected(t *testing.T) {
+	client := newFakeCloudWatch()
+	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	run := func() error {
+		return Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+			&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, nil, nil)
+	}
+	if err := run(); err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	name := cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", sqsAgeAlarmSuffix), alarmNameMaxLen)
+	want := aws.ToFloat64(client.alarms[name].input.Threshold)
+	client.alarms[name].input.Threshold = aws.Float64(want + 1000)
+	puts := client.putCalls
+
+	if err := run(); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if client.putCalls != puts+1 {
+		t.Errorf("expected exactly one corrective put, got %d", client.putCalls-puts)
+	}
+	if got := aws.ToFloat64(client.alarms[name].input.Threshold); got != want {
+		t.Errorf("threshold = %v, want it restored to %v", got, want)
+	}
+}
+
+func TestAlarmMatches_DisabledAlarmIsDrift(t *testing.T) {
+	d := alarmDef{name: "a", dimensionName: "QueueName", dimensionValue: "q", period: 60, evaluationPeriods: 1}
+	current := types.MetricAlarm{
+		Dimensions:        []types.Dimension{{Name: aws.String("QueueName"), Value: aws.String("q")}},
+		Period:            aws.Int32(60),
+		EvaluationPeriods: aws.Int32(1),
+		Threshold:         aws.Float64(0),
+	}
+	if !alarmMatches(current, d, nil) {
+		t.Fatal("expected the baseline alarm to match")
+	}
+	current.ActionsEnabled = aws.Bool(false)
+	if alarmMatches(current, d, nil) {
+		t.Error("an alarm someone disabled must count as drift")
+	}
 }

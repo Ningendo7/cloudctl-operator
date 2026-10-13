@@ -65,7 +65,7 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			} else {
 				ledger, networkErr = rds.CleanupPodNetworkIdentity(
 					ctx, r.AWSClients.EC2, r.Client,
-					cr.Namespace, cr.Name, rdsNetworkServiceAccountName(cr), cr.Status.ManagedResources,
+					cr.Namespace, cr.Name, string(cr.UID), rdsNetworkServiceAccountName(cr), cr.Status.ManagedResources,
 				)
 				cr.Status.ManagedResources = ledger
 			}
@@ -108,7 +108,7 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 
 			ledger, networkErr := rds.CleanupPodNetworkIdentity(
 				ctx, r.AWSClients.EC2, r.Client,
-				cr.Namespace, cr.Name, rdsNetworkServiceAccountName(cr), cr.Status.ManagedResources,
+				cr.Namespace, cr.Name, string(cr.UID), rdsNetworkServiceAccountName(cr), cr.Status.ManagedResources,
 			)
 			cr.Status.ManagedResources = ledger
 			if networkErr != nil {

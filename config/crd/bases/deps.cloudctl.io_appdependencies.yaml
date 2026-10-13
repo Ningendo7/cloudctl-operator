@@ -164,32 +164,11 @@ spec:
                               default: false
                               type: boolean
                             kmsKeyRef:
-                              description: |-
-                                ConsumeRef references a resource owned by another AppDependencies CR. The
-                                owning CR must list this CR in the target resource's sharedWith grants, or
-                                the reference is reported as unauthorized rather than silently honored.
-                              properties:
-                                name:
-                                  description: name of the AppDependencies CR that
-                                    owns the resource.
-                                  maxLength: 253
-                                  type: string
-                                namespace:
-                                  description: namespace of the AppDependencies CR
-                                    that owns the resource.
-                                  maxLength: 63
-                                  type: string
-                                resourceName:
-                                  description: |-
-                                    resourceName is the `name` of the specific resource entry within the
-                                    owning CR's section (e.g. the queue name under its sqs.resources list).
-                                  maxLength: 80
-                                  type: string
-                              required:
-                              - name
-                              - namespace
-                              - resourceName
-                              type: object
+                              description: kmsKeyRef is the name of an entry in this
+                                CR's kms.resources.
+                              maxLength: 256
+                              pattern: ^[a-zA-Z0-9_/-]+$
+                              type: string
                           type: object
                           x-kubernetes-validations:
                           - message: enabled and kmsKeyRef are mutually exclusive
@@ -286,41 +265,6 @@ spec:
                 type: object
               kms:
                 properties:
-                  consumes:
-                    items:
-                      description: |-
-                        ConsumeRef references a resource owned by another AppDependencies CR. The
-                        owning CR must list this CR in the target resource's sharedWith grants, or
-                        the reference is reported as unauthorized rather than silently honored.
-                      properties:
-                        name:
-                          description: name of the AppDependencies CR that owns the
-                            resource.
-                          maxLength: 253
-                          type: string
-                        namespace:
-                          description: namespace of the AppDependencies CR that owns
-                            the resource.
-                          maxLength: 63
-                          type: string
-                        resourceName:
-                          description: |-
-                            resourceName is the `name` of the specific resource entry within the
-                            owning CR's section (e.g. the queue name under its sqs.resources list).
-                          maxLength: 80
-                          type: string
-                      required:
-                      - name
-                      - namespace
-                      - resourceName
-                      type: object
-                    maxItems: 50
-                    type: array
-                    x-kubernetes-list-map-keys:
-                    - namespace
-                    - name
-                    - resourceName
-                    x-kubernetes-list-type: map
                   resources:
                     items:
                       properties:
@@ -348,45 +292,6 @@ spec:
                           maxLength: 256
                           pattern: ^[a-zA-Z0-9_/-]+$
                           type: string
-                        sharedWith:
-                          items:
-                            description: |-
-                              SharedWithEntry grants another AppDependencies CR permission to consume a
-                              resource owned by this one. Referencing a resource is not sufficient on
-                              its own — the owner must explicitly list the consumer here.
-                            properties:
-                              access:
-                                default: ReadOnly
-                                description: |-
-                                  access controls how much this grant confers. ReadOnly still includes
-                                  whatever's mechanically required just to consume the resource at all
-                                  (e.g. deleting an SQS message once received, or subscribing to an
-                                  SNS topic) — it's the ability to add new data (SendMessage, Publish,
-                                  PutObject, PutItem, ...) that ReadWrite adds on top.
-                                enum:
-                                - ReadOnly
-                                - ReadWrite
-                                type: string
-                              name:
-                                description: name of the consuming AppDependencies
-                                  CR.
-                                maxLength: 253
-                                type: string
-                              namespace:
-                                description: namespace of the consuming AppDependencies
-                                  CR.
-                                maxLength: 63
-                                type: string
-                            required:
-                            - name
-                            - namespace
-                            type: object
-                          maxItems: 20
-                          type: array
-                          x-kubernetes-list-map-keys:
-                          - namespace
-                          - name
-                          x-kubernetes-list-type: map
                       required:
                       - name
                       type: object
@@ -479,8 +384,9 @@ spec:
                           type: boolean
                         allocatedStorage:
                           description: |-
-                            allocatedStorage in GiB. AWS rejects any decrease via ModifyDBInstance,
-                            so this field can only grow once set.
+                            allocatedStorage in GiB. Can only grow once set. AWS rounds a growth
+                            up to at least 10% more than the current size. Growth applies at once
+                            when nothing else is pending, otherwise with the other changes.
                           format: int32
                           maximum: 65536
                           minimum: 20
@@ -488,9 +394,24 @@ spec:
                           x-kubernetes-validations:
                           - message: allocatedStorage cannot be decreased
                             rule: self >= oldSelf
+                        allowMajorVersionUpgrade:
+                          description: |-
+                            allowMajorVersionUpgrade lets engineVersion move the instance to a new
+                            major version. Without it a major upgrade is refused, since it can't be
+                            undone and can break applications.
+                          type: boolean
+                        applyImmediately:
+                          description: |-
+                            applyImmediately applies instance class, engine version, Multi-AZ,
+                            backup and storage changes now instead of in the instance's next
+                            weekly maintenance window. Class and engine changes cause downtime,
+                            and an immediate change also applies any change already pending.
+                          type: boolean
                         backup:
-                          description: RDSBackupSpec enables automated backups and
-                            point-in-time recovery.
+                          description: |-
+                            backup enables automated backups. They are only ever turned on or
+                            extended, never turned off or shortened: that deletes existing
+                            backups, so do it in AWS directly if intended.
                           properties:
                             enabled:
                               default: false
@@ -523,32 +444,11 @@ spec:
                               default: false
                               type: boolean
                             kmsKeyRef:
-                              description: |-
-                                ConsumeRef references a resource owned by another AppDependencies CR. The
-                                owning CR must list this CR in the target resource's sharedWith grants, or
-                                the reference is reported as unauthorized rather than silently honored.
-                              properties:
-                                name:
-                                  description: name of the AppDependencies CR that
-                                    owns the resource.
-                                  maxLength: 253
-                                  type: string
-                                namespace:
-                                  description: namespace of the AppDependencies CR
-                                    that owns the resource.
-                                  maxLength: 63
-                                  type: string
-                                resourceName:
-                                  description: |-
-                                    resourceName is the `name` of the specific resource entry within the
-                                    owning CR's section (e.g. the queue name under its sqs.resources list).
-                                  maxLength: 80
-                                  type: string
-                              required:
-                              - name
-                              - namespace
-                              - resourceName
-                              type: object
+                              description: kmsKeyRef is the name of an entry in this
+                                CR's kms.resources.
+                              maxLength: 256
+                              pattern: ^[a-zA-Z0-9_/-]+$
+                              type: string
                           type: object
                           x-kubernetes-validations:
                           - message: enabled and kmsKeyRef are mutually exclusive
@@ -560,7 +460,13 @@ spec:
                           - mariadb
                           type: string
                         engineVersion:
+                          description: |-
+                            engineVersion is the minimum engine version, as dotted numbers such as
+                            "16" or "16.4". A higher version upgrades the instance (a major
+                            upgrade included); an instance already at or past it is left alone,
+                            since AWS applies minor upgrades itself and never downgrades.
                           maxLength: 20
+                          pattern: ^[0-9]+(\.[0-9]+)*$
                           type: string
                         highAvailability:
                           description: |-
@@ -606,9 +512,9 @@ spec:
                           description: |-
                             sharedWith grants other AppDependencies CRs network access to this
                             instance via a dedicated, operator-owned security group - not an
-                            IAM grant. Connecting with a mirrored Secret username/password is a
-                            plain TCP+SQL login, so sharedWith here authorizes network reachability,
-                            never API permissions.
+                            IAM grant. It authorizes network reachability only: a consumer gets
+                            the host and port in its ConfigMap but never credentials, which stay
+                            with the owner, who creates per-app database users.
                             Requires EKS Security Groups for Pods to be enabled on the cluster.
                           items:
                             description: |-
@@ -745,32 +651,11 @@ spec:
                               default: false
                               type: boolean
                             kmsKeyRef:
-                              description: |-
-                                ConsumeRef references a resource owned by another AppDependencies CR. The
-                                owning CR must list this CR in the target resource's sharedWith grants, or
-                                the reference is reported as unauthorized rather than silently honored.
-                              properties:
-                                name:
-                                  description: name of the AppDependencies CR that
-                                    owns the resource.
-                                  maxLength: 253
-                                  type: string
-                                namespace:
-                                  description: namespace of the AppDependencies CR
-                                    that owns the resource.
-                                  maxLength: 63
-                                  type: string
-                                resourceName:
-                                  description: |-
-                                    resourceName is the `name` of the specific resource entry within the
-                                    owning CR's section (e.g. the queue name under its sqs.resources list).
-                                  maxLength: 80
-                                  type: string
-                              required:
-                              - name
-                              - namespace
-                              - resourceName
-                              type: object
+                              description: kmsKeyRef is the name of an entry in this
+                                CR's kms.resources.
+                              maxLength: 256
+                              pattern: ^[a-zA-Z0-9_/-]+$
+                              type: string
                           type: object
                           x-kubernetes-validations:
                           - message: enabled and kmsKeyRef are mutually exclusive
@@ -1001,32 +886,11 @@ spec:
                               default: false
                               type: boolean
                             kmsKeyRef:
-                              description: |-
-                                ConsumeRef references a resource owned by another AppDependencies CR. The
-                                owning CR must list this CR in the target resource's sharedWith grants, or
-                                the reference is reported as unauthorized rather than silently honored.
-                              properties:
-                                name:
-                                  description: name of the AppDependencies CR that
-                                    owns the resource.
-                                  maxLength: 253
-                                  type: string
-                                namespace:
-                                  description: namespace of the AppDependencies CR
-                                    that owns the resource.
-                                  maxLength: 63
-                                  type: string
-                                resourceName:
-                                  description: |-
-                                    resourceName is the `name` of the specific resource entry within the
-                                    owning CR's section (e.g. the queue name under its sqs.resources list).
-                                  maxLength: 80
-                                  type: string
-                              required:
-                              - name
-                              - namespace
-                              - resourceName
-                              type: object
+                              description: kmsKeyRef is the name of an entry in this
+                                CR's kms.resources.
+                              maxLength: 256
+                              pattern: ^[a-zA-Z0-9_/-]+$
+                              type: string
                           type: object
                           x-kubernetes-validations:
                           - message: enabled and kmsKeyRef are mutually exclusive
@@ -1186,32 +1050,11 @@ spec:
                               default: false
                               type: boolean
                             kmsKeyRef:
-                              description: |-
-                                ConsumeRef references a resource owned by another AppDependencies CR. The
-                                owning CR must list this CR in the target resource's sharedWith grants, or
-                                the reference is reported as unauthorized rather than silently honored.
-                              properties:
-                                name:
-                                  description: name of the AppDependencies CR that
-                                    owns the resource.
-                                  maxLength: 253
-                                  type: string
-                                namespace:
-                                  description: namespace of the AppDependencies CR
-                                    that owns the resource.
-                                  maxLength: 63
-                                  type: string
-                                resourceName:
-                                  description: |-
-                                    resourceName is the `name` of the specific resource entry within the
-                                    owning CR's section (e.g. the queue name under its sqs.resources list).
-                                  maxLength: 80
-                                  type: string
-                              required:
-                              - name
-                              - namespace
-                              - resourceName
-                              type: object
+                              description: kmsKeyRef is the name of an entry in this
+                                CR's kms.resources.
+                              maxLength: 256
+                              pattern: ^[a-zA-Z0-9_/-]+$
+                              type: string
                           type: object
                           x-kubernetes-validations:
                           - message: enabled and kmsKeyRef are mutually exclusive

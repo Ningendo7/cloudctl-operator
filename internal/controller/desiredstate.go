@@ -55,8 +55,18 @@ import (
 func checkpointFor(r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) status.Checkpoint {
 	return func(ctx context.Context, ledger []depsv1alpha1.ManagedResource) error {
 		cr.Status.ManagedResources = ledger
-		return r.Status().Patch(ctx, cr, client.MergeFrom(original))
+		return r.Status().Patch(ctx, cr, statusPatch(original, cr))
 	}
+}
+
+// statusPatch diffs cr against original, ignoring resourceVersion: an
+// earlier write in this pass (the finalizer update, a checkpoint) moves
+// cr's version past original's, and a diff that included it would make the
+// patch fail with a conflict if anything else touched the CR meanwhile.
+func statusPatch(original, cr *depsv1alpha1.AppDependencies) client.Patch {
+	from := original.DeepCopy()
+	from.ResourceVersion = cr.ResourceVersion
+	return client.MergeFrom(from)
 }
 
 // eventRecorderFor adapts r.Recorder into a status.EventRecorder bound to
@@ -138,22 +148,38 @@ type section struct {
 const ForceDeleteAllAnnotation = "cloudctl.io/force-delete-all"
 
 // allSections lists every resource-type section this CR reconciles, in
-// dependency order — iamSection must run last, since deriving this CR's
-// IAM policy reads the ARNs the other sections just wrote into this same
-// reconcile pass's ledger. Adding a new resource type means adding one file
+// dependency order — kmsSection runs first, since other sections' kmsKeyRef
+// resolves against keys it just wrote to the ledger, and iamSection runs
+// last, since deriving this CR's IAM policy reads the ARNs the other
+// sections just wrote into this same reconcile pass's ledger. Adding a new resource type means adding one file
 // (section_<type>.go) with its own constructor, and one line here — this
 // file's size doesn't grow with the number of resource types.
 func allSections(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) []section {
 	return []section{
+		kmsSection(r, original),
 		sqsSection(r, original),
 		snsSection(r, original),
 		dynamodbSection(r, original),
 		s3Section(r, original),
 		rdsSection(r, original),
-		kmsSection(r, original),
 		alarmsSection(r),
 		iamSection(r),
 	}
+}
+
+// finalizeOrder is allSections with kms moved last: a key must outlive the
+// resources encrypted with it, the reverse of the order they're created in.
+func finalizeOrder(sections []section) []section {
+	ordered := make([]section, 0, len(sections))
+	var keys []section
+	for _, s := range sections {
+		if s.name == "KMSReady" {
+			keys = append(keys, s)
+			continue
+		}
+		ordered = append(ordered, s)
+	}
+	return append(ordered, keys...)
 }
 
 func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) error {
@@ -211,7 +237,7 @@ func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr 
 	var blocked []string
 	// original is nil here: finalize closures only ever call Cleanup, never
 	// checkpointFor, so there's nothing that would dereference it.
-	for _, s := range allSections(r, nil) {
+	for _, s := range finalizeOrder(allSections(r, nil)) {
 		done, sectionBlocked, err := s.finalize(ctx, cr)
 		if err != nil {
 			if firstErr == nil {

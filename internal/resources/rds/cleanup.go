@@ -196,11 +196,11 @@ func ensureFinalSnapshot(
 	episodeID := strconv.FormatInt(entry.PendingDeletionSince.Unix(), 10)
 	expectedSnapshotID := cloudctlaws.DerivedResourceName(namespace, crName, resourceType, 255, entry.Name, "final-snapshot", episodeID)
 
-	existing := status.FindManagedResource(ledger, snapshotResourceType, entry.Name)
-	if existing != nil && existing.ARN != expectedSnapshotID {
+	existing, existingFound := status.FindManagedResource(ledger, snapshotResourceType, entry.Name)
+	if existingFound && existing.ARN != expectedSnapshotID {
 		return retireFinalSnapshot(ctx, awsClient, entry.Name, ledger, "superseded by a newer episode", recordEvent)
 	}
-	if existing != nil && existing.State == depsv1alpha1.ManagedResourceStateVerified {
+	if existingFound && existing.State == depsv1alpha1.ManagedResourceStateVerified {
 		return ledger, nil
 	}
 
@@ -209,7 +209,7 @@ func ensureFinalSnapshot(
 		return ledger, err
 	}
 
-	if existing == nil {
+	if !existingFound {
 		snapshotID := expectedSnapshotID
 		_, createErr := awsClient.CreateDBSnapshot(ctx, &rds.CreateDBSnapshotInput{
 			DBInstanceIdentifier: &instanceID,
@@ -243,7 +243,7 @@ func ensureFinalSnapshot(
 
 	switch aws.ToString(describeOut.DBSnapshots[0].Status) {
 	case "available":
-		updated := *existing
+		updated := existing
 		now := metav1.Now()
 		updated.State = depsv1alpha1.ManagedResourceStateVerified
 		updated.LastVerifiedAt = &now
@@ -275,8 +275,8 @@ func retireFinalSnapshot(
 	why string,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	existing := status.FindManagedResource(ledger, snapshotResourceType, resourceName)
-	if existing == nil {
+	existing, existingFound := status.FindManagedResource(ledger, snapshotResourceType, resourceName)
+	if !existingFound {
 		return ledger, nil
 	}
 

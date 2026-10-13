@@ -25,7 +25,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	clientpkg "sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -64,11 +63,6 @@ const (
 	// or fails as an ordinary retryable/non-retryable error, never as an
 	// indefinitely-blocked state waiting on some other condition to change.
 	CleanupReasonPendingDeletion CleanupReason = "PendingDeletion"
-	// CleanupReasonBlockedByConsumer means the quiet window elapsed but
-	// another AppDependencies CR still declares an encryption.kmsKeyRef
-	// pointing at this key - deletion stays blocked indefinitely, with no
-	// automatic resolution, until that reference is removed.
-	CleanupReasonBlockedByConsumer CleanupReason = "BlockedByConsumer"
 )
 
 // CleanupResult reports what happened to a ledger entry Cleanup did not
@@ -100,20 +94,16 @@ type CleanupResult struct {
 // Unlike every other resource type, there's no "is it empty" check here
 // in the usual sense — a KMS key has no AWS-queryable signal analogous to
 // a message, item, or object count for "is anything still using this to
-// encrypt data." The one usage signal this does check (HasActiveConsumer:
-// does any other AppDependencies CR currently declare an
-// encryption.kmsKeyRef pointing at this key) is k8s-queryable, not
-// AWS-queryable, and only catches consumers going through that field —
-// something encrypted with this key entirely outside this operator's own
-// bookkeeping is invisible to it. The quiet window, that check, and AWS's
-// own 30-day PendingDeletion window are the only safety layers, and there
-// is no force override to skip any of them — force-deleting a key can
-// make a completely different, still-live resource's data permanently
-// unreadable, not just this resource's own.
+// encrypt data." Keys are never shared across CRs, so the caller passes in
+// every key this CR's own resources still reference (see
+// dedicatedKeysStillNeeded). Something encrypted with this key entirely
+// outside this operator's bookkeeping is invisible to that. The quiet
+// window, that list, and AWS's own PendingDeletion window are the only
+// safety layers, and there is no force override to skip any of them —
+// force-deleting a key can make still-live data permanently unreadable.
 func Cleanup(
 	ctx context.Context,
 	client kmsAPI,
-	k8sClient clientpkg.Client,
 	namespace, crName, crUID string,
 	spec *depsv1alpha1.KMSSpec,
 	dedicatedKeysStillNeeded []string,
@@ -135,9 +125,6 @@ func Cleanup(
 
 	updatedLedger = ledger
 	var firstErr error
-	var allCRs []depsv1alpha1.AppDependencies
-	var allCRsFetched bool
-	var allCRsErr error
 	for _, entry := range ledger {
 		if entry.Type != resourceType {
 			continue
@@ -213,26 +200,6 @@ func Cleanup(
 		}
 		if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
 			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonPendingDeletion})
-			continue
-		}
-
-		if !allCRsFetched {
-			allCRs, allCRsErr = listAllCRs(ctx, k8sClient)
-			allCRsFetched = true
-		}
-		if allCRsErr != nil {
-			if firstErr == nil {
-				firstErr = allCRsErr
-			}
-			continue
-		}
-		if HasActiveConsumer(allCRs, namespace, crName, entry.Name) {
-			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonBlockedByConsumer})
-			if recordEvent != nil {
-				recordEvent("Warning", "KeyDeletionBlockedByConsumer", fmt.Sprintf(
-					"KMS key %s (%s) is no longer declared here, but another AppDependencies CR still references it via encryption.kmsKeyRef - refusing to schedule deletion. Remove that reference first; this will otherwise remain blocked indefinitely.",
-					entry.Name, entry.ARN))
-			}
 			continue
 		}
 

@@ -56,7 +56,7 @@ func TestEnsureSecurityGroup_CreatesNewGroupInResolvedVPC(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err != nil {
 		t.Fatalf("EnsureSecurityGroup() error = %v", err)
 	}
@@ -84,13 +84,13 @@ func TestEnsureSecurityGroup_IsIdempotent_ReusesExistingGroup(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	firstARN, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err != nil {
 		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
 	}
 
 	secondARN, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err != nil {
 		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
 	}
@@ -111,7 +111,7 @@ func TestEnsureSecurityGroup_GrantsIngressForAuthorizedConsumer(t *testing.T) {
 	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith)
 	if err != nil {
 		t.Fatalf("EnsureSecurityGroup() error = %v", err)
 	}
@@ -137,7 +137,7 @@ func TestEnsureSecurityGroup_MySQLUsesPort3306(t *testing.T) {
 	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "mysql", testRegion, testAccountID, sharedWith)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "mysql", testRegion, testAccountID, false, sharedWith)
 	if err != nil {
 		t.Fatalf("EnsureSecurityGroup() error = %v", err)
 	}
@@ -161,7 +161,7 @@ func TestEnsureSecurityGroup_SkipsIngressForConsumerWithoutPublishedPodIdentity(
 	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith)
 	if err != nil {
 		t.Fatalf("expected no error for an unresolved forward reference, got %v", err)
 	}
@@ -178,7 +178,7 @@ func TestEnsureSecurityGroup_SkipsIngressForNonexistentConsumerCR(t *testing.T) 
 	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith)
 	if err != nil {
 		t.Fatalf("expected no error when the consumer CR doesn't exist yet, got %v", err)
 	}
@@ -199,7 +199,7 @@ func TestEnsureSecurityGroup_ReassertingIngressIsIdempotent(t *testing.T) {
 	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
 
 	if _, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith); err != nil {
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith); err != nil {
 		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
 	}
 	if ec2Client.authorizeSecurityGroupIngressCalls != 1 {
@@ -207,7 +207,7 @@ func TestEnsureSecurityGroup_ReassertingIngressIsIdempotent(t *testing.T) {
 	}
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith)
 	if err != nil {
 		t.Fatalf("second EnsureSecurityGroup() error = %v (duplicate-permission errors must be swallowed, not surfaced)", err)
 	}
@@ -232,7 +232,7 @@ func TestEnsureSecurityGroup_MultipleConsumers_GrantsOnlyTheResolvedOne(t *testi
 	}
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith)
 	if err != nil {
 		t.Fatalf("EnsureSecurityGroup() error = %v", err)
 	}
@@ -252,7 +252,7 @@ func TestEnsureSecurityGroup_PropagatesVPCResolutionFailure(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	_, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err == nil {
 		t.Fatal("expected an error when VPC resolution fails")
 	}
@@ -268,7 +268,7 @@ func TestEnsureSecurityGroup_PropagatesCreateSecurityGroupFailure(t *testing.T) 
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	_, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err == nil {
 		t.Fatal("expected an error when CreateSecurityGroup fails")
 	}
@@ -287,7 +287,7 @@ func TestEnsureSecurityGroup_PropagatesAuthorizeIngressFailure_WhenNotDuplicate(
 	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
 
 	_, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith)
 	if err == nil {
 		t.Fatal("expected a real (non-duplicate) Authorize failure to surface as an error")
 	}
@@ -307,7 +307,7 @@ func TestEnsureSecurityGroup_RevokesIngressForRemovedConsumer(t *testing.T) {
 		{Namespace: "analytics", Name: "analytics-service"},
 	}
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, bothShared)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, bothShared)
 	if err != nil {
 		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
 	}
@@ -319,7 +319,7 @@ func TestEnsureSecurityGroup_RevokesIngressForRemovedConsumer(t *testing.T) {
 	// fulfillment-service revoked from sharedWith - only analytics remains.
 	onlyAnalytics := []depsv1alpha1.SharedWithEntry{{Namespace: "analytics", Name: "analytics-service"}}
 	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, onlyAnalytics)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, onlyAnalytics)
 	if err != nil {
 		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
 	}
@@ -340,14 +340,14 @@ func TestEnsureSecurityGroup_RevokesAllIngressWhenSharedWithEmptied(t *testing.T
 	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith)
 	if err != nil {
 		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
 	}
 
 	// sharedWith emptied entirely - this consumer (and everyone else) is revoked.
 	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err != nil {
 		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
 	}
@@ -369,7 +369,7 @@ func TestEnsureSecurityGroup_IgnoresRulesOnADifferentPort(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err != nil {
 		t.Fatalf("EnsureSecurityGroup() error = %v", err)
 	}
@@ -379,7 +379,7 @@ func TestEnsureSecurityGroup_IgnoresRulesOnADifferentPort(t *testing.T) {
 	// Reconcile again with still-empty sharedWith - must not touch the
 	// foreign, different-port rule.
 	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err != nil {
 		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
 	}
@@ -401,11 +401,11 @@ func TestEnsureSecurityGroup_NoRevokeCallsWhenNothingStale(t *testing.T) {
 	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
 
 	if _, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith); err != nil {
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith); err != nil {
 		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
 	}
 	if _, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, sharedWith); err != nil {
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith); err != nil {
 		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
 	}
 
@@ -423,14 +423,14 @@ func TestEnsureSecurityGroup_SwapsConsumer_RevokesOldGrantsNewInOnePass(t *testi
 
 	oldShared := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, oldShared)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, oldShared)
 	if err != nil {
 		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
 	}
 
 	newShared := []depsv1alpha1.SharedWithEntry{{Namespace: "analytics", Name: "analytics-service"}}
 	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, newShared)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, newShared)
 	if err != nil {
 		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
 	}
@@ -450,7 +450,7 @@ func TestEnsureSecurityGroup_RevokeNotFound_TreatedAsSuccess(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err != nil {
 		t.Fatalf("EnsureSecurityGroup() error = %v", err)
 	}
@@ -464,7 +464,7 @@ func TestEnsureSecurityGroup_RevokeNotFound_TreatedAsSuccess(t *testing.T) {
 	ec2Client.revokeSecurityGroupIngressErr = &fakeAWSError{code: "InvalidPermission.NotFound", fault: smithy.FaultClient}
 
 	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err != nil {
 		t.Fatalf("expected InvalidPermission.NotFound on revoke to be treated as success, got %v", err)
 	}
@@ -476,7 +476,7 @@ func TestEnsureSecurityGroup_PropagatesRevokeFailure_WhenNotNotFound(t *testing.
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err != nil {
 		t.Fatalf("EnsureSecurityGroup() error = %v", err)
 	}
@@ -485,7 +485,7 @@ func TestEnsureSecurityGroup_PropagatesRevokeFailure_WhenNotNotFound(t *testing.
 	ec2Client.revokeSecurityGroupIngressErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
 
 	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err == nil {
 		t.Fatal("expected a real (non-NotFound) Revoke failure to surface as an error")
 	}
@@ -497,14 +497,14 @@ func TestEnsureSecurityGroup_PropagatesDescribeFailureDuringRevokeCheck(t *testi
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	_, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err != nil {
 		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
 	}
 
 	ec2Client.describeSecurityGroupsByIDErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
 	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, nil)
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err == nil {
 		t.Fatal("expected the Describe failure (needed to check current rules before revoking) to propagate")
 	}
@@ -540,4 +540,93 @@ func TestEnginePort(t *testing.T) {
 			t.Errorf("enginePort(%q) = %d, want %d", tt.engine, got, tt.want)
 		}
 	}
+}
+
+func existingGroupWithTags(t *testing.T, ec2Client *fakeEC2, tags map[string]string) string {
+	t.Helper()
+	name := cloudctlaws.ResourceName("default", "checkout-service", "rds-sg", "orders-db", 255)
+	id := "sg-pre-existing"
+	ec2Client.groups[id] = &fakeSecurityGroup{id: id, name: name, vpcID: "vpc-prod-private-data-tier", tags: tags}
+	return id
+}
+
+func ensureGroup(t *testing.T, rdsClient *fakeRDS, ec2Client *fakeEC2, adopt bool) (string, error) {
+	t.Helper()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	return EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, adopt, nil)
+}
+
+func TestEnsureSecurityGroup_RefusesExistingGroupItDoesNotOwn(t *testing.T) {
+	tests := []struct {
+		name string
+		tags map[string]string
+	}{
+		{name: "untagged", tags: map[string]string{}},
+		{name: "owned by a different CR", tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "someone-else"),
+			cloudctlaws.OwnerUIDTagKey: "uid-9",
+		}},
+		{name: "left by an earlier incarnation of this CR", tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-old",
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rdsClient, ec2Client := newFakeRDS(), newFakeEC2()
+			id := existingGroupWithTags(t, ec2Client, tc.tags)
+
+			if _, err := ensureGroup(t, rdsClient, ec2Client, false); err == nil {
+				t.Fatal("expected a group this CR doesn't own to be refused")
+			}
+			if ec2Client.authorizeSecurityGroupIngressCalls+ec2Client.revokeSecurityGroupIngressCalls != 0 {
+				t.Error("a refused group's rules must not be touched")
+			}
+			if len(ec2Client.groups[id].ingress) != 0 {
+				t.Error("a refused group must be left exactly as found")
+			}
+		})
+	}
+}
+
+func TestEnsureSecurityGroup_AdoptTakesUntaggedOrStaleGroupButNeverAnotherCRs(t *testing.T) {
+	t.Run("untagged", func(t *testing.T) {
+		rdsClient, ec2Client := newFakeRDS(), newFakeEC2()
+		id := existingGroupWithTags(t, ec2Client, map[string]string{})
+		if _, err := ensureGroup(t, rdsClient, ec2Client, true); err != nil {
+			t.Fatalf("EnsureSecurityGroup() error = %v", err)
+		}
+		if !cloudctlaws.IsOwnedBy(ec2Client.groups[id].tags, "default", "checkout-service", "uid-1") {
+			t.Errorf("expected the adopted group to be tagged as owned, got %v", ec2Client.groups[id].tags)
+		}
+	})
+
+	t.Run("stale UID of the same CR", func(t *testing.T) {
+		rdsClient, ec2Client := newFakeRDS(), newFakeEC2()
+		id := existingGroupWithTags(t, ec2Client, map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-old",
+		})
+		if _, err := ensureGroup(t, rdsClient, ec2Client, true); err != nil {
+			t.Fatalf("EnsureSecurityGroup() error = %v", err)
+		}
+		if !cloudctlaws.IsOwnedBy(ec2Client.groups[id].tags, "default", "checkout-service", "uid-1") {
+			t.Errorf("expected the UID tag to be taken over, got %v", ec2Client.groups[id].tags)
+		}
+	})
+
+	t.Run("another CR's group is never adopted", func(t *testing.T) {
+		rdsClient, ec2Client := newFakeRDS(), newFakeEC2()
+		id := existingGroupWithTags(t, ec2Client, map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "someone-else"),
+			cloudctlaws.OwnerUIDTagKey: "uid-9",
+		})
+		if _, err := ensureGroup(t, rdsClient, ec2Client, true); err == nil {
+			t.Fatal("expected adopt:true not to override a different CR's ownership")
+		}
+		if ec2Client.groups[id].tags[cloudctlaws.OwnerUIDTagKey] != "uid-9" {
+			t.Error("the other CR's tags must be left alone")
+		}
+	})
 }

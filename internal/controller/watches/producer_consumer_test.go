@@ -61,7 +61,7 @@ func TestProducerToConsumers_MapsEveryConsumingResourceType(t *testing.T) {
 	}
 	unrelated := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "unrelated"}}
 
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).
+	k8sClient := newIndexedClientBuilder(t).
 		WithObjects(producer, sqsConsumer, snsConsumer, dynamodbConsumer, s3Consumer, rdsConsumer, unrelated).Build()
 
 	requests := ProducerToConsumers(k8sClient)(context.Background(), producer)
@@ -95,7 +95,7 @@ func TestProducerToConsumers_NeverMapsProducerToItself(t *testing.T) {
 			{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
 		}}},
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(producer).Build()
 
 	requests := ProducerToConsumers(k8sClient)(context.Background(), producer)
 	if len(requests) != 0 {
@@ -113,7 +113,7 @@ func TestProducerToConsumers_IgnoresConsumerInDifferentNamespaceWithSameName(t *
 			{Namespace: "staging", Name: "checkout-service", ResourceName: "orders"},
 		}}},
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, decoy).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(producer, decoy).Build()
 
 	requests := ProducerToConsumers(k8sClient)(context.Background(), producer)
 	if len(requests) != 0 {
@@ -123,7 +123,7 @@ func TestProducerToConsumers_IgnoresConsumerInDifferentNamespaceWithSameName(t *
 
 func TestProducerToConsumers_NoConsumersReturnsNil(t *testing.T) {
 	producer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"}}
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer).Build()
+	k8sClient := newIndexedClientBuilder(t).WithObjects(producer).Build()
 
 	requests := ProducerToConsumers(k8sClient)(context.Background(), producer)
 	if len(requests) != 0 {

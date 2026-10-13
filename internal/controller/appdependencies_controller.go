@@ -105,7 +105,7 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 
 	err := ensureDesiredState(ctx, r, cr, original)
 
-	if statusErr := r.Status().Patch(ctx, cr, client.MergeFrom(original)); statusErr != nil {
+	if statusErr := r.Status().Patch(ctx, cr, statusPatch(original, cr)); statusErr != nil {
 		log.Error(statusErr, "failed to update status")
 		if err == nil {
 			err = statusErr
@@ -171,6 +171,9 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentReconciles
 	}
+	if err := watches.RegisterIndexes(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&depsv1alpha1.AppDependencies{}, builder.WithPredicates(predicates.AppDependenciesPredicate())).
 		Owns(&corev1.ConfigMap{}).
@@ -182,7 +185,7 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&depsv1alpha1.AppDependencies{},
 			handler.EnqueueRequestsFromMapFunc(watches.ProducerToConsumers(r.Client)),
-			builder.WithPredicates(predicates.AppDependenciesPredicate()),
+			builder.WithPredicates(predicates.ProducerChangedPredicate()),
 		).
 		Watches(
 			&depsv1alpha1.RDSSubnetGroupGrant{},

@@ -115,7 +115,7 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 		reconciler := &AppDependenciesReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),
-			Scheme: mgr.GetScheme(),
+			Scheme:    mgr.GetScheme(),
 			AWSClients: &cloudctlaws.Clients{
 				RDS: fakeRDS, EC2: fakeEC2,
 				SQS: newFakeSQSClient(), SNS: newFakeSNSClient(), IAM: newFakeIAMClient(),
@@ -224,8 +224,8 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(producer), &current); err != nil {
 				return false
 			}
-			entry := status.FindManagedResource(current.Status.ManagedResources, resourceTypeRDS, "orders-db")
-			return entry != nil && entry.State == depsv1alpha1.ManagedResourceStateVerified
+			entry, entryFound := status.FindManagedResource(current.Status.ManagedResources, resourceTypeRDS, "orders-db")
+			return entryFound && entry.State == depsv1alpha1.ManagedResourceStateVerified
 		}, 10*time.Second, 100*time.Millisecond).Should(BeTrue(), "expected the producer's instance to become Verified")
 
 		for id, g := range fakeEC2.groups {
