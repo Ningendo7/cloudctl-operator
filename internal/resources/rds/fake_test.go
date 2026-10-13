@@ -71,10 +71,12 @@ type fakeInstance struct {
 	pending               *types.PendingModifiedValues
 	storageType           string
 	iops                  *int32
+	publiclyAccessible    bool
 }
 
 type fakeSnapshot struct {
 	id, arn, instanceID, status string
+	tags                        map[string]string
 }
 
 type fakeRDS struct {
@@ -311,6 +313,7 @@ func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInsta
 				Endpoint:              endpoint,
 				MasterUserSecret:      masterUserSecret,
 				StorageEncrypted:      boolPtr(i.kmsKeyARN != ""),
+				PubliclyAccessible:    boolPtr(i.publiclyAccessible),
 			},
 		},
 	}, nil
@@ -371,7 +374,7 @@ func (f *fakeRDS) CreateDBSnapshot(_ context.Context, in *rds.CreateDBSnapshotIn
 		snapStatus = "available"
 	}
 	arn := "arn:aws:rds:us-east-1:123456789012:snapshot:" + id
-	snap := &fakeSnapshot{id: id, arn: arn, instanceID: *in.DBInstanceIdentifier, status: snapStatus}
+	snap := &fakeSnapshot{id: id, arn: arn, instanceID: *in.DBInstanceIdentifier, status: snapStatus, tags: tagsToMap(in.Tags)}
 	f.snapshots[id] = snap
 	return &rds.CreateDBSnapshotOutput{
 		DBSnapshot: &types.DBSnapshot{DBSnapshotIdentifier: &id, DBSnapshotArn: &arn, Status: &snap.status},
@@ -404,7 +407,7 @@ func (f *fakeRDS) DescribeDBSnapshots(_ context.Context, in *rds.DescribeDBSnaps
 		return &rds.DescribeDBSnapshotsOutput{}, nil
 	}
 	return &rds.DescribeDBSnapshotsOutput{
-		DBSnapshots: []types.DBSnapshot{{DBSnapshotIdentifier: &s.id, DBInstanceIdentifier: &s.instanceID, DBSnapshotArn: &s.arn, Status: &s.status}},
+		DBSnapshots: []types.DBSnapshot{{DBSnapshotIdentifier: &s.id, DBInstanceIdentifier: &s.instanceID, DBSnapshotArn: &s.arn, Status: &s.status, TagList: mapToTags(s.tags)}},
 	}, nil
 }
 

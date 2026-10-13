@@ -1799,3 +1799,51 @@ func TestEnsure_AdoptionConflictDoesNotMaskOwnershipRefusals(t *testing.T) {
 		t.Fatalf("expected the ownership refusal to win over the settings conflict, got %v", err)
 	}
 }
+
+func TestEnsure_CreatesInstancePrivate(t *testing.T) {
+	client := newFakeRDS()
+	if _, err := ensureOnce(t, client, baseInstanceSpec("orders-db"), nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	got := client.lastCreateDBInstanceInput.PubliclyAccessible
+	if got == nil || *got {
+		t.Errorf("expected PubliclyAccessible to be explicitly false, got %v", got)
+	}
+}
+
+func TestEnsure_PubliclyAccessibleInstance_WarnsButIsNotChanged(t *testing.T) {
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].publiclyAccessible = true
+
+	var reasons []string
+	if _, err = ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if !contains(reasons, "InstancePubliclyAccessible") {
+		t.Errorf("expected an InstancePubliclyAccessible warning, got %v", reasons)
+	}
+	if client.modifyDBInstanceCalls != 0 {
+		t.Errorf("expected the setting to be left alone, got %d modify calls", client.modifyDBInstanceCalls)
+	}
+}
+
+func TestEnsure_AdoptionRefusesPubliclyAccessibleInstance(t *testing.T) {
+	client := newFakeRDS()
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	spec := baseInstanceSpec("orders-db")
+	spec.Adopt = true
+	existing := existingInstanceMatching(instanceID, spec)
+	existing.publiclyAccessible = true
+	client.instances[instanceID] = existing
+
+	_, err := ensureOnce(t, client, spec, nil)
+	if err == nil || !strings.Contains(err.Error(), "publicly accessible") {
+		t.Fatalf("expected adoption to be refused for a public instance, got %v", err)
+	}
+}

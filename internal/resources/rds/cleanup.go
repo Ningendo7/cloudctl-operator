@@ -108,7 +108,7 @@ func Cleanup(
 			}
 			// Back in use - any tracked snapshot has outlived its purpose.
 			var retireErr error
-			updatedLedger, retireErr = retireFinalSnapshot(ctx, awsClient, entry.Name, updatedLedger, "the instance reappeared in spec", recordEvent)
+			updatedLedger, retireErr = retireFinalSnapshot(ctx, awsClient, namespace, crName, crUID, entry.Name, updatedLedger, "the instance reappeared in spec", recordEvent)
 			if retireErr != nil && firstErr == nil {
 				firstErr = retireErr
 			}
@@ -130,6 +130,28 @@ func Cleanup(
 			continue
 		}
 
+		// Re-verified on every pass before anything acts on the ledger's
+		// word: the ARN is a deterministic name, so a replaced or
+		// re-tagged instance would otherwise get this CR's snapshot and
+		// its "stuck" report.
+		owned, gone, ownErr := verifyInstanceOwned(ctx, awsClient, namespace, crName, crUID, entry)
+		if ownErr != nil {
+			if firstErr == nil {
+				firstErr = ownErr
+			}
+			continue
+		}
+		if gone {
+			status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
+			continue
+		}
+		if !owned {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("instance %q no longer verified as owned by this CR - refusing to act on it", entry.Name)
+			}
+			continue
+		}
+
 		if entry.PendingDeletionSince == nil {
 			updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
 			if recordEvent != nil {
@@ -148,7 +170,7 @@ func Cleanup(
 			continue
 		}
 
-		updatedLedger, err = ensureFinalSnapshot(ctx, awsClient, namespace, crName, entry, updatedLedger, recordEvent)
+		updatedLedger, err = ensureFinalSnapshot(ctx, awsClient, namespace, crName, crUID, entry, updatedLedger, recordEvent)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -185,7 +207,7 @@ func markPendingDeletion(ledger []depsv1alpha1.ManagedResource, results []Cleanu
 func ensureFinalSnapshot(
 	ctx context.Context,
 	awsClient rdsAPI,
-	namespace, crName string,
+	namespace, crName, crUID string,
 	entry depsv1alpha1.ManagedResource,
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
@@ -198,7 +220,7 @@ func ensureFinalSnapshot(
 
 	existing, existingFound := status.FindManagedResource(ledger, snapshotResourceType, entry.Name)
 	if existingFound && existing.ARN != expectedSnapshotID {
-		return retireFinalSnapshot(ctx, awsClient, entry.Name, ledger, "superseded by a newer episode", recordEvent)
+		return retireFinalSnapshot(ctx, awsClient, namespace, crName, crUID, entry.Name, ledger, "superseded by a newer episode", recordEvent)
 	}
 	if existingFound && existing.State == depsv1alpha1.ManagedResourceStateVerified {
 		return ledger, nil
@@ -214,6 +236,7 @@ func ensureFinalSnapshot(
 		_, createErr := awsClient.CreateDBSnapshot(ctx, &rds.CreateDBSnapshotInput{
 			DBInstanceIdentifier: &instanceID,
 			DBSnapshotIdentifier: &snapshotID,
+			Tags:                 mapToTags(ownerTags(namespace, crName, crUID)),
 		})
 		var alreadyExists *types.DBSnapshotAlreadyExistsFault
 		if createErr != nil && !errors.As(createErr, &alreadyExists) {
@@ -270,6 +293,7 @@ func ensureFinalSnapshot(
 func retireFinalSnapshot(
 	ctx context.Context,
 	awsClient rdsAPI,
+	namespace, crName, crUID string,
 	resourceName string,
 	ledger []depsv1alpha1.ManagedResource,
 	why string,
@@ -280,16 +304,28 @@ func retireFinalSnapshot(
 		return ledger, nil
 	}
 
+	describeOut, err := awsClient.DescribeDBSnapshots(ctx, &rds.DescribeDBSnapshotsInput{DBSnapshotIdentifier: &existing.ARN})
+	if err != nil {
+		return ledger, wrapAWSError(err, fmt.Sprintf("checking snapshot %q before retiring it", existing.ARN))
+	}
+	if len(describeOut.DBSnapshots) == 0 {
+		status.RemoveManagedResource(&ledger, snapshotResourceType, resourceName)
+		return ledger, nil
+	}
+	snapshot := describeOut.DBSnapshots[0]
+
+	// The identifier is a deterministic name from the ledger, so it is
+	// deleted only while it still carries this CR's ownership tags.
+	if !cloudctlaws.IsOwnedBy(tagsToMap(snapshot.TagList), namespace, crName, crUID) {
+		status.RemoveManagedResource(&ledger, snapshotResourceType, resourceName)
+		if recordEvent != nil {
+			recordEvent("Warning", "FinalSnapshotNotOwned", fmt.Sprintf("Snapshot %q is no longer tagged as owned by this CR - leaving it in place and no longer tracking it", existing.ARN))
+		}
+		return ledger, nil
+	}
+
 	if existing.State != depsv1alpha1.ManagedResourceStateVerified {
-		describeOut, err := awsClient.DescribeDBSnapshots(ctx, &rds.DescribeDBSnapshotsInput{DBSnapshotIdentifier: &existing.ARN})
-		if err != nil {
-			return ledger, wrapAWSError(err, fmt.Sprintf("checking snapshot %q before retiring it", existing.ARN))
-		}
-		if len(describeOut.DBSnapshots) == 0 {
-			status.RemoveManagedResource(&ledger, snapshotResourceType, resourceName)
-			return ledger, nil
-		}
-		switch aws.ToString(describeOut.DBSnapshots[0].Status) {
+		switch aws.ToString(snapshot.Status) {
 		case statusAvailable:
 			// proceed to delete below
 		case statusFailed:
@@ -311,6 +347,20 @@ func retireFinalSnapshot(
 		recordEvent("Normal", "FinalSnapshotRetired", fmt.Sprintf("Deleted final snapshot %q for %q - %s", existing.ARN, resourceName, why))
 	}
 	return ledger, nil
+}
+
+// verifyInstanceOwned reads the instance's ownership tags fresh. gone is
+// true when the instance no longer exists.
+func verifyInstanceOwned(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (owned, gone bool, err error) {
+	tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &entry.ARN})
+	if tErr != nil {
+		var notFound *types.DBInstanceNotFoundFault
+		if errors.As(tErr, &notFound) {
+			return false, true, nil
+		}
+		return false, false, wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of instance %q", entry.Name))
+	}
+	return cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.TagList), namespace, crName, crUID), false, nil
 }
 
 // instanceIDFromARN extracts the instance identifier from a stored RDS

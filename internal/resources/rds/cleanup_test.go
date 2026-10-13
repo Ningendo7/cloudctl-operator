@@ -20,6 +20,7 @@ import (
 	"context"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -806,6 +807,10 @@ func TestCleanup_SupersededEpisode_PropagatesRetireFailure(t *testing.T) {
 
 	// Re-seed a tracked "old episode" entry directly to force the
 	// superseded path in ensureFinalSnapshot without relying on timing.
+	client.snapshots["some-older-snapshot-id"] = &fakeSnapshot{
+		id: "some-older-snapshot-id", arn: "arn:aws:rds:us-east-1:123456789012:snapshot:some-older-snapshot-id",
+		instanceID: "x", status: "available", tags: ownerTags("default", "checkout-service", "uid-1"),
+	}
 	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{
 		Type: snapshotResourceType, Name: "orders-db", ARN: "some-older-snapshot-id",
 		State: depsv1alpha1.ManagedResourceStateVerified, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, CreatedAt: metav1.Now(),
@@ -949,4 +954,97 @@ func TestInstanceIDFromARN(t *testing.T) {
 
 func containsString(haystack []string, needle string) bool {
 	return slices.Contains(haystack, needle)
+}
+
+func instanceTags(client *fakeRDS, namespace, crName, name string) map[string]string {
+	return client.instances[cloudctlaws.ResourceName(namespace, crName, resourceType, name, 63)].tags
+}
+
+func TestCleanup_DeletePolicy_RefusesToActOnInstanceNoLongerOwned(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	delete(instanceTags(client, "default", "checkout-service", "orders-db"), cloudctlaws.OwnerTagKey)
+
+	ledger, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "no longer verified as owned") {
+		t.Fatalf("expected an ownership refusal, got %v", err)
+	}
+	if entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db"); entry.PendingDeletionSince != nil {
+		t.Error("expected the instance not to be marked pending deletion before ownership is verified")
+	}
+	if findCleanupResult(results, "orders-db") != nil {
+		t.Error("expected no stuck/pending report for an instance this CR no longer owns")
+	}
+
+	// Past the quiet window it still must not snapshot a foreign instance.
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+	if _, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil); err == nil {
+		t.Fatal("expected the refusal to hold past the quiet window")
+	}
+	if client.createDBSnapshotCalls != 0 {
+		t.Errorf("expected no snapshot of an instance that isn't ours, got %d calls", client.createDBSnapshotCalls)
+	}
+}
+
+func TestCleanup_DeletePolicy_InstanceAlreadyGone_DropsLedgerEntry(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	delete(client.instances, cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63))
+
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if status.HasManagedResource(ledger, resourceType, "orders-db") {
+		t.Error("expected an instance already gone from AWS to be dropped from the ledger")
+	}
+}
+
+func TestCleanup_FinalSnapshotIsTaggedAsOwned(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	ledger = setMarked(t, client, ledger, "orders-db")
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	if !cloudctlaws.IsOwnedBy(client.snapshots[entry.ARN].tags, "default", "checkout-service", "uid-1") {
+		t.Errorf("expected the final snapshot to carry this CR's ownership tags, got %v", client.snapshots[entry.ARN].tags)
+	}
+}
+
+func TestCleanup_BackInUse_DoesNotDeleteSnapshotNoLongerOwned(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	ledger = setMarked(t, client, ledger, "orders-db")
+	ledger = backdatePendingDeletion(ledger, "orders-db", deletionQuietWindow+time.Minute)
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	client.setSnapshotStatus(entry.ARN, "available")
+	client.snapshots[entry.ARN].tags = map[string]string{}
+
+	var events []string
+	recordEvent := func(_, reason, _ string) { events = append(events, reason) }
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, recordEvent)
+	if err != nil {
+		t.Fatalf("redeclare Cleanup() error = %v", err)
+	}
+	if client.deleteDBSnapshotCalls != 0 {
+		t.Errorf("expected no DeleteDBSnapshot for a snapshot that isn't tagged as ours, got %d", client.deleteDBSnapshotCalls)
+	}
+	if _, stillExists := client.snapshots[entry.ARN]; !stillExists {
+		t.Error("expected the snapshot to be left in AWS")
+	}
+	if status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
+		t.Error("expected the snapshot to stop being tracked")
+	}
+	if !containsString(events, "FinalSnapshotNotOwned") {
+		t.Errorf("expected a FinalSnapshotNotOwned warning, got %v", events)
+	}
 }

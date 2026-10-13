@@ -85,7 +85,7 @@ func checkAdoptable(
 
 // adoptionConflicts lists the differences between an existing instance and
 // the spec that adoption must not paper over: settings that can't be changed
-// afterwards (engine, subnet group, encryption), and settings the operator
+// afterwards (engine, subnet group, encryption), public accessibility, and settings the operator
 // would otherwise change on its first reconcile (class, Multi-AZ, a higher
 // engine version or storage size than the instance has).
 func adoptionConflicts(instance types.DBInstance, r depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource) []string {
@@ -103,6 +103,10 @@ func adoptionConflicts(instance types.DBInstance, r depsv1alpha1.RDSInstanceSpec
 	}
 	if actualSubnetGroup != r.DBSubnetGroupName {
 		differs("dbSubnetGroupName", orNone(actualSubnetGroup), r.DBSubnetGroupName)
+	}
+
+	if aws.ToBool(instance.PubliclyAccessible) {
+		conflicts = append(conflicts, "instance is publicly accessible (this operator only manages private instances)")
 	}
 
 	wantEncrypted := r.Encryption != nil && (r.Encryption.Enabled || r.Encryption.KMSKeyRef != "")

@@ -194,11 +194,13 @@ spec:
 
 **Connection info.** The owner's and each consumer's connection ConfigMap carries `RDS_<NAME>_HOST`, `_PORT`, `_ENGINE` and `_DB_INSTANCE_IDENTIFIER` (consumers' keys also include the producer's namespace and CR name).
 
+**Private by default.** Instances are created with `PubliclyAccessible` explicitly off, since AWS otherwise defaults to public in a default VPC. If an instance later becomes public, the operator emits an `InstancePubliclyAccessible` warning each reconcile but does not change it: that may be a deliberate decision, and the security group is the only access it controls. An adopted instance keeps the security groups it already has, so check them too.
+
 **Network access.** Each instance gets its own security group, created and owned by the operator and never shared. `sharedWith` grants ingress from a consumer CR's pods, which therefore need EKS Security Groups for Pods: the consumer CR gets its own pod security group and a `SecurityGroupPolicy`. A security group found at the expected name is only reused if it carries this CR's ownership tags; `adopt: true` takes over an untagged one or one left by an earlier incarnation of the same CR.
 
 **Adopting an existing instance.** With `adopt: true`, an untagged instance at the expected name is adopted only if the spec describes it. Adoption never changes an instance, so it is refused with an `AdoptionConflict` reason, and before anything is created, tagged or modified, when the instance differs on any of:
 
-- `engine`, `dbSubnetGroupName`, or storage encryption (including the key, for a `kmsKeyRef`), none of which can be changed afterwards;
+- `engine`, `dbSubnetGroupName`, or storage encryption (including the key, for a `kmsKeyRef`), none of which can be changed afterwards, or an instance that is publicly accessible;
 - `instanceClass` or `highAvailability`, which the first reconcile would otherwise change, possibly downsizing a production instance;
 - an `engineVersion` or `allocatedStorage` higher than the instance has, which would upgrade or grow it.
 
@@ -208,7 +210,7 @@ An instance with more storage or a newer version than the spec's minimums is ado
 
 **Observing an instance.** The status AWS reports for each instance is recorded on its `status.managedResources` entry as `observedStatus`, with `observedStatusSince` set when the value last changed (not on every poll). While the instance isn't usable, `RDSReady` is `False` with a reason derived from that status: `InstanceCreating`, `InstanceModifying`, `InstanceConfiguringEnhancedMonitoring` and so on, or `InstanceFailed`, which is not retried and needs manual investigation. The field is informational and never gates an action.
 
-**Deletion.** The operator never calls `DeleteDBInstance`. With `deletionPolicy: Delete`, an instance removed from spec goes through the quiet window and a one-hour grace period, then escalates to `InstanceStuckPendingDeletion` on the `RDSReady` condition while the operator takes a final snapshot so the eventual manual delete has a restore point; billing continues until someone deletes the instance. `Retain` (the default) just removes the ownership tag.
+**Deletion.** The operator never calls `DeleteDBInstance`. With `deletionPolicy: Delete`, an instance removed from spec goes through the quiet window and a one-hour grace period, then escalates to `InstanceStuckPendingDeletion` on the `RDSReady` condition while the operator takes a final snapshot so the eventual manual delete has a restore point; billing continues until someone deletes the instance. Each pass first re-reads the instance's ownership tags and refuses to act (no snapshot, no stuck report) if they no longer match this CR; an instance already gone from AWS is dropped from the ledger. Final snapshots carry the same tags and are only deleted while they do. `Retain` (the default) just removes the ownership tag.
 
 **Testing.** Unit tests, the controller's envtest suite and a live suite against real AWS (`make test-live`, never in CI) cover RDS. There is no LocalStack integration tier or e2e suite for it: LocalStack's community edition doesn't implement RDS.
 

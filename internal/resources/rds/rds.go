@@ -379,6 +379,13 @@ func ensureInstanceObserving(
 		}
 	}
 
+	// Reported, not reverted: a public flag may be someone's deliberate
+	// change, and this operator's security group is the only access it
+	// controls.
+	if aws.ToBool(instance.PubliclyAccessible) && recordEvent != nil {
+		recordEvent("Warning", "InstancePubliclyAccessible", fmt.Sprintf("RDS instance %s is publicly accessible; this operator creates instances as private and never changes the setting - turn it off in AWS if unintended", instanceARN))
+	}
+
 	// Re-asserted every pass, independent of the ownership trust window.
 	if !servingOnly {
 		if err := reconcileInstanceAttributes(ctx, awsClient, instanceID, instanceARN, instance, opts, recordEvent); err != nil {
@@ -418,8 +425,10 @@ func createInstance(
 		VpcSecurityGroupIds:      []string{opts.securityGroupID},
 		MasterUsername:           aws.String(masterUsername),
 		ManageMasterUserPassword: aws.Bool(true),
-		MultiAZ:                  aws.Bool(opts.multiAZ),
-		Tags:                     mapToTags(ownerTags(namespace, crName, crUID)),
+		// Set explicitly: AWS defaults to public in a default VPC.
+		PubliclyAccessible: aws.Bool(false),
+		MultiAZ:            aws.Bool(opts.multiAZ),
+		Tags:               mapToTags(ownerTags(namespace, crName, crUID)),
 	}
 	if opts.backupEnabled {
 		input.BackupRetentionPeriod = aws.Int32(defaultBackupRetentionDays)
