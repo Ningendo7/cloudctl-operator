@@ -495,9 +495,19 @@ spec:
 			crGone(g, resilienceNamespace, "persist")
 		}, 8*time.Minute, 20*time.Second).Should(Succeed())
 
-		Expect(queueCount(nextAWSPod("outage-queue"), queueNameFor("outage"))).To(Equal(1),
-			"the queue LocalStack lost should be recreated exactly once")
-		Expect(queueCount(nextAWSPod("during-queue"), queueNameFor("during-outage"))).To(Equal(1))
+		Expect(queueCount(nextAWSPod("during-queue"), queueNameFor("during-outage"))).To(Equal(1),
+			"the CR created during the outage should get its queue once AWS is back")
+
+		// A queue with no managed attributes isn't re-checked in AWS while
+		// its ledger entry is inside the trust window, so a queue AWS lost
+		// stays unnoticed (and the CR Ready) until the window lapses. Lapse
+		// it the way time would, instead of waiting ten minutes.
+		By("letting the trust window lapse on the queue AWS lost")
+		expireTrustWindow(resilienceNamespace, "outage", "sqs", "orders")
+		Eventually(func() int {
+			_ = tryForceReconcile(resilienceNamespace, "outage")
+			return queueCount(nextAWSPod("outage-queue"), queueNameFor("outage"))
+		}, 3*time.Minute, 10*time.Second).Should(Equal(1), "the queue LocalStack lost should be recreated exactly once")
 	})
 
 	It("stays up but unready when it can't reach AWS at startup, instead of crash-looping, and recovers once it can", func() {
@@ -611,6 +621,22 @@ func (c crView) ledgerCreatedAt(resourceType, name string) string {
 		}
 	}
 	return ""
+}
+
+// expireTrustWindow backdates a ledger entry's last verification past
+// status.TrustWindow, so the next reconcile re-checks it against AWS.
+func expireTrustWindow(ns, name, resourceType, resourceName string) {
+	GinkgoHelper()
+	cr, err := getCR(ns, name)
+	Expect(err).NotTo(HaveOccurred())
+	for i, r := range cr.Status.ManagedResources {
+		if r.Type == resourceType && r.Name == resourceName {
+			mustKubectl("patch", "appdependencies", name, "-n", ns, "--subresource=status", "--type=json",
+				"-p", fmt.Sprintf(`[{"op":"add","path":"/status/managedResources/%d/lastVerifiedAt","value":"2000-01-01T00:00:00Z"}]`, i))
+			return
+		}
+	}
+	Fail(fmt.Sprintf("no %s/%s ledger entry on %s/%s", resourceType, resourceName, ns, name))
 }
 
 // crReady asserts the CR's aggregate Ready condition is True for its
