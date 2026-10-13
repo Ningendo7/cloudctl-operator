@@ -61,11 +61,6 @@ func tryKubectl(args ...string) (string, error) {
 	return utils.Run(exec.Command("kubectl", args...))
 }
 
-func lastLine(s string) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	return strings.TrimSpace(lines[len(lines)-1])
-}
-
 func waitNoManagerPods() {
 	GinkgoHelper()
 	Eventually(func() string {
@@ -177,45 +172,54 @@ var _ = Describe("Operator resilience against LocalStack", Ordered, ContinueOnFa
 	})
 
 	It("runs with the narrow permissions it was given, and no more", func() {
-		asSA := fmt.Sprintf("--as=system:serviceaccount:%s:%s", namespace, serviceAccountName)
-		can := func(verb, resource string, extra ...string) bool {
-			args := append([]string{"auth", "can-i", verb, resource, asSA, "-n", resilienceNamespace}, extra...)
-			out, _ := tryKubectl(args...)
-			return lastLine(out) == "yes"
+		// SubjectAccessReview rather than `kubectl auth can-i`, which can't
+		// resolve a resource whose CRD isn't installed here (the EKS
+		// SecurityGroupPolicy) and answers "no" for it.
+		type check struct{ verb, group, resource, subresource string }
+		allowed := func(c check) bool {
+			out, err := kubectlCreateStdin(fmt.Sprintf(`apiVersion: authorization.k8s.io/v1
+kind: SubjectAccessReview
+spec:
+  user: system:serviceaccount:%s:%s
+  resourceAttributes:
+    namespace: %s
+    verb: %s
+    group: "%s"
+    resource: %s
+    subresource: "%s"
+`, namespace, serviceAccountName, resilienceNamespace, c.verb, c.group, c.resource, c.subresource), "-o", "jsonpath={.status.allowed}")
+			Expect(err).NotTo(HaveOccurred())
+			return strings.TrimSpace(out) == "true"
 		}
 
-		type check struct {
-			verb, resource string
-			extra          []string
+		for _, c := range []check{
+			{"create", "", "configmaps", ""},
+			{"create", "", "secrets", ""},
+			{"create", "", "serviceaccounts", ""},
+			{"patch", "", "serviceaccounts", ""},
+			{"patch", "deps.cloudctl.io", "appdependencies", "status"},
+			{"update", "deps.cloudctl.io", "appdependencies", "finalizers"},
+			{"watch", "deps.cloudctl.io", "rdssubnetgroupgrants", ""},
+			{"create", "events.k8s.io", "events", ""},
+			{"create", "vpcresources.k8s.aws", "securitygrouppolicies", ""},
+		} {
+			Expect(allowed(c)).To(BeTrue(), "the manager needs to %s %s/%s", c.verb, c.group, c.resource)
 		}
 		for _, c := range []check{
-			{"create", "configmaps", nil},
-			{"create", "secrets", nil},
-			{"create", "serviceaccounts", nil},
-			{"patch", "serviceaccounts", nil},
-			{"patch", "appdependencies.deps.cloudctl.io", []string{"--subresource=status"}},
-			{"update", "appdependencies.deps.cloudctl.io", []string{"--subresource=finalizers"}},
-			{"watch", "rdssubnetgroupgrants.deps.cloudctl.io", nil},
-			{"create", "events.events.k8s.io", nil},
-			{"create", "securitygrouppolicies.vpcresources.k8s.aws", nil},
+			{"delete", "", "serviceaccounts", ""},
+			{"create", "deps.cloudctl.io", "rdssubnetgroupgrants", ""},
+			{"update", "deps.cloudctl.io", "rdssubnetgroupgrants", ""},
+			{"delete", "deps.cloudctl.io", "rdssubnetgroupgrants", ""},
+			{"get", "", "pods", ""},
+			{"create", "", "pods", "exec"},
+			{"create", "apps", "deployments", ""},
+			{"list", "", "nodes", ""},
+			{"delete", "", "namespaces", ""},
+			{"create", "rbac.authorization.k8s.io", "clusterroles", ""},
+			{"create", "rbac.authorization.k8s.io", "rolebindings", ""},
+			{"patch", "apiextensions.k8s.io", "customresourcedefinitions", ""},
 		} {
-			Expect(can(c.verb, c.resource, c.extra...)).To(BeTrue(), "the manager needs to %s %s", c.verb, c.resource)
-		}
-		for _, c := range []check{
-			{"delete", "serviceaccounts", nil},
-			{"create", "rdssubnetgroupgrants.deps.cloudctl.io", nil},
-			{"update", "rdssubnetgroupgrants.deps.cloudctl.io", nil},
-			{"delete", "rdssubnetgroupgrants.deps.cloudctl.io", nil},
-			{"get", "pods", nil},
-			{"create", "pods", []string{"--subresource=exec"}},
-			{"create", "deployments.apps", nil},
-			{"list", "nodes", nil},
-			{"delete", "namespaces", nil},
-			{"create", "clusterroles.rbac.authorization.k8s.io", nil},
-			{"create", "rolebindings.rbac.authorization.k8s.io", nil},
-			{"patch", "customresourcedefinitions.apiextensions.k8s.io", nil},
-		} {
-			Expect(can(c.verb, c.resource, c.extra...)).To(BeFalse(), "the manager must not be able to %s %s", c.verb, c.resource)
+			Expect(allowed(c)).To(BeFalse(), "the manager must not be able to %s %s/%s", c.verb, c.group, c.resource)
 		}
 	})
 
@@ -652,6 +656,12 @@ func tryForceReconcile(ns, name string) error {
 	_, err := utils.Run(exec.Command("kubectl", "annotate", "appdependencies", name, "-n", ns, "--overwrite",
 		fmt.Sprintf("%s=%d", predicates.ForceReconcileAnnotation, time.Now().UnixNano())))
 	return err
+}
+
+func kubectlCreateStdin(manifest string, extraArgs ...string) (string, error) {
+	cmd := exec.Command("kubectl", append([]string{"create", "-f", "-"}, extraArgs...)...)
+	cmd.Stdin = strings.NewReader(manifest)
+	return utils.Run(cmd)
 }
 
 func kubectlApplyStdin(manifest string, extraArgs ...string) (string, error) {

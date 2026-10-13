@@ -280,9 +280,11 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 				KMS: newFakeKMSClient(), CloudWatch: newFakeCloudWatchClient(),
 				Region: "us-east-1", AccountID: "123456789012",
 			},
-			Recorder:        events.NewFakeRecorder(1000),
-			OIDCProviderARN: "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
-			OIDCProviderURL: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+			Recorder: events.NewFakeRecorder(1000),
+			// One worker: the in-memory AWS fakes are not safe for concurrent use.
+			MaxConcurrentReconciles: 1,
+			OIDCProviderARN:         "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+			OIDCProviderURL:         "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
 		}).SetupWithManager(mgr)).To(Succeed())
 
 		var mgrCtx context.Context
@@ -621,6 +623,18 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 			Expect(k8sClient.Get(ctx, saKey, &sa)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &sa)).To(Succeed())
 			Eventually(roleARN, timeout, poll).ShouldNot(BeEmpty(), "a deleted ServiceAccount must be recreated")
+
+			// There is no garbage collector in envtest, so the owner
+			// reference surviving the CR's deletion is what proves a real
+			// cluster would collect the ServiceAccount.
+			Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), &depsv1alpha1.AppDependencies{}))
+			}, timeout, poll).Should(BeTrue())
+			var released corev1.ServiceAccount
+			Expect(k8sClient.Get(ctx, saKey, &released)).To(Succeed())
+			Expect(released.OwnerReferences).To(HaveLen(1), "releasing the ServiceAccount must not strip the owner reference that lets it be garbage-collected")
+			Expect(released.Annotations).NotTo(HaveKey(serviceaccount.RoleARNAnnotation))
 		})
 	})
 

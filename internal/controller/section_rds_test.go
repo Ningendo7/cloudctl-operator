@@ -311,9 +311,11 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 				KMS: newFakeKMSClient(), CloudWatch: newFakeCloudWatchClient(),
 				Region: "us-east-1", AccountID: "123456789012",
 			},
-			Recorder:        events.NewFakeRecorder(1000),
-			OIDCProviderARN: "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
-			OIDCProviderURL: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+			Recorder: events.NewFakeRecorder(1000),
+			// One worker: the in-memory AWS fakes are not safe for concurrent use.
+			MaxConcurrentReconciles: 1,
+			OIDCProviderARN:         "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+			OIDCProviderURL:         "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
 		}).SetupWithManager(mgr)).To(Succeed())
 
 		var mgrCtx context.Context
