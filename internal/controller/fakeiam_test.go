@@ -90,6 +90,19 @@ func (f *fakeIAMClient) ListRoleTags(_ context.Context, in *iam.ListRoleTagsInpu
 	return &iam.ListRoleTagsOutput{Tags: tagsToIAMSlice(r.tags)}, nil
 }
 
+func (f *fakeIAMClient) GetRolePolicy(_ context.Context, in *iam.GetRolePolicyInput, _ ...func(*iam.Options)) (*iam.GetRolePolicyOutput, error) {
+	r, ok := f.roles[*in.RoleName]
+	if !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	doc, ok := r.policies[*in.PolicyName]
+	if !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	name, policyName := *in.RoleName, *in.PolicyName
+	return &iam.GetRolePolicyOutput{RoleName: &name, PolicyName: &policyName, PolicyDocument: &doc}, nil
+}
+
 func (f *fakeIAMClient) PutRolePolicy(_ context.Context, in *iam.PutRolePolicyInput, _ ...func(*iam.Options)) (*iam.PutRolePolicyOutput, error) {
 	r, ok := f.roles[*in.RoleName]
 	if !ok {

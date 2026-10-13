@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -73,8 +74,8 @@ func TestEnsure_CreatesBucketWithAccountHashSuffix(t *testing.T) {
 		t.Errorf("expected <identity-hash>-<account-hash> after the base name, got %q", expected)
 	}
 
-	entry := status.FindManagedResource(ledger, "s3", "receipts")
-	if entry == nil || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+	entry, entryFound := status.FindManagedResource(ledger, "s3", "receipts")
+	if !entryFound || entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected the bucket to reach Verified after a successful tag write, got %+v", entry)
 	}
 }
@@ -91,8 +92,8 @@ func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("s3", "receipts"))
-	if keyEntry == nil {
+	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("s3", "receipts"))
+	if !keyEntryFound {
 		t.Fatal("expected a dedicated KMS key ledger entry named \"receipts-key\"")
 	}
 
@@ -122,17 +123,17 @@ func TestEnsure_CorrectsKMSKeyDriftOnExistingBucket(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("s3", "receipts"))
+	keyEntry, _ := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("s3", "receipts"))
 	if client.buckets[bucket].kmsKeyARN != keyEntry.ARN {
 		t.Errorf("expected drift correction to set the bucket's KMS key to %q, got %q", keyEntry.ARN, client.buckets[bucket].kmsKeyARN)
 	}
 }
 
-func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefRetriesWhenKeyNotYetCreated(t *testing.T) {
 	client := newFakeS3()
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 		{Name: "receipts", Encryption: &depsv1alpha1.EncryptionSpec{
-			KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+			KMSKeyRef: "shared-key",
 		}},
 	}}
 	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
@@ -147,31 +148,17 @@ func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
 	}
 }
 
-func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefResolvesAKeyInThisCRsLedger(t *testing.T) {
 	client := newFakeS3()
-	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
-		Spec: depsv1alpha1.AppDependenciesSpec{
-			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
-				{Name: "shared-key", SharedWith: []depsv1alpha1.SharedWithEntry{
-					{Namespace: "default", Name: "checkout-service"},
-				}},
-			}},
-		},
-		Status: depsv1alpha1.AppDependenciesStatus{
-			ManagedResources: []depsv1alpha1.ManagedResource{
-				{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"},
-			},
-		},
-	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	ledger := []depsv1alpha1.ManagedResource{{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"}}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 		{Name: "receipts", Encryption: &depsv1alpha1.EncryptionSpec{
-			KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+			KMSKeyRef: "shared-key",
 		}},
 	}}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -289,8 +276,8 @@ func TestEnsure_CreatesBucketTaggedAtomically(t *testing.T) {
 	if client.putBucketTaggingCalls != 0 {
 		t.Errorf("expected no PutBucketTagging call for a bucket tagged atomically at creation, got %d", client.putBucketTaggingCalls)
 	}
-	entry := status.FindManagedResource(ledger, "s3", "receipts")
-	if entry == nil || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+	entry, entryFound := status.FindManagedResource(ledger, "s3", "receipts")
+	if !entryFound || entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected Verified directly, with no TagPending intermediate state, got %+v", entry)
 	}
 }
@@ -343,8 +330,8 @@ func TestEnsure_RecoversAfterCrashRightAfterCreate_WithoutAdopt(t *testing.T) {
 	if len(client.buckets) != 1 {
 		t.Errorf("expected exactly one bucket in AWS, not a duplicate, got %d", len(client.buckets))
 	}
-	entry := status.FindManagedResource(ledger, resourceType, "receipts")
-	if entry == nil || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, "receipts")
+	if !entryFound || entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected the bucket to reach Verified without adopt:true, got %+v", entry)
 	}
 	if _, ok := client.buckets[bucket]; !ok {
@@ -424,6 +411,46 @@ func TestEnsure_RejectsReplicationAsNotYetSupported(t *testing.T) {
 	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected replication to be explicitly rejected as unsupported")
+	}
+	if !errors.Is(err, ErrReplicationNotSupported) {
+		t.Errorf("expected errors.Is(err, ErrReplicationNotSupported), got %v", err)
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if errors.As(err, &reconcileErr) {
+		t.Errorf("expected a hard, non-retryable error - retrying forever on a feature that can never succeed would look indistinguishable from a slow-but-working reconcile, got a ReconcileError with Retryable=%v", reconcileErr.Retryable)
+	}
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	if _, created := client.buckets[bucket]; created {
+		t.Error("expected no CreateBucket call for a replication-enabled bucket - it should fail before touching AWS at all")
+	}
+}
+
+func TestEnsure_ReplicationRequested_DoesNotBlockOtherBuckets(t *testing.T) {
+	client := newFakeS3()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Replication: &depsv1alpha1.S3ReplicationSpec{Enabled: true, Region: "us-west-2"}},
+		{Name: "invoices"},
+	}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error from the replication-enabled bucket")
+	}
+	if !status.HasManagedResource(ledger, resourceType, "invoices") {
+		t.Error("expected the unaffected bucket to still be created despite the other one's unsupported replication request")
+	}
+}
+
+func TestEnsure_ReplicationDisabled_ProceedsNormally(t *testing.T) {
+	client := newFakeS3()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Replication: &depsv1alpha1.S3ReplicationSpec{Enabled: false}},
+	}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if !status.HasManagedResource(ledger, resourceType, "receipts") {
+		t.Error("expected the bucket to be created normally when replication is declared but disabled")
 	}
 }
 
@@ -534,7 +561,7 @@ func TestEnsure_TruncatesBucketNameExceedingS3Limit(t *testing.T) {
 	if len(bucket) > 63 {
 		t.Errorf("computed bucket name is %d characters, want <= 63", len(bucket))
 	}
-	if status.FindManagedResource(ledger, resourceType, longKey) == nil {
+	if !status.HasManagedResource(ledger, resourceType, longKey) {
 		t.Error("expected a ledger entry for the bucket despite the over-length name")
 	}
 }
@@ -552,7 +579,7 @@ func TestEnsure_ContinuesToOtherBucketsAfterOneFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error reported for the unowned receipts bucket")
 	}
-	if status.FindManagedResource(ledger, "s3", "logs") == nil {
+	if !status.HasManagedResource(ledger, "s3", "logs") {
 		t.Error("expected logs to still be created despite receipts failing")
 	}
 }
@@ -590,8 +617,8 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 		t.Fatalf("Ensure() error = %v — expected the trust window to skip the AWS calls entirely", err)
 	}
 
-	entry := status.FindManagedResource(updatedLedger, "s3", "receipts")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(updatedLedger, "s3", "receipts")
+	if !entryFound {
 		t.Fatal("expected the ledger entry to survive the skip path")
 	}
 	if entry.ARN != bucketArn {
@@ -632,7 +659,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(updatedLedger, "s3", "receipts")
+	entry, _ := status.FindManagedResource(updatedLedger, "s3", "receipts")
 	if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
 		t.Errorf("expected deletionPolicy to update to Delete even while skipping revalidation, got %s", entry.DeletionPolicy)
 	}
@@ -650,16 +677,16 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	}
 
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
-	entry := status.FindManagedResource(ledger, "s3", "receipts")
+	entry, _ := status.FindManagedResource(ledger, "s3", "receipts")
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	updatedEntry := status.FindManagedResource(updatedLedger, "s3", "receipts")
+	updatedEntry, _ := status.FindManagedResource(updatedLedger, "s3", "receipts")
 	if updatedEntry.LastVerifiedAt.Equal(&stale) {
 		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
 	}
@@ -703,5 +730,70 @@ func TestEnsure_AdoptingBucket_EmitsAdoptedEvent(t *testing.T) {
 
 	if len(*events) != 1 || (*events)[0].reason != "BucketAdopted" {
 		t.Errorf("expected exactly one BucketAdopted event, got %+v", *events)
+	}
+}
+
+func TestEnsure_LifecycleUnchanged_IsNotRewritten(t *testing.T) {
+	client := newFakeS3()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Backup: &depsv1alpha1.S3BackupSpec{Enabled: true}},
+	}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	if client.lifecycleWrites != 1 {
+		t.Fatalf("expected one lifecycle write on create, got %d", client.lifecycleWrites)
+	}
+
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if client.lifecycleWrites != 1 {
+		t.Errorf("expected no further lifecycle write when nothing changed, got %d total", client.lifecycleWrites)
+	}
+}
+
+func TestEnsure_NoLifecycleDesiredOrPresent_MakesNoWrite(t *testing.T) {
+	client := newFakeS3()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if client.lifecycleWrites != 0 {
+		t.Errorf("expected no lifecycle write or delete for a bucket with none desired, got %d", client.lifecycleWrites)
+	}
+}
+
+func TestEnsure_LifecycleDrift_IsCorrected(t *testing.T) {
+	client := newFakeS3()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Backup: &depsv1alpha1.S3BackupSpec{Enabled: true}},
+	}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	days := int32(1)
+	client.buckets[bucket].lifecycleRules[0].NoncurrentVersionExpiration = &types.NoncurrentVersionExpiration{NoncurrentDays: &days}
+
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if got := aws.ToInt32(client.buckets[bucket].lifecycleRules[0].NoncurrentVersionExpiration.NoncurrentDays); got == days {
+		t.Errorf("expected the drifted noncurrent expiration to be reset, still %d", got)
+	}
+}
+
+func TestLifecycleRulesMatch_RuleUsingUnmanagedFeaturesNeverMatches(t *testing.T) {
+	desired := buildLifecycleRules(defaultLifecycleRules())
+	current := buildLifecycleRules(defaultLifecycleRules())
+	current[0].AbortIncompleteMultipartUpload = &types.AbortIncompleteMultipartUpload{DaysAfterInitiation: aws.Int32(7)}
+	if lifecycleRulesMatch(current, desired) {
+		t.Error("a rule carrying settings this operator never writes must be treated as drift")
+	}
+	if !lifecycleRulesMatch(desired, desired) {
+		t.Error("identical rules must match")
 	}
 }

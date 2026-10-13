@@ -68,8 +68,8 @@ func TestEnsure_CreatesTableWithOwnerTagsAndOnDemandBilling(t *testing.T) {
 		t.Error("expected the table to be tagged as owned by this CR at creation")
 	}
 
-	entry := status.FindManagedResource(ledger, "dynamodb", "sessions")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "dynamodb", "sessions")
+	if !entryFound {
 		t.Fatal("expected a ledger entry after creation")
 	}
 	if entry.State != depsv1alpha1.ManagedResourceStateCreating {
@@ -115,7 +115,7 @@ func TestEnsure_MovesToVerifiedOnceTableIsActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	if entry := status.FindManagedResource(ledger, "dynamodb", "sessions"); entry == nil || entry.State != depsv1alpha1.ManagedResourceStateCreating {
+	if entry, entryFound := status.FindManagedResource(ledger, "dynamodb", "sessions"); !entryFound || entry.State != depsv1alpha1.ManagedResourceStateCreating {
 		t.Fatalf("test setup broken: expected Creating after first Ensure(), got %+v", entry)
 	}
 
@@ -123,8 +123,8 @@ func TestEnsure_MovesToVerifiedOnceTableIsActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
-	entry := status.FindManagedResource(ledger, "dynamodb", "sessions")
-	if entry == nil || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+	entry, entryFound := status.FindManagedResource(ledger, "dynamodb", "sessions")
+	if !entryFound || entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected the table to be Verified once ACTIVE, got %+v", entry)
 	}
 	if entry.LastVerifiedAt == nil {
@@ -168,8 +168,8 @@ func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("dynamodb", "sessions"))
-	if keyEntry == nil {
+	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("dynamodb", "sessions"))
+	if !keyEntryFound {
 		t.Fatal("expected a dedicated KMS key ledger entry named \"sessions-key\"")
 	}
 
@@ -202,17 +202,17 @@ func TestEnsure_CorrectsKMSKeyDriftOnActiveTable(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("dynamodb", "sessions"))
+	keyEntry, _ := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("dynamodb", "sessions"))
 	if client.tables[tableName].kmsKeyARN != keyEntry.ARN {
 		t.Errorf("expected drift correction to set the table's KMS key to %q, got %q", keyEntry.ARN, client.tables[tableName].kmsKeyARN)
 	}
 }
 
-func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefRetriesWhenKeyNotYetCreated(t *testing.T) {
 	client := newFakeDynamoDB()
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{
-			KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+			KMSKeyRef: "shared-key",
 		}},
 	}}
 	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
@@ -227,31 +227,17 @@ func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
 	}
 }
 
-func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefResolvesAKeyInThisCRsLedger(t *testing.T) {
 	client := newFakeDynamoDB()
-	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
-		Spec: depsv1alpha1.AppDependenciesSpec{
-			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
-				{Name: "shared-key", SharedWith: []depsv1alpha1.SharedWithEntry{
-					{Namespace: "default", Name: "checkout-service"},
-				}},
-			}},
-		},
-		Status: depsv1alpha1.AppDependenciesStatus{
-			ManagedResources: []depsv1alpha1.ManagedResource{
-				{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"},
-			},
-		},
-	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	ledger := []depsv1alpha1.ManagedResource{{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"}}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{
-			KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+			KMSKeyRef: "shared-key",
 		}},
 	}}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -703,7 +689,7 @@ func TestEnsure_TruncatesTableNameExceedingDynamoDBLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
-	if status.FindManagedResource(ledger, resourceType, longKey) == nil {
+	if !status.HasManagedResource(ledger, resourceType, longKey) {
 		t.Error("expected a ledger entry for the table despite the over-length name")
 	}
 }
@@ -741,7 +727,7 @@ func TestEnsure_ContinuesToOtherTablesAfterOneFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error reported for the unowned sessions table")
 	}
-	if status.FindManagedResource(ledger, "dynamodb", "orders") == nil {
+	if !status.HasManagedResource(ledger, "dynamodb", "orders") {
 		t.Error("expected orders to still be created despite sessions failing")
 	}
 }
@@ -782,8 +768,8 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 		t.Fatalf("Ensure() error = %v — expected the trust window to skip the ownership tag check", err)
 	}
 
-	entry := status.FindManagedResource(updatedLedger, "dynamodb", "sessions")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(updatedLedger, "dynamodb", "sessions")
+	if !entryFound {
 		t.Fatal("expected the ledger entry to survive the skip path")
 	}
 	if entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.Equal(&fresh) {
@@ -825,7 +811,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(updatedLedger, "dynamodb", "sessions")
+	entry, _ := status.FindManagedResource(updatedLedger, "dynamodb", "sessions")
 	if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
 		t.Errorf("expected deletionPolicy to update to Delete even while skipping revalidation, got %s", entry.DeletionPolicy)
 	}
@@ -843,16 +829,16 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	}
 
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
-	entry := status.FindManagedResource(ledger, "dynamodb", "sessions")
+	entry, _ := status.FindManagedResource(ledger, "dynamodb", "sessions")
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	updatedEntry := status.FindManagedResource(updatedLedger, "dynamodb", "sessions")
+	updatedEntry, _ := status.FindManagedResource(updatedLedger, "dynamodb", "sessions")
 	if updatedEntry.LastVerifiedAt.Equal(&stale) {
 		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
 	}

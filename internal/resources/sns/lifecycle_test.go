@@ -55,7 +55,7 @@ func (s *snsLifecycleSubject) EnsureOne(ctx context.Context, ledger []depsv1alph
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: name, DeletionPolicy: opts.DeletionPolicy, Adopt: opts.Adopt},
 	}}
-	return Ensure(ctx, s.client, nil, nil, s.namespace, s.crName, s.crUID, testRegion, testAccountID, spec, ledger, nil, nil)
+	return Ensure(ctx, s.client, nil, s.namespace, s.crName, s.crUID, testRegion, testAccountID, spec, ledger, nil, nil)
 }
 
 func (s *snsLifecycleSubject) Cleanup(ctx context.Context, ledger []depsv1alpha1.ManagedResource, declared []string, deleting bool) ([]depsv1alpha1.ManagedResource, []lifecycletest.CleanupResult, error) {

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,8 @@ var _ = Describe("AppDependencies Controller", func() {
 		fakeIAM        *fakeIAMClient
 		fakeKMS        *fakeKMSClient
 		fakeCloudWatch *fakeCloudWatchClient
+		fakeRDS        *fakeRDSClient
+		fakeEC2        *fakeEC2Client
 		fakeRecorder   *events.FakeRecorder
 		reconciler     *AppDependenciesReconciler
 	)
@@ -58,11 +61,18 @@ var _ = Describe("AppDependencies Controller", func() {
 		fakeIAM = newFakeIAMClient()
 		fakeKMS = newFakeKMSClient()
 		fakeCloudWatch = newFakeCloudWatchClient()
+		fakeRDS = newFakeRDSClient()
+		fakeEC2 = newFakeEC2Client()
 		fakeRecorder = events.NewFakeRecorder(20)
 		reconciler = &AppDependenciesReconciler{
-			Client:          k8sClient,
-			Scheme:          k8sClient.Scheme(),
-			AWSClients:      &cloudctlaws.Clients{SQS: fakeSQS, SNS: fakeSNS, IAM: fakeIAM, KMS: fakeKMS, CloudWatch: fakeCloudWatch, Region: "us-east-1", AccountID: "123456789012"},
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			AWSClients: &cloudctlaws.Clients{
+				SQS: fakeSQS, SNS: fakeSNS, IAM: fakeIAM, KMS: fakeKMS, CloudWatch: fakeCloudWatch,
+				RDS: fakeRDS, EC2: fakeEC2,
+				Region: "us-east-1", AccountID: "123456789012",
+			},
 			Recorder:        fakeRecorder,
 			OIDCProviderARN: "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
 			OIDCProviderURL: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
@@ -130,7 +140,7 @@ var _ = Describe("AppDependencies Controller", func() {
 			alias := "alias/" + cloudctlaws.ResourceName(updated.Namespace, updated.Name, "kms", "primary", 256-len("alias/"))
 			Expect(fakeKMS.aliases).To(HaveKey(alias))
 
-			entry := status.FindManagedResource(updated.Status.ManagedResources, "kms", "primary")
+			entry, _ := status.FindManagedResource(updated.Status.ManagedResources, "kms", "primary")
 			Expect(entry).NotTo(BeNil())
 			Expect(entry.State).To(Equal(depsv1alpha1.ManagedResourceStateVerified))
 			Expect(fakeKMS.aliases[alias]).To(Equal(entry.ARN))
@@ -217,11 +227,11 @@ var _ = Describe("AppDependencies Controller", func() {
 			// Push the ledger entry's PendingDeletionSince into the past so
 			// the next reconcile evaluates the real emptiness check instead
 			// of just holding through the quiet window.
-			entry := status.FindManagedResource(pending.Status.ManagedResources, "sqs", "orders")
+			entry, _ := status.FindManagedResource(pending.Status.ManagedResources, "sqs", "orders")
 			Expect(entry).NotTo(BeNil())
 			past := metav1.NewTime(time.Now().Add(-1 * time.Hour))
 			entry.PendingDeletionSince = &past
-			status.UpsertManagedResource(&pending.Status.ManagedResources, *entry)
+			status.UpsertManagedResource(&pending.Status.ManagedResources, entry)
 			Expect(k8sClient.Status().Update(ctx, &pending)).To(Succeed())
 
 			_, err = reconciler.Reconcile(ctx, req)
@@ -343,6 +353,186 @@ var _ = Describe("AppDependencies Controller", func() {
 			Expect(fakeSNS.topics).To(HaveKey(topicArn))
 		})
 	})
+
+	Context("reconciling a new CR with a declared RDS instance", func() {
+		It("creates the instance and its security group, and reports Ready", func() {
+			grant := &depsv1alpha1.RDSSubnetGroupGrant{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-grant-happy-"},
+				Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "happy-path-subnet-group", AllowedNamespaces: []string{"default"}},
+			}
+			Expect(k8sClient.Create(ctx, grant)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, grant) })
+
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-rds-create-", Namespace: "default"},
+				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
+					Name: "orders-db", DBSubnetGroupName: "happy-path-subnet-group",
+					Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
+				}}}},
+			}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			instanceID := cloudctlaws.ResourceName(cr.Namespace, cr.Name, "rds", "orders-db", 63)
+			Expect(fakeRDS.instances).To(HaveKey(instanceID))
+			Expect(fakeEC2.groupCount()).NotTo(BeZero())
+
+			// First pass only ever creates and marks Creating - same
+			// two-pass create-then-verify behavior as every other
+			// resource type here. A second pass is needed to see Verified.
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			var updated depsv1alpha1.AppDependencies
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &updated)).To(Succeed())
+
+			entry, _ := status.FindManagedResource(updated.Status.ManagedResources, resourceTypeRDS, "orders-db")
+			Expect(entry).NotTo(BeNil())
+			Expect(entry.State).To(Equal(depsv1alpha1.ManagedResourceStateVerified))
+
+			rdsReady := apimeta.FindStatusCondition(updated.Status.Conditions, "RDSReady")
+			Expect(rdsReady).NotTo(BeNil())
+			Expect(rdsReady.Status).To(Equal(metav1.ConditionTrue))
+
+			ready := apimeta.FindStatusCondition(updated.Status.Conditions, "Ready")
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		// Within one reconcile pass, the same instance's live state is read
+		// from three independent call sites (rdsSection's own status
+		// check, the generated ConfigMap's connection-info delivery, and
+		// the mirrored credentials Secret's delivery) - all three
+		// ultimately resolve the exact same instance. See
+		// rds.WithDescribeCache.
+		It("shares one DescribeDBInstances call per reconcile pass instead of one per call site", func() {
+			grant := &depsv1alpha1.RDSSubnetGroupGrant{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-grant-describecache-"},
+				Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "describecache-subnet-group", AllowedNamespaces: []string{"default"}},
+			}
+			Expect(k8sClient.Create(ctx, grant)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, grant) })
+
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-rds-describecache-", Namespace: "default"},
+				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
+					Name: "orders-db", DBSubnetGroupName: "describecache-subnet-group",
+					Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
+				}}}},
+			}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+			// First two passes create, then verify ownership - get past
+			// both before measuring the steady-state pass below, so this
+			// isn't conflated with that unrelated two-pass shape.
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			instanceID := cloudctlaws.ResourceName(cr.Namespace, cr.Name, "rds", "orders-db", 63)
+			callsBefore := fakeRDS.describeDBInstancesCalls[instanceID]
+
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			callsDuringThisPass := fakeRDS.describeDBInstancesCalls[instanceID] - callsBefore
+			Expect(callsDuringThisPass).To(Equal(1), "expected rdsSection's own status check, the ConfigMap's connection-info delivery, and the Secret's credentials delivery to share one DescribeDBInstances call")
+		})
+	})
+
+	Context("reconciling a declared RDS instance with no authorizing grant", func() {
+		It("reports RDSReady=False without creating anything in AWS", func() {
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-rds-unauthorized-", Namespace: "default"},
+				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
+					Name: "orders-db", DBSubnetGroupName: "no-grant-subnet-group",
+					Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
+				}}}},
+			}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+			// A retryable ReconcileError, so Reconcile itself reports no Go
+			// error (it requeues internally) - only the condition reflects
+			// the problem.
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			var updated depsv1alpha1.AppDependencies
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &updated)).To(Succeed())
+			Expect(fakeRDS.instances).To(BeEmpty())
+
+			rdsReady := apimeta.FindStatusCondition(updated.Status.Conditions, "RDSReady")
+			Expect(rdsReady).NotTo(BeNil())
+			Expect(rdsReady.Status).To(Equal(metav1.ConditionFalse))
+		})
+	})
+
+	Context("an RDS instance removed from spec and left stuck past the grace period", func() {
+		It("surfaces InstanceStuckPendingDeletion without Reconcile itself returning an error", func() {
+			grant := &depsv1alpha1.RDSSubnetGroupGrant{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-grant-stuck-"},
+				Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "stuck-subnet-group", AllowedNamespaces: []string{"default"}},
+			}
+			Expect(k8sClient.Create(ctx, grant)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, grant) })
+
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-rds-stuck-", Namespace: "default"},
+				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
+					Name: "orders-db", DBSubnetGroupName: "stuck-subnet-group",
+					Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
+					DeletionPolicy: depsv1alpha1.DeletionPolicyDelete,
+				}}}},
+			}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Remove the instance from spec entirely - the next reconcile
+			// marks it pending deletion.
+			var updated depsv1alpha1.AppDependencies
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &updated)).To(Succeed())
+			updated.Spec.RDS.Resources = nil
+			Expect(k8sClient.Update(ctx, &updated)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &updated)).To(Succeed())
+			entry, _ := status.FindManagedResource(updated.Status.ManagedResources, resourceTypeRDS, "orders-db")
+			Expect(entry).NotTo(BeNil())
+			Expect(entry.PendingDeletionSince).NotTo(BeNil())
+
+			// Backdate it directly in status, well past both
+			// deletionQuietWindow and PendingDeletionGracePeriod, exactly
+			// as a human would observe after enough real time passed.
+			past := metav1.NewTime(time.Now().Add(-2 * time.Hour))
+			entry.PendingDeletionSince = &past
+			status.UpsertManagedResource(&updated.Status.ManagedResources, entry)
+			Expect(k8sClient.Status().Update(ctx, &updated)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &updated)).To(Succeed())
+			rdsReady := apimeta.FindStatusCondition(updated.Status.Conditions, "RDSReady")
+			Expect(rdsReady).NotTo(BeNil())
+			Expect(rdsReady.Status).To(Equal(metav1.ConditionFalse))
+			Expect(rdsReady.Reason).To(Equal("InstanceStuckPendingDeletion"))
+
+			// The instance itself is never deleted - this operator never
+			// calls DeleteDBInstance.
+			instanceID := cloudctlaws.ResourceName(updated.Namespace, updated.Name, "rds", "orders-db", 63)
+			Expect(fakeRDS.instances).To(HaveKey(instanceID))
+		})
+	})
 })
 
 // newCountingReconciler builds a reconciler backed by a fake client whose
@@ -375,8 +565,9 @@ func newCountingReconciler(t *testing.T, patchCount *int, objs ...client.Object)
 		Build()
 
 	return &AppDependenciesReconciler{
-		Client: c,
-		Scheme: scheme,
+		Client:    c,
+		APIReader: c,
+		Scheme:    scheme,
 		AWSClients: &cloudctlaws.Clients{
 			SQS: newFakeSQSClient(), SNS: newFakeSNSClient(), IAM: newFakeIAMClient(),
 			KMS: newFakeKMSClient(), CloudWatch: newFakeCloudWatchClient(),
@@ -508,5 +699,78 @@ func TestCheckpointFor_SurvivesConcurrentSpecEdit(t *testing.T) {
 	}
 	if final.Spec.SQS == nil {
 		t.Error("expected the concurrent spec edit to survive the checkpoint, not be clobbered by it")
+	}
+}
+
+func TestJitteredDriftRequeue_WithinBoundsAndVaries(t *testing.T) {
+	lo := time.Duration(float64(DriftDetectionInterval) * (1 - driftRequeueJitterFraction))
+	hi := time.Duration(float64(DriftDetectionInterval) * (1 + driftRequeueJitterFraction))
+
+	seen := map[time.Duration]bool{}
+	for range 50 {
+		d := jitteredDriftRequeue()
+		if d < lo || d > hi {
+			t.Fatalf("jitteredDriftRequeue() = %v, want within [%v, %v]", d, lo, hi)
+		}
+		seen[d] = true
+	}
+	if len(seen) < 2 {
+		t.Error("expected jitteredDriftRequeue() to vary across calls, not return a fixed value")
+	}
+}
+
+func TestStatusPatch_DoesNotCarryResourceVersion(t *testing.T) {
+	original := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", ResourceVersion: "1"}}
+	cr := original.DeepCopy()
+	cr.ResourceVersion = "7"
+	cr.Status.IAMRoleARN = "arn:aws:iam::123456789012:role/x"
+
+	data, err := statusPatch(original, cr).Data(cr)
+	if err != nil {
+		t.Fatalf("Data() error = %v", err)
+	}
+	if strings.Contains(string(data), "resourceVersion") {
+		t.Errorf("patch must not carry resourceVersion as an implicit precondition, got %s", data)
+	}
+	if !strings.Contains(string(data), "iamRoleARN") {
+		t.Errorf("expected the status change to be in the patch, got %s", data)
+	}
+}
+
+func TestCheckpointFor_LaterCheckpointSurvivesAConcurrentSpecEdit(t *testing.T) {
+	scheme := newSharedWithScheme(t)
+	seed := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(seed).
+		WithStatusSubresource(&depsv1alpha1.AppDependencies{}).
+		Build()
+
+	var reconcilerCR depsv1alpha1.AppDependencies
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(seed), &reconcilerCR); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	r := &AppDependenciesReconciler{Client: c, Scheme: scheme}
+	checkpoint := checkpointFor(r, &reconcilerCR, reconcilerCR.DeepCopy())
+
+	first := []depsv1alpha1.ManagedResource{{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:111111111111:orders"}}
+	if err := checkpoint(context.Background(), first); err != nil {
+		t.Fatalf("first checkpoint() error = %v", err)
+	}
+
+	var editor depsv1alpha1.AppDependencies
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(seed), &editor); err != nil {
+		t.Fatalf("Get (editor): %v", err)
+	}
+	editor.Spec.SQS = &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	if err := c.Update(context.Background(), &editor); err != nil {
+		t.Fatalf("concurrent spec edit: %v", err)
+	}
+
+	second := []depsv1alpha1.ManagedResource{first[0], {Type: "sns", Name: "events", ARN: "arn:aws:sns:us-east-1:111111111111:events"}}
+	if err := checkpoint(context.Background(), second); err != nil {
+		t.Fatalf("second checkpoint() rejected by a spec edit made after the first: %v", err)
 	}
 }

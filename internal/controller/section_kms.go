@@ -19,66 +19,106 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 )
 
-// dedicatedKMSKeyNames collects the ledger names of dedicated KMS keys
-// every other section's own encryption.enabled resources currently want,
-// for kms.Cleanup's declared-vs-ledger diff — those keys are never
-// declared in spec.KMS.Resources itself (see EnsureDedicatedKey's own
-// doc comment), so without this, kmsSection's own Cleanup would see every
-// dedicated key as unwanted and try to delete it on every reconcile,
-// regardless of whether the resource that actually owns it still exists
-// and still wants it.
-//
-// Checks every section that has an encryption field: sqs, sns, dynamodb,
-// s3 - every resource type this operator manages now supports it.
-func dedicatedKMSKeyNames(cr *depsv1alpha1.AppDependencies) []string {
-	var names []string
+// encryptedResource is one declared resource that can carry an encryption
+// block, whichever section it comes from.
+type encryptedResource struct {
+	resourceType string
+	name         string
+	encryption   *depsv1alpha1.EncryptionSpec
+}
+
+// encryptedResources lists every resource in cr with an encryption block,
+// across every section that supports one.
+func encryptedResources(cr *depsv1alpha1.AppDependencies) []encryptedResource {
+	var out []encryptedResource
 	if cr.Spec.SQS != nil {
-		for _, q := range cr.Spec.SQS.Resources {
-			if q.Encryption != nil && q.Encryption.Enabled {
-				names = append(names, kms.DedicatedKeyLedgerName(resourceTypeSQS, q.Name))
-			}
+		for _, r := range cr.Spec.SQS.Resources {
+			out = append(out, encryptedResource{resourceTypeSQS, r.Name, r.Encryption})
 		}
 	}
 	if cr.Spec.SNS != nil {
-		for _, t := range cr.Spec.SNS.Resources {
-			if t.Encryption != nil && t.Encryption.Enabled {
-				names = append(names, kms.DedicatedKeyLedgerName(resourceTypeSNS, t.Name))
-			}
+		for _, r := range cr.Spec.SNS.Resources {
+			out = append(out, encryptedResource{resourceTypeSNS, r.Name, r.Encryption})
 		}
 	}
 	if cr.Spec.DynamoDB != nil {
-		for _, tbl := range cr.Spec.DynamoDB.Resources {
-			if tbl.Encryption != nil && tbl.Encryption.Enabled {
-				names = append(names, kms.DedicatedKeyLedgerName(resourceTypeDynamoDB, tbl.Name))
-			}
+		for _, r := range cr.Spec.DynamoDB.Resources {
+			out = append(out, encryptedResource{resourceTypeDynamoDB, r.Name, r.Encryption})
 		}
 	}
 	if cr.Spec.S3 != nil {
-		for _, b := range cr.Spec.S3.Resources {
-			if b.Encryption != nil && b.Encryption.Enabled {
-				names = append(names, kms.DedicatedKeyLedgerName(resourceTypeS3, b.Name))
-			}
+		for _, r := range cr.Spec.S3.Resources {
+			out = append(out, encryptedResource{resourceTypeS3, r.Name, r.Encryption})
+		}
+	}
+	if cr.Spec.RDS != nil {
+		for _, r := range cr.Spec.RDS.Resources {
+			out = append(out, encryptedResource{resourceTypeRDS, r.Name, r.Encryption})
+		}
+	}
+	return out
+}
+
+// referencedKMSKeyNames returns the names, under kms.resources, of the keys
+// this CR's resources reference through encryption.kmsKeyRef.
+func referencedKMSKeyNames(cr *depsv1alpha1.AppDependencies) []string {
+	var names []string
+	for _, r := range encryptedResources(cr) {
+		if r.encryption != nil && r.encryption.KMSKeyRef != "" && !slices.Contains(names, r.encryption.KMSKeyRef) {
+			names = append(names, r.encryption.KMSKeyRef)
 		}
 	}
 	return names
 }
 
+// neededKMSKeyNames collects the ledger names of keys this CR still needs
+// but that kms.Cleanup wouldn't otherwise see as declared: dedicated keys
+// of resources with encryption.enabled (never listed in spec.kms.resources,
+// see EnsureDedicatedKey), and keys a resource still references through
+// kmsKeyRef. Without it every such key would look unwanted on every pass.
+func neededKMSKeyNames(cr *depsv1alpha1.AppDependencies) []string {
+	names := referencedKMSKeyNames(cr)
+	for _, r := range encryptedResources(cr) {
+		if r.encryption != nil && r.encryption.Enabled {
+			names = append(names, kms.DedicatedKeyLedgerName(r.resourceType, r.name))
+		}
+	}
+	return names
+}
+
+// undeclaredKMSKeyRefs returns referenced key names missing from
+// spec.kms.resources.
+func undeclaredKMSKeyRefs(cr *depsv1alpha1.AppDependencies) []string {
+	declared := map[string]bool{}
+	if cr.Spec.KMS != nil {
+		for _, k := range cr.Spec.KMS.Resources {
+			declared[k.Name] = true
+		}
+	}
+	var missing []string
+	for _, name := range referencedKMSKeyNames(cr) {
+		if !declared[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
 // kmsSection adapts the kms package's Ensure/Cleanup to the orchestrator's
-// uniform section shape. Registered before iamSection but after every
-// other resource section — nothing derives grants against a KMS key yet
-// (that's future work, once other resource types can reference one via an
-// encryption field), but keeping it ahead of iamSection now means a
-// dedicated-key grant will already have somewhere to plug in without
-// reordering sections later.
+// uniform section shape. Runs first, so a key a resource references through
+// kmsKeyRef already exists in the ledger when that resource reconciles.
 func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	awsClients := r.AWSClients
 	return section{
-		name: "KMSReady",
+		name: conditionTypeKMSReady,
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
 			declared := 0
 			if cr.Spec.KMS != nil {
@@ -95,7 +135,7 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 
 			ledger, _, cleanupErr := kms.Cleanup(
 				ctx, awsClients.KMS, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.KMS, dedicatedKMSKeyNames(cr), cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
+				cr.Spec.KMS, neededKMSKeyNames(cr), cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
@@ -103,7 +143,19 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(ctx, cr, "KMSReady", err, eventRecorderFor(r, cr))
+			// A kmsKeyRef to a key this CR never declared can't resolve no
+			// matter how long the resource waits, so it gets its own
+			// permanent reason rather than the resource's "not ready yet".
+			conditionErr := err
+			if conditionErr == nil {
+				if missing := undeclaredKMSKeyRefs(cr); len(missing) > 0 {
+					conditionErr = &cloudctlaws.ReconcileError{
+						Err:    fmt.Errorf("encryption.kmsKeyRef names %s, not declared under kms.resources", strings.Join(missing, ", ")),
+						Reason: "KMSKeyRefNotDeclared",
+					}
+				}
+			}
+			setSectionCondition(ctx, cr, conditionTypeKMSReady, conditionErr, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {
@@ -114,8 +166,8 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "kms", declared)
 			defer cancel()
 
-			// dedicatedKeysStillNeeded is irrelevant here — deleting is
-			// true, so kms.Cleanup tears down every kms-type ledger entry
+			// The needed-keys list is irrelevant here — deleting is true,
+			// so kms.Cleanup tears down every kms-type ledger entry
 			// regardless, the same as every other resource type's finalize.
 			ledger, results, err := kms.Cleanup(
 				ctx, awsClients.KMS, cr.Namespace, cr.Name, string(cr.UID),

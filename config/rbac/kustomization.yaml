@@ -22,6 +22,9 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the cloudctl-operator itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- rdssubnetgroupgrant_admin_role.yaml
+- rdssubnetgroupgrant_editor_role.yaml
+- rdssubnetgroupgrant_viewer_role.yaml
 - appdependencies_admin_role.yaml
 - appdependencies_editor_role.yaml
 - appdependencies_viewer_role.yaml

@@ -1,0 +1,53 @@
+# Minimal stand-in for the real EKS VPC resource controller's
+# SecurityGroupPolicy CRD (vpcresources.k8s.aws/v1beta1), installed only so
+# envtest's real apiserver recognizes the kind this project's
+# ensureSecurityGroupPolicy applies via server-side apply. Not the
+# project's own CRD - never touch this to change this operator's own API,
+# see api/v1alpha1 instead.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: securitygrouppolicies.vpcresources.k8s.aws
+spec:
+  group: vpcresources.k8s.aws
+  names:
+    kind: SecurityGroupPolicy
+    listKind: SecurityGroupPolicyList
+    plural: securitygrouppolicies
+    singular: securitygrouppolicy
+  scope: Namespaced
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                serviceAccountSelector:
+                  type: object
+                  properties:
+                    matchLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                podSelector:
+                  type: object
+                  properties:
+                    matchLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                securityGroups:
+                  type: object
+                  properties:
+                    groupIds:
+                      type: array
+                      items:
+                        type: string
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true

@@ -153,9 +153,70 @@ IAM role in a different region, which needs real multi-region client
 support this operator doesn't have yet. Same limitation as DynamoDB's
 Global Tables.
 
+## RDS
+
+```yaml
+spec:
+  rds:
+    resources:
+      - name: orders-db
+        dbSubnetGroupName: prod-private-data-tier
+        engine: postgres
+        engineVersion: "16"
+        instanceClass: db.t4g.micro
+        allocatedStorage: 20
+        highAvailability: {enabled: true}
+        backup: {enabled: true}
+        encryption: {enabled: true}
+        sharedWith:
+          - namespace: fulfillment
+            name: fulfillment-service
+    consumes:                       # on the consuming CR
+      - namespace: checkout
+        name: checkout-service
+        resourceName: orders-db
+```
+
+| Field | Notes |
+|---|---|
+| `dbSubnetGroupName` | An existing DB subnet group, never created by the operator. The CR's namespace must be covered by an `RDSSubnetGroupGrant` (cluster-scoped, created by a platform admin), otherwise the section reports a retryable authorization error. **Immutable.** |
+| `engine` | `postgres`, `mysql` or `mariadb`. **Immutable.** |
+| `engineVersion` | A *minimum*, as dotted numbers such as `16` or `16.4`. A higher version upgrades the instance; an instance already at or past it, including one AWS minor-upgraded itself, is left alone. A major upgrade is refused unless `allowMajorVersionUpgrade: true`. |
+| `instanceClass`, `highAvailability` | Instance class and Multi-AZ. Changes are drift-corrected (see below). |
+| `allocatedStorage` | GiB, 20–65536. Can only grow; AWS rounds a growth up to at least 10% more. |
+| `backup` | Automated backups with AWS's default 7-day retention. Only ever turned on or extended: omitting it or disabling it on an instance that has backups leaves them on and emits a `BackupsLeftEnabled` warning, since turning them off deletes the existing backups. |
+| `encryption` | `enabled: true` provisions a dedicated key, or `kmsKeyRef` names a key under this CR's `kms.resources` (see [KMS](#kms)). **Immutable once set.** |
+| `applyImmediately` | See "Changing a running instance". |
+| `deletionPolicy`, `adopt`, `sharedWith` | See below. |
+| `replication` | Not implemented; setting it is a permanent error. |
+
+**Credentials.** The operator never sets or generates a password. RDS creates and rotates the master user's password in Secrets Manager, and the operator mirrors it into a Secret named `<cr>-rds-credentials` in the *owning* CR's namespace only. Rotation reaches the Secret within one drift-detection interval, but never a running pod's environment. The master user can do anything in the database, so consumers never receive it: the owner creates per-app database users and hands the credentials to each team.
+
+**Connection info.** The owner's and each consumer's connection ConfigMap carries `RDS_<NAME>_HOST`, `_PORT`, `_ENGINE` and `_DB_INSTANCE_IDENTIFIER` (consumers' keys also include the producer's namespace and CR name).
+
+**Private by default.** Instances are created with `PubliclyAccessible` explicitly off, since AWS otherwise defaults to public in a default VPC. If an instance later becomes public, the operator emits an `InstancePubliclyAccessible` warning each reconcile but does not change it: that may be a deliberate decision, and the security group is the only access it controls. An adopted instance keeps the security groups it already has, so check them too.
+
+**Network access.** Each instance gets its own security group, created and owned by the operator and never shared. `sharedWith` grants ingress from a consumer CR's pods, which therefore need EKS Security Groups for Pods: the consumer CR gets its own pod security group and a `SecurityGroupPolicy`. A security group found at the expected name is only reused if it carries this CR's ownership tags; `adopt: true` takes over an untagged one or one left by an earlier incarnation of the same CR.
+
+**Adopting an existing instance.** With `adopt: true`, an untagged instance at the expected name is adopted only if the spec describes it. Adoption never changes an instance, so it is refused with an `AdoptionConflict` reason, and before anything is created, tagged or modified, when the instance differs on any of:
+
+- `engine`, `dbSubnetGroupName`, or storage encryption (including the key, for a `kmsKeyRef`), none of which can be changed afterwards, or an instance that is publicly accessible;
+- `instanceClass` or `highAvailability`, which the first reconcile would otherwise change, possibly downsizing a production instance;
+- an `engineVersion` or `allocatedStorage` higher than the instance has, which would upgrade or grow it.
+
+An instance with more storage or a newer version than the spec's minimums is adopted. All conflicts are listed in one message. Make the spec match what exists, adopt, then change the spec: from then on changes go through the normal flow below. An instance already owned by another CR is refused for that reason first.
+
+**Changing a running instance.** Class, Multi-AZ, backup, engine-version and storage changes wait for the instance's weekly maintenance window by default, with a `ChangeDeferred` event, because some of them restart the instance. Set `applyImmediately: true` to apply them at once. Storage growth is the exception: it applies at once when nothing else is pending, since an immediate change also applies every pending one. An edit made while a change is pending replaces the pending value. A security group change always applies at once. While an instance is `backing-up` or `storage-optimization` it is reported ready but not modified; any other status that isn't `available` is retried.
+
+**Observing an instance.** The status AWS reports for each instance is recorded on its `status.managedResources` entry as `observedStatus`, with `observedStatusSince` set when the value last changed (not on every poll). While the instance isn't usable, `RDSReady` is `False` with a reason derived from that status: `InstanceCreating`, `InstanceModifying`, `InstanceConfiguringEnhancedMonitoring` and so on, or `InstanceFailed`, which is not retried and needs manual investigation. The field is informational and never gates an action.
+
+**Deletion.** The operator never calls `DeleteDBInstance`. With `deletionPolicy: Delete`, an instance removed from spec goes through the quiet window and a one-hour grace period, then escalates to `InstanceStuckPendingDeletion` on the `RDSReady` condition while the operator takes a final snapshot so the eventual manual delete has a restore point; billing continues until someone deletes the instance. Each pass first re-reads the instance's ownership tags and refuses to act (no snapshot, no stuck report) if they no longer match this CR; an instance already gone from AWS is dropped from the ledger. Final snapshots carry the same tags and are only deleted while they do. `Retain` (the default) just removes the ownership tag.
+
+**Testing.** Unit tests, the controller's envtest suite and a live suite against real AWS (`make test-live`, never in CI) cover RDS. There is no LocalStack integration tier or e2e suite for it: LocalStack's community edition doesn't implement RDS.
+
 ## KMS
 
-Every resource type above (SQS, SNS, DynamoDB, S3) exposes an
+Every resource type above (SQS, SNS, DynamoDB, S3, RDS) exposes an
 `encryption` field, offered as two mutually exclusive modes rather than a
 spectrum:
 
@@ -171,23 +232,23 @@ spec:
     resources:
       - name: events
         encryption:
-          kmsKeyRef:             # reuse an existing key instead
-            namespace: platform
-            name: shared-keys
-            resourceName: general-purpose
+          kmsKeyRef: general-purpose   # reuse a key declared below instead
 
   kms:
     resources:
       - name: general-purpose
-        sharedWith:
-          - namespace: checkout
-            name: checkout-service
 ```
 
 | Field | Notes |
 |---|---|
 | `encryption.enabled` | Provisions a dedicated key just for this resource (ledger name `<resource>-key`), created and tagged the same as every other owned resource. No `spec.kms` section needs to be touched — this is the common case. |
-| `encryption.kmsKeyRef` | Points at an explicitly declared `kms.resources` entry — this CR's own, or another CR's — for deliberate reuse of one key across multiple resources. Resolved through the exact same `sharedWith`/`consumes` authorization path as any other cross-CR reference: an unauthorized or not-yet-existing reference is a retryable, self-resolving condition, not a permanent failure. |
+| `encryption.kmsKeyRef` | The name of an entry in **this CR's own** `kms.resources`, for deliberate reuse of one key across several of this CR's resources. A name that isn't declared is reported on the `KMSReady` condition as `KMSKeyRefNotDeclared`; a declared key that hasn't been created yet is a retryable, self-resolving condition. |
+
+Keys are never shared across CRs. A resource encrypted with another
+team's key would depend on that team for its own data's availability:
+revoking access would take it down, and deleting the key would make its
+data permanently unreadable. A centrally managed key belongs outside this
+operator, with a platform or security team.
 
 A freshly created key briefly sits in the ledger as `TagPending` even
 though tagging itself is atomic with `CreateKey` — the name is a holdover
@@ -198,13 +259,18 @@ findable-by-ARN record rather than risking a second key being created on
 the next reconcile.
 
 A standalone `kms.resources` entry (as used by `kmsKeyRef` above) supports
-`deletionPolicy` and `adopt` like every other resource type, and
-`sharedWith` for granting other CRs `kms:Decrypt`/`kms:GenerateDataKey` —
-but deliberately **no `force`**: unlike a queue or a bucket, a key isn't
+`deletionPolicy` and `adopt` like every other resource type, but
+deliberately **no `force`**: unlike a queue or a bucket, a key isn't
 "non-empty" in a way force could legitimately override, since deleting one
 while anything still uses it to encrypt data makes that data permanently
-unrecoverable elsewhere, not just gone from this CR. `ScheduleKeyDeletion`
-uses AWS's maximum 30-day window for the same reason.
+unrecoverable. `ScheduleKeyDeletion` uses AWS's maximum 30-day window for
+the same reason. A key that one of this CR's resources still references is
+never scheduled for deletion, even if it has been removed from
+`kms.resources`. On CR deletion, keys are removed last, after the
+resources encrypted with them.
+
+The CR's IAM role gets `kms:Decrypt` and `kms:GenerateDataKey` on every key
+the CR declares or provisions.
 
 **Known gap:** drift correction only ever moves in the "enable, or point
 at a different key" direction — removing `encryption` from spec doesn't
@@ -367,15 +433,15 @@ spec:
 
 ### Lifecycle comparison across resource types
 
-| | SQS | SNS | DynamoDB | S3 | KMS |
-|---|---|---|---|---|---|
-| Create + tag atomic? | Yes | Yes | Yes | Yes | Yes |
-| "Non-empty" signal | message count (3 counters) | active subscriptions | item count (count-only `Scan`) | any object version/delete marker | *(no concept — see below)* |
-| Async create lifecycle | No | No | Yes (`Creating`→`Active`) | No | No |
-| `force` bypasses non-empty guard | Yes | Yes | Yes | Yes | No — deletion is irreversible for anyone else still using the key, so there's nothing to force |
-| Deny-policy on `PendingDeletion` | Yes | Yes | No (see DynamoDB section) | Yes | N/A — uses `ScheduleKeyDeletion`'s own AWS-side wait instead |
-| `StuckPendingDeletion` escalation (7-day grace) | Yes | Yes | Yes | Yes | No — no self-imposed grace period; AWS's own 30-day `ScheduleKeyDeletion` window is the wait |
-| Emptiness-check backoff applies | Yes | Yes | Yes | Yes | No (nothing to back off) |
+| | SQS | SNS | DynamoDB | S3 | KMS | RDS |
+|---|---|---|---|---|---|---|
+| Create + tag atomic? | Yes | Yes | Yes | Yes | Yes | Yes |
+| "Non-empty" signal | message count (3 counters) | active subscriptions | item count (count-only `Scan`) | any object version/delete marker | *(no concept — see below)* | *(none — the operator never deletes an instance)* |
+| Async create lifecycle | No | No | Yes (`Creating`→`Active`) | No | No | Yes (minutes; status-driven) |
+| `force` bypasses non-empty guard | Yes | Yes | Yes | Yes | No — deletion is irreversible for anyone else still using the key, so there's nothing to force | No — there is no delete to force |
+| Deny-policy on `PendingDeletion` | Yes | Yes | No (see DynamoDB section) | Yes | N/A — uses `ScheduleKeyDeletion`'s own AWS-side wait instead | No |
+| `StuckPendingDeletion` escalation (7-day grace) | Yes | Yes | Yes | Yes | No — no self-imposed grace period; AWS's own 30-day `ScheduleKeyDeletion` window is the wait | Yes, after 1 hour, and it is permanent: the operator never deletes |
+| Emptiness-check backoff applies | Yes | Yes | Yes | Yes | No (nothing to back off) | No |
 
 Covered by the shared cross-resource-type test suite in
 `internal/resources/lifecycletest` (create, adopt, foreign-resource

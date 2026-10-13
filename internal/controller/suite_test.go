@@ -67,7 +67,12 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		// testdata holds a stand-in for the EKS VPC resource controller's
+		// own SecurityGroupPolicy CRD - a foreign CRD this operator
+		// depends on (RDS's pod network identity) but doesn't own, needed
+		// so envtest's real apiserver recognizes the kind at all. See
+		// that file's own header comment.
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases"), "testdata"},
 		ErrorIfCRDPathMissing: true,
 	}
 

@@ -42,6 +42,7 @@ package alarms
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
@@ -60,6 +61,9 @@ const resourceType = "sns" // ConsumeRef resolution for snsTopicRef always targe
 // package always uses: a resource that's momentarily stopped reporting
 // metrics (not necessarily broken) shouldn't flip an alarm to ALARM on
 // absence alone.
+// queueNameDimension is the CloudWatch dimension SQS metrics are keyed by.
+const queueNameDimension = "QueueName"
+
 const treatMissingDataNotBreaching = "notBreaching"
 
 // Alarm name suffixes. Combined with cloudctlaws.ResourceName's own
@@ -178,7 +182,7 @@ func desiredAlarms(
 				description:        fmt.Sprintf("Queue %q has a message older than 15 minutes - processing is falling behind.", q.Name),
 				namespace:          "AWS/SQS",
 				metricName:         "ApproximateAgeOfOldestMessage",
-				dimensionName:      "QueueName",
+				dimensionName:      queueNameDimension,
 				dimensionValue:     queueName,
 				statistic:          types.StatisticMaximum,
 				comparisonOperator: types.ComparisonOperatorGreaterThanThreshold,
@@ -200,7 +204,7 @@ func desiredAlarms(
 					description:        fmt.Sprintf("Queue %q's dead-letter queue has at least one message - something is failing repeatedly.", q.Name),
 					namespace:          "AWS/SQS",
 					metricName:         "ApproximateNumberOfMessagesVisible",
-					dimensionName:      "QueueName",
+					dimensionName:      queueNameDimension,
 					dimensionValue:     dlqName,
 					statistic:          types.StatisticMaximum,
 					comparisonOperator: types.ComparisonOperatorGreaterThanThreshold,
@@ -326,9 +330,9 @@ func reconcileAlarms(
 		return wrapAWSError(err, "listing alarms")
 	}
 
-	existingByName := make(map[string]struct{}, len(existing))
+	existingByName := make(map[string]types.MetricAlarm, len(existing))
 	for _, a := range existing {
-		existingByName[aws.ToString(a.AlarmName)] = struct{}{}
+		existingByName[aws.ToString(a.AlarmName)] = a
 	}
 
 	var firstErr error
@@ -336,7 +340,10 @@ func reconcileAlarms(
 	for _, d := range desired {
 		desiredByName[d.name] = struct{}{}
 
-		_, exists := existingByName[d.name]
+		current, exists := existingByName[d.name]
+		if exists && alarmMatches(current, d, alarmActions) {
+			continue
+		}
 		if exists {
 			owned, err := isAlarmOwnedByUs(ctx, cwClient, own, d.name)
 			if err != nil {
@@ -385,6 +392,36 @@ func reconcileAlarms(
 	}
 
 	return firstErr
+}
+
+// alarmMatches reports whether current already equals what putAlarm would
+// write, so an unchanged alarm costs no tag read and no write. Anything
+// putAlarm never sets (metric math, extra actions, a disabled alarm)
+// counts as a mismatch.
+func alarmMatches(current types.MetricAlarm, d alarmDef, actions []string) bool {
+	if len(current.Metrics) > 0 || len(current.InsufficientDataActions) > 0 || current.DatapointsToAlarm != nil ||
+		current.ExtendedStatistic != nil || current.Unit != "" || current.EvaluateLowSampleCountPercentile != nil {
+		return false
+	}
+	if current.ActionsEnabled != nil && !*current.ActionsEnabled {
+		return false
+	}
+	if len(current.Dimensions) != 1 || aws.ToString(current.Dimensions[0].Name) != d.dimensionName || aws.ToString(current.Dimensions[0].Value) != d.dimensionValue {
+		return false
+	}
+	if d.treatMissingData != "" && aws.ToString(current.TreatMissingData) != d.treatMissingData {
+		return false
+	}
+	return aws.ToString(current.AlarmDescription) == d.description &&
+		aws.ToString(current.Namespace) == d.namespace &&
+		aws.ToString(current.MetricName) == d.metricName &&
+		current.Statistic == d.statistic &&
+		current.ComparisonOperator == d.comparisonOperator &&
+		aws.ToFloat64(current.Threshold) == d.threshold &&
+		aws.ToInt32(current.EvaluationPeriods) == d.evaluationPeriods &&
+		aws.ToInt32(current.Period) == d.period &&
+		slices.Equal(current.AlarmActions, actions) &&
+		slices.Equal(current.OKActions, actions)
 }
 
 // listAlarmsByPrefix paginates through every alarm whose name starts with

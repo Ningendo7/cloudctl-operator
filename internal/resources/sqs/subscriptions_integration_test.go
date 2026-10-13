@@ -134,8 +134,8 @@ func TestIntegration_EnsureSubscriptions_RealSubscribeAndQueuePolicyGrant(t *tes
 		t.Fatalf("EnsureSubscriptions() error = %v", err)
 	}
 	ledgerName := subscriptionLedgerName(f.queueName, f.ref)
-	entry := status.FindManagedResource(ledger, subscriptionResourceType, ledgerName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, subscriptionResourceType, ledgerName)
+	if !entryFound {
 		t.Fatal("expected a ledger entry for the new subscription")
 	}
 
@@ -186,7 +186,7 @@ func TestIntegration_CleanupSubscriptions_RealUnsubscribeAndPolicyRevoke(t *test
 	}
 
 	ledgerName := subscriptionLedgerName(f.queueName, f.ref)
-	if status.FindManagedResource(ledger, subscriptionResourceType, ledgerName) != nil {
+	if status.HasManagedResource(ledger, subscriptionResourceType, ledgerName) {
 		t.Error("expected the ledger entry to be removed")
 	}
 

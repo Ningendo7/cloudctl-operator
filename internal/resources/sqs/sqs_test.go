@@ -59,8 +59,8 @@ func TestEnsure_CreatesNewQueue(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(ledger, "sqs", "orders")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "sqs", "orders")
+	if !entryFound {
 		t.Fatal("expected a ledger entry for orders")
 	}
 	if entry.State != depsv1alpha1.ManagedResourceStateVerified {
@@ -90,8 +90,8 @@ func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sqs", "orders"))
-	if keyEntry == nil {
+	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sqs", "orders"))
+	if !keyEntryFound {
 		t.Fatal("expected a dedicated KMS key ledger entry named \"orders-key\"")
 	}
 
@@ -122,7 +122,7 @@ func TestEnsure_DLQSharesMainQueuesDedicatedKey(t *testing.T) {
 		t.Fatalf("expected exactly one dedicated key to be created for a queue+DLQ pair, got %d", kmsClient.KeyCount())
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sqs", "orders"))
+	keyEntry, _ := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sqs", "orders"))
 	dlqName := cloudctlaws.DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
 	dlq, ok := client.queues[dlqName]
 	if !ok {
@@ -154,18 +154,18 @@ func TestEnsure_CorrectsKmsMasterKeyIdDriftOnExistingQueue(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sqs", "orders"))
+	keyEntry, _ := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sqs", "orders"))
 	if client.queues[queueName].attributes["KmsMasterKeyId"] != keyEntry.ARN {
 		t.Errorf("expected drift correction to set KmsMasterKeyId to %q, got %q", keyEntry.ARN, client.queues[queueName].attributes["KmsMasterKeyId"])
 	}
 }
 
-func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefRetriesWhenKeyNotYetCreated(t *testing.T) {
 	client := newFakeSQS()
 	spec := &depsv1alpha1.SQSSpec{
 		Resources: []depsv1alpha1.SQSQueueSpec{
 			{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{
-				KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+				KMSKeyRef: "shared-key",
 			}},
 		},
 	}
@@ -181,33 +181,19 @@ func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
 	}
 }
 
-func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefResolvesAKeyInThisCRsLedger(t *testing.T) {
 	client := newFakeSQS()
-	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
-		Spec: depsv1alpha1.AppDependenciesSpec{
-			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
-				{Name: "shared-key", SharedWith: []depsv1alpha1.SharedWithEntry{
-					{Namespace: "default", Name: "checkout-service"},
-				}},
-			}},
-		},
-		Status: depsv1alpha1.AppDependenciesStatus{
-			ManagedResources: []depsv1alpha1.ManagedResource{
-				{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"},
-			},
-		},
-	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	ledger := []depsv1alpha1.ManagedResource{{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"}}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
 	spec := &depsv1alpha1.SQSSpec{
 		Resources: []depsv1alpha1.SQSQueueSpec{
 			{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{
-				KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+				KMSKeyRef: "shared-key",
 			}},
 		},
 	}
 
-	_, err := Ensure(context.Background(), client, nil, nil, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, nil, k8sClient, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -229,7 +215,8 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	firstCreatedAt := status.FindManagedResource(ledger, "sqs", "orders").CreatedAt
+	firstEntry, _ := status.FindManagedResource(ledger, "sqs", "orders")
+	firstCreatedAt := firstEntry.CreatedAt
 
 	ledger, err = Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
 	if err != nil {
@@ -238,7 +225,8 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	if len(client.queues) != 1 {
 		t.Fatalf("expected exactly one queue after re-reconciling, got %d", len(client.queues))
 	}
-	got := status.FindManagedResource(ledger, "sqs", "orders").CreatedAt
+	gotEntry, _ := status.FindManagedResource(ledger, "sqs", "orders")
+	got := gotEntry.CreatedAt
 	if !got.Equal(&firstCreatedAt) {
 		t.Errorf("expected CreatedAt to be preserved across reconciles, got %v want %v", got, firstCreatedAt)
 	}
@@ -274,7 +262,7 @@ func TestEnsure_AdoptsUntaggedEmptyQueue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
-	if entry := status.FindManagedResource(ledger, "sqs", "orders"); entry == nil || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+	if entry, entryFound := status.FindManagedResource(ledger, "sqs", "orders"); !entryFound || entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected a Verified ledger entry after adoption, got %+v", entry)
 	}
 	if !cloudctlaws.IsOwnedBy(client.queues[queueName].tags, "default", "checkout-service", "uid-1") {
@@ -439,8 +427,8 @@ func TestEnsure_CreatesDLQAndSetsRedrivePolicy(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	dlqEntry := status.FindManagedResource(ledger, "sqs", cloudctlaws.DerivedKey("orders", "dlq"))
-	if dlqEntry == nil {
+	dlqEntry, dlqEntryFound := status.FindManagedResource(ledger, "sqs", cloudctlaws.DerivedKey("orders", "dlq"))
+	if !dlqEntryFound {
 		t.Fatal("expected a ledger entry for the DLQ")
 	}
 	dlqQueueName := cloudctlaws.DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
@@ -575,8 +563,8 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 		t.Fatalf("Ensure() error = %v — expected the trust window to skip the AWS call entirely", err)
 	}
 
-	entry := status.FindManagedResource(updatedLedger, "sqs", "orders")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(updatedLedger, "sqs", "orders")
+	if !entryFound {
 		t.Fatal("expected the ledger entry to survive the skip path")
 	}
 	if entry.ARN != "arn:aws:sqs:us-east-1:000000000000:default-checkout-service-orders" {
@@ -615,7 +603,7 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(updatedLedger, "sqs", "orders")
+	entry, _ := status.FindManagedResource(updatedLedger, "sqs", "orders")
 	if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
 		t.Errorf("expected deletionPolicy to update to Delete even while skipping revalidation, got %s", entry.DeletionPolicy)
 	}
@@ -633,16 +621,16 @@ func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	}
 
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
-	entry := status.FindManagedResource(ledger, "sqs", "orders")
+	entry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	updatedLedger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	updatedEntry := status.FindManagedResource(updatedLedger, "sqs", "orders")
+	updatedEntry, _ := status.FindManagedResource(updatedLedger, "sqs", "orders")
 	if updatedEntry.LastVerifiedAt.Equal(&stale) {
 		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
 	}
@@ -740,9 +728,9 @@ func TestEnsure_CorrectsVisibilityTimeoutDriftOnExistingQueue(t *testing.T) {
 	// Force past the trust window so the "already exists" path (not the
 	// skip path) runs, and change the desired value.
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
-	entry := status.FindManagedResource(ledger, "sqs", "orders")
+	entry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	updated := int32(300)
 	spec.Resources[0].Overrides.VisibilityTimeoutSeconds = &updated
@@ -806,7 +794,7 @@ func TestEnsure_ContinuesToOtherQueuesAfterOneFails(t *testing.T) {
 	if _, ok := client.queues[receiptsName]; !ok {
 		t.Error("expected the second queue to still be created despite the first one failing")
 	}
-	if status.FindManagedResource(ledger, "sqs", "receipts") == nil {
+	if !status.HasManagedResource(ledger, "sqs", "receipts") {
 		t.Error("expected a ledger entry for the successfully-created second queue")
 	}
 }
@@ -847,9 +835,9 @@ func TestEnsure_ClearsRedrivePolicyWhenDLQRemoved_AfterTrustWindowExpires(t *tes
 	}
 
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
-	entry := status.FindManagedResource(ledger, "sqs", "orders")
+	entry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	spec = &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 	if _, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err != nil {

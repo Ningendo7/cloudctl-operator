@@ -14,6 +14,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - secrets
   verbs:
   - create
   - delete
@@ -60,9 +61,29 @@ rules:
   - patch
   - update
 - apiGroups:
+  - deps.cloudctl.io
+  resources:
+  - rdssubnetgroupgrants
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - events.k8s.io
   resources:
   - events
   verbs:
   - create
   - patch
+- apiGroups:
+  - vpcresources.k8s.aws
+  resources:
+  - securitygrouppolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

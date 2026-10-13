@@ -134,7 +134,7 @@ func TestIntegration_Ensure_ReconcilesTagsOnExistingTopic(t *testing.T) {
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -169,11 +169,11 @@ func TestIntegration_Ensure_IsIdempotentAgainstRealAWS(t *testing.T) {
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	ledger, err = Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, ledger, nil, nil)
+	ledger, err = Ensure(ctx, client, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -200,7 +200,7 @@ func TestIntegration_Ensure_AdoptsRealUntaggedTopic(t *testing.T) {
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Adopt: true},
 	}}
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, nil, nil, nil); err != nil {
+	if _, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -241,13 +241,13 @@ func TestIntegration_Ensure_CorrectsAttributeDriftOnRealTopic(t *testing.T) {
 			Overrides: &depsv1alpha1.SNSOverrides{ContentBasedDeduplication: &dedup},
 		},
 	}}
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 
 	dedup = true
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, ledger, nil, nil); err != nil {
+	if _, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, ledger, nil, nil); err != nil {
 		t.Fatalf("drift-correcting Ensure() error = %v", err)
 	}
 
@@ -271,7 +271,7 @@ func TestIntegration_Cleanup_DeletesRealTopicImmediatelyWhenForced(t *testing.T)
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", testRegionIntegration, testAccountIDIntegration, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}

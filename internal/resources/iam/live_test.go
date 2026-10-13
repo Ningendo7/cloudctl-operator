@@ -229,7 +229,7 @@ func TestLive_Ensure_CorrectsTrustPolicyDriftOnRealRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildTrustPolicy() error = %v", err)
 	}
-	if !trustPolicyEquivalent(*getOut.Role.AssumeRolePolicyDocument, expected) {
+	if !policyDocumentEquivalent(*getOut.Role.AssumeRolePolicyDocument, expected) {
 		t.Errorf("expected the drifted trust policy to be corrected back on real AWS, got %s", *getOut.Role.AssumeRolePolicyDocument)
 	}
 }

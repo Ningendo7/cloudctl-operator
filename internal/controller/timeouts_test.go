@@ -134,3 +134,27 @@ func TestSectionDeletionContext_UsesTheLargerDeletionBudget(t *testing.T) {
 		t.Errorf("expected the deletion timeout (%v) to exceed the equivalent provisioning timeout (%v)", got, provisioningWant)
 	}
 }
+
+func TestIAMWorkloadCount(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{Spec: depsv1alpha1.AppDependenciesSpec{
+		SQS: &depsv1alpha1.SQSSpec{
+			Resources: []depsv1alpha1.SQSQueueSpec{
+				{Name: "plain"},
+				{Name: "dedicated-key", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+				{Name: "shared-key", Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: "shared"}},
+				{Name: "encryption-off", Encryption: &depsv1alpha1.EncryptionSpec{}},
+			},
+			Consumes: []depsv1alpha1.ConsumeRef{{Namespace: "a", Name: "b", ResourceName: "q"}},
+		},
+		S3: &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+			{Name: "bucket", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+		}},
+		RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "db"}}},
+	}}
+
+	// 4 queues + 1 consume + 2 encrypted queues, 1 bucket + 1 encrypted
+	// bucket; the RDS instance never feeds IAM.
+	if got, want := iamWorkloadCount(cr), 9; got != want {
+		t.Errorf("iamWorkloadCount() = %d, want %d", got, want)
+	}
+}

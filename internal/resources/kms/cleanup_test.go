@@ -54,7 +54,7 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	if len(results) != 1 || results[0].Reason != CleanupReasonRetained {
 		t.Fatalf("expected a Retained result, got %+v", results)
 	}
-	if status.FindManagedResource(updated, resourceType, "primary") == nil {
+	if !status.HasManagedResource(updated, resourceType, "primary") {
 		t.Error("expected the ledger entry to remain for a retained resource")
 	}
 	if cloudctlaws.IsOwnedBy(client.keys[arn].tags, "default", "checkout-service", "uid-1") {
@@ -80,8 +80,8 @@ func TestCleanup_HoldsNewlyEligibleKeyForQuietWindowBeforeScheduling(t *testing.
 	if len(results) != 1 || results[0].Reason != CleanupReasonPendingDeletion {
 		t.Fatalf("expected a PendingDeletion result, got %+v", results)
 	}
-	entry := status.FindManagedResource(updated, resourceType, "primary")
-	if entry == nil || entry.PendingDeletionSince == nil {
+	entry, entryFound := status.FindManagedResource(updated, resourceType, "primary")
+	if !entryFound || entry.PendingDeletionSince == nil {
 		t.Fatal("expected PendingDeletionSince to be set")
 	}
 }
@@ -102,7 +102,7 @@ func TestCleanup_SchedulesDeletionAfterQuietWindowElapses(t *testing.T) {
 	if client.keys[arn].keyState != types.KeyStatePendingDeletion {
 		t.Errorf("expected ScheduleKeyDeletion to have been called, KeyState = %v", client.keys[arn].keyState)
 	}
-	if status.FindManagedResource(updated, resourceType, "primary") != nil {
+	if status.HasManagedResource(updated, resourceType, "primary") {
 		t.Error("expected the ledger entry to be removed once deletion is scheduled - AWS's own 30-day window takes over from here")
 	}
 }
@@ -125,7 +125,7 @@ func TestCleanup_SkipsAlreadyScheduledKey(t *testing.T) {
 	// Still present - Cleanup only drops the ledger entry at the moment it
 	// itself calls ScheduleKeyDeletion, not on every subsequent pass while
 	// waiting for AWS's own window to elapse.
-	if status.FindManagedResource(updated, resourceType, "primary") == nil {
+	if !status.HasManagedResource(updated, resourceType, "primary") {
 		t.Error("expected the ledger entry to remain untouched for an already-scheduled key")
 	}
 }
@@ -140,7 +140,7 @@ func TestCleanup_TreatsAlreadyDeletedKeyAsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	if status.FindManagedResource(updated, resourceType, "primary") != nil {
+	if status.HasManagedResource(updated, resourceType, "primary") {
 		t.Error("expected the ledger entry to be dropped for a key already gone in AWS")
 	}
 }
@@ -161,7 +161,7 @@ func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 	if client.keys[arn].keyState != types.KeyStateEnabled {
 		t.Error("expected no ScheduleKeyDeletion call")
 	}
-	if status.FindManagedResource(updated, resourceType, "primary") == nil {
+	if !status.HasManagedResource(updated, resourceType, "primary") {
 		t.Error("expected the ledger entry to be preserved, not silently dropped, on a real failure")
 	}
 }
@@ -180,8 +180,8 @@ func TestCleanup_ClearsPendingDeletionMarkerWhenRedeclared(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	entry := status.FindManagedResource(updated, resourceType, "primary")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(updated, resourceType, "primary")
+	if !entryFound {
 		t.Fatal("expected the ledger entry to remain for a still-declared key")
 	}
 	if entry.PendingDeletionSince != nil {
@@ -208,10 +208,10 @@ func TestCleanup_ContinuesToOtherResourcesAfterOneFails(t *testing.T) {
 	if client.keys[goodARN].keyState != types.KeyStatePendingDeletion {
 		t.Error("expected the good key's deletion to still be scheduled despite the other one failing")
 	}
-	if status.FindManagedResource(updated, resourceType, "good-key") != nil {
+	if status.HasManagedResource(updated, resourceType, "good-key") {
 		t.Error("expected the good key's ledger entry to be removed")
 	}
-	if status.FindManagedResource(updated, resourceType, "bad-key") == nil {
+	if !status.HasManagedResource(updated, resourceType, "bad-key") {
 		t.Error("expected the bad key's ledger entry to be preserved after a real failure")
 	}
 }
@@ -234,8 +234,8 @@ func TestCleanup_TreatsADedicatedKeyStillNeededAsDeclared(t *testing.T) {
 	if len(results) != 0 {
 		t.Errorf("expected no cleanup results for a still-needed dedicated key, got %+v", results)
 	}
-	entry := status.FindManagedResource(updated, resourceType, "orders-key")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(updated, resourceType, "orders-key")
+	if !entryFound {
 		t.Fatal("expected the dedicated key's ledger entry to remain")
 	}
 	if entry.PendingDeletionSince != nil {
@@ -265,7 +265,7 @@ func TestCleanup_SchedulesADedicatedKeyNoLongerNeeded(t *testing.T) {
 	if client.keys[arn].keyState != types.KeyStatePendingDeletion {
 		t.Error("expected ScheduleKeyDeletion to have been called for a dedicated key no longer needed")
 	}
-	if status.FindManagedResource(updated, resourceType, "orders-key") != nil {
+	if status.HasManagedResource(updated, resourceType, "orders-key") {
 		t.Error("expected the dedicated key's ledger entry to be removed once deletion is scheduled")
 	}
 }

@@ -26,8 +26,6 @@ import (
 	"github.com/aws/smithy-go"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -35,15 +33,6 @@ import (
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kmstest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
-
-func newSchemeForKMSKeyRefTest(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	if err := depsv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-	return scheme
-}
 
 const (
 	testRegion    = "us-east-1"
@@ -58,13 +47,13 @@ func TestEnsure_CreatesNewTopic(t *testing.T) {
 		},
 	}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(ledger, "sns", "events")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, "sns", "events")
+	if !entryFound {
 		t.Fatal("expected a ledger entry for events")
 	}
 	if entry.State != depsv1alpha1.ManagedResourceStateVerified {
@@ -90,13 +79,13 @@ func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 		},
 	}
 
-	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, kmsClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sns", "events"))
-	if keyEntry == nil {
+	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sns", "events"))
+	if !keyEntryFound {
 		t.Fatal("expected a dedicated KMS key ledger entry named \"events-key\"")
 	}
 
@@ -127,29 +116,28 @@ func TestEnsure_CorrectsKmsMasterKeyIdDriftOnExistingTopic(t *testing.T) {
 		},
 	}
 
-	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, kmsClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	keyEntry := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sns", "events"))
+	keyEntry, _ := status.FindManagedResource(ledger, "kms", kms.DedicatedKeyLedgerName("sns", "events"))
 	if client.topics[topicArn].attributes["KmsMasterKeyId"] != keyEntry.ARN {
 		t.Errorf("expected drift correction to set KmsMasterKeyId to %q, got %q", keyEntry.ARN, client.topics[topicArn].attributes["KmsMasterKeyId"])
 	}
 }
 
-func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefRetriesWhenKeyNotYetCreated(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{
 		Resources: []depsv1alpha1.SNSTopicSpec{
 			{Name: "events", Encryption: &depsv1alpha1.EncryptionSpec{
-				KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+				KMSKeyRef: "shared-key",
 			}},
 		},
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).Build()
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error - the producer CR doesn't exist yet")
 	}
@@ -159,33 +147,18 @@ func TestEnsure_KMSKeyRefRetriesWhenNotYetAuthorized(t *testing.T) {
 	}
 }
 
-func TestEnsure_KMSKeyRefResolvesWhenAuthorized(t *testing.T) {
+func TestEnsure_KMSKeyRefResolvesAKeyInThisCRsLedger(t *testing.T) {
 	client := newFakeSNS()
-	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
-		Spec: depsv1alpha1.AppDependenciesSpec{
-			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
-				{Name: "shared-key", SharedWith: []depsv1alpha1.SharedWithEntry{
-					{Namespace: "default", Name: "checkout-service"},
-				}},
-			}},
-		},
-		Status: depsv1alpha1.AppDependenciesStatus{
-			ManagedResources: []depsv1alpha1.ManagedResource{
-				{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"},
-			},
-		},
-	}
-	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	ledger := []depsv1alpha1.ManagedResource{{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"}}
 	spec := &depsv1alpha1.SNSSpec{
 		Resources: []depsv1alpha1.SNSTopicSpec{
 			{Name: "events", Encryption: &depsv1alpha1.EncryptionSpec{
-				KMSKeyRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-key"},
+				KMSKeyRef: "shared-key",
 			}},
 		},
 	}
 
-	_, err := Ensure(context.Background(), client, nil, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -204,20 +177,22 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	firstCreatedAt := status.FindManagedResource(ledger, "sns", "events").CreatedAt
+	firstEntry, _ := status.FindManagedResource(ledger, "sns", "events")
+	firstCreatedAt := firstEntry.CreatedAt
 
-	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
+	ledger, err = Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 	if len(client.topics) != 1 {
 		t.Fatalf("expected exactly one topic after re-reconciling, got %d", len(client.topics))
 	}
-	got := status.FindManagedResource(ledger, "sns", "events").CreatedAt
+	gotEntry, _ := status.FindManagedResource(ledger, "sns", "events")
+	got := gotEntry.CreatedAt
 	if !got.Equal(&firstCreatedAt) {
 		t.Errorf("expected CreatedAt to be preserved across reconciles, got %v want %v", got, firstCreatedAt)
 	}
@@ -230,7 +205,7 @@ func TestEnsure_RefusesUnownedExistingTopic(t *testing.T) {
 	client.topics[topicArn] = &fakeTopic{arn: topicArn, tags: map[string]string{"team": "someone-else"}}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when a same-named topic exists without our ownership tag")
 	}
@@ -243,7 +218,7 @@ func TestEnsure_AdoptsUntaggedTopic(t *testing.T) {
 	client.topics[topicArn] = &fakeTopic{arn: topicArn, tags: map[string]string{"cost-center": "1234"}}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", Adopt: true}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("expected adoption to succeed, got error: %v", err)
 	}
@@ -267,7 +242,7 @@ func TestEnsure_RefusesAdoptingTopicOwnedByDifferentCR(t *testing.T) {
 	}}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", Adopt: true}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to never override a topic already owned by a different AppDependencies CR")
 	}
@@ -288,7 +263,7 @@ func TestEnsure_RefusesAdoptingTopicWithStaleUIDEvenWithAdoptTrue(t *testing.T) 
 	}}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", Adopt: true}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to never override a topic tagged with this CR's name but a stale (different) UID")
 	}
@@ -298,7 +273,7 @@ func TestEnsure_CreatesFIFOTopicWithSuffixAndAttribute(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", FIFO: true}}}
 
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -319,7 +294,7 @@ func TestEnsure_ClassifiesTransientAWSErrorsAsRetryable(t *testing.T) {
 	client.listTagsForResourceErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when the tag lookup fails")
 	}
@@ -338,7 +313,7 @@ func TestEnsure_ClassifiesPermissionErrorsAsNotRetryable(t *testing.T) {
 	client.listTagsForResourceErr = &fakeAWSError{code: "AccessDenied", fault: smithy.FaultClient}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when the tag lookup fails")
 	}
@@ -357,7 +332,7 @@ func TestEnsure_PropagatesCreateTopicErrors(t *testing.T) {
 	client.createTopicErr = &fakeAWSError{code: "InternalError", fault: smithy.FaultServer}
 
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when topic creation fails")
 	}
@@ -374,7 +349,7 @@ func TestEnsure_PropagatesCreateTopicErrors(t *testing.T) {
 func TestEnsure_CorrectsContentBasedDeduplicationDriftOnExistingFIFOTopic(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", FIFO: true}}}
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
@@ -386,7 +361,7 @@ func TestEnsure_CorrectsContentBasedDeduplicationDriftOnExistingFIFOTopic(t *tes
 
 	dedup := true
 	spec.Resources[0].Overrides = &depsv1alpha1.SNSOverrides{ContentBasedDeduplication: &dedup}
-	_, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err = Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -400,7 +375,7 @@ func TestEnsure_SkipsAttributeDriftForNonFIFOTopics(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
 
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -424,7 +399,7 @@ func TestEnsure_ContinuesToOtherTopicsAfterOneFails(t *testing.T) {
 		{Name: "user-events"},   // unrelated, should still succeed
 	}}
 
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error from the failing topic")
 	}
@@ -433,7 +408,7 @@ func TestEnsure_ContinuesToOtherTopicsAfterOneFails(t *testing.T) {
 	if _, ok := client.topics[goodArn]; !ok {
 		t.Error("expected the second topic to still be created despite the first one failing")
 	}
-	if status.FindManagedResource(ledger, "sns", "user-events") == nil {
+	if !status.HasManagedResource(ledger, "sns", "user-events") {
 		t.Error("expected a ledger entry for the successfully-created second topic")
 	}
 }
@@ -443,7 +418,7 @@ func TestEnsure_TruncatesTopicNameExceedingSNSLimit(t *testing.T) {
 	tooLongKey := strings.Repeat("a", 250)
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: tooLongKey}}}
 
-	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	_, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -476,13 +451,13 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
 	}}
-	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
+	updatedLedger, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v — expected the trust window to skip the AWS call entirely", err)
 	}
 
-	entry := status.FindManagedResource(updatedLedger, "sns", "events")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(updatedLedger, "sns", "events")
+	if !entryFound {
 		t.Fatal("expected the ledger entry to survive the skip path")
 	}
 	if entry.ARN != topicArn {
@@ -515,12 +490,12 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
+	updatedLedger, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(updatedLedger, "sns", "events")
+	entry, _ := status.FindManagedResource(updatedLedger, "sns", "events")
 	if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
 		t.Errorf("expected deletionPolicy to update to Delete even while skipping revalidation, got %s", entry.DeletionPolicy)
 	}
@@ -532,22 +507,22 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 func TestEnsure_RevalidatesAfterTrustWindowExpires(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	ledger, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("setup Ensure() error = %v", err)
 	}
 
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
-	entry := status.FindManagedResource(ledger, "sns", "events")
+	entry, _ := status.FindManagedResource(ledger, "sns", "events")
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
 
-	updatedLedger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
+	updatedLedger, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	updatedEntry := status.FindManagedResource(updatedLedger, "sns", "events")
+	updatedEntry, _ := status.FindManagedResource(updatedLedger, "sns", "events")
 	if updatedEntry.LastVerifiedAt.Equal(&stale) {
 		t.Error("expected LastVerifiedAt to be refreshed once the trust window expired and revalidation ran")
 	}
@@ -569,7 +544,7 @@ func TestEnsure_CreatingTopic_EmitsCreatedEvent(t *testing.T) {
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
 	recordEvent, events := newEventCollector()
 
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, recordEvent); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, recordEvent); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -586,7 +561,7 @@ func TestEnsure_AdoptingTopic_EmitsAdoptedEvent(t *testing.T) {
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", Adopt: true}}}
 	recordEvent, events := newEventCollector()
 
-	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, recordEvent); err != nil {
+	if _, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, recordEvent); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 

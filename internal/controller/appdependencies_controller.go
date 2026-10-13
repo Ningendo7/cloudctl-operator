@@ -34,12 +34,14 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/controller/predicates"
+	"github.com/Ningendo7/cloudctl-operator/internal/controller/watches"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/serviceaccount"
 )
 
 // AppDependenciesReconciler reconciles a AppDependencies object
 type AppDependenciesReconciler struct {
 	client.Client
+	APIReader  client.Reader
 	Scheme     *runtime.Scheme
 	AWSClients *cloudctlaws.Clients
 	Recorder   events.EventRecorder
@@ -64,8 +66,11 @@ const defaultMaxConcurrentReconciles = 5
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=deps.cloudctl.io,resources=appdependencies/finalizers,verbs=update
+// +kubebuilder:rbac:groups=deps.cloudctl.io,resources=rdssubnetgroupgrants,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=vpcresources.k8s.aws,resources=securitygrouppolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -100,7 +105,7 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 
 	err := ensureDesiredState(ctx, r, cr, original)
 
-	if statusErr := r.Status().Patch(ctx, cr, client.MergeFrom(original)); statusErr != nil {
+	if statusErr := r.Status().Patch(ctx, cr, statusPatch(original, cr)); statusErr != nil {
 		log.Error(statusErr, "failed to update status")
 		if err == nil {
 			err = statusErr
@@ -116,8 +121,9 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 		return ctrl.Result{}, err
 	}
 
-	log.Info("Reconcile succeeded", "requeueAfter", DriftDetectionInterval, "duration", time.Since(start))
-	return ctrl.Result{RequeueAfter: DriftDetectionInterval}, nil
+	requeueAfter := jitteredDriftRequeue()
+	log.Info("Reconcile succeeded", "requeueAfter", requeueAfter, "duration", time.Since(start))
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *depsv1alpha1.AppDependencies) (ctrl.Result, error) {
@@ -146,8 +152,9 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 	}
 
 	if !done {
-		log.Info("Deletion reconcile still waiting on resources to drain", "requeueAfter", DriftDetectionInterval, "duration", time.Since(start))
-		return ctrl.Result{RequeueAfter: DriftDetectionInterval}, nil
+		requeueAfter := jitteredDriftRequeue()
+		log.Info("Deletion reconcile still waiting on resources to drain", "requeueAfter", requeueAfter, "duration", time.Since(start))
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	if err := removeFinalizer(ctx, r.Client, cr); err != nil {
@@ -164,22 +171,30 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentReconciles
 	}
+	if err := watches.RegisterIndexes(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&depsv1alpha1.AppDependencies{}, builder.WithPredicates(predicates.AppDependenciesPredicate())).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Secret{}).
 		Owns(
 			&corev1.ServiceAccount{},
 			builder.WithPredicates(predicates.AnnotationValueChangedPredicate(serviceaccount.RoleARNAnnotation)),
 		).
-		// Self-referential watch: a producer's sharedWith change (or any
-		// spec change generation-changed already lets through) also
-		// reconciles every CR that consumes from it, so a revocation or
-		// new grant takes effect immediately instead of waiting for the
-		// periodic drift-detection interval. See mapProducerToConsumers.
 		Watches(
 			&depsv1alpha1.AppDependencies{},
-			handler.EnqueueRequestsFromMapFunc(r.mapProducerToConsumers),
-			builder.WithPredicates(predicates.AppDependenciesPredicate()),
+			handler.EnqueueRequestsFromMapFunc(watches.ProducerToConsumers(r.Client)),
+			builder.WithPredicates(predicates.ProducerChangedPredicate()),
+		).
+		Watches(
+			&depsv1alpha1.RDSSubnetGroupGrant{},
+			handler.EnqueueRequestsFromMapFunc(watches.SubnetGroupGrantToAffectedCRs(r.Client)),
+		).
+		Watches(
+			&depsv1alpha1.AppDependencies{},
+			handler.EnqueueRequestsFromMapFunc(watches.ConsumerPodIdentityToRDSProducers(r.Client)),
+			builder.WithPredicates(predicates.PodNetworkIdentityPublishedPredicate()),
 		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrent}).
 		Named("appdependencies").

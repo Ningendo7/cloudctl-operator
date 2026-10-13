@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -37,9 +38,8 @@ import (
 )
 
 // s3API is the subset of the S3 client this package needs. Stays private
-// here — like sqsAPI/snsAPI/dynamodbAPI originally did — until a second
-// real consumer (controller-level envtest fakes) needs to substitute a
-// fake here too.
+// here until a second real consumer (controller-level envtest fakes)
+// needs to substitute a fake here too.
 type s3API interface {
 	HeadBucket(ctx context.Context, in *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error)
 	CreateBucket(ctx context.Context, in *s3sdk.CreateBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.CreateBucketOutput, error)
@@ -48,6 +48,7 @@ type s3API interface {
 	PutBucketTagging(ctx context.Context, in *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error)
 	PutBucketVersioning(ctx context.Context, in *s3sdk.PutBucketVersioningInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketVersioningOutput, error)
 	GetBucketVersioning(ctx context.Context, in *s3sdk.GetBucketVersioningInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketVersioningOutput, error)
+	GetBucketLifecycleConfiguration(ctx context.Context, in *s3sdk.GetBucketLifecycleConfigurationInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketLifecycleConfigurationOutput, error)
 	PutBucketLifecycleConfiguration(ctx context.Context, in *s3sdk.PutBucketLifecycleConfigurationInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketLifecycleConfigurationOutput, error)
 	DeleteBucketLifecycle(ctx context.Context, in *s3sdk.DeleteBucketLifecycleInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketLifecycleOutput, error)
 	ListObjectVersions(ctx context.Context, in *s3sdk.ListObjectVersionsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.ListObjectVersionsOutput, error)
@@ -131,12 +132,12 @@ func Ensure(
 			}
 		}
 		if b.Encryption != nil {
-			if b.Encryption.KMSKeyRef != nil {
-				arn, ok := kms.ResolveSharedKeyARN(ctx, k8sClient, namespace, crName, *b.Encryption.KMSKeyRef)
+			if b.Encryption.KMSKeyRef != "" {
+				arn, ok := kms.SharedKeyARN(ledger, b.Encryption.KMSKeyRef)
 				if !ok {
 					if firstErr == nil {
 						firstErr = &cloudctlaws.ReconcileError{
-							Err:       fmt.Errorf("bucket %q: encryption.kmsKeyRef %s/%s/%s is not yet authorized (producer must list this CR in the key's sharedWith) or does not exist yet", b.Name, b.Encryption.KMSKeyRef.Namespace, b.Encryption.KMSKeyRef.Name, b.Encryption.KMSKeyRef.ResourceName),
+							Err:       fmt.Errorf("bucket %q: encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources", b.Name, b.Encryption.KMSKeyRef),
 							Retryable: true,
 						}
 					}
@@ -189,7 +190,7 @@ func ensureBucket(
 	bucket := bucketName(namespace, crName, resourceName, accountID)
 	bucketArn := "arn:aws:s3:::" + bucket
 
-	if existing := status.FindManagedResource(ledger, resourceType, resourceName); existing != nil && !status.NeedsRevalidation(*existing) {
+	if existing, existingFound := status.FindManagedResource(ledger, resourceType, resourceName); existingFound && !status.NeedsRevalidation(existing) {
 		// Still within the trust window - skip re-verifying existence and
 		// ownership (HeadBucket + GetBucketTagging), but attribute drift
 		// correction is a different concern and still runs every reconcile
@@ -200,7 +201,7 @@ func ensureBucket(
 		// with no AWS call needed, so refresh those against the cached
 		// entry; LastVerifiedAt stays as it was until the window actually
 		// expires and a real ownership check runs again.
-		updated := *existing
+		updated := existing
 		updated.DeletionPolicy = opts.deletionPolicy
 		updated.Force = opts.force
 		status.UpsertManagedResource(&ledger, updated)
@@ -284,12 +285,8 @@ func ensureBucket(
 	return recordVerified(ledger, resourceName, bucketArn, opts.deletionPolicy, opts.force), nil
 }
 
-// reconcileBucketAttributes corrects drift on versioning and the lifecycle
-// policy. Lifecycle is written unconditionally when non-empty rather than
-// diffed against the current configuration first - PutBucketLifecycleConfiguration
-// is itself fully idempotent, and a deep structural comparison of nested
-// transition/expiration rules isn't worth the complexity it would add for
-// avoiding one harmless redundant call per reconcile.
+// reconcileBucketAttributes corrects drift on versioning, encryption and the
+// lifecycle policy, writing only when AWS differs from the desired state.
 func reconcileBucketAttributes(ctx context.Context, awsClient s3API, bucket string, opts bucketOptions) error {
 	desiredVersioning := opts.backupEnabled
 	if opts.versioningOverride != nil {
@@ -359,6 +356,19 @@ func reconcileBucketAttributes(ctx context.Context, awsClient s3API, bucket stri
 	}
 
 	rules := desiredLifecycleRules(opts)
+	desired := buildLifecycleRules(rules)
+	var currentRules []types.LifecycleRule
+	currentOut, err := awsClient.GetBucketLifecycleConfiguration(ctx, &s3sdk.GetBucketLifecycleConfigurationInput{Bucket: &bucket})
+	switch {
+	case err == nil:
+		currentRules = currentOut.Rules
+	case !isNoSuchLifecycleConfiguration(err):
+		return fmt.Errorf("reading lifecycle policy: %w", err)
+	}
+	if lifecycleRulesMatch(currentRules, desired) {
+		return nil
+	}
+
 	if len(rules) == 0 {
 		_, err := awsClient.DeleteBucketLifecycle(ctx, &s3sdk.DeleteBucketLifecycleInput{Bucket: &bucket})
 		if err != nil && !isNotFoundError(err) {
@@ -370,13 +380,78 @@ func reconcileBucketAttributes(ctx context.Context, awsClient s3API, bucket stri
 	_, err = awsClient.PutBucketLifecycleConfiguration(ctx, &s3sdk.PutBucketLifecycleConfigurationInput{
 		Bucket: &bucket,
 		LifecycleConfiguration: &types.BucketLifecycleConfiguration{
-			Rules: buildLifecycleRules(rules),
+			Rules: desired,
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("setting lifecycle policy: %w", err)
 	}
 	return nil
+}
+
+func isNoSuchLifecycleConfiguration(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchLifecycleConfiguration"
+}
+
+// lifecycleRulesMatch reports whether current already equals desired. A
+// current rule using anything this operator never sets counts as a
+// mismatch, so a false "equal" can't skip a needed write.
+func lifecycleRulesMatch(current, desired []types.LifecycleRule) bool {
+	if len(current) != len(desired) {
+		return false
+	}
+	want := make(map[string]string, len(desired))
+	for _, r := range desired {
+		fp, ok := lifecycleRuleFingerprint(r)
+		if !ok {
+			return false
+		}
+		want[aws.ToString(r.ID)] = fp
+	}
+	for _, r := range current {
+		fp, ok := lifecycleRuleFingerprint(r)
+		if !ok || want[aws.ToString(r.ID)] != fp {
+			return false
+		}
+	}
+	return true
+}
+
+func lifecycleRuleFingerprint(r types.LifecycleRule) (string, bool) {
+	if r.AbortIncompleteMultipartUpload != nil || len(r.NoncurrentVersionTransitions) > 0 || len(r.Transitions) > 1 || aws.ToString(r.Prefix) != "" { //nolint:staticcheck // a rule using the legacy prefix is never one we wrote
+		return "", false
+	}
+	prefix := ""
+	if f := r.Filter; f != nil {
+		if f.And != nil || f.Tag != nil || f.ObjectSizeGreaterThan != nil || f.ObjectSizeLessThan != nil {
+			return "", false
+		}
+		prefix = aws.ToString(f.Prefix)
+	}
+	var transition string
+	if len(r.Transitions) == 1 {
+		t := r.Transitions[0]
+		if t.Date != nil {
+			return "", false
+		}
+		transition = fmt.Sprintf("%d/%s", aws.ToInt32(t.Days), t.StorageClass)
+	}
+	var expiration int32
+	if e := r.Expiration; e != nil {
+		if e.Date != nil || e.ExpiredObjectDeleteMarker != nil {
+			return "", false
+		}
+		expiration = aws.ToInt32(e.Days)
+	}
+	var noncurrent int32
+	if n := r.NoncurrentVersionExpiration; n != nil {
+		if n.NewerNoncurrentVersions != nil {
+			return "", false
+		}
+		noncurrent = aws.ToInt32(n.NoncurrentDays)
+	}
+	return fmt.Sprintf("%s|%s|%s|%d|%d", r.Status, prefix, transition, expiration, noncurrent), true
 }
 
 // isServerSideEncryptionConfigurationNotFound reports whether err is S3's
@@ -457,7 +532,7 @@ func buildLifecycleRules(rules []depsv1alpha1.S3LifecycleRule) []types.Lifecycle
 func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn string, deletionPolicy depsv1alpha1.DeletionPolicy, force bool) []depsv1alpha1.ManagedResource {
 	now := metav1.Now()
 	createdAt := now
-	if existing := status.FindManagedResource(ledger, resourceType, ledgerName); existing != nil {
+	if existing, existingFound := status.FindManagedResource(ledger, resourceType, ledgerName); existingFound {
 		createdAt = existing.CreatedAt
 	}
 	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{

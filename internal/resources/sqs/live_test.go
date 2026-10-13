@@ -260,10 +260,10 @@ func TestLive_Ensure_RedrivePolicyClearsWhenDLQRemoved(t *testing.T) {
 	// treat as needing a round trip on its own (see sqs.go's
 	// reconcileAttributes doc comment) - a known, accepted gap, not
 	// something this test is trying to disprove.
-	mainEntry := status.FindManagedResource(ledger, "sqs", "orders")
+	mainEntry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
 	mainEntry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, *mainEntry)
+	status.UpsertManagedResource(&ledger, mainEntry)
 
 	spec.Resources[0].DLQ = false
 	if _, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil); err != nil {
@@ -369,10 +369,10 @@ func TestLive_Cleanup_BlocksDeletingQueueWithARealMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Cleanup() error = %v", err)
 	}
-	entry := status.FindManagedResource(ledger, "sqs", "orders")
+	entry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	past := metav1.NewTime(time.Now().Add(-2 * deletionQuietWindow))
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	if _, _, err := Cleanup(ctx, client, nil, nil, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil); err != nil {
 		t.Fatalf("second Cleanup() error = %v", err)
@@ -441,7 +441,7 @@ func TestLive_Ensure_DedicatedKMSKeyEncryptsRealQueue(t *testing.T) {
 		// kms package's own Cleanup won't schedule deletion within a single
 		// pass (it only starts a quiet window) - delete the real key
 		// directly instead of leaving it dangling.
-		if keyEntry := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "orders")); keyEntry != nil {
+		if keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "orders")); keyEntryFound {
 			windowDays := int32(7)
 			if _, err := kmsClient.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{KeyId: &keyEntry.ARN, PendingWindowInDays: &windowDays}); err != nil {
 				t.Logf("key cleanup warning: %v", err)
@@ -449,8 +449,8 @@ func TestLive_Ensure_DedicatedKMSKeyEncryptsRealQueue(t *testing.T) {
 		}
 	})
 
-	keyEntry := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "orders"))
-	if keyEntry == nil {
+	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "orders"))
+	if !keyEntryFound {
 		t.Fatal("expected a dedicated KMS key ledger entry for the encrypted queue")
 	}
 
@@ -503,10 +503,10 @@ func TestLive_Ensure_RecreatesQueueDeletedExternally(t *testing.T) {
 
 	// Bypass the trust window so Ensure actually re-verifies against real
 	// AWS on this pass, instead of trusting the (now-stale) cached entry.
-	entry := status.FindManagedResource(ledger, "sqs", "orders")
+	entry, _ := status.FindManagedResource(ledger, "sqs", "orders")
 	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
 	entry.LastVerifiedAt = &stale
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
 
 	// AWS enforces a ~60s cooldown before a deleted queue's name can be
 	// reused (QueueDeletedRecently) - retry through it rather than sleep a
@@ -529,7 +529,7 @@ func TestLive_Ensure_RecreatesQueueDeletedExternally(t *testing.T) {
 	// unique creation-time identifier, so the recreated queue legitimately
 	// gets the exact same ARN as before - the meaningful check is that the
 	// queue genuinely exists again, not that its ARN changed.
-	if status.FindManagedResource(updated, "sqs", "orders") == nil {
+	if !status.HasManagedResource(updated, "sqs", "orders") {
 		t.Fatal("expected a ledger entry for the recreated queue")
 	}
 	if _, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName}); err != nil {

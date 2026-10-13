@@ -24,11 +24,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
-	"github.com/Ningendo7/cloudctl-operator/internal/resources/iam"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -135,29 +133,24 @@ func EnsureDedicatedKey(
 	if err != nil {
 		return "", updatedLedger, err
 	}
-	entry := status.FindManagedResource(updatedLedger, resourceType, ledgerName)
+	entry, found := status.FindManagedResource(updatedLedger, resourceType, ledgerName)
+	if !found {
+		return "", updatedLedger, fmt.Errorf("KMS key %q is missing from the ledger right after ensuring it", ledgerName)
+	}
 	return entry.ARN, updatedLedger, nil
 }
 
-// ResolveSharedKeyARN resolves an EncryptionSpec.KMSKeyRef to the ARN of
-// the KMS key it points at — for encryption.kmsKeyRef, the deliberate-reuse
-// half of the hybrid design (as opposed to EnsureDedicatedKey's
-// per-resource key). Uses the exact same cross-CR authorization check
-// every other consumes reference goes through: the producer's own
-// kms.resources entry must list this CR in its sharedWith. Returns
-// ("", false) if that isn't true yet — the caller should treat this as a
-// normal, self-resolving-forward-reference state (the same reasoning
-// collectGrants itself already applies to every other resource type's
-// consumes), not a hard, permanent failure.
-//
-// Takes namespace/crName rather than the whole CR, unlike
-// iam.ResolveConsumeARN's own signature, since none of sqs/sns/dynamodb/s3
-// carry the full CR object through their Ensure calls the way iam and
-// configmap do — only what identifies the consumer for the sharedWith
-// match is actually needed.
-func ResolveSharedKeyARN(ctx context.Context, k8sClient client.Client, namespace, crName string, ref depsv1alpha1.ConsumeRef) (arn string, ok bool) {
-	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName}}
-	return iam.ResolveConsumeARN(ctx, k8sClient, consumer, resourceType, ref)
+// SharedKeyARN returns the ARN of the key declared as name under this CR's
+// own kms.resources, once it exists in the ledger. A key that isn't there
+// yet is a normal, self-resolving state: kms is reconciled before the
+// resources that reference it, so this only misses on a first pass or after
+// a failed create.
+func SharedKeyARN(ledger []depsv1alpha1.ManagedResource, name string) (arn string, ok bool) {
+	entry, found := status.FindManagedResource(ledger, resourceType, name)
+	if !found || entry.ARN == "" {
+		return "", false
+	}
+	return entry.ARN, true
 }
 
 // ensureKey is a thin orchestrator: the ledger, not an alias lookup, is
@@ -179,8 +172,8 @@ func ensureKey(
 ) ([]depsv1alpha1.ManagedResource, error) {
 	alias := aliasName(namespace, crName, resourceName, opts)
 
-	if entry := status.FindManagedResource(ledger, resourceType, resourceName); entry != nil {
-		return resumeKey(ctx, kmsClient, namespace, crName, crUID, alias, opts, *entry, ledger, recordEvent)
+	if entry, entryFound := status.FindManagedResource(ledger, resourceType, resourceName); entryFound {
+		return resumeKey(ctx, kmsClient, namespace, crName, crUID, alias, opts, entry, ledger, recordEvent)
 	}
 
 	descirbeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
@@ -264,6 +257,10 @@ func createKey(
 // finishing alias creation if that's what didn't complete last time, and
 // reviving the key out of a scheduled deletion if Cleanup's own quiet
 // window scheduled one and the resource has since reappeared in spec.
+// Skips all of that and returns immediately once the entry is already
+// Verified and within its trust window - the same re-verification cadence
+// every other resource type already applies to its own ownership check,
+// which this package had been doing on every single pass instead.
 func resumeKey(
 	ctx context.Context,
 	kmsClient kmsAPI,
@@ -273,6 +270,13 @@ func resumeKey(
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
+	if !status.NeedsRevalidation(entry) {
+		updated := entry
+		updated.DeletionPolicy = opts.deletionPolicy
+		status.UpsertManagedResource(&ledger, updated)
+		return ledger, nil
+	}
+
 	describeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &entry.ARN,
 	})
@@ -417,7 +421,7 @@ func recordKey(
 ) []depsv1alpha1.ManagedResource {
 	now := metav1.Now()
 	createdAt := now
-	if existing := status.FindManagedResource(ledger, resourceType, resourceName); existing != nil {
+	if existing, existingFound := status.FindManagedResource(ledger, resourceType, resourceName); existingFound {
 		createdAt = existing.CreatedAt
 	}
 	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{

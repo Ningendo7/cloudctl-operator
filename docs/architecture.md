@@ -118,14 +118,15 @@ empty artifact). Flat, env-var-shaped keys
 app code required.
 
 A `consumes` entry is mirrored into the *consumer's own* ConfigMap using
-the same flat keys, prefixed with the producer CR's name
-(`SQS_<PRODUCER_CR_NAME>_ORDERS_URL`) to avoid two different producers'
-same-named resources colliding in one consumer's map. This isn't just a
-naming nicety — `sharedWith`/`consumes` support cross-namespace grants, and
-ConfigMaps are namespace-scoped, so a consumer's pod can never mount a
-ConfigMap living in the producer's own namespace directly. Mirroring into
-the consumer's own namespace is the only mechanism that works at all once
-sharing crosses a namespace boundary.
+the same flat keys, prefixed with the producer CR's namespace and name
+(`SQS_<PRODUCER_NAMESPACE>_<PRODUCER_CR_NAME>_ORDERS_URL`) — namespace and
+name together, not name alone, since two unrelated producers in different
+namespaces can share a bare CR name. This isn't just a naming nicety —
+`sharedWith`/`consumes` support cross-namespace grants, and ConfigMaps are
+namespace-scoped, so a consumer's pod can never mount a ConfigMap living
+in the producer's own namespace directly. Mirroring into the consumer's
+own namespace is the only mechanism that works at all once sharing
+crosses a namespace boundary.
 
 Mirroring reuses the exact same authorization check IAM's own policy
 derivation applies (`iam.ResolveConsumeARN`, shared rather than
@@ -138,6 +139,28 @@ identifier for something its own IAM role can't touch.
 The IAM role's own ARN is deliberately *not* included in this ConfigMap —
 IRSA is meant to be fully transparent to the application; there's nothing
 for it to do with its own role ARN.
+
+**RDS credentials (master username/password) → a generated Secret**,
+named `<cr-name>-credentials`, same ownership/regeneration/deletion rules
+as the ConfigMap above. Re-derived from AWS Secrets Manager's own managed
+secret every reconcile — this operator never generates or caches a
+password itself, Secrets Manager stays the sole source of truth. Consumed
+the same way as the ConfigMap (`envFrom: secretRef`), which is exactly
+where this mechanism's guarantee runs out: updating a Secret object never
+touches a container's process environment, since env vars are fixed at
+container start. The operator keeps the Secret's *content* correct within
+one drift-detection interval of any rotation (manual or AWS-automatic),
+but nothing restarts an already-running pod once that happens — it keeps
+using its stale, now-invalid password until something else recreates it.
+Teams that need that handled automatically should add Stakater Reloader's
+`reloader.stakater.com/auto: "true"` annotation to their own Deployment;
+this operator deliberately doesn't do that restart itself, since it would
+mean gaining write access to workload resources it has never touched
+anywhere else. IAM database authentication would remove the problem at
+the root instead of working around it (a signed, short-lived token
+generated per connection, nothing to rotate or go stale) but needs
+app-side connection-code changes this operator can't make on anyone's
+behalf — a candidate for a future `authMethod` option, not attempted here.
 
 ## Validation: CEL schema rules, not an admission webhook
 

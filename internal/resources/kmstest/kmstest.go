@@ -21,9 +21,9 @@ limitations under the License.
 // without hitting real AWS. Detailed KMS behavior itself is already
 // covered by internal/resources/kms's own unit tests; this fake only needs
 // to be complete enough to exercise the dedicated-key/shared-key call from
-// each of those four packages - previously copy-pasted identically into
-// each one as its own fakekms_test.go, since a _test.go file's symbols
-// aren't importable across package boundaries. Must never be imported by
+// each of those four packages. Lives as its own importable package, not a
+// _test.go file in each one, since a _test.go file's symbols aren't
+// importable across package boundaries. Must never be imported by
 // production code.
 package kmstest
 

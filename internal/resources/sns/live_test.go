@@ -116,7 +116,7 @@ func TestLive_Ensure_CreatesRealTopicWithConstructedARNMatchingReal(t *testing.T
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -169,7 +169,7 @@ func TestLive_Ensure_FIFOTopicAcceptsFifoAndDedupAttributes(t *testing.T) {
 	topicArn := cloudctlaws.TopicARN(region, accountID, cloudctlaws.ResourceName(namespace, crName, "sns", "events", 256-len(".fifo"))+".fifo")
 	t.Cleanup(func() { deleteTopicIfExists(t, client, topicArn) })
 
-	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -214,7 +214,7 @@ func TestLive_Cleanup_DenyPolicyActuallyBlocksPublishThenClearingRestoresIt(t *t
 	topicArn := cloudctlaws.TopicARN(region, accountID, cloudctlaws.ResourceName(namespace, crName, "sns", "events", 256))
 	t.Cleanup(func() { deleteTopicIfExists(t, client, topicArn) })
 
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil); err != nil {
+	if _, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -243,8 +243,7 @@ func TestLive_Cleanup_DenyPolicyActuallyBlocksPublishThenClearingRestoresIt(t *t
 // TestLive_Ensure_RefusesTopicOwnedByADifferentRealCR confirms the
 // tag-based stale-UID/ownership check against real, round-tripped AWS
 // tags read via SNS's own ListTagsForResource shape (a []Tag slice, not
-// SQS's map) - this exact bug class was real and found live once already
-// in sqs's own ownership check before IsStaleUID existed everywhere.
+// SQS's map).
 func TestLive_Ensure_RefusesTopicOwnedByADifferentRealCR(t *testing.T) {
 	cfg := skipUnlessLiveAWSCredentials(t)
 	client := sns.NewFromConfig(cfg)
@@ -257,14 +256,14 @@ func TestLive_Ensure_RefusesTopicOwnedByADifferentRealCR(t *testing.T) {
 	ownerSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "owner-uid", region, accountID, ownerSpec, nil, nil, nil); err != nil {
+	if _, err := Ensure(ctx, client, nil, namespace, crName, "owner-uid", region, accountID, ownerSpec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() (establishing the real owner) error = %v", err)
 	}
 
 	intruderSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Adopt: true},
 	}}
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "intruder-uid", region, accountID, intruderSpec, nil, nil, nil); err == nil {
+	if _, err := Ensure(ctx, client, nil, namespace, crName, "intruder-uid", region, accountID, intruderSpec, nil, nil, nil); err == nil {
 		t.Error("expected Ensure to refuse a real topic already owned by a different CR's UID, even with adopt:true")
 	}
 }

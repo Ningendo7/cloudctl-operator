@@ -64,10 +64,19 @@ type fakeKMS struct {
 	describeKeyErr         error
 
 	nextKeyNum int
+
+	// describeKeyCalls/listResourceTagsCalls count every real call, keyed
+	// by the KeyId/ARN requested - lets a test prove the trust-window gate
+	// actually skips re-verification rather than just trusting it does.
+	describeKeyCalls      map[string]int
+	listResourceTagsCalls map[string]int
 }
 
 func newFakeKMS() *fakeKMS {
-	return &fakeKMS{keys: map[string]*fakeKey{}, aliases: map[string]string{}}
+	return &fakeKMS{
+		keys: map[string]*fakeKey{}, aliases: map[string]string{},
+		describeKeyCalls: map[string]int{}, listResourceTagsCalls: map[string]int{},
+	}
 }
 
 // resolve maps a KeyId input (an alias name, a key ARN, or a bare key ID)
@@ -89,6 +98,7 @@ func (f *fakeKMS) resolve(keyID string) string {
 }
 
 func (f *fakeKMS) DescribeKey(_ context.Context, in *kms.DescribeKeyInput, _ ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
+	f.describeKeyCalls[*in.KeyId]++
 	if f.describeKeyErr != nil {
 		return nil, f.describeKeyErr
 	}
@@ -149,6 +159,7 @@ func (f *fakeKMS) EnableKeyRotation(_ context.Context, in *kms.EnableKeyRotation
 }
 
 func (f *fakeKMS) ListResourceTags(_ context.Context, in *kms.ListResourceTagsInput, _ ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
+	f.listResourceTagsCalls[*in.KeyId]++
 	if f.listResourceTagsErr != nil {
 		return nil, f.listResourceTagsErr
 	}

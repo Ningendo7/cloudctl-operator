@@ -18,11 +18,11 @@ limitations under the License.
 
 // Live tests run against a real AWS account - no LocalStack. Standalone
 // KMS has no integration tier at all (see docs/testing.md: LocalStack's
-// community edition has historically been the least faithful for KMS, so
-// testing against it there risks false confidence more than real
-// coverage) - this is the only real-AWS-shaped coverage this package's
-// own resourceType gets at all, beyond the dedicated-key path already
-// exercised through sqs/sns/s3/dynamodb's own live tests.
+// community edition is the least faithful for KMS, so testing against it
+// there risks false confidence more than real coverage) - this is the
+// only real-AWS-shaped coverage this package's own resourceType gets at
+// all, beyond the dedicated-key path already exercised through
+// sqs/sns/s3/dynamodb's own live tests.
 //
 // Unlike every other resource type, a KMS key cannot be deleted
 // immediately - ScheduleKeyDeletion's PendingWindowInDays has a hard AWS
@@ -111,8 +111,8 @@ func TestLive_Ensure_CreatesRealKeyWithAliasTagsAndRotation(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	entry := status.FindManagedResource(ledger, resourceType, "primary")
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, "primary")
+	if !entryFound {
 		t.Fatal("expected a ledger entry for the created key")
 	}
 	t.Cleanup(func() { deleteRealKeyDirectly(t, client, entry.ARN) })

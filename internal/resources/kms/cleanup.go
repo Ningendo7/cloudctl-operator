@@ -92,13 +92,15 @@ type CleanupResult struct {
 // deletion.
 //
 // Unlike every other resource type, there's no "is it empty" check here
-// at all — a KMS key has no AWS-queryable signal analogous to a message,
-// item, or object count for "is anything still using this to encrypt
-// data." The quiet window plus AWS's own 30-day PendingDeletion window are
-// the only two safety layers, and there's no force override to skip
-// either of them — force-deleting a key can make a completely different,
-// still-live resource's data permanently unreadable, not just this
-// resource's own.
+// in the usual sense — a KMS key has no AWS-queryable signal analogous to
+// a message, item, or object count for "is anything still using this to
+// encrypt data." Keys are never shared across CRs, so the caller passes in
+// every key this CR's own resources still reference (see
+// dedicatedKeysStillNeeded). Something encrypted with this key entirely
+// outside this operator's bookkeeping is invisible to that. The quiet
+// window, that list, and AWS's own PendingDeletion window are the only
+// safety layers, and there is no force override to skip any of them —
+// force-deleting a key can make still-live data permanently unreadable.
 func Cleanup(
 	ctx context.Context,
 	client kmsAPI,

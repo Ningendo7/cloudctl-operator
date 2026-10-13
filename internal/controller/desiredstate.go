@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	equality "k8s.io/apimachinery/pkg/api/equality"
@@ -30,6 +31,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/configmap"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -53,8 +55,18 @@ import (
 func checkpointFor(r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) status.Checkpoint {
 	return func(ctx context.Context, ledger []depsv1alpha1.ManagedResource) error {
 		cr.Status.ManagedResources = ledger
-		return r.Status().Patch(ctx, cr, client.MergeFrom(original))
+		return r.Status().Patch(ctx, cr, statusPatch(original, cr))
 	}
+}
+
+// statusPatch diffs cr against original, ignoring resourceVersion: an
+// earlier write in this pass (the finalizer update, a checkpoint) moves
+// cr's version past original's, and a diff that included it would make the
+// patch fail with a conflict if anything else touched the CR meanwhile.
+func statusPatch(original, cr *depsv1alpha1.AppDependencies) client.Patch {
+	from := original.DeepCopy()
+	from.ResourceVersion = cr.ResourceVersion
+	return client.MergeFrom(from)
 }
 
 // eventRecorderFor adapts r.Recorder into a status.EventRecorder bound to
@@ -80,6 +92,15 @@ func eventRecorderFor(r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependen
 // deletes a queue via the console) that no Kubernetes watch can see.
 const DriftDetectionInterval = 5 * time.Minute
 
+// driftRequeueJitterFraction keeps a fleet of CRs reconciled around the
+// same time from staying locked in step on every later requeue too.
+const driftRequeueJitterFraction = 0.2
+
+func jitteredDriftRequeue() time.Duration {
+	span := float64(DriftDetectionInterval) * driftRequeueJitterFraction
+	return DriftDetectionInterval + time.Duration(rand.Float64()*2*span-span) //nolint:gosec // jitter, not a secret
+}
+
 // transientRequeueInterval is how soon a transient AWS error (throttling,
 // eventual consistency) gets retried - short, since the SDK's own retryer
 // has already been through its internal backoff before an error like this
@@ -95,15 +116,21 @@ const (
 	resourceTypeSNS      = "sns"
 	resourceTypeDynamoDB = "dynamodb"
 	resourceTypeS3       = "s3"
+	resourceTypeRDS      = "rds"
 
-	conditionTypeS3Ready = "S3Ready"
+	conditionTypeS3Ready  = "S3Ready"
+	conditionTypeKMSReady = "KMSReady"
+
+	reasonError                        = "Error"
+	reasonTransientError               = "TransientError"
+	reasonInstanceStuckPendingDeletion = "InstanceStuckPendingDeletion"
 )
 
 // sectionTypes lists every per-section Ready condition type this CR can
 // produce, used to compute the aggregate Ready condition. Kept in sync
 // with allSections above — each entry here should have a matching
 // section constructor registered there.
-var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", conditionTypeS3Ready, "KMSReady", "AlarmsReady", "IAMReady", "ConnectionInfoReady"}
+var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", conditionTypeS3Ready, "RDSReady", conditionTypeKMSReady, "AlarmsReady", "IAMReady", "ConnectionInfoReady"}
 
 type section struct {
 	name      string
@@ -126,24 +153,47 @@ type section struct {
 const ForceDeleteAllAnnotation = "cloudctl.io/force-delete-all"
 
 // allSections lists every resource-type section this CR reconciles, in
-// dependency order — iamSection must run last, since deriving this CR's
-// IAM policy reads the ARNs the other sections just wrote into this same
-// reconcile pass's ledger. Adding a new resource type means adding one file
+// dependency order — kmsSection runs first, since other sections' kmsKeyRef
+// resolves against keys it just wrote to the ledger, and iamSection runs
+// last, since deriving this CR's IAM policy reads the ARNs the other
+// sections just wrote into this same reconcile pass's ledger. Adding a new resource type means adding one file
 // (section_<type>.go) with its own constructor, and one line here — this
 // file's size doesn't grow with the number of resource types.
 func allSections(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) []section {
 	return []section{
+		kmsSection(r, original),
 		sqsSection(r, original),
 		snsSection(r, original),
 		dynamodbSection(r, original),
 		s3Section(r, original),
-		kmsSection(r, original),
+		rdsSection(r, original),
 		alarmsSection(r),
 		iamSection(r),
 	}
 }
 
+// finalizeOrder is allSections with kms moved last: a key must outlive the
+// resources encrypted with it, the reverse of the order they're created in.
+func finalizeOrder(sections []section) []section {
+	ordered := make([]section, 0, len(sections))
+	var keys []section
+	for _, s := range sections {
+		if s.name == conditionTypeKMSReady {
+			keys = append(keys, s)
+			continue
+		}
+		ordered = append(ordered, s)
+	}
+	return append(ordered, keys...)
+}
+
 func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) error {
+	// Shares one DescribeDBInstances call per RDS instance across this
+	// whole pass - rdsSection's own status check, and the ConfigMap/Secret
+	// connection-info delivery below, would otherwise each describe the
+	// same instance independently. See rds.WithDescribeCache.
+	ctx = rds.WithDescribeCache(ctx)
+
 	checkpoint := checkpointFor(r, cr, original)
 	lastCheckpointed := cr.Status.DeepCopy()
 	var firstErr error
@@ -164,8 +214,14 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 	// Runs last, after every section has written this pass's ARNs into the
 	// ledger: the ConfigMap it generates is only as fresh as that ledger
 	// data, so anything reconciled earlier in this same pass is already
-	// reflected in it, not lagging a full reconcile behind.
-	connErr := configmap.Ensure(ctx, r.Client, r.AWSClients.Region, r.AWSClients.AccountID, cr)
+	// reflected in it, not lagging a full reconcile behind. The mirrored
+	// RDS credentials Secret is the same kind of connection-info delivery
+	// (just the one piece of it that's secret, not identifiers), so it
+	// shares this same condition and timing rather than getting its own.
+	connErr := configmap.Ensure(ctx, r.Client, r.APIReader, r.AWSClients.RDS, r.AWSClients.Region, r.AWSClients.AccountID, cr)
+	if connErr == nil {
+		connErr = rds.EnsureCredentialsSecret(ctx, r.AWSClients.SecretsManager, r.AWSClients.RDS, r.Client, r.APIReader, cr)
+	}
 	setSectionCondition(ctx, cr, "ConnectionInfoReady", connErr, eventRecorderFor(r, cr))
 	if firstErr == nil {
 		firstErr = connErr
@@ -186,7 +242,7 @@ func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr 
 	var blocked []string
 	// original is nil here: finalize closures only ever call Cleanup, never
 	// checkpointFor, so there's nothing that would dereference it.
-	for _, s := range allSections(r, nil) {
+	for _, s := range finalizeOrder(allSections(r, nil)) {
 		done, sectionBlocked, err := s.finalize(ctx, cr)
 		if err != nil {
 			if firstErr == nil {
@@ -226,12 +282,15 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 		return
 	}
 
-	reason := "Error"
+	reason := reasonError
+	var reconcileErr *cloudctlaws.ReconcileError
 	switch {
+	case errors.As(err, &reconcileErr) && reconcileErr.Reason != "":
+		reason = reconcileErr.Reason
 	case cloudctlaws.IsPermissionDenied(err):
 		reason = "PermissionDenied"
 	case isRetryable(err):
-		reason = "TransientError"
+		reason = reasonTransientError
 	}
 
 	logf.FromContext(ctx).Error(err, "Section failed to reconcile", "section", conditionType, "reason", reason)

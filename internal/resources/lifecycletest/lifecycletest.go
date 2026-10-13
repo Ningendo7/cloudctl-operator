@@ -119,13 +119,13 @@ func findResult(results []CleanupResult, name string) *CleanupResult {
 }
 
 func markPastQuietWindow(ledger []depsv1alpha1.ManagedResource, resourceType, name string) []depsv1alpha1.ManagedResource {
-	entry := status.FindManagedResource(ledger, resourceType, name)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, name)
+	if !entryFound {
 		return ledger
 	}
 	past := metav1.NewTime(time.Now().Add(-preTestQuietWindow))
 	entry.PendingDeletionSince = &past
-	status.UpsertManagedResource(&ledger, *entry)
+	status.UpsertManagedResource(&ledger, entry)
 	return ledger
 }
 
@@ -143,8 +143,8 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("EnsureOne() error = %v", err)
 		}
-		entry := status.FindManagedResource(ledger, s.ResourceType(), "widget")
-		if entry == nil {
+		entry, entryFound := status.FindManagedResource(ledger, s.ResourceType(), "widget")
+		if !entryFound {
 			t.Fatal("expected a ledger entry after EnsureOne")
 		}
 		if entry.ARN == "" {
@@ -161,7 +161,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("expected adopt:true to succeed against a foreign resource, got %v", err)
 		}
-		if entry := status.FindManagedResource(ledger, s.ResourceType(), "widget"); entry == nil {
+		if !status.HasManagedResource(ledger, s.ResourceType(), "widget") {
 			t.Error("expected a ledger entry after adopting")
 		}
 	})
@@ -253,7 +253,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("second Cleanup() error = %v", err)
 		}
-		if entry := status.FindManagedResource(updated, s.ResourceType(), "widget"); entry != nil {
+		if entry, entryFound := status.FindManagedResource(updated, s.ResourceType(), "widget"); entryFound {
 			t.Errorf("expected the ledger entry removed once actually deleted, got %+v", entry)
 		}
 	})
@@ -273,7 +273,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("first Cleanup() error = %v", err)
 		}
-		if entry := status.FindManagedResource(ledger, s.ResourceType(), "widget"); entry == nil || entry.PendingDeletionSince == nil {
+		if entry, entryFound := status.FindManagedResource(ledger, s.ResourceType(), "widget"); !entryFound || entry.PendingDeletionSince == nil {
 			t.Fatal("test setup broken: expected the resource marked pending deletion before reappearance")
 		}
 
@@ -281,8 +281,8 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("Cleanup (reappeared) error = %v", err)
 		}
-		entry := status.FindManagedResource(updated, s.ResourceType(), "widget")
-		if entry == nil {
+		entry, entryFound := status.FindManagedResource(updated, s.ResourceType(), "widget")
+		if !entryFound {
 			t.Fatal("expected the ledger entry to survive reappearance")
 		}
 		if entry.PendingDeletionSince != nil {

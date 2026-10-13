@@ -25,6 +25,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -36,7 +37,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/iam"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -48,6 +51,7 @@ const (
 	resourceTypeSNS      = "sns"
 	resourceTypeDynamoDB = "dynamodb"
 	resourceTypeS3       = "s3"
+	resourceTypeRDS      = "rds"
 )
 
 // fieldOwner is this package's server-side-apply field manager name. The
@@ -69,15 +73,27 @@ func ConfigMapName(crName string) string {
 // nothing left to report. Refuses to touch a same-named ConfigMap this CR
 // doesn't already own (checked via its owner reference) - the same
 // name-match-isn't-ownership rule every AWS resource here follows.
-func Ensure(ctx context.Context, k8sClient client.Client, region, accountID string, cr *depsv1alpha1.AppDependencies) error {
-	data, err := buildConnectionData(ctx, k8sClient, region, accountID, cr)
+// rdsClient is only ever touched when cr declares an rds resource or
+// consumes one - resolving an instance's host/port/engine needs a live
+// DescribeDBInstances call (unlike every other resource type here, which
+// derives its connection value purely from the ARN already in the
+// ledger), so a CR that never uses RDS can pass nil.
+//
+// apiReader bypasses the label-filtered cache, which can't see an
+// unlabeled same-named ConfigMap.
+func Ensure(ctx context.Context, k8sClient client.Client, apiReader client.Reader, rdsClient cloudctlaws.RDSClient, region, accountID string, cr *depsv1alpha1.AppDependencies) error {
+	data, err := buildConnectionData(ctx, k8sClient, rdsClient, region, accountID, cr)
 	if err != nil {
 		return err
 	}
 
 	name := ConfigMapName(cr.Name)
 	existing := &corev1.ConfigMap{}
-	getErr := k8sClient.Get(ctx, client.ObjectKey{Namespace: cr.Namespace, Name: name}, existing)
+	key := client.ObjectKey{Namespace: cr.Namespace, Name: name}
+	getErr := k8sClient.Get(ctx, key, existing)
+	if apierrors.IsNotFound(getErr) {
+		getErr = apiReader.Get(ctx, key, existing)
+	}
 	exists := getErr == nil
 	if getErr != nil && !apierrors.IsNotFound(getErr) {
 		return getErr
@@ -102,6 +118,7 @@ func Ensure(ctx context.Context, k8sClient client.Client, region, accountID stri
 	}
 
 	apply := applycorev1.ConfigMap(name, cr.Namespace).
+		WithLabels(map[string]string{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue}).
 		WithData(data).
 		WithOwnerReferences(applymetav1.OwnerReference().
 			WithAPIVersion(gvk.GroupVersion().String()).
@@ -125,6 +142,7 @@ func Ensure(ctx context.Context, k8sClient client.Client, region, accountID stri
 func buildConnectionData(
 	ctx context.Context,
 	k8sClient client.Client,
+	rdsClient cloudctlaws.RDSClient,
 	region,
 	accountID string,
 	cr *depsv1alpha1.AppDependencies,
@@ -179,8 +197,90 @@ func buildConnectionData(
 			}
 		}
 	}
+	if cr.Spec.RDS != nil {
+		for _, r := range cr.Spec.RDS.Resources {
+			if err := addOwnedRDS(ctx, rdsClient, data, cr, r.Name); err != nil {
+				return nil, err
+			}
+		}
+		for _, ref := range cr.Spec.RDS.Consumes {
+			if err := addConsumedRDS(ctx, k8sClient, rdsClient, data, cr, ref); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	return data, nil
+}
+
+// addOwnedRDS adds this CR's own RDS instance's connection info to data.
+// Unlike addOwned/connectionKV's single-key-per-resource model, RDS needs
+// several keys per instance (host, port, engine, identifier) - genuinely
+// different in shape from every other resource type here, so it gets its
+// own path rather than being forced into connectionKV's switch. A
+// not-yet-reconciled or not-yet-ready instance (no ledger entry, or
+// ResolveConnectionInfo's ok is false) is skipped silently, same as every
+// other resource type's own forward-reference tolerance.
+func addOwnedRDS(ctx context.Context, rdsClient cloudctlaws.RDSClient, data map[string]string, cr *depsv1alpha1.AppDependencies, resourceName string) error {
+	entry, entryFound := status.FindManagedResource(cr.Status.ManagedResources, resourceTypeRDS, resourceName)
+	if !entryFound {
+		return nil
+	}
+	info, ok, err := rds.ResolveConnectionInfo(ctx, rdsClient, entry.ARN)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	setRDSConnectionKeys(data, resourceName, "", "", info)
+	return nil
+}
+
+// addConsumedRDS adds a consumed RDS instance's connection info to data,
+// but only once the producer's own declared sharedWith actually
+// authorizes this consumer - rds.IsConsumerAuthorized, not
+// iam.ResolveConsumeARN, since RDS's sharedWith governs network access
+// rather than feeding IAM policy derivation (RDS connects via a mirrored
+// username/password, not an AWS API call), so IAM's own consume-
+// resolution has no "rds" case to match against.
+func addConsumedRDS(ctx context.Context, k8sClient client.Client, rdsClient cloudctlaws.RDSClient, data map[string]string, consumer *depsv1alpha1.AppDependencies, ref depsv1alpha1.ConsumeRef) error {
+	var producer depsv1alpha1.AppDependencies
+	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, &producer); err != nil {
+		return nil //nolint:nilerr // forward reference: resolves on a later pass
+	}
+	if !rds.IsConsumerAuthorized(&producer, ref.ResourceName, consumer.Namespace, consumer.Name) {
+		return nil
+	}
+	entry, entryFound := status.FindManagedResource(producer.Status.ManagedResources, resourceTypeRDS, ref.ResourceName)
+	if !entryFound {
+		return nil
+	}
+	info, ok, err := rds.ResolveConnectionInfo(ctx, rdsClient, entry.ARN)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	setRDSConnectionKeys(data, ref.ResourceName, ref.Namespace, ref.Name, info)
+	return nil
+}
+
+// setRDSConnectionKeys writes one RDS instance's host/port/engine/
+// identifier into data, keyed the same owned-vs-consumed way every other
+// resource type's connectionKV already keys its own single value.
+func setRDSConnectionKeys(data map[string]string, resourceName, producerNamespace, producerCRName string, info rds.ConnectionInfo) {
+	key := func(suffix string) string {
+		if producerCRName == "" {
+			return envKey(resourceTypeRDS, resourceName, suffix)
+		}
+		return envKey(resourceTypeRDS, producerNamespace, producerCRName, resourceName, suffix)
+	}
+	data[key("HOST")] = info.Host
+	data[key("PORT")] = strconv.Itoa(int(info.Port))
+	data[key("ENGINE")] = info.Engine
+	data[key("DB_INSTANCE_IDENTIFIER")] = info.DBInstanceIdentifier
 }
 
 // addOwned adds this CR's own resource to data, keyed without a producer
@@ -197,11 +297,11 @@ func addOwned(
 	region,
 	accountID string,
 ) error {
-	entry := status.FindManagedResource(cr.Status.ManagedResources, resourceType, resourceName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(cr.Status.ManagedResources, resourceType, resourceName)
+	if !entryFound {
 		return nil
 	}
-	key, value, err := connectionKV(resourceType, resourceName, entry.ARN, region, accountID, "")
+	key, value, err := connectionKV(resourceType, resourceName, entry.ARN, region, accountID, "", "")
 	if err != nil {
 		return err
 	}
@@ -213,8 +313,7 @@ func addOwned(
 // iam.ResolveConsumeARN confirms it's actually authorized - the same
 // check IAM's own policy derivation applies, reused rather than
 // duplicated so this can never expose more than IAM actually grants
-// access to. Keyed with the producer CR's name folded in, since two
-// different producers can each own a resource with the same logical name.
+// access to. Keyed with the producer CR's namespace and name folded in.
 func addConsumed(
 	ctx context.Context,
 	k8sClient client.Client,
@@ -229,7 +328,7 @@ func addConsumed(
 	if !ok {
 		return nil
 	}
-	key, value, err := connectionKV(resourceType, ref.ResourceName, arn, region, accountID, ref.Name)
+	key, value, err := connectionKV(resourceType, ref.ResourceName, arn, region, accountID, ref.Namespace, ref.Name)
 	if err != nil {
 		return err
 	}
@@ -241,7 +340,7 @@ func addConsumed(
 // actually needs for one resource: SQS needs a queue URL (SendMessage/
 // ReceiveMessage take a URL, not an ARN), the others hand back what
 // they're natively identified by.
-func connectionKV(resourceType, resourceName, arn, region, accountID, producerCRName string) (key, value string, err error) {
+func connectionKV(resourceType, resourceName, arn, region, accountID, producerNamespace, producerCRName string) (key, value string, err error) {
 	id := arnResourceID(arn)
 
 	var suffix string
@@ -265,7 +364,7 @@ func connectionKV(resourceType, resourceName, arn, region, accountID, producerCR
 	if producerCRName == "" {
 		key = envKey(resourceType, resourceName, suffix)
 	} else {
-		key = envKey(resourceType, producerCRName, resourceName, suffix)
+		key = envKey(resourceType, producerNamespace, producerCRName, resourceName, suffix)
 	}
 	return key, value, nil
 }

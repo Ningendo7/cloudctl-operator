@@ -20,7 +20,7 @@ limitations under the License.
 // LocalStack container instead of this package's own hand-written fakes.
 // The fakes only ever encode our own beliefs about how IAM's API behaves;
 // these tests catch the case where that belief is simply wrong - in
-// particular, trustPolicyEquivalent's assumption that GetRole returns
+// particular, policyDocumentEquivalent's assumption that GetRole returns
 // AssumeRolePolicyDocument URL-encoded is read from AWS's docs, not
 // previously exercised against a real (or real-shaped) API response
 // anywhere in this codebase. Excluded from `go test ./...` by the
@@ -210,7 +210,7 @@ func TestIntegration_Ensure_RefusesForeignRoleWithNoAdoptEscapeHatch(t *testing.
 }
 
 // TestIntegration_Ensure_CorrectsTrustPolicyDriftOnRealRole specifically
-// exercises trustPolicyEquivalent's URL-encoding assumption against a real
+// exercises policyDocumentEquivalent's URL-encoding assumption against a real
 // GetRole response, not a fake that only ever returns what we told it to.
 func TestIntegration_Ensure_CorrectsTrustPolicyDriftOnRealRole(t *testing.T) {
 	client := newIntegrationClient(t)
@@ -243,7 +243,7 @@ func TestIntegration_Ensure_CorrectsTrustPolicyDriftOnRealRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("real GetRole() error = %v", err)
 	}
-	if !trustPolicyEquivalent(*getOut.Role.AssumeRolePolicyDocument, mustBuildExpectedTrustPolicy(t, namespace, crName)) {
+	if !policyDocumentEquivalent(*getOut.Role.AssumeRolePolicyDocument, mustBuildExpectedTrustPolicy(t, namespace, crName)) {
 		t.Errorf("expected the drifted trust policy to be corrected back, got %s", *getOut.Role.AssumeRolePolicyDocument)
 	}
 }

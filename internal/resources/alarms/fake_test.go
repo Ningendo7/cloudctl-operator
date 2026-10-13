@@ -35,6 +35,9 @@ type fakeAlarm struct {
 
 type fakeCloudWatch struct {
 	alarms map[string]*fakeAlarm
+
+	putCalls      int
+	listTagsCalls int
 }
 
 func newFakeCloudWatch() *fakeCloudWatch {
@@ -50,6 +53,7 @@ func (f *fakeCloudWatch) DescribeAlarms(_ context.Context, in *cloudwatch.Descri
 		}
 		out.MetricAlarms = append(out.MetricAlarms, types.MetricAlarm{
 			AlarmName:          a.input.AlarmName,
+			AlarmDescription:   a.input.AlarmDescription,
 			AlarmArn:           aws.String("arn:aws:cloudwatch:us-east-1:123456789012:alarm:" + name),
 			Namespace:          a.input.Namespace,
 			MetricName:         a.input.MetricName,
@@ -68,6 +72,7 @@ func (f *fakeCloudWatch) DescribeAlarms(_ context.Context, in *cloudwatch.Descri
 }
 
 func (f *fakeCloudWatch) PutMetricAlarm(_ context.Context, in *cloudwatch.PutMetricAlarmInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.PutMetricAlarmOutput, error) {
+	f.putCalls++
 	name := aws.ToString(in.AlarmName)
 	existing, ok := f.alarms[name]
 	tags := map[string]string{}
@@ -91,6 +96,7 @@ func (f *fakeCloudWatch) DeleteAlarms(_ context.Context, in *cloudwatch.DeleteAl
 }
 
 func (f *fakeCloudWatch) ListTagsForResource(_ context.Context, in *cloudwatch.ListTagsForResourceInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.ListTagsForResourceOutput, error) {
+	f.listTagsCalls++
 	arn := aws.ToString(in.ResourceARN)
 	for name, a := range f.alarms {
 		if strings.HasSuffix(arn, ":alarm:"+name) {

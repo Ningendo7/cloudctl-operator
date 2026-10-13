@@ -47,8 +47,8 @@ func Cleanup(
 	ledger []depsv1alpha1.ManagedResource,
 	deleting bool,
 ) (updatedLedger []depsv1alpha1.ManagedResource, err error) {
-	entry := status.FindManagedResource(ledger, resourceType, roleLedgerName)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, roleLedgerName)
+	if !entryFound {
 		return ledger, nil // never created, nothing to do
 	}
 

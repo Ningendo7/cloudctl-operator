@@ -17,11 +17,15 @@ limitations under the License.
 package s3
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"sync"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -97,6 +101,17 @@ type fakeS3 struct {
 	putBucketTaggingErr     error
 	abortMultipartUploadErr error
 	deleteObjectsErr        error
+
+	// multipartPageSize caps ListMultipartUploads pages (0 = unlimited);
+	// uploadsMu guards uploads and aborts since aborts run concurrently;
+	// afterAborts, if set, runs after each abort with the running count.
+	multipartPageSize int
+	uploadsMu         sync.Mutex
+	aborts            int
+	afterAborts       func(abortsSoFar int)
+
+	// lifecycleWrites counts Put and Delete lifecycle calls together.
+	lifecycleWrites int
 
 	// getBucketTaggingCalls/putBucketTaggingCalls let tests assert that the
 	// atomic-tag-on-create path never triggers the separate tagging round
@@ -257,11 +272,23 @@ func (f *fakeS3) GetBucketEncryption(_ context.Context, in *s3sdk.GetBucketEncry
 	}, nil
 }
 
+func (f *fakeS3) GetBucketLifecycleConfiguration(_ context.Context, in *s3sdk.GetBucketLifecycleConfigurationInput, _ ...func(*s3sdk.Options)) (*s3sdk.GetBucketLifecycleConfigurationOutput, error) {
+	b, ok := f.buckets[*in.Bucket]
+	if !ok {
+		return nil, &types.NoSuchBucket{}
+	}
+	if !b.hasLifecycle {
+		return nil, &fakeAWSError{code: "NoSuchLifecycleConfiguration"}
+	}
+	return &s3sdk.GetBucketLifecycleConfigurationOutput{Rules: b.lifecycleRules}, nil
+}
+
 func (f *fakeS3) PutBucketLifecycleConfiguration(_ context.Context, in *s3sdk.PutBucketLifecycleConfigurationInput, _ ...func(*s3sdk.Options)) (*s3sdk.PutBucketLifecycleConfigurationOutput, error) {
 	b, ok := f.buckets[*in.Bucket]
 	if !ok {
 		return nil, &types.NoSuchBucket{}
 	}
+	f.lifecycleWrites++
 	b.hasLifecycle = true
 	b.lifecycleRules = in.LifecycleConfiguration.Rules
 	return &s3sdk.PutBucketLifecycleConfigurationOutput{}, nil
@@ -272,6 +299,7 @@ func (f *fakeS3) DeleteBucketLifecycle(_ context.Context, in *s3sdk.DeleteBucket
 	if !ok {
 		return nil, &types.NoSuchBucket{}
 	}
+	f.lifecycleWrites++
 	b.hasLifecycle = false
 	b.lifecycleRules = nil
 	return &s3sdk.DeleteBucketLifecycleOutput{}, nil
@@ -331,19 +359,48 @@ func (f *fakeS3) DeleteObjects(_ context.Context, in *s3sdk.DeleteObjectsInput, 
 }
 
 func (f *fakeS3) ListMultipartUploads(_ context.Context, in *s3sdk.ListMultipartUploadsInput, _ ...func(*s3sdk.Options)) (*s3sdk.ListMultipartUploadsOutput, error) {
+	f.uploadsMu.Lock()
+	defer f.uploadsMu.Unlock()
 	b, ok := f.buckets[*in.Bucket]
 	if !ok {
 		return nil, &types.NoSuchBucket{}
 	}
+	// Like S3: ordered by key then upload ID, returning what sorts after the
+	// markers, so paging still works when earlier uploads are aborted.
+	sorted := slices.Clone(b.uploads)
+	slices.SortFunc(sorted, func(a, c fakeUpload) int {
+		return cmp.Or(cmp.Compare(a.key, c.key), cmp.Compare(a.uploadID, c.uploadID))
+	})
 	var uploads []types.MultipartUpload
-	for _, u := range b.uploads {
+	truncated := false
+	for _, u := range sorted {
+		if in.KeyMarker != nil {
+			after := cmp.Or(cmp.Compare(u.key, *in.KeyMarker), cmp.Compare(u.uploadID, aws.ToString(in.UploadIdMarker)))
+			if after <= 0 {
+				continue
+			}
+		}
+		if f.multipartPageSize > 0 && len(uploads) == f.multipartPageSize {
+			truncated = true
+			break
+		}
 		key, uploadID := u.key, u.uploadID
 		uploads = append(uploads, types.MultipartUpload{Key: &key, UploadId: &uploadID})
 	}
-	return &s3sdk.ListMultipartUploadsOutput{Uploads: uploads}, nil
+	out := &s3sdk.ListMultipartUploadsOutput{Uploads: uploads, IsTruncated: &truncated}
+	if truncated {
+		out.NextKeyMarker, out.NextUploadIdMarker = uploads[len(uploads)-1].Key, uploads[len(uploads)-1].UploadId
+	}
+	return out, nil
 }
 
 func (f *fakeS3) AbortMultipartUpload(_ context.Context, in *s3sdk.AbortMultipartUploadInput, _ ...func(*s3sdk.Options)) (*s3sdk.AbortMultipartUploadOutput, error) {
+	f.uploadsMu.Lock()
+	defer f.uploadsMu.Unlock()
+	f.aborts++
+	if f.afterAborts != nil {
+		defer f.afterAborts(f.aborts)
+	}
 	if f.abortMultipartUploadErr != nil {
 		return nil, f.abortMultipartUploadErr
 	}

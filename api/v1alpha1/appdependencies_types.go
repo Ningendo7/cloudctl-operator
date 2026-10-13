@@ -92,23 +92,26 @@ type ConsumeRef struct {
 	ResourceName string `json:"resourceName"`
 }
 
-// EncryptionSpec configures server-side encryption with a KMS key for one
+// EncryptionSpec configures storage encryption with a KMS key for one
 // resource. enabled provisions a dedicated, operator-owned key just for
 // this resource — the common case, no kms section ever needs to be
-// touched. kmsKeyRef instead points at an explicitly declared kms
-// resource (this CR's own, or another CR's, shared via its sharedWith,
-// resolved through the exact same authorization path as any other
-// consumes reference) for deliberate reuse of one key across multiple
-// resources. The two are mutually exclusive: reusing a key and owning a
-// dedicated one are different decisions, not a spectrum.
+// touched. kmsKeyRef instead names a key declared under this CR's own
+// kms.resources, for deliberate reuse of one key across several of this
+// CR's resources. Keys are never shared across CRs: a resource encrypted
+// with another team's key would depend on that team for its own data's
+// availability. The two are mutually exclusive: reusing a key and owning
+// a dedicated one are different decisions, not a spectrum.
 // +kubebuilder:validation:XValidation:rule="!(self.enabled == true && has(self.kmsKeyRef))",message="enabled and kmsKeyRef are mutually exclusive"
 type EncryptionSpec struct {
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
+	// kmsKeyRef is the name of an entry in this CR's kms.resources.
 	// +optional
-	KMSKeyRef *ConsumeRef `json:"kmsKeyRef,omitempty"`
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9_/-]+$`
+	KMSKeyRef string `json:"kmsKeyRef,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -561,6 +564,183 @@ type DynamoDBSpec struct {
 }
 
 // ---------------------------------------------------------------------------
+// RDS
+// ---------------------------------------------------------------------------
+
+// RDSHighAvailabilitySpec enables Multi-AZ failover. Kept separate from
+// RDSBackupSpec/RDSReplicationSpec because each protects against a
+// different failure mode: Multi-AZ against infrastructure failure,
+// backup against a logical/human mistake, cross-region replication
+// against a regional outage - one combined flag would give a false sense
+// of covering all three.
+type RDSHighAvailabilitySpec struct {
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// RDSBackupSpec enables automated backups and point-in-time recovery.
+type RDSBackupSpec struct {
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// RDSReplicationSpec configures a cross-region read replica for disaster
+// recovery. Region is required when enabled: this is a self-contained
+// check, enforced here rather than at reconcile time.
+// +kubebuilder:validation:XValidation:rule="!self.enabled || size(self.region) > 0",message="region is required when replication is enabled"
+type RDSReplicationSpec struct {
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:MaxLength=20
+	Region string `json:"region,omitempty"`
+}
+
+// RDSInstanceSpec declares a single RDS instance this app owns.
+//
+// encryption is immutable once set - unlike every other resource type's
+// encryption flag, RDS's StorageEncrypted cannot be toggled on an
+// existing instance; enabling it later requires a full snapshot-and-
+// restore into a new instance, which this design doesn't attempt.
+// +kubebuilder:validation:XValidation:rule="has(self.encryption) == has(oldSelf.encryption) && (!has(self.encryption) || self.encryption == oldSelf.encryption)",message="encryption is immutable on an RDS instance; AWS does not support enabling storage encryption after creation"
+// engine is immutable - AWS never allows changing an instance's engine
+// after creation, so this blocks the edit outright instead of silently
+// accepting a change the controller could never apply.
+// +kubebuilder:validation:XValidation:rule="self.engine == oldSelf.engine",message="engine is immutable on an RDS instance"
+// dbSubnetGroupName is immutable here (though AWS itself allows changing
+// it): doing so would mean re-resolving the instance's VPC and moving its
+// dedicated security group, which this design doesn't attempt yet.
+// +kubebuilder:validation:XValidation:rule="self.dbSubnetGroupName == oldSelf.dbSubnetGroupName",message="dbSubnetGroupName is immutable on an RDS instance for now - moving VPCs isn't supported"
+type RDSInstanceSpec struct {
+	// name of the instance, used to derive the actual AWS DB instance
+	// identifier.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9-]+$`
+	Name string `json:"name"`
+
+	// dbSubnetGroupName references a DBSubnetGroup that must already
+	// exist - this operator never creates VPC-level networking. The
+	// referencing namespace must be covered by a matching
+	// RDSSubnetGroupGrant, or reconciliation reports
+	// SubnetGroupNotAuthorized.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=255
+	DBSubnetGroupName string `json:"dbSubnetGroupName"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=postgres;mysql;mariadb
+	Engine string `json:"engine"`
+
+	// engineVersion is the minimum engine version, as dotted numbers such as
+	// "16" or "16.4". A higher version upgrades the instance (a major
+	// upgrade included); an instance already at or past it is left alone,
+	// since AWS applies minor upgrades itself and never downgrades.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)*$`
+	EngineVersion string `json:"engineVersion"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=50
+	// +kubebuilder:validation:Pattern=`^db\.[a-z0-9]+\.[a-z0-9]+$`
+	InstanceClass string `json:"instanceClass"`
+
+	// allocatedStorage in GiB. Can only grow once set. AWS rounds a growth
+	// up to at least 10% more than the current size. Growth applies at once
+	// when nothing else is pending, otherwise with the other changes.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=20
+	// +kubebuilder:validation:Maximum=65536
+	// +kubebuilder:validation:XValidation:rule="self >= oldSelf",message="allocatedStorage cannot be decreased"
+	AllocatedStorage int32 `json:"allocatedStorage"`
+
+	// +optional
+	// +kubebuilder:default=Retain
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
+
+	// allowMajorVersionUpgrade lets engineVersion move the instance to a new
+	// major version. Without it a major upgrade is refused, since it can't be
+	// undone and can break applications.
+	// +optional
+	AllowMajorVersionUpgrade bool `json:"allowMajorVersionUpgrade,omitempty"`
+
+	// applyImmediately applies instance class, engine version, Multi-AZ,
+	// backup and storage changes now instead of in the instance's next
+	// weekly maintenance window. Class and engine changes cause downtime,
+	// and an immediate change also applies any change already pending.
+	// +optional
+	ApplyImmediately bool `json:"applyImmediately,omitempty"`
+
+	// adopt allows this CR to take ownership of a pre-existing AWS
+	// resource found under this entry's deterministic name that isn't
+	// already tagged as owned by this CR. Same semantics as every other
+	// resource type's adopt field.
+	// +optional
+	Adopt bool `json:"adopt,omitempty"`
+
+	// sharedWith grants other AppDependencies CRs network access to this
+	// instance via a dedicated, operator-owned security group - not an
+	// IAM grant. It authorizes network reachability only: a consumer gets
+	// the host and port in its ConfigMap but never credentials, which stay
+	// with the owner, who creates per-app database users.
+	// Requires EKS Security Groups for Pods to be enabled on the cluster.
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=name
+	SharedWith []SharedWithEntry `json:"sharedWith,omitempty"`
+
+	// +optional
+	HighAvailability *RDSHighAvailabilitySpec `json:"highAvailability,omitempty"`
+
+	// backup enables automated backups. They are only ever turned on or
+	// extended, never turned off or shortened: that deletes existing
+	// backups, so do it in AWS directly if intended.
+	// +optional
+	Backup *RDSBackupSpec `json:"backup,omitempty"`
+
+	// +optional
+	Replication *RDSReplicationSpec `json:"replication,omitempty"`
+
+	// encryption enables storage encryption with a KMS key. See
+	// EncryptionSpec. Immutable: AWS cannot change an instance's storage
+	// encryption in place, so it can be neither added to, changed on, nor
+	// removed from an existing entry.
+	// +optional
+	Encryption *EncryptionSpec `json:"encryption,omitempty"`
+}
+
+// RDSSpec is the rds section of an AppDependencies spec.
+type RDSSpec struct {
+	// resources this app owns.
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	// +listType=map
+	// +listMapKey=name
+	Resources []RDSInstanceSpec `json:"resources,omitempty"`
+
+	// consumes references RDS instances owned by other AppDependencies
+	// CRs. Unlike every other resource type, this never feeds IAM policy
+	// derivation - it only ever authorizes network reachability via the
+	// producer's dedicated security group. This is included despite direct
+	// cross-service database access being unusual (a shared multi-tenant instance,
+	// direct reporting/analytics access, or temporary access during a migration).
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=name
+	// +listMapKey=resourceName
+	Consumes []ConsumeRef `json:"consumes,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
 // KMS
 // ---------------------------------------------------------------------------
 
@@ -584,13 +764,6 @@ type KMSKeySpec struct {
 	// not just gone from this CR.
 	// +optional
 	Adopt bool `json:"adopt,omitempty"`
-
-	// +optional
-	// +kubebuilder:validation:MaxItems=20
-	// +listType=map
-	// +listMapKey=namespace
-	// +listMapKey=name
-	SharedWith []SharedWithEntry `json:"sharedWith,omitempty"`
 }
 
 type KMSSpec struct {
@@ -599,14 +772,6 @@ type KMSSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	Resources []KMSKeySpec `json:"resources,omitempty"`
-
-	// +optional
-	// +kubebuilder:validation:MaxItems=50
-	// +listType=map
-	// +listMapKey=namespace
-	// +listMapKey=name
-	// +listMapKey=resourceName
-	Consumes []ConsumeRef `json:"consumes,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -659,10 +824,25 @@ type AppDependenciesSpec struct {
 	DynamoDB *DynamoDBSpec `json:"dynamodb,omitempty"`
 
 	// +optional
+	RDS *RDSSpec `json:"rds,omitempty"`
+
+	// +optional
 	KMS *KMSSpec `json:"kms,omitempty"`
 
 	// +optional
 	Alarms *AlarmsSpec `json:"alarms,omitempty"`
+
+	// networkServiceAccountName overrides which ServiceAccount identifies
+	// this CR's own pods for network-identity purposes (currently: which
+	// pods get the dedicated security group letting them reach an RDS
+	// instance this CR consumes). Defaults to serviceAccountName if unset
+	// - the common case, since a CR's pods usually only ever have the one
+	// ServiceAccount. Only needed when a CR's pod topology genuinely
+	// diverges (e.g. only one component of a larger app needs database
+	// access, not every pod under the CR's main ServiceAccount).
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	NetworkServiceAccountName string `json:"networkServiceAccountName,omitempty"`
 }
 
 // ManagedResourceState reflects the ownership-ledger trust window for a
@@ -731,6 +911,18 @@ type ManagedResource struct {
 	// pendingDeletionSince.
 	// +optional
 	LastEmptyCheckAt *metav1.Time `json:"lastEmptyCheckAt,omitempty"`
+
+	// observedStatus is the provider-reported lifecycle status last seen for
+	// this resource (RDS DBInstanceStatus, e.g. "creating", "modifying",
+	// "available"). Only set for resource types with a long-running
+	// lifecycle; informational, never used to gate any action.
+	// +optional
+	ObservedStatus string `json:"observedStatus,omitempty"`
+
+	// observedStatusSince is when observedStatus last changed value, not
+	// when it was last polled.
+	// +optional
+	ObservedStatusSince *metav1.Time `json:"observedStatusSince,omitempty"`
 }
 
 // AppDependenciesStatus defines the observed state of AppDependencies.

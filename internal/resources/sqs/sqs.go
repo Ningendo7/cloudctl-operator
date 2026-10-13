@@ -128,11 +128,11 @@ func ensureQueue(
 ) ([]depsv1alpha1.ManagedResource, error) {
 	var kmsKeyARN *string
 	if q.Encryption != nil {
-		if q.Encryption.KMSKeyRef != nil {
-			arn, ok := kms.ResolveSharedKeyARN(ctx, k8sClient, namespace, crName, *q.Encryption.KMSKeyRef)
+		if q.Encryption.KMSKeyRef != "" {
+			arn, ok := kms.SharedKeyARN(ledger, q.Encryption.KMSKeyRef)
 			if !ok {
 				return ledger, &cloudctlaws.ReconcileError{
-					Err:       fmt.Errorf("encryption.kmsKeyRef %s/%s/%s is not yet authorized (producer must list this CR in the key's sharedWith) or does not exist yet", q.Encryption.KMSKeyRef.Namespace, q.Encryption.KMSKeyRef.Name, q.Encryption.KMSKeyRef.ResourceName),
+					Err:       fmt.Errorf("encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources", q.Encryption.KMSKeyRef),
 					Retryable: true,
 				}
 			}
@@ -170,8 +170,8 @@ func ensureQueue(
 		if err != nil {
 			return ledger, fmt.Errorf("dlq: %w", err)
 		}
-		entry := status.FindManagedResource(ledger, resourceType, dlqName)
-		if entry == nil {
+		entry, entryFound := status.FindManagedResource(ledger, resourceType, dlqName)
+		if !entryFound {
 			return ledger, fmt.Errorf("dlq %q: expected a ledger entry after ensuring it, found none", dlqName)
 		}
 		dlqArn = entry.ARN
@@ -225,8 +225,8 @@ func ensureQueue(
 		return ledger, nil
 	}
 
-	entry := status.FindManagedResource(ledger, resourceType, q.Name)
-	if entry == nil {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, q.Name)
+	if !entryFound {
 		return ledger, fmt.Errorf("expected a ledger entry after ensuring it, found none")
 	}
 	queueName, err := queueNameFromARN(entry.ARN)
@@ -255,7 +255,7 @@ func ensureSingleQueue(
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	if existing := status.FindManagedResource(ledger, resourceType, resourceName); existing != nil && !status.NeedsRevalidation(*existing) {
+	if existing, existingFound := status.FindManagedResource(ledger, resourceType, resourceName); existingFound && !status.NeedsRevalidation(existing) {
 		// Still within the trust window - skip re-verifying ownership, but
 		// attribute drift correction is a different concern and must still
 		// run every reconcile regardless of the trust window. Local-only
@@ -263,7 +263,7 @@ func ensureSingleQueue(
 		// with no AWS call needed, so refresh those against the cached
 		// entry; ARN and LastVerifiedAt stay as they were until the window
 		// actually expires and a real ownership check runs again.
-		updated := *existing
+		updated := existing
 		updated.DeletionPolicy = opts.deletionPolicy
 		updated.Force = opts.force
 		status.UpsertManagedResource(&ledger, updated)
@@ -502,7 +502,7 @@ func recordVerified(
 
 	now := metav1.Now()
 	createdAt := now
-	if existing := status.FindManagedResource(ledger, resourceType, ledgerName); existing != nil {
+	if existing, existingFound := status.FindManagedResource(ledger, resourceType, ledgerName); existingFound {
 		createdAt = existing.CreatedAt
 	}
 

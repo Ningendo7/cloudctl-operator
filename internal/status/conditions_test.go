@@ -52,16 +52,15 @@ func TestSetSectionCondition_AggregatesReady(t *testing.T) {
 }
 
 // TestSetSectionCondition_StaleSectionFromOlderGenerationDoesNotSatisfyReady
-// is a regression test for a real bug found live: ensureDesiredState
-// checkpoints status after every section within one reconcile pass, so
-// mid-pass, sections later in the list still carry their condition from
-// the CR's *previous* generation. Before this fix, recomputeReady only
-// checked Status == True, so a stale-but-True DynamoDBReady (e.g. a
-// vacuous "nothing declared" success from the generation before dynamodb
-// was ever added to spec) satisfied the aggregate check just as well as a
-// fresh one - Ready flipped True, observedGeneration stamped to the
-// *current* generation, after only 2 of 7 sections had actually been
-// reprocessed for it.
+// covers a checkpointing hazard: ensureDesiredState checkpoints status
+// after every section within one reconcile pass, so mid-pass, sections
+// later in the list still carry their condition from the CR's *previous*
+// generation. recomputeReady must check each condition's own
+// observedGeneration, not just Status == True - otherwise a stale-but-True
+// DynamoDBReady (e.g. a vacuous "nothing declared" success from the
+// generation before dynamodb was ever added to spec) would satisfy the
+// aggregate check just as well as a fresh one, flipping Ready True after
+// only 2 of 7 sections had actually been reprocessed.
 func TestSetSectionCondition_StaleSectionFromOlderGenerationDoesNotSatisfyReady(t *testing.T) {
 	var conditions []metav1.Condition
 	sections := []string{"SQSReady", "DynamoDBReady"}
