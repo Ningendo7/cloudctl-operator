@@ -17,6 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+	"strings"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -542,6 +545,78 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			err := k8sClient.Update(ctx, obj)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("allocatedStorage cannot be decreased"))
+		})
+	})
+
+	Context("invalid specs are rejected at admission", func() {
+		validRDS := func() depsv1alpha1.RDSInstanceSpec {
+			return depsv1alpha1.RDSInstanceSpec{
+				Name: "orders-db", DBSubnetGroupName: "prod-private-data-tier",
+				Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
+			}
+		}
+		rdsCR := func(mutate func(*depsv1alpha1.RDSInstanceSpec)) *depsv1alpha1.AppDependencies {
+			inst := validRDS()
+			mutate(&inst)
+			return &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-invalid-rds-", Namespace: "default"},
+				Spec:       depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{inst}}},
+			}
+		}
+		sqsCR := func(mutate func(*depsv1alpha1.SQSQueueSpec)) *depsv1alpha1.AppDependencies {
+			q := depsv1alpha1.SQSQueueSpec{Name: "orders"}
+			mutate(&q)
+			return &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-invalid-sqs-", Namespace: "default"},
+				Spec:       depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{q}}},
+			}
+		}
+		s3CR := func(mutate func(*depsv1alpha1.S3BucketSpec)) *depsv1alpha1.AppDependencies {
+			b := depsv1alpha1.S3BucketSpec{Name: "receipts"}
+			mutate(&b)
+			return &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-invalid-s3-", Namespace: "default"},
+				Spec:       depsv1alpha1.AppDependenciesSpec{S3: &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{b}}},
+			}
+		}
+
+		DescribeTable("rejects",
+			func(obj *depsv1alpha1.AppDependencies, wantMessage string) {
+				err := k8sClient.Create(ctx, obj)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(wantMessage))
+			},
+			Entry("an unsupported RDS engine", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) { i.Engine = "oracle" }), "Unsupported value"),
+			Entry("a non-numeric engine version", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) { i.EngineVersion = "16.x" }), "should match"),
+			Entry("an instance class that isn't a db.* class", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) { i.InstanceClass = "t4g.micro" }), "should match"),
+			Entry("storage below the minimum", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) { i.AllocatedStorage = 10 }), "greater than or equal to 20"),
+			Entry("storage above the maximum", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) { i.AllocatedStorage = 70000 }), "less than or equal to 65536"),
+			Entry("an RDS name with an underscore", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) { i.Name = "orders_db" }), "should match"),
+			Entry("an RDS name over 63 characters", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) { i.Name = strings.Repeat("a", 64) }), "Too long"),
+			Entry("a dedicated key together with a key reference", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) {
+				i.Encryption = &depsv1alpha1.EncryptionSpec{Enabled: true, KMSKeyRef: "shared"}
+			}), "mutually exclusive"),
+			Entry("an RDS key reference with a path traversal", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) {
+				i.Encryption = &depsv1alpha1.EncryptionSpec{KMSKeyRef: "../shared key"}
+			}), "should match"),
+			Entry("more sharedWith entries than allowed", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) {
+				for n := range 21 {
+					i.SharedWith = append(i.SharedWith, depsv1alpha1.SharedWithEntry{Namespace: "team", Name: fmt.Sprintf("consumer-%d", n)})
+				}
+			}), "Too many"),
+			Entry("an SQS name with a space", sqsCR(func(q *depsv1alpha1.SQSQueueSpec) { q.Name = "my orders" }), "should match"),
+			Entry("an SQS name over 80 characters", sqsCR(func(q *depsv1alpha1.SQSQueueSpec) { q.Name = strings.Repeat("a", 81) }), "Too long"),
+			Entry("an unknown deletion policy", sqsCR(func(q *depsv1alpha1.SQSQueueSpec) { q.DeletionPolicy = "Purge" }), "Unsupported value"),
+			Entry("an uppercase S3 bucket name", s3CR(func(b *depsv1alpha1.S3BucketSpec) { b.Name = "Receipts" }), "should match"),
+			Entry("S3 replication without a region", s3CR(func(b *depsv1alpha1.S3BucketSpec) {
+				b.Replication = &depsv1alpha1.S3ReplicationSpec{Enabled: true}
+			}), "region is required"),
+		)
+
+		It("accepts the same specs once they're valid, so the table is rejecting the right thing", func() {
+			Expect(k8sClient.Create(ctx, rdsCR(func(*depsv1alpha1.RDSInstanceSpec) {}))).To(Succeed())
+			Expect(k8sClient.Create(ctx, sqsCR(func(*depsv1alpha1.SQSQueueSpec) {}))).To(Succeed())
+			Expect(k8sClient.Create(ctx, s3CR(func(*depsv1alpha1.S3BucketSpec) {}))).To(Succeed())
 		})
 	})
 })

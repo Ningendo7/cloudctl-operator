@@ -28,6 +28,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	applycorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 	applymetav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -116,7 +117,7 @@ func Ensure(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDe
 	}
 
 	if prev := cr.Status.ServiceAccountName; prev != "" && prev != target {
-		if err := release(ctx, k8sClient, cr.Namespace, prev); err != nil {
+		if err := release(ctx, k8sClient, cr, prev); err != nil {
 			return prev, err
 		}
 	}
@@ -181,7 +182,7 @@ func Cleanup(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppD
 	if cr.Status.ServiceAccountName == "" {
 		return nil
 	}
-	return release(ctx, k8sClient, cr.Namespace, cr.Status.ServiceAccountName)
+	return release(ctx, k8sClient, cr, cr.Status.ServiceAccountName)
 }
 
 // release gives up this field manager's claim by re-applying with the
@@ -192,11 +193,23 @@ func Cleanup(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppD
 // against a name that doesn't exist would otherwise recreate a bare
 // object with only an owner-reference-less identity, which we never want
 // on a path whose whole purpose is tidying up).
-func release(ctx context.Context, k8sClient client.Client, namespace, name string) error {
+func release(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDependencies, name string) error {
 	sa := &corev1.ServiceAccount{}
-	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sa); err != nil {
+	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: cr.Namespace, Name: name}, sa); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	apply := applycorev1.ServiceAccount(name, namespace)
+	apply := applycorev1.ServiceAccount(name, cr.Namespace)
+	// An owner reference this operator set must outlive the release: it is
+	// what lets garbage collection remove a ServiceAccount it created once
+	// the CR is gone. Omitting it here would strip it, orphaning the object.
+	if owner := metav1.GetControllerOf(sa); owner != nil && owner.UID == cr.UID {
+		apply = apply.WithOwnerReferences(applymetav1.OwnerReference().
+			WithAPIVersion(owner.APIVersion).
+			WithKind(owner.Kind).
+			WithName(owner.Name).
+			WithUID(owner.UID).
+			WithController(true).
+			WithBlockOwnerDeletion(true))
+	}
 	return k8sClient.Apply(ctx, apply, fieldOwner, client.ForceOwnership)
 }

@@ -97,7 +97,33 @@ pain, not worth ledger-state machinery today.
 unfixable from this operator's own reconcile loop, tracked separately.
 
 **The controller's own AWS-side IAM boundary.** What the manager's own
-execution role is allowed to do in AWS is deployment configuration, not
-something this repo can enforce in code. Worth documenting a minimum
-required policy for installers as a follow-up, but out of scope for a
-code fix.
+execution role may do in AWS is deployment configuration, not something
+this repo can enforce in code. The API calls it makes are listed below, so
+an installer can build the narrowest policy for the services they use.
+
+### AWS actions the manager's role needs
+
+Grant only the services you declare in CRs. Every resource name is derived
+from the CR, so each action can be scoped by resource ARN prefix; tag
+conditions (`aws:ResourceTag/cloudctl.io/owner`) are worth adding for the
+destructive ones, so leaked credentials can't touch resources this operator
+didn't create.
+
+| Service | Actions |
+|---|---|
+| STS | `sts:GetCallerIdentity` (startup and periodic credential check) |
+| SQS | `CreateQueue`, `GetQueueUrl`, `GetQueueAttributes`, `SetQueueAttributes`, `ListQueueTags`, `TagQueue`, `UntagQueue`, `DeleteQueue` |
+| SNS | `CreateTopic`, `GetTopicAttributes`, `SetTopicAttributes`, `ListTagsForResource`, `TagResource`, `UntagResource`, `DeleteTopic`, `ListSubscriptionsByTopic`, `Subscribe`, `Unsubscribe` |
+| S3 | `HeadBucket`, `CreateBucket`, `DeleteBucket`, `GetBucketTagging`, `PutBucketTagging`, `Get`/`PutBucketVersioning`, `Get`/`PutBucketLifecycleConfiguration`, `DeleteBucketLifecycle`, `Get`/`PutBucketEncryption`, `Get`/`PutBucketPolicy`, `DeleteBucketPolicy`, `ListBucketVersions`, `DeleteObject`/`DeleteObjectVersion` (via `DeleteObjects`), `ListBucketMultipartUploads`, `AbortMultipartUpload` |
+| DynamoDB | `DescribeTable`, `CreateTable`, `DeleteTable`, `UpdateTable`, `ListTagsOfResource`, `TagResource`, `UntagResource`, `DescribeContinuousBackups`, `UpdateContinuousBackups`, `Scan` (emptiness check) |
+| KMS | `CreateKey`, `DescribeKey`, `CreateAlias`, `EnableKeyRotation`, `ListResourceTags`, `TagResource`, `UntagResource`, `ScheduleKeyDeletion`, `CancelKeyDeletion` |
+| IAM | `GetRole`, `CreateRole`, `UpdateAssumeRolePolicy`, `ListRoleTags`, `GetRolePolicy`, `PutRolePolicy`, `DeleteRolePolicy`, `DeleteRole` |
+| CloudWatch | `DescribeAlarms`, `PutMetricAlarm`, `DeleteAlarms`, `ListTagsForResource` |
+| RDS | `CreateDBInstance`, `ModifyDBInstance`, `DescribeDBInstances`, `DescribeDBSubnetGroups`, `DescribeDBEngineVersions`, `ListTagsForResource`, `AddTagsToResource`, `RemoveTagsFromResource`, `CreateDBSnapshot`, `DescribeDBSnapshots`, `DeleteDBSnapshot` (never `DeleteDBInstance`) |
+| EC2 (RDS security groups) | `CreateSecurityGroup`, `DescribeSecurityGroups`, `AuthorizeSecurityGroupIngress`, `RevokeSecurityGroupIngress`, `DeleteSecurityGroup`, `CreateTags`, `DescribeTags` |
+| Secrets Manager (RDS) | `GetSecretValue`, scoped to the `rds!db-*` secrets AWS creates |
+
+The RDS rows were exercised against real AWS with a broadly-privileged
+user, so whether `ManageMasterUserPassword` needs further actions on the
+caller (for example KMS permissions for the secret's key) was not verified
+under a least-privilege policy; test yours before relying on it.

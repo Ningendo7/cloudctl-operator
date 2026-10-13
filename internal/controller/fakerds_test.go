@@ -18,12 +18,14 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/rds/types"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
 
 // fakeRDSInstance and fakeRDSClient are a minimal in-memory stand-in for
@@ -55,6 +57,11 @@ type fakeRDSSnapshot struct {
 // goroutine may be reading.
 type fakeRDSClient struct {
 	mu sync.Mutex
+
+	// exposeMasterSecret makes instances report the managed master-user
+	// secret AWS would create. Off by default so specs that never wire a
+	// Secrets Manager client are unaffected.
+	exposeMasterSecret bool
 
 	instances map[string]*fakeRDSInstance // keyed by DBInstanceIdentifier
 	snapshots map[string]*fakeRDSSnapshot // keyed by DBSnapshotIdentifier
@@ -150,6 +157,7 @@ func (f *fakeRDSClient) DescribeDBInstances(_ context.Context, in *rds.DescribeD
 		MultiAZ:               &i.multiAZ,
 		BackupRetentionPeriod: &i.backupRetentionPeriod,
 		Endpoint:              &types.Endpoint{Address: &i.endpointAddress, Port: &i.endpointPort},
+		MasterUserSecret:      f.masterUserSecretFor(id),
 	}}}, nil
 }
 
@@ -259,4 +267,48 @@ func (f *fakeRDSClient) hasInstance(id string) bool {
 	defer f.mu.Unlock()
 	_, ok := f.instances[id]
 	return ok
+}
+
+func (f *fakeRDSClient) setExposeMasterSecret(v bool) {
+	f.mu.Lock()
+	f.exposeMasterSecret = v
+	f.mu.Unlock()
+}
+
+// masterUserSecretFor must be called with f.mu held.
+func (f *fakeRDSClient) masterUserSecretFor(instanceID string) *types.MasterUserSecret {
+	if !f.exposeMasterSecret {
+		return nil
+	}
+	return &types.MasterUserSecret{SecretArn: aws.String(fakeMasterSecretARN(instanceID))}
+}
+
+func fakeMasterSecretARN(instanceID string) string {
+	return "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-" + instanceID
+}
+
+// fakeSecretsManager serves one username/password pair for every secret ARN
+// it is asked about, and lets a spec change the password to simulate AWS
+// rotating it. Safe to use from a live manager and a spec at once.
+type fakeSecretsManager struct {
+	mu       sync.Mutex
+	password string
+}
+
+func newFakeSecretsManager(password string) *fakeSecretsManager {
+	return &fakeSecretsManager{password: password}
+}
+
+func (f *fakeSecretsManager) rotate(password string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.password = password
+}
+
+func (f *fakeSecretsManager) GetSecretValue(_ context.Context, _ *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	body, _ := json.Marshal(map[string]string{"username": "cloudctl_admin", "password": f.password})
+	s := string(body)
+	return &secretsmanager.GetSecretValueOutput{SecretString: &s}, nil
 }

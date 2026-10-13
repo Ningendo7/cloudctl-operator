@@ -398,3 +398,45 @@ func (e *erroringClient) Get(_ context.Context, _ client.ObjectKey, _ client.Obj
 type errBoom struct{}
 
 func (errBoom) Error() string { return "boom" }
+
+// Releasing a ServiceAccount this operator created must strip the role
+// annotation but keep the owner reference, or garbage collection would never
+// remove the object once its CR is deleted.
+func TestCleanup_DefaultName_KeepsOwnerReference(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	cr := newCR("ns", "checkout", "")
+
+	if _, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/x"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	cr.Status.ServiceAccountName = "checkout"
+
+	if err := Cleanup(context.Background(), c, cr); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+
+	got := getSA(t, c, "ns", "checkout")
+	if _, ok := got.Annotations[RoleARNAnnotation]; ok {
+		t.Error("expected the role-arn annotation removed")
+	}
+	if owner := metav1.GetControllerOf(got); owner == nil || owner.UID != cr.UID {
+		t.Errorf("expected the owner reference to survive the release, got %v", got.OwnerReferences)
+	}
+}
+
+func TestCleanup_UserProvidedName_NeverGainsAnOwnerReference(t *testing.T) {
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "team-sa"}}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(sa).Build()
+	cr := newCR("ns", "checkout", "team-sa")
+
+	if _, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/x"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	cr.Status.ServiceAccountName = "team-sa"
+	if err := Cleanup(context.Background(), c, cr); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if got := getSA(t, c, "ns", "team-sa"); len(got.OwnerReferences) != 0 {
+		t.Errorf("a ServiceAccount the user created must never be owned, got %v", got.OwnerReferences)
+	}
+}

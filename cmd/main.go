@@ -31,15 +31,12 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -255,8 +252,6 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	managedBy := labels.Set{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue}
-	managedBySelector := labels.SelectorFromSet(managedBy)
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -266,10 +261,7 @@ func main() {
 		LeaderElectionID:       "687fa3e1.cloudctl.io",
 		// Only cache our own Secrets/ConfigMaps, not the whole cluster's.
 		Cache: cache.Options{
-			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Secret{}:    {Label: managedBySelector},
-				&corev1.ConfigMap{}: {Label: managedBySelector},
-			},
+			ByObject: controller.ManagedObjectCache(),
 		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the

@@ -9,6 +9,17 @@ fake AWS client, and `internal/controller` runs the same reconciler code
 against a real Kubernetes API server via envtest (real CRDs, finalizers,
 watches) with those same fakes standing in for AWS.
 
+The controller package also runs a live manager (with the production
+cache configuration from `ManagedObjectCache`) through failure and hostile
+state rather than the happy path: one section failing while the others
+carry on and recover by themselves, no hot loop on a persistent error, a
+deletion that can't finish yet, a ConfigMap or Secret the operator didn't
+create sitting at its name, a user-owned ServiceAccount, the credentials
+Secret and ConfigMap being deleted, corrupted, relabelled or losing their
+owner reference, and cross-namespace sharing being revoked. The CRD's
+admission rules (patterns, bounds, CEL immutability) are checked against
+the real API server with a table of invalid specs.
+
 **What this can't catch:** a fake only ever encodes our own belief about
 how an AWS API behaves. If that belief is wrong — a misread error code, a
 field we assumed was optional but isn't — a fully green unit suite will
@@ -138,3 +149,16 @@ Distinct from the integration tier above specifically in scope, not
 mechanism — both go through LocalStack, but this tier drives everything
 through a real Kubernetes reconcile loop (CRDs, finalizers, the actual
 controller binary) rather than calling package functions directly.
+
+A second suite, `resilience_test.go`, checks what only a real cluster and
+manager can show and does not depend on AWS being faithful: the manager's
+actual RBAC (what it can and cannot do), admission rejections and
+immutable fields at a real API server, an unauthorized RDS subnet group
+becoming authorized when a grant appears, garbage collection of owned
+objects when a CR is deleted while the retained queue is left behind with
+ownership released, a burst of CRs (no duplicates, no leaks, no OOM kills),
+leader failover after the leader is killed, a full manager restart that
+must not recreate or forget anything, an AWS outage (in-cluster objects are
+never deleted, a deletion is held, and everything recovers by itself once
+AWS returns with its state wiped), and a manager started with no reachable
+AWS, which must stay up but unready rather than crash-loop.

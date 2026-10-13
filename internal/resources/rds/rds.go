@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
@@ -300,15 +301,25 @@ func ensureInstanceObserving(
 		return created, createErr
 	}
 
+	// Creation only ever happens for an instance this CR has never had. One
+	// the ledger knows but AWS no longer has was deleted out-of-band, and a
+	// replacement would be an empty database reported Ready.
+	missing := func() ([]depsv1alpha1.ManagedResource, error) {
+		if entry, found := status.FindManagedResource(ledger, resourceType, resourceName); found {
+			return ledger, instanceMissingError(entry, instanceID, recordEvent)
+		}
+		return create()
+	}
+
 	var notFound *types.DBInstanceNotFoundFault
 	if errors.As(err, &notFound) {
-		return create()
+		return missing()
 	}
 	if err != nil {
 		return ledger, wrapAWSError(err, "looking up instance")
 	}
 	if len(describeOut.DBInstances) == 0 {
-		return create()
+		return missing()
 	}
 
 	instance := describeOut.DBInstances[0]
@@ -596,6 +607,30 @@ func effectiveAttributes(instance types.DBInstance) instanceAttributes {
 		attrs.allocatedStorage = *pending.AllocatedStorage
 	}
 	return attrs
+}
+
+// creationVisibilityGrace is how long a just-created instance may be absent
+// from DescribeDBInstances before that is treated as it having been deleted.
+const creationVisibilityGrace = 5 * time.Minute
+
+const reasonInstanceMissing = "InstanceMissing"
+
+func instanceMissingError(entry depsv1alpha1.ManagedResource, instanceID string, recordEvent status.EventRecorder) error {
+	if entry.State == depsv1alpha1.ManagedResourceStateCreating && time.Since(entry.CreatedAt.Time) < creationVisibilityGrace {
+		return &cloudctlaws.ReconcileError{
+			Err:       fmt.Errorf("instance %q was just created and is not visible yet", instanceID),
+			Retryable: true,
+		}
+	}
+	if recordEvent != nil {
+		recordEvent("Warning", "InstanceMissing", fmt.Sprintf("RDS instance %s no longer exists in AWS and will not be recreated", entry.ARN))
+	}
+	return &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("RDS instance %q (%s) no longer exists in AWS: it was deleted out-of-band, and this operator will not create an empty "+
+			"replacement. Restore it under the same identifier from a snapshot or point-in-time backup and set adopt: true, "+
+			"or remove it from spec and add it again to start fresh", instanceID, entry.ARN),
+		Reason: reasonInstanceMissing,
+	}
 }
 
 // recordObservedStatus stamps the ledger entry with the AWS-reported

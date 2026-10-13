@@ -144,15 +144,27 @@ func ensureTopic(
 		updated.Force = t.Force
 		status.UpsertManagedResource(&ledger, updated)
 
+		// Existence is checked on every pass, trust window or not: the
+		// window only exempts the ownership-tag re-check, and a topic
+		// deleted out-of-band must not stay reported Ready until it lapses.
+		var probeErr error
 		if len(desiredTopicAttributes(t, kmsKeyARN)) == 0 {
-			// Nothing this package manages could have drifted - skip the
-			// AWS round trip entirely.
+			_, probeErr = awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
+		} else {
+			probeErr = reconcileTopicAttributes(ctx, awsClient, topicArn, t, kmsKeyARN)
+		}
+		var gone *types.NotFoundException
+		switch {
+		case errors.As(probeErr, &gone):
+			if recordEvent != nil {
+				recordEvent("Warning", "TopicMissing", fmt.Sprintf("SNS topic %s no longer exists in AWS; recreating it", topicArn))
+			}
+			// Falls through to the full path below, which recreates it.
+		case probeErr != nil:
+			return ledger, wrapAWSError(probeErr, "reconciling topic attributes")
+		default:
 			return ledger, nil
 		}
-		if err := reconcileTopicAttributes(ctx, awsClient, topicArn, t, kmsKeyARN); err != nil {
-			return ledger, wrapAWSError(err, "reconciling topic attributes")
-		}
-		return ledger, nil
 	}
 
 	ownerTags := map[string]string{

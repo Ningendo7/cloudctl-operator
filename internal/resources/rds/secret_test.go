@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 )
 
 // ownedCRWithCredentials builds a CR owning one RDS instance whose fake
@@ -329,7 +330,7 @@ func TestEnsureCredentialsSecret_MultipleOwnedInstances(t *testing.T) {
 	smClient.secrets[i1.masterUserSecretARN] = `{"username":"u1","password":"p1"}`
 
 	ledger2, err := createInstance(context.Background(), rdsClient, "default", "checkout-service", "uid-1",
-		"default-checkout-service-invoices-db", "invoices-db",
+		cloudctlaws.ResourceName("default", "checkout-service", resourceType, "invoices-db", 63), "invoices-db",
 		instanceOptions{deletionPolicy: depsv1alpha1.DeletionPolicyRetain, engine: "mysql", engineVersion: "8.0", instanceClass: "db.t4g.micro", dbSubnetGroupName: "sg", securityGroupID: "sg-2"},
 		ledger1, nil)
 	if err != nil {

@@ -19,6 +19,7 @@ package sns
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -435,6 +436,9 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 	client.listTagsForResourceErr = errors.New("should not be called: trust window should have skipped this")
 
 	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
+	// Existence is checked every pass, so the topic must exist; it is
+	// untagged, so a successful Ensure also shows ownership wasn't re-read.
+	client.topics[topicArn] = &fakeTopic{arn: topicArn, tags: map[string]string{}}
 	fresh := metav1.Now()
 	ledger := []depsv1alpha1.ManagedResource{
 		{
@@ -473,6 +477,9 @@ func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 	client.listTagsForResourceErr = errors.New("should not be called: trust window should have skipped this")
 
 	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
+	// Existence is checked every pass, so the topic must exist; it is
+	// untagged, so a successful Ensure also shows ownership wasn't re-read.
+	client.topics[topicArn] = &fakeTopic{arn: topicArn, tags: map[string]string{}}
 	fresh := metav1.Now()
 	ledger := []depsv1alpha1.ManagedResource{
 		{
@@ -567,5 +574,30 @@ func TestEnsure_AdoptingTopic_EmitsAdoptedEvent(t *testing.T) {
 
 	if len(*events) != 1 || (*events)[0].reason != "TopicAdopted" {
 		t.Errorf("expected exactly one TopicAdopted event, got %+v", *events)
+	}
+}
+
+// A topic deleted out-of-band while its ledger entry is still inside the
+// trust window must be noticed and recreated on the next pass.
+func TestEnsure_RecreatesTopicDeletedOutOfBandWithinTrustWindow(t *testing.T) {
+	client := newFakeSNS()
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
+	ledger, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
+	delete(client.topics, topicArn)
+
+	var events []string
+	record := func(_, reason, _ string) { events = append(events, reason) }
+	if _, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, record); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if _, ok := client.topics[topicArn]; !ok {
+		t.Fatal("expected the topic deleted out-of-band to be recreated while its entry was still inside the trust window")
+	}
+	if !slices.Contains(events, "TopicMissing") {
+		t.Errorf("expected a TopicMissing event, got %v", events)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -533,14 +534,22 @@ func TestEnsure_NoDLQMeansNoRedrivePolicy(t *testing.T) {
 	}
 }
 
+// registerUntaggedQueue puts the queue the trust-window tests' ledger entry
+// points at into the fake, without ownership tags. Existence is checked on
+// every pass, so it must exist; but were ownership re-verified, an untagged
+// queue would be refused, so a successful Ensure shows that check was skipped.
+func registerUntaggedQueue(client *fakeSQS) {
+	const name = "default-checkout-service-orders"
+	client.queues[name] = &fakeQueue{
+		url:  "https://sqs.us-east-1.amazonaws.com/000000000000/" + name,
+		arn:  "arn:aws:sqs:us-east-1:000000000000:" + name,
+		tags: map[string]string{},
+	}
+}
+
 func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 	client := newFakeSQS()
-	// Never actually register the queue in the fake at all - if Ensure
-	// makes any AWS call here, it fails (not-found -> tries to create,
-	// which would still succeed, so instead force GetQueueUrl itself to
-	// error) - proving the skip happened by making any call unmistakably
-	// visible as a failure.
-	client.getQueueUrlErr = errors.New("should not be called: trust window should have skipped this")
+	registerUntaggedQueue(client)
 
 	fresh := metav1.Now()
 	ledger := []depsv1alpha1.ManagedResource{
@@ -577,7 +586,7 @@ func TestEnsure_SkipsRevalidationWithinTrustWindow(t *testing.T) {
 
 func TestEnsure_UpdatesLocalFieldsEvenWhenSkippingRevalidation(t *testing.T) {
 	client := newFakeSQS()
-	client.getQueueUrlErr = errors.New("should not be called: trust window should have skipped this")
+	registerUntaggedQueue(client)
 
 	fresh := metav1.Now()
 	ledger := []depsv1alpha1.ManagedResource{
@@ -970,5 +979,56 @@ func TestEnsure_AdoptingQueue_EmitsAdoptedEvent(t *testing.T) {
 
 	if len(*events) != 1 || (*events)[0].reason != "QueueAdopted" {
 		t.Errorf("expected exactly one QueueAdopted event, got %+v", *events)
+	}
+}
+
+// A queue deleted out-of-band while its ledger entry is still inside the
+// trust window must be noticed and recreated on the next pass, not reported
+// healthy until the window lapses.
+func TestEnsure_RecreatesQueueDeletedOutOfBandWithinTrustWindow(t *testing.T) {
+	visibility := int32(60)
+	for name, q := range map[string]depsv1alpha1.SQSQueueSpec{
+		"plain queue":                  {Name: "orders"},
+		"queue with managed attribute": {Name: "orders", Overrides: &depsv1alpha1.SQSOverrides{VisibilityTimeoutSeconds: &visibility}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeSQS()
+			spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{q}}
+			ledger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+			if err != nil {
+				t.Fatalf("setup Ensure() error = %v", err)
+			}
+			queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
+			delete(client.queues, queueName)
+
+			var events []string
+			record := func(_, reason, _ string) { events = append(events, reason) }
+			if _, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, record); err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			if _, ok := client.queues[queueName]; !ok {
+				t.Fatal("expected the queue deleted out-of-band to be recreated while its entry was still inside the trust window")
+			}
+			if !slices.Contains(events, "QueueMissing") || !slices.Contains(events, "QueueCreated") {
+				t.Errorf("expected QueueMissing and QueueCreated events, got %v", events)
+			}
+		})
+	}
+}
+
+func TestEnsure_WithinTrustWindow_OtherLookupErrorsStillSurface(t *testing.T) {
+	client := newFakeSQS()
+	registerUntaggedQueue(client)
+	client.getQueueUrlErr = errors.New("boom")
+	fresh := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{{
+		Type: resourceType, Name: "orders", ARN: "arn:aws:sqs:us-east-1:000000000000:default-checkout-service-orders",
+		State: depsv1alpha1.ManagedResourceStateVerified, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+		CreatedAt: fresh, LastVerifiedAt: &fresh,
+	}}
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+
+	if _, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err == nil {
+		t.Fatal("expected a lookup failure that isn't 'queue missing' to be reported, not treated as a reason to recreate")
 	}
 }

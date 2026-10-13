@@ -19,6 +19,7 @@ package s3
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -795,5 +796,30 @@ func TestLifecycleRulesMatch_RuleUsingUnmanagedFeaturesNeverMatches(t *testing.T
 	}
 	if !lifecycleRulesMatch(desired, desired) {
 		t.Error("identical rules must match")
+	}
+}
+
+// A bucket deleted out-of-band while its ledger entry is still inside the
+// trust window must be noticed and recreated on the next pass.
+func TestEnsure_RecreatesBucketDeletedOutOfBandWithinTrustWindow(t *testing.T) {
+	client := newFakeS3()
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	delete(client.buckets, bucket)
+
+	var events []string
+	record := func(_, reason, _ string) { events = append(events, reason) }
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, record); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if _, ok := client.buckets[bucket]; !ok {
+		t.Fatal("expected the bucket deleted out-of-band to be recreated while its entry was still inside the trust window")
+	}
+	if !slices.Contains(events, "BucketMissing") {
+		t.Errorf("expected a BucketMissing event, got %v", events)
 	}
 }
