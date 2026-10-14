@@ -17,15 +17,26 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 )
 
 // These specs exercise the CRD's CEL validation rules against a real
@@ -618,5 +629,111 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Expect(k8sClient.Create(ctx, sqsCR(func(*depsv1alpha1.SQSQueueSpec) {}))).To(Succeed())
 			Expect(k8sClient.Create(ctx, s3CR(func(*depsv1alpha1.S3BucketSpec) {}))).To(Succeed())
 		})
+	})
+})
+
+// A v0.2.0 CR can hold the cross-CR kmsKeyRef object and KMS sharedWith/
+// consumes fields, all removed in v0.3.0. Upgrading the CRD leaves such
+// objects stored, so this runs a separate API server through the real
+// sequence: install the v0.2.0 CRD, store old-shaped CRs, install the
+// current CRD, then do what the manager does.
+var _ = Describe("Upgrading the CRD from v0.2.0", func() {
+	It("still lists every CR, and refuses only the one with the removed kmsKeyRef form", func() {
+		env := &envtest.Environment{
+			CRDDirectoryPaths:     []string{filepath.Join("testdata", "upgrade")},
+			ErrorIfCRDPathMissing: true,
+		}
+		if dir := getFirstFoundEnvTestBinaryDir(); dir != "" {
+			env.BinaryAssetsDirectory = dir
+		}
+		upgradeCfg, err := env.Start()
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(env.Stop)
+
+		raw, err := client.New(upgradeCfg, client.Options{Scheme: runtime.NewScheme()})
+		Expect(err).NotTo(HaveOccurred())
+		create := func(name string, spec map[string]any) {
+			Expect(raw.Create(ctx, &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "deps.cloudctl.io/v1alpha1", "kind": "AppDependencies",
+				"metadata": map[string]any{"name": name, "namespace": "default"},
+				"spec":     spec,
+			}})).To(Succeed())
+		}
+		create("plain", map[string]any{"sqs": map[string]any{"resources": []any{map[string]any{"name": "orders"}}}})
+		create("old-producer", map[string]any{"kms": map[string]any{"resources": []any{
+			map[string]any{"name": "shared", "sharedWith": []any{map[string]any{"namespace": "other", "name": "consumer"}}},
+		}}})
+		create("old-consumer", map[string]any{
+			"kms": map[string]any{"consumes": []any{map[string]any{"namespace": "default", "name": "old-producer", "resourceName": "shared"}}},
+			"sqs": map[string]any{"resources": []any{map[string]any{"name": "events", "encryption": map[string]any{
+				"kmsKeyRef": map[string]any{"namespace": "default", "name": "old-producer", "resourceName": "shared"},
+			}}}},
+		})
+
+		_, err = envtest.InstallCRDs(upgradeCfg, envtest.CRDInstallOptions{
+			Paths:              []string{filepath.Join("..", "..", "config", "crd", "bases")},
+			ErrorIfPathMissing: true,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		scheme := runtime.NewScheme()
+		Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
+		Expect(depsv1alpha1.AddToScheme(scheme)).To(Succeed())
+		typed, err := client.New(upgradeCfg, client.Options{Scheme: scheme})
+		Expect(err).NotTo(HaveOccurred())
+
+		By("listing, which is what the manager's cache does for every CR in the cluster")
+		var list depsv1alpha1.AppDependenciesList
+		Expect(typed.List(ctx, &list)).To(Succeed(), "one old-shaped CR must not stop the whole list from decoding")
+		Expect(list.Items).To(HaveLen(3))
+
+		sqsClient := newFakeSQSClient()
+		reconciler := &AppDependenciesReconciler{
+			Client: typed, APIReader: typed, Scheme: scheme,
+			AWSClients: &cloudctlaws.Clients{
+				SQS: sqsClient, SNS: newFakeSNSClient(), IAM: newFakeIAMClient(), KMS: newFakeKMSClient(),
+				CloudWatch: newFakeCloudWatchClient(), Region: "us-east-1", AccountID: "123456789012",
+			},
+			Recorder:        events.NewFakeRecorder(50),
+			OIDCProviderARN: "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+			OIDCProviderURL: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+		}
+		reconcileOnce := func(name string) depsv1alpha1.AppDependencies {
+			key := types.NamespacedName{Namespace: "default", Name: name}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			var got depsv1alpha1.AppDependencies
+			Expect(typed.Get(ctx, key, &got)).To(Succeed())
+			return got
+		}
+
+		By("refusing the CR that still has the removed form, without creating anything for it")
+		consumer := reconcileOnce("old-consumer")
+		kmsReady := apimeta.FindStatusCondition(consumer.Status.Conditions, conditionTypeKMSReady)
+		Expect(kmsReady).NotTo(BeNil())
+		Expect(kmsReady.Status).To(Equal(metav1.ConditionFalse))
+		Expect(kmsReady.Reason).To(Equal(reasonLegacyKMSKeyRef))
+		Expect(kmsReady.Message).To(And(ContainSubstring(`sqs resource "events"`), ContainSubstring("kms.resources")))
+		Expect(sqsClient.queues).To(BeEmpty(), "an encrypted resource must not be created unencrypted because its key reference was lost")
+
+		By("reconciling a CR that never used the removed fields exactly as before")
+		plain := reconcileOnce("plain")
+		Expect(apimeta.FindStatusCondition(plain.Status.Conditions, "SQSReady")).NotTo(BeNil())
+		Expect(apimeta.FindStatusCondition(plain.Status.Conditions, "SQSReady").Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("decodes the removed object form of kmsKeyRef without losing the string form", func() {
+		var legacy, current depsv1alpha1.EncryptionSpec
+		Expect(json.Unmarshal([]byte(`{"enabled":false,"kmsKeyRef":{}}`), &legacy)).To(Succeed())
+		Expect(legacy.LegacyKMSKeyRef).To(BeTrue())
+		Expect(legacy.KMSKeyRef).To(BeEmpty())
+
+		Expect(json.Unmarshal([]byte(`{"kmsKeyRef":"shared"}`), &current)).To(Succeed())
+		Expect(current.LegacyKMSKeyRef).To(BeFalse())
+		Expect(current.KMSKeyRef).To(Equal("shared"))
+
+		out, err := json.Marshal(legacy)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(out)).NotTo(ContainSubstring("Legacy"), "the marker is not part of the API")
 	})
 })

@@ -80,6 +80,12 @@ deleting, refusing both when it doesn't match. See
 `internal/resources/configmap/configmap_test.go`'s
 `TestEnsure_PreExistingForeignConfigMap_*` tests.
 
+**RDS delete path acted on unverified ownership.** Cleanup of a removed `Delete`-policy instance took a final snapshot of whatever sat at the ledger's ARN, and later deleted that snapshot, without re-reading ownership tags (the snapshots weren't tagged at all). Instance names are deterministic, so a replaced or re-tagged instance would have been snapshotted as if it were ours. Each pass now re-reads the instance's tags before acting, final snapshots carry the CR's ownership tags, and one is deleted only while it still does.
+
+**Releasing a ServiceAccount stripped its owner reference.** `release()` re-applied an empty object under the operator's field manager, which removed the owner reference along with the role annotation, so a ServiceAccount the operator created was never garbage-collected once its CR was deleted. It now keeps an owner reference it set. Only a real cluster could show this, since envtest has no garbage collector.
+
+**A v0.2.0 `kmsKeyRef` object blocked the whole cache.** See "Upgrading from v0.2.0" in [resources.md](resources.md#kms). Found by running the real CRD upgrade against an API server.
+
 ## Accepted, documented, not fixed
 
 **Resource-name-squatting DoS.** Since resource names are fully

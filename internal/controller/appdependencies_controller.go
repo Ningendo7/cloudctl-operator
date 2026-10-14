@@ -96,6 +96,10 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	log.Info("Starting reconcile")
 	original := cr.DeepCopy()
 
+	if refused, err := refuseLegacyKMSKeyRef(ctx, r, cr, original); refused || err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if err := ensureFinalizer(ctx, r.Client, cr); err != nil {
 		log.Error(err, "Reconcile failed", "duration", time.Since(start))
 		return ctrl.Result{}, err

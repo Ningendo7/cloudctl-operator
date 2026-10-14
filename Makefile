@@ -143,11 +143,11 @@ cleanup-test-integration: ## Tear down the LocalStack container used for integra
 # integration one above. Gated behind the "live" build tag; never runs in
 # CI, costs real (small) money per run, and needs real credentials to
 # resolve via the standard AWS credential chain or every test just skips.
-LIVE_TEST_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/sns/... ./internal/resources/s3/... ./internal/resources/dynamodb/... ./internal/resources/iam/... ./internal/resources/alarms/... ./internal/resources/kms/...
+LIVE_TEST_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/sns/... ./internal/resources/s3/... ./internal/resources/dynamodb/... ./internal/resources/iam/... ./internal/resources/alarms/... ./internal/resources/kms/... ./internal/resources/rds/...
 
 .PHONY: test-live
 test-live: ## Run live tests against your own real AWS account (costs money, never run in CI)
-	go test -tags=live $(LIVE_TEST_PACKAGES) -v
+	go test -tags=live $(LIVE_TEST_PACKAGES) -v -timeout 45m
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

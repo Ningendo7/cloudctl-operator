@@ -190,3 +190,33 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 		},
 	}
 }
+
+// refuseLegacyKMSKeyRef reports whether the CR still has the cross-CR form of
+// encryption.kmsKeyRef that v0.3.0 removed, recording why on its status if so.
+// It must run before any write to the CR: the finalizer Update would store
+// the spec back without the removed field and decode that response over this
+// object, leaving a CR that looks like it never asked for encryption.
+func refuseLegacyKMSKeyRef(ctx context.Context, r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) (bool, error) {
+	where := legacyKMSKeyRefPath(cr)
+	if where == "" {
+		return false, nil
+	}
+	setSectionCondition(ctx, cr, conditionTypeKMSReady, &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("%s uses the cross-CR form of encryption.kmsKeyRef that v0.3.0 removed; set it to the name of a key under this CR's kms.resources, "+
+			"or use encryption.enabled for a dedicated key. Nothing is reconciled until it is fixed", where),
+		Reason: reasonLegacyKMSKeyRef,
+	}, eventRecorderFor(r, cr))
+	// A spec edit bumps the generation and triggers the next reconcile.
+	return true, r.Status().Patch(ctx, cr, statusPatch(original, cr))
+}
+
+// legacyKMSKeyRefPath names the first resource whose encryption still has the
+// pre-v0.3.0 kmsKeyRef object, or "" if there is none.
+func legacyKMSKeyRefPath(cr *depsv1alpha1.AppDependencies) string {
+	for _, r := range encryptedResources(cr) {
+		if r.encryption != nil && r.encryption.LegacyKMSKeyRef {
+			return fmt.Sprintf("%s resource %q", r.resourceType, r.name)
+		}
+	}
+	return ""
+}
