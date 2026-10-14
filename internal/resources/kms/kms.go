@@ -257,10 +257,9 @@ func createKey(
 // finishing alias creation if that's what didn't complete last time, and
 // reviving the key out of a scheduled deletion if Cleanup's own quiet
 // window scheduled one and the resource has since reappeared in spec.
-// Skips all of that and returns immediately once the entry is already
-// Verified and within its trust window - the same re-verification cadence
-// every other resource type already applies to its own ownership check,
-// which this package had been doing on every single pass instead.
+// Once the entry is already Verified and within its trust window, the
+// ownership-tag re-check is skipped - the same cadence every other resource
+// type applies - while existence and key state are still read every pass.
 func resumeKey(
 	ctx context.Context,
 	kmsClient kmsAPI,
@@ -270,13 +269,11 @@ func resumeKey(
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	if !status.NeedsRevalidation(entry) {
-		updated := entry
-		updated.DeletionPolicy = opts.deletionPolicy
-		status.UpsertManagedResource(&ledger, updated)
-		return ledger, nil
-	}
-
+	// Existence and key state are read on every pass: the trust window only
+	// exempts the ownership-tag re-check. A key deleted out-of-band is an
+	// error either way, never a recreate, so reading it late would only delay
+	// the report; a deletion someone else scheduled is reversed by the full
+	// path below, so it is better caught now than at the next revalidation.
 	describeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &entry.ARN,
 	})
@@ -288,6 +285,9 @@ func resumeKey(
 		// ever encrypted under it is already permanently unrecoverable;
 		// silently creating a same-named replacement would paper over
 		// that, not fix it. Surface it loudly instead.
+		if recordEvent != nil {
+			recordEvent("Warning", "KeyMissing", fmt.Sprintf("KMS key %s no longer exists in AWS and will not be recreated", entry.ARN))
+		}
 		return ledger, fmt.Errorf(
 			"KMS key %q (%s) no longer exists in AWS — it was deleted out-of-band, and everything encrypted under it is unrecoverable; remove and re-add this entry to provision a new key once you've confirmed that's acceptable",
 			entry.Name, entry.ARN,
@@ -296,6 +296,14 @@ func resumeKey(
 	if err != nil {
 		return ledger, wrapAWSError(err, fmt.Sprintf("looking up KMS key %q", entry.Name))
 	}
+
+	if !status.NeedsRevalidation(entry) && describeOut.KeyMetadata.KeyState != types.KeyStatePendingDeletion {
+		updated := entry
+		updated.DeletionPolicy = opts.deletionPolicy
+		status.UpsertManagedResource(&ledger, updated)
+		return ledger, nil
+	}
+
 	keyID := *describeOut.KeyMetadata.KeyId
 
 	tags, tErr := listAllResourceTags(ctx, kmsClient, entry.ARN)

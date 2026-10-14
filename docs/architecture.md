@@ -44,11 +44,14 @@ from that:
   requires the freshest tag check available before acting; cached trust
   alone never authorizes destroying something. The window exempts the
   ownership check only: every reconcile still confirms an SQS queue, SNS
-  topic, S3 bucket, DynamoDB table or RDS instance exists, so one deleted
-  out-of-band is reported (a `*Missing` warning event) and recreated on the
-  next pass, not after the window lapses. KMS keys are the exception by
-  design: a missing key is an error, never silently replaced, since
-  everything encrypted under it is already unrecoverable.
+  topic, S3 bucket, DynamoDB table, RDS instance or KMS key exists. A queue,
+  topic or bucket deleted out-of-band is reported (a `*Missing` warning
+  event) and recreated on the next pass, not after the window lapses. RDS
+  instances and KMS keys are the exception by design: a missing one is an
+  error, never silently replaced, since a new instance would be empty and
+  everything encrypted under a lost key is already unrecoverable. A KMS key
+  deletion scheduled by someone else is cancelled on the same pass while
+  the key is still declared.
 
 ## Deletion is a lifecycle, not a single API call
 
