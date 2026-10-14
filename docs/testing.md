@@ -158,7 +158,11 @@ immutable fields at a real API server, an unauthorized RDS subnet group
 becoming authorized when a grant appears, garbage collection of owned
 objects when a CR is deleted while the retained queue is left behind with
 ownership released, a burst of CRs (no duplicates, no leaks, no OOM kills),
-leader failover after the leader is killed, a full manager restart that
+a ServiceAccount the user owns having the role merged in and released again
+without being deleted (the garbage collector runs here), a queue shared across
+namespaces being withheld until the owner grants it, granted with the policy
+visible in AWS, and taken away again on revoke, the leader's reconcile
+metrics, leader failover after the leader is killed, a full manager restart that
 must not recreate or forget anything, an AWS outage (in-cluster objects are
 never deleted, a deletion is held, and everything recovers by itself once
 AWS returns with its state wiped), and a manager started with no reachable
