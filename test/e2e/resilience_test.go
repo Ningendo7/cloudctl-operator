@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -369,6 +371,218 @@ spec:
 			Expect(p.restarts()).To(BeZero(), "pod %s restarted under load", p.Metadata.Name)
 			Expect(p.oomKilled()).To(BeFalse(), "pod %s was OOM-killed", p.Metadata.Name)
 		}
+	})
+
+	It("merges the role into a ServiceAccount the user owns, keeps the rest, and releases it without deleting it", func() {
+		const sa = "team-sa"
+		_, err := kubectlApplyStdin(fmt.Sprintf(`apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    team: payments
+  annotations:
+    example.com/keep: "yes"
+`, sa, resilienceNamespace))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = kubectlApplyStdin(strings.Replace(queueCRManifest(resilienceNamespace, "user-sa"),
+			"spec:\n", "spec:\n  serviceAccountName: "+sa+"\n", 1))
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func() string {
+			state, err := getServiceAccount(resilienceNamespace, sa)
+			if err != nil {
+				return ""
+			}
+			return state.Annotations[roleARNAnnotation]
+		}, 3*time.Minute, 3*time.Second).ShouldNot(BeEmpty(), "the role annotation should be merged into the user's ServiceAccount")
+
+		merged, err := getServiceAccount(resilienceNamespace, sa)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(merged.Annotations).To(HaveKeyWithValue("example.com/keep", "yes"))
+		Expect(merged.Labels).To(HaveKeyWithValue("team", "payments"))
+		Expect(merged.Metadata.OwnerReferences).To(BeEmpty(), "a ServiceAccount the user created must never be owned by the CR")
+
+		mustKubectl("delete", "appdependencies", "user-sa", "-n", resilienceNamespace, "--wait=true", "--timeout=3m")
+
+		// The garbage collector runs here, unlike in envtest: anything wrongly
+		// owned by the CR would be gone within a minute or two.
+		Consistently(func() error {
+			_, err := getServiceAccount(resilienceNamespace, sa)
+			return err
+		}, 45*time.Second, 5*time.Second).Should(Succeed(), "the user's ServiceAccount must survive its CR")
+		released, err := getServiceAccount(resilienceNamespace, sa)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(released.Annotations).NotTo(HaveKey(roleARNAnnotation))
+		Expect(released.Annotations).To(HaveKeyWithValue("example.com/keep", "yes"))
+		Expect(released.Labels).To(HaveKeyWithValue("team", "payments"))
+	})
+
+	It("grants a queue across namespaces only when the owner allows it, and takes access away again when it is revoked", func() {
+		const consumerNS = "e2e-consumer"
+		mustKubectl("create", "ns", consumerNS)
+		DeferCleanup(func() {
+			_, _ = tryKubectl("delete", "appdependencies", "--all", "-n", consumerNS, "--wait=true", "--timeout=2m")
+			_, _ = tryKubectl("delete", "ns", consumerNS, "--ignore-not-found", "--timeout=90s")
+		})
+
+		producer := func(shared bool) string {
+			sharedWith := ""
+			if shared {
+				sharedWith = fmt.Sprintf("        sharedWith:\n          - namespace: %s\n            name: share-consumer\n", consumerNS)
+			}
+			return fmt.Sprintf(`apiVersion: deps.cloudctl.io/v1alpha1
+kind: AppDependencies
+metadata:
+  name: share-producer
+  namespace: %s
+spec:
+  sqs:
+    resources:
+      - name: orders
+%s`, resilienceNamespace, sharedWith)
+		}
+		consumerKey := connectionKey("sqs", resilienceNamespace, "share-producer", "orders", "URL")
+		consumerKeys := func() string {
+			out, _ := tryKubectl("get", "configmap", "share-consumer-connection", "-n", consumerNS, "-o", "jsonpath={.data}")
+			return out
+		}
+
+		By("the producer exists but has not allowed anyone")
+		_, err := kubectlApplyStdin(producer(false))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) { crReady(g, resilienceNamespace, "share-producer") }, 3*time.Minute, 3*time.Second).Should(Succeed())
+
+		By("a consumer asks for the queue anyway")
+		_, err = kubectlApplyStdin(fmt.Sprintf(`apiVersion: deps.cloudctl.io/v1alpha1
+kind: AppDependencies
+metadata:
+  name: share-consumer
+  namespace: %s
+spec:
+  sqs:
+    consumes:
+      - namespace: %s
+        name: share-producer
+        resourceName: orders
+`, consumerNS, resilienceNamespace))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			cr, err := getCR(consumerNS, "share-consumer")
+			g.Expect(err).NotTo(HaveOccurred())
+			status, _, _ := cr.condition("IAMReady")
+			g.Expect(status).To(Equal("False"), "an ungranted reference must be reported")
+		}, 2*time.Minute, 3*time.Second).Should(Succeed())
+		Consistently(func(g Gomega) {
+			g.Expect(consumerKeys()).NotTo(ContainSubstring(consumerKey), "an ungranted queue must never reach the consumer's ConfigMap")
+			cr, err := getCR(consumerNS, "share-consumer")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(cr.Status.IAMRoleARN).To(BeEmpty(), "and must not get the consumer a role")
+		}, 15*time.Second, 3*time.Second).Should(Succeed())
+
+		By("the owner grants it, with no action on the consumer")
+		_, err = kubectlApplyStdin(producer(true))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(consumerKeys, 3*time.Minute, 3*time.Second).Should(ContainSubstring(consumerKey))
+		Eventually(func(g Gomega) { crReady(g, consumerNS, "share-consumer") }, 3*time.Minute, 3*time.Second).Should(Succeed())
+
+		producerCR, err := getCR(resilienceNamespace, "share-producer")
+		Expect(err).NotTo(HaveOccurred())
+		queueARN := ""
+		for _, r := range producerCR.Status.ManagedResources {
+			if r.Type == "sqs" && r.Name == "orders" {
+				queueARN = r.ARN
+			}
+		}
+		Expect(queueARN).NotTo(BeEmpty())
+		consumerCR, err := getCR(consumerNS, "share-consumer")
+		Expect(err).NotTo(HaveOccurred())
+		roleName := consumerCR.Status.IAMRoleARN[strings.LastIndex(consumerCR.Status.IAMRoleARN, "/")+1:]
+		Expect(roleName).NotTo(BeEmpty())
+
+		By("the grant is real in AWS, not just in status")
+		policy := runAWSCLIPod(nextAWSPod("share-policy"), "iam", "get-role-policy", "--role-name", roleName, "--policy-name", "cloudctl-derived-policy")
+		Expect(policy).To(ContainSubstring(queueARN))
+
+		By("the owner revokes it")
+		_, err = kubectlApplyStdin(producer(false))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(consumerKeys, 3*time.Minute, 3*time.Second).ShouldNot(ContainSubstring(consumerKey))
+		Eventually(func(g Gomega) {
+			cr, err := getCR(consumerNS, "share-consumer")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(cr.Status.IAMRoleARN).To(BeEmpty())
+		}, 3*time.Minute, 3*time.Second).Should(Succeed())
+		Expect(runAWSCLIPod(nextAWSPod("share-roles"), "iam", "list-roles")).NotTo(ContainSubstring(roleName),
+			"a consumer with nothing left to access must not keep an IAM role")
+
+		mustKubectl("delete", "appdependencies", "share-consumer", "-n", consumerNS, "--wait=true", "--timeout=3m")
+		mustKubectl("delete", "appdependencies", "share-producer", "-n", resilienceNamespace, "--wait=true", "--timeout=3m")
+	})
+
+	It("exposes reconcile metrics on the leader", func() {
+		_, err := kubectlApplyStdin(queueCRManifest(resilienceNamespace, "metrics-probe"))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) { crReady(g, resilienceNamespace, "metrics-probe") }, 3*time.Minute, 3*time.Second).Should(Succeed())
+
+		// apply, not create: the Manager suite leaves this binding behind.
+		binding, err := tryKubectl("create", "clusterrolebinding", metricsRoleBindingName,
+			"--clusterrole=cloudctl-operator-metrics-reader",
+			fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
+			"--dry-run=client", "-o", "yaml")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = kubectlApplyStdin(binding)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() {
+			_, _ = tryKubectl("delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found")
+		})
+
+		token, err := serviceAccountToken()
+		Expect(err).NotTo(HaveOccurred())
+
+		// Only the leader runs the controller, so only it has reconcile
+		// metrics; the Service could land on the standby.
+		leader, err := leaderPodName()
+		Expect(err).NotTo(HaveOccurred())
+		podIP := strings.TrimSpace(mustKubectl("get", "pod", leader, "-n", namespace, "-o", "jsonpath={.status.podIP}"))
+		Expect(podIP).NotTo(BeEmpty())
+
+		curlPod := nextAWSPod("curl-metrics-probe")
+		DeferCleanup(func() { _, _ = tryKubectl("delete", "pod", curlPod, "-n", namespace, "--ignore-not-found") })
+		mustKubectl("run", curlPod, "--restart=Never", "--namespace", namespace, "--image=curlimages/curl:latest",
+			"--overrides", fmt.Sprintf(`{
+				"spec": {
+					"containers": [{
+						"name": "curl",
+						"image": "curlimages/curl:latest",
+						"command": ["/bin/sh", "-c"],
+						"args": ["for i in $(seq 1 30); do curl -sk -H 'Authorization: Bearer %s' https://%s:8443/metrics && exit 0 || sleep 2; done; exit 1"],
+						"securityContext": {
+							"readOnlyRootFilesystem": true,
+							"allowPrivilegeEscalation": false,
+							"capabilities": {"drop": ["ALL"]},
+							"runAsNonRoot": true,
+							"runAsUser": 1000,
+							"seccompProfile": {"type": "RuntimeDefault"}
+						}
+					}],
+					"serviceAccountName": "%s"
+				}
+			}`, token, podIP, serviceAccountName))
+		Eventually(func() string {
+			out, _ := tryKubectl("get", "pod", curlPod, "-n", namespace, "-o", "jsonpath={.status.phase}")
+			return out
+		}, 5*time.Minute, 3*time.Second).Should(Equal("Succeeded"))
+
+		metrics := mustKubectl("logs", curlPod, "-n", namespace)
+		success := regexp.MustCompile(`controller_runtime_reconcile_total\{controller="appdependencies",result="success"\} ([0-9.e+]+)`).FindStringSubmatch(metrics)
+		Expect(success).NotTo(BeNil(), "the leader should report successful reconciles of AppDependencies")
+		count, err := strconv.ParseFloat(success[1], 64)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(count).To(BeNumerically(">=", 1))
+		// Label set and order vary between controller-runtime versions.
+		Expect(metrics).To(MatchRegexp(`workqueue_depth\{[^}]*"appdependencies"[^}]*\}`))
 	})
 
 	It("fails over to the standby when the leader is killed, and the new leader really reconciles", func() {
@@ -789,4 +1003,50 @@ func leaderPodName() (string, error) {
 func queueCount(podName, substr string) int {
 	logs := runAWSCLIPod(podName, "sqs", "list-queues")
 	return strings.Count(logs, substr)
+}
+
+// roleARNAnnotation is the IRSA annotation the operator manages on ServiceAccounts.
+const roleARNAnnotation = "eks.amazonaws.com/role-arn"
+
+type serviceAccountState struct {
+	Metadata struct {
+		OwnerReferences []struct {
+			Name string `json:"name"`
+		} `json:"ownerReferences"`
+	} `json:"metadata"`
+	Labels      map[string]string
+	Annotations map[string]string
+}
+
+// getServiceAccount reads a ServiceAccount's labels, annotations and owner
+// references. Decoded from JSON rather than jsonpath, which mishandles the
+// dotted annotation key.
+func getServiceAccount(ns, name string) (serviceAccountState, error) {
+	var raw struct {
+		Metadata struct {
+			Labels          map[string]string `json:"labels"`
+			Annotations     map[string]string `json:"annotations"`
+			OwnerReferences []struct {
+				Name string `json:"name"`
+			} `json:"ownerReferences"`
+		} `json:"metadata"`
+	}
+	out, err := utils.Run(exec.Command("kubectl", "get", "serviceaccount", name, "-n", ns, "-o", "json"))
+	if err != nil {
+		return serviceAccountState{}, err
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return serviceAccountState{}, err
+	}
+	state := serviceAccountState{Labels: raw.Metadata.Labels, Annotations: raw.Metadata.Annotations}
+	state.Metadata.OwnerReferences = raw.Metadata.OwnerReferences
+	return state, nil
+}
+
+var nonEnvChars = regexp.MustCompile(`[^A-Z0-9_]`)
+
+// connectionKey is the ConfigMap key the operator derives for a resource
+// consumed from another CR (see configmap.envKey).
+func connectionKey(parts ...string) string {
+	return nonEnvChars.ReplaceAllString(strings.ToUpper(strings.Join(parts, "_")), "_")
 }
