@@ -29,6 +29,7 @@ spec:
 | `force` | Allows deleting a queue that isn't empty (visible, in-flight, *and* delayed message counts are all checked independently). |
 | `adopt` | Required to bring an existing, differently-owned or untagged queue under this CR's management. |
 | `sharedWith` | Grants other `AppDependencies` CRs permission to consume this queue (up to 20 entries), and via `access`, how much (see [IAM](#iam) below). |
+| `subscribesTo` | Subscribes this queue to SNS topics (up to 20), each referenced by owner namespace, CR name and topic name. The operator creates the real SNS subscription and the queue policy that lets the topic deliver, and removes both when the entry goes. The topic's owner must list this CR in its own `sharedWith`, the same as any cross-CR reference. |
 | `overrides.visibilityTimeoutSeconds` | 0–43200. Drift-corrected on every reconcile if it diverges from spec. |
 | `overrides.maxReceiveCount` | 1–1000. Only meaningful with `dlq: true`. |
 | `overrides.contentBasedDeduplication` | Only meaningful with `fifo: true`. |
@@ -58,9 +59,9 @@ spec:
 | `overrides.contentBasedDeduplication` | Only meaningful with `fifo: true`. Drift-corrected on every reconcile. |
 | `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. |
 
-**Not yet built:** subscription management (`Subscribe`/`Unsubscribe` from
-this operator's side) — deliberately deferred past core lifecycle
-management.
+Subscriptions are managed from the subscribing queue's side, with the SQS
+`subscribesTo` field. A topic with active subscriptions counts as non-empty
+for deletion.
 
 ## DynamoDB
 
@@ -98,11 +99,10 @@ still `CREATING`), unlike SQS/SNS. A newly created table sits in a
 verification, tagging drift, billing mode, and PITR are all deferred until
 then.
 
-The trust-window read-skip optimization (see [architecture.md](architecture.md))
-skips the ownership tag re-check within the window, but — unlike
-SQS/SNS/S3 — always re-runs `DescribeTable` regardless, since a table's
-status (`ACTIVE`/`CREATING`/`DELETING`) has to be read fresh every
-reconcile before anything else can safely proceed.
+The trust window (see [architecture.md](architecture.md)) skips only the
+ownership tag re-check. Existence is confirmed on every reconcile, and for
+DynamoDB that read doubles as the status check (`ACTIVE`/`CREATING`/
+`DELETING`) that has to be fresh before anything else can safely proceed.
 
 **Not yet built:** a deny-policy blocking new writes while a table sits in
 `PendingDeletion` (SQS/SNS/S3 all have this; DynamoDB resource-based
@@ -142,10 +142,11 @@ spec:
 Deletion safety matches SQS/SNS in full: a bucket policy Deny on
 `s3:PutObject` (which alone covers every write path, including all three
 multipart upload calls) blocks new writes the moment a bucket enters
-`PendingDeletion`, and the trust-window read-skip optimization applies
-here too — within the window, `HeadBucket`/`GetBucketTagging` are skipped
-entirely, though attribute drift correction (versioning, lifecycle) still
-runs every reconcile regardless, since S3 always has something to compare.
+`PendingDeletion`, and the trust window applies here too — within it,
+`HeadBucket`/`GetBucketTagging` are skipped, but attribute drift correction
+(versioning, lifecycle) still runs every reconcile, since S3 always has
+something to compare. A bucket deleted out-of-band shows up in those reads
+and is recreated on that same pass.
 
 **Not yet built:** `replication` (the CRD field exists but is explicitly
 rejected at reconcile time) — cross-region replication needs a bucket and
@@ -273,6 +274,8 @@ resources encrypted with them.
 
 The CR's IAM role gets `kms:Decrypt` and `kms:GenerateDataKey` on every key
 the CR declares or provisions.
+
+**Upgrading from v0.2.0.** `encryption.kmsKeyRef` used to be a cross-CR reference object, and `kms.resources[].sharedWith` and `kms.consumes` existed; v0.3.0 removed all three. After the CRD upgrade the API server drops the removed fields from stored objects, and a CR that used the object form is left with an empty `kmsKeyRef: {}`. From v0.3.1 the manager refuses such a CR: `KMSReady` goes `False` with reason `LegacyKMSKeyRef`, naming the resource, and nothing is reconciled for it until it's edited. Every other CR is unaffected. v0.3.0 cannot decode that object, which makes its cache fail to list every `AppDependencies`, so go straight to v0.3.1, or edit those CRs first.
 
 **Known gap:** drift correction only ever moves in the "enable, or point
 at a different key" direction — removing `encryption` from spec doesn't

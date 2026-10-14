@@ -17,6 +17,9 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"bytes"
+	"encoding/json"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -112,6 +115,36 @@ type EncryptionSpec struct {
 	// +kubebuilder:validation:MaxLength=256
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9_/-]+$`
 	KMSKeyRef string `json:"kmsKeyRef,omitempty"`
+
+	// LegacyKMSKeyRef is set when the object still carries the cross-CR
+	// reference object kmsKeyRef had before v0.3.0 (a CRD upgrade leaves it
+	// stored as an empty object). Not part of the API: it only lets such an
+	// object decode, so the controller can refuse it by name instead of the
+	// whole cache failing to list.
+	LegacyKMSKeyRef bool `json:"-"`
+}
+
+// UnmarshalJSON accepts the pre-v0.3.0 object form of kmsKeyRef alongside the
+// current string, recording that it was seen rather than failing the decode.
+func (e *EncryptionSpec) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Enabled   bool            `json:"enabled,omitempty"`
+		KMSKeyRef json.RawMessage `json:"kmsKeyRef,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*e = EncryptionSpec{Enabled: raw.Enabled}
+	ref := bytes.TrimSpace(raw.KMSKeyRef)
+	switch {
+	case len(ref) == 0 || string(ref) == "null":
+		return nil
+	case ref[0] == '{':
+		e.LegacyKMSKeyRef = true
+		return nil
+	default:
+		return json.Unmarshal(ref, &e.KMSKeyRef)
+	}
 }
 
 // ---------------------------------------------------------------------------

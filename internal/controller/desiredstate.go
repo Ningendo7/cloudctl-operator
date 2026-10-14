@@ -123,6 +123,7 @@ const (
 
 	reasonError                        = "Error"
 	reasonTransientError               = "TransientError"
+	reasonLegacyKMSKeyRef              = "LegacyKMSKeyRef"
 	reasonInstanceStuckPendingDeletion = "InstanceStuckPendingDeletion"
 )
 

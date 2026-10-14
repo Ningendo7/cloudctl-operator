@@ -117,11 +117,12 @@ exists to catch. Still no integration tier for standalone KMS (see the
 note above on why LocalStack is deferred for it).
 
 RDS is live-only: LocalStack's community edition doesn't implement it, so
-there is no integration or e2e tier for it. Its single long test creates one
+there is no integration or e2e tier for it. Its long test creates one
 real `db.t4g.micro` instance and walks the whole lifecycle (ownership tags,
 credentials delivery, drift correction, ingress grant and revoke, adoption,
 credential rotation, the final-snapshot safety net, storage growth), taking
-about 20 minutes plus teardown and costing a few cents. It needs a
+about 12 to 15 minutes including teardown and costing a few cents. `make
+test-live` allows 45 minutes for the package. It needs a
 pre-existing DB subnet group (`RDS_LIVE_TEST_SUBNET_GROUP`) and optionally an
 existing enabled KMS key (`RDS_LIVE_TEST_KMS_KEY_ARN`, never modified by the
 test); it skips if the subnet group isn't set.
