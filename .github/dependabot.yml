@@ -8,7 +8,19 @@ updates:
     # PR triggers the full CI matrix (now 6 workflows, several of them a
     # real kind cluster), so ungrouped updates turn routine patch bumps
     # into dozens of expensive runs for no real benefit.
+    # Dependabot puts each package in the first group that matches. The
+    # Kubernetes libraries and controller-runtime have to move together and
+    # can change behavior the envtest and e2e suites rely on, and the AWS SDK
+    # is the other dependency that matters here, so each gets its own PR
+    # instead of hiding inside one 20-update bump.
     groups:
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+      aws-sdk:
+        patterns:
+          - "github.com/aws/*"
       go-dependencies:
         patterns:
           - "*"
