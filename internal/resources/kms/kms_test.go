@@ -19,6 +19,7 @@ package kms
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -100,11 +101,10 @@ func TestEnsure_ResumesFromLedgerWithoutRecreatingKeyWhenAliasIsMissing(t *testi
 	}
 }
 
-// TestEnsure_SkipsReVerificationWithinTrustWindow proves resumeKey no
-// longer re-verifies ownership (ListResourceTags) or re-describes the key
-// on every single pass once an entry is already Verified and recently
-// checked - the same trust-window cadence rds/sqs/sns/s3/dynamodb already
-// apply to their own ownership checks.
+// TestEnsure_SkipsReVerificationWithinTrustWindow proves resumeKey skips the
+// ownership re-check (ListResourceTags) once an entry is already Verified
+// and recently checked, the same trust-window cadence the other resource
+// types apply, while still reading the key itself on every pass.
 func TestEnsure_SkipsReVerificationWithinTrustWindow(t *testing.T) {
 	client := newFakeKMS()
 	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
@@ -120,8 +120,8 @@ func TestEnsure_SkipsReVerificationWithinTrustWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
-	if client.describeKeyCalls[arn] != 0 {
-		t.Errorf("expected no DescribeKey call within the trust window, got %d", client.describeKeyCalls[arn])
+	if client.describeKeyCalls[arn] != 1 {
+		t.Errorf("expected exactly one DescribeKey call (existence is read every pass), got %d", client.describeKeyCalls[arn])
 	}
 	if client.listResourceTagsCalls[arn] != 0 {
 		t.Errorf("expected no ListResourceTags call within the trust window, got %d", client.listResourceTagsCalls[arn])
@@ -581,5 +581,49 @@ func TestEnsure_CancelingScheduledDeletion_EmitsEvent(t *testing.T) {
 
 	if len(*events) != 1 || (*events)[0].reason != "KeyDeletionCancelled" {
 		t.Errorf("expected exactly one KeyDeletionCancelled event, got %+v", *events)
+	}
+}
+
+func TestEnsure_KeyDeletedOutOfBandWithinTrustWindow_IsALoudErrorNotARecreate(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/gone"
+	recentlyVerified := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			CreatedAt: metav1.Now(), LastVerifiedAt: &recentlyVerified, State: depsv1alpha1.ManagedResourceStateVerified},
+	}
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+
+	var events []string
+	record := func(_, reason, _ string) { events = append(events, reason) }
+	_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, nil, record)
+	if err == nil || !strings.Contains(err.Error(), "no longer exists in AWS") {
+		t.Fatalf("expected a loud error for a key missing inside the trust window, got %v", err)
+	}
+	if len(client.keys) != 0 {
+		t.Error("expected no replacement key to be created")
+	}
+	if !slices.Contains(events, "KeyMissing") {
+		t.Errorf("expected a KeyMissing warning, got %v", events)
+	}
+}
+
+func TestEnsure_DeletionScheduledOutOfBandWithinTrustWindow_IsCancelled(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	client.keys[arn].keyState = types.KeyStatePendingDeletion
+	recentlyVerified := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			CreatedAt: metav1.Now(), LastVerifiedAt: &recentlyVerified, State: depsv1alpha1.ManagedResourceStateVerified},
+	}
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+
+	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if client.keys[arn].keyState != types.KeyStateEnabled {
+		t.Errorf("expected a deletion scheduled by someone else to be cancelled while the key is still declared, got %v", client.keys[arn].keyState)
 	}
 }
