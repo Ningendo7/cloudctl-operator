@@ -581,7 +581,8 @@ spec:
 		count, err := strconv.ParseFloat(success[1], 64)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(count).To(BeNumerically(">=", 1))
-		Expect(metrics).To(ContainSubstring(`workqueue_depth{name="appdependencies"}`))
+		// Label set and order vary between controller-runtime versions.
+		Expect(metrics).To(MatchRegexp(`workqueue_depth\{[^}]*"appdependencies"[^}]*\}`))
 	})
 
 	It("fails over to the standby when the leader is killed, and the new leader really reconciles", func() {
