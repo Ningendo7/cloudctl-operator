@@ -163,3 +163,22 @@ must not recreate or forget anything, an AWS outage (in-cluster objects are
 never deleted, a deletion is held, and everything recovers by itself once
 AWS returns with its state wiped), and a manager started with no reachable
 AWS, which must stay up but unready rather than crash-loop.
+
+## Release smoke test
+
+`smoke-release.yml` runs inside the release workflow, after the image and
+chart are pushed and before `:latest` is moved or the GitHub Release is
+created. On a fresh kind cluster with an in-cluster LocalStack it installs
+what was actually published, the way the README tells users to: the OCI
+chart (pulled anonymously, no image override, so the chart's default tag has
+to resolve to the published image), checking both CRDs establish and both
+manager replicas become ready, then a real `AppDependencies` CR reaching
+`Ready` and being deleted again; then the same with the `install.yaml`
+bundle built the way the release builds it. The e2e suite never touches
+either path, since it deploys a locally built image through kustomize.
+
+A failure leaves an unreferenced tag in the registry rather than a broken
+release people have already pulled; fix forward with the next patch. It can
+also be run by hand against any published version (Actions, Release Smoke
+Test, Run workflow).
+

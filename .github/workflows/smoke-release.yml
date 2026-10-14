@@ -1,0 +1,149 @@
+name: Release Smoke Test
+
+# Installs what a release actually published, the way a user would: the OCI
+# chart and the install.yaml bundle, pulled anonymously, running the published
+# multi-arch image against an in-cluster LocalStack. The e2e suite deploys with
+# a locally built image through kustomize, so it never touches any of this.
+#
+# Called by release.yml between publishing and advertising (the :latest alias
+# and the GitHub Release), so a broken artifact stops there. Also runnable by
+# hand against any version already published:
+#   Actions -> Release Smoke Test -> Run workflow -> version v0.3.1
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release tag to test, for example v0.3.1
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to test, for example v0.3.1
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  smoke:
+    name: Install the published chart and install.yaml
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      VERSION: ${{ inputs.version }}
+      IMAGE: ghcr.io/ningendo7/cloudctl-operator
+      CHART: oci://ghcr.io/ningendo7/charts/cloudctl-operator
+      NAMESPACE: cloudctl-operator-system
+      AWS_ENDPOINT: http://localstack.localstack-system.svc.cluster.local:4566
+      OIDC_ARN: arn:aws:iam::000000000000:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/SMOKE
+      OIDC_URL: https://oidc.eks.us-east-1.amazonaws.com/id/SMOKE
+    steps:
+      - name: Check the version looks like a release tag
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version must look like v1.2.3, got: $VERSION"
+            exit 1
+          fi
+
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Install Helm
+        run: make install-helm
+
+      - name: Create kind cluster
+        run: kind create cluster
+
+      # The manager only becomes ready once its AWS identity check passes, so
+      # something real has to answer it. Same LocalStack the e2e suite uses.
+      - name: Deploy LocalStack into the cluster
+        run: |
+          kubectl apply -f test/e2e/testdata/localstack.yaml
+          kubectl rollout status deployment/localstack -n localstack-system --timeout=3m
+
+      # The README's own install command, no registry login and no image
+      # override: the chart's default tag must resolve to the published image.
+      - name: Install the published chart
+        run: |
+          helm install cloudctl-operator "$CHART" \
+            --version "${VERSION#v}" \
+            --namespace "$NAMESPACE" \
+            --create-namespace \
+            --set-string manager.args="{--leader-elect,--oidc-provider-arn=${OIDC_ARN},--oidc-provider-url=${OIDC_URL}}" \
+            --set manager.extraEnv[0].name=AWS_ENDPOINT_URL \
+            --set manager.extraEnv[0].value="$AWS_ENDPOINT" \
+            --set manager.extraEnv[1].name=AWS_ACCESS_KEY_ID \
+            --set manager.extraEnv[1].value=test \
+            --set manager.extraEnv[2].name=AWS_SECRET_ACCESS_KEY \
+            --set manager.extraEnv[2].value=test \
+            --set manager.extraEnv[3].name=AWS_REGION \
+            --set manager.extraEnv[3].value=us-east-1 \
+            --wait --timeout 5m
+
+      - name: Check the chart's manager runs the published image and both replicas are ready
+        run: |
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/appdependencies.deps.cloudctl.io crd/rdssubnetgroupgrants.deps.cloudctl.io
+          kubectl get deployment -n "$NAMESPACE" -o wide
+          images=$(kubectl get pods -n "$NAMESPACE" -l control-plane=controller-manager -o jsonpath='{.items[*].spec.containers[*].image}')
+          echo "images: $images"
+          for image in $images; do
+            [[ "$image" == "$IMAGE:$VERSION" ]] || { echo "unexpected image $image, wanted $IMAGE:$VERSION"; exit 1; }
+          done
+          ready=$(kubectl get pods -n "$NAMESPACE" -l control-plane=controller-manager -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}' | wc -w)
+          [[ "$ready" -ge 2 ]] || { echo "expected 2 ready manager pods, got $ready"; exit 1; }
+
+      - name: A real CR reaches Ready and is cleaned up again
+        run: |
+          kubectl apply -f test/e2e/testdata/sqs-sample.yaml
+          kubectl wait --for=condition=Ready appdependencies/e2e-orders --timeout=3m
+          kubectl delete appdependencies e2e-orders --wait --timeout=3m
+
+      - name: Uninstall the chart
+        run: |
+          helm uninstall cloudctl-operator --namespace "$NAMESPACE" --wait --timeout 3m
+          kubectl delete namespace "$NAMESPACE" --wait --timeout=3m
+
+      # Built exactly the way release.yml builds the asset it attaches.
+      - name: Install the install.yaml bundle
+        run: |
+          make build-installer IMG="$IMAGE:$VERSION"
+          kubectl apply -f dist/install.yaml
+          kubectl set env deployment/cloudctl-operator-controller-manager -n "$NAMESPACE" \
+            AWS_ENDPOINT_URL="$AWS_ENDPOINT" AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
+          kubectl patch deployment cloudctl-operator-controller-manager -n "$NAMESPACE" --type=json -p "[
+            {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--oidc-provider-arn=${OIDC_ARN}\"},
+            {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--oidc-provider-url=${OIDC_URL}\"}
+          ]"
+          kubectl rollout status deployment/cloudctl-operator-controller-manager -n "$NAMESPACE" --timeout=5m
+
+      - name: A real CR reaches Ready under the bundle too
+        run: |
+          kubectl apply -f test/e2e/testdata/sqs-sample.yaml
+          kubectl wait --for=condition=Ready appdependencies/e2e-orders --timeout=3m
+          kubectl delete appdependencies e2e-orders --wait --timeout=3m
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get appdependencies -A -o yaml || true
+          kubectl logs -n "$NAMESPACE" -l control-plane=controller-manager --all-containers --tail=300 --prefix || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -60 || true
