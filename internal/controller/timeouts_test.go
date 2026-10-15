@@ -18,10 +18,17 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/aws/smithy-go"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 )
 
 func timeoutOf(ctx context.Context, t *testing.T) time.Duration {
@@ -156,5 +163,88 @@ func TestIAMWorkloadCount(t *testing.T) {
 	// bucket; the RDS instance never feeds IAM.
 	if got, want := iamWorkloadCount(cr), 9; got != want {
 		t.Errorf("iamWorkloadCount() = %d, want %d", got, want)
+	}
+}
+
+// The connection-info step runs after every section, and calls RDS and
+// Secrets Manager, so it needs a deadline of its own.
+func TestConnectionInfoContext_HasADeadlineThatScalesWithRDS(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{}
+	ctx, cancel := connectionInfoContext(context.Background(), cr)
+	defer cancel()
+	base := timeoutOf(ctx, t)
+
+	cr.Spec.RDS = &depsv1alpha1.RDSSpec{Resources: make([]depsv1alpha1.RDSInstanceSpec, 3)}
+	ctx, cancel = connectionInfoContext(context.Background(), cr)
+	defer cancel()
+	if got := timeoutOf(ctx, t); got <= base {
+		t.Errorf("timeout with 3 RDS instances = %v, want more than %v", got, base)
+	}
+}
+
+func TestControllerOptions_BacksOffFromSecondsUpToTheDriftInterval(t *testing.T) {
+	opts := controllerOptions(3)
+	if opts.MaxConcurrentReconciles != 3 {
+		t.Errorf("MaxConcurrentReconciles = %d, want 3", opts.MaxConcurrentReconciles)
+	}
+	if opts.RateLimiter == nil {
+		t.Fatal("expected a RateLimiter: controller-runtime's default retries a failing CR after 5 ms")
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "cr"}}
+	if first := opts.RateLimiter.When(req); first < 2*time.Second {
+		t.Errorf("first retry after %v, want at least 2s", first)
+	}
+	var last time.Duration
+	for range 30 {
+		last = opts.RateLimiter.When(req)
+	}
+	if last > DriftDetectionInterval {
+		t.Errorf("retry delay grew to %v, want at most the drift interval %v", last, DriftDetectionInterval)
+	}
+}
+
+// The reconcile timeout is a backstop for a pass stuck outside every
+// section's own deadline, so it must not cut off a legitimate one: every
+// section deleting the CRD's maximum of 20 resources.
+func TestControllerOptions_ReconcileTimeoutSitsAboveEverySectionBudget(t *testing.T) {
+	opts := controllerOptions(1)
+	worst := time.Duration(len(sectionTypes)) * (baseSectionDeletionTimeout + 20*perResourceDeletionTimeout)
+	if opts.ReconciliationTimeout <= worst {
+		t.Errorf("ReconciliationTimeout = %v, want more than the worst-case section budgets %v", opts.ReconciliationTimeout, worst)
+	}
+}
+
+func TestIsRetryable_FallsBackToTheAWSClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"throttling error without a ReconcileError", fmt.Errorf("getting queue URL: %w", &smithy.GenericAPIError{Code: "ThrottlingException"}), true},
+		{"section deadline", fmt.Errorf("sqs: %w", context.DeadlineExceeded), true},
+		{"a ReconcileError's own verdict wins", &cloudctlaws.ReconcileError{Err: context.DeadlineExceeded, Retryable: false}, false},
+		{"ReconcileError marked retryable", &cloudctlaws.ReconcileError{Err: errors.New("busy"), Retryable: true}, true},
+		{"plain error", errors.New("invalid name"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryable(tc.err); got != tc.want {
+				t.Errorf("isRetryable(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStatusWriteContext_OutlivesACancelledPass(t *testing.T) {
+	pass, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	ctx, cancelWrite := statusWriteContext(pass)
+	defer cancelWrite()
+	if ctx.Err() != nil {
+		t.Fatalf("status write context is already done: %v", ctx.Err())
+	}
+	if got := timeoutOf(ctx, t); got > statusWriteTimeout {
+		t.Errorf("timeout = %v, want at most %v", got, statusWriteTimeout)
 	}
 }

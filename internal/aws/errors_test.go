@@ -17,11 +17,15 @@ limitations under the License.
 package aws
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"syscall"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
@@ -94,6 +98,13 @@ func TestIsRetryable(t *testing.T) {
 		{"bare HTTP 429, no error code", fakeHTTPStatusError(429), true},
 		{"bare HTTP 503, no error code", fakeHTTPStatusError(503), true},
 		{"bare HTTP 403, no error code", fakeHTTPStatusError(403), false},
+		{"section deadline", fmt.Errorf("operation error SQS: GetQueueUrl, %w", context.DeadlineExceeded), true},
+		{"rate limiter refused up front", fmt.Errorf("operation error SQS: GetQueueUrl, %w", ErrRateLimitWait), true},
+		{"SDK retry quota exhausted", fmt.Errorf("failed to get rate limit token, %w",
+			ratelimit.QuotaExceededError{Available: 0, Requested: 5}), true},
+		{"network timeout", &net.DNSError{Err: "i/o timeout", IsTimeout: true}, true},
+		{"connection reset", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, true},
+		{"cancelled, the manager is shutting down", fmt.Errorf("wrapped: %w", context.Canceled), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

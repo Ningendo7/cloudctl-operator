@@ -72,6 +72,22 @@ func TestRunPeriodicCheck_RecoversOnLaterSuccess(t *testing.T) {
 	waitForCondition(t, func() bool { return h.Check(nil) == nil }, "CredentialHealth to recover once a later re-check succeeds")
 }
 
+// hangingSTSClient never answers, like a call on a half-open connection.
+type hangingSTSClient struct{}
+
+func (hangingSTSClient) GetCallerIdentity(ctx context.Context, _ *sts.GetCallerIdentityInput, _ ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestRunPeriodicCheck_AHungCallTimesOutAndReportsUnhealthy(t *testing.T) {
+	h := NewCredentialHealth()
+
+	go RunPeriodicCheck(t.Context(), hangingSTSClient{}, 5*time.Millisecond, h)
+
+	waitForCondition(t, func() bool { return h.Check(nil) != nil }, "a hung GetCallerIdentity to time out and flip unhealthy")
+}
+
 func TestRunPeriodicCheck_StopsOnContextCancellation(t *testing.T) {
 	fake := &fakeSTSClient{}
 	h := NewCredentialHealth()

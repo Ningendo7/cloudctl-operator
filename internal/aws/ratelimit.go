@@ -18,6 +18,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -58,6 +59,11 @@ func NewLimiter(qps float64, burst int) *rate.Limiter {
 	return rate.NewLimiter(rate.Limit(qps), burst)
 }
 
+// ErrRateLimitWait marks a call the limiter refused because its wait would
+// outlast the call's deadline. x/time/rate returns that as a plain error
+// wrapping nothing, so without this it would read as a permanent failure.
+var ErrRateLimitWait = errors.New("rate limiter wait would exceed the call's deadline")
+
 // RateLimitMiddleware returns an aws-sdk-go-v2 middleware that blocks on
 // limiter.Wait before letting a request proceed, until a token is
 // available or the call's own context ends. A nil limiter is a no-op
@@ -76,6 +82,9 @@ func RateLimitMiddleware(service string, limiter *rate.Limiter) func(*smithymidd
 				if limiter != nil {
 					waitStart := time.Now()
 					if err := limiter.Wait(ctx); err != nil {
+						if ctx.Err() == nil {
+							err = fmt.Errorf("%w: %w", ErrRateLimitWait, err)
+						}
 						return smithymiddleware.FinalizeOutput{}, smithymiddleware.Metadata{}, fmt.Errorf("rate limit wait: %w", err)
 					}
 					observability.AWSRateLimitWait.WithLabelValues(service).Add(time.Since(waitStart).Seconds())

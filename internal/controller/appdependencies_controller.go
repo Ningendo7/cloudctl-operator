@@ -29,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -118,7 +117,9 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	err := ensureDesiredState(ctx, r, cr, original)
 
 	patchCtx, endPatch := startSpan(ctx, "patch status")
+	patchCtx, cancelPatch := statusWriteContext(patchCtx)
 	statusErr := r.Status().Patch(patchCtx, cr, statusPatch(original, cr))
+	cancelPatch()
 	endPatch(statusErr)
 	if statusErr != nil {
 		log.Error(statusErr, "failed to update status")
@@ -153,7 +154,9 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 
 	done, err := finalizeDesiredState(ctx, r, cr)
 
-	if statusErr := r.Status().Patch(ctx, cr, client.MergeFrom(original)); statusErr != nil {
+	patchCtx, cancelPatch := statusWriteContext(ctx)
+	defer cancelPatch()
+	if statusErr := r.Status().Patch(patchCtx, cr, client.MergeFrom(original)); statusErr != nil {
 		log.Error(statusErr, "failed to update status during deletion")
 	}
 
@@ -211,7 +214,7 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(watches.ConsumerPodIdentityToRDSProducers(r.Client)),
 			builder.WithPredicates(predicates.PodNetworkIdentityPublishedPredicate()),
 		).
-		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrent}).
+		WithOptions(controllerOptions(maxConcurrent)).
 		Named("appdependencies").
 		Complete(r)
 }
