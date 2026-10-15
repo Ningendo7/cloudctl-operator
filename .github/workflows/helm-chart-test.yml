@@ -63,6 +63,33 @@ jobs:
         run: |
           helm template ./charts/chart
 
+      # Observability objects are opt-in: nothing that needs a CRD this
+      # cluster may not have (ServiceMonitor, PrometheusRule) renders by
+      # default, and nothing that can page someone turns on by accident.
+      - name: Observability objects are not rendered by default
+        run: |
+          default=$(helm template ./charts/chart)
+          for marker in "kind: ServiceMonitor" "kind: PrometheusRule" "grafana_dashboard"; do
+            if grep -q "$marker" <<<"$default"; then
+              echo "chart renders '$marker' by default; it must be opt-in"
+              exit 1
+            fi
+          done
+
+      - name: Each observability flag renders its object
+        run: |
+          helm template ./charts/chart --set prometheus.enabled=true | grep -q "kind: ServiceMonitor"
+          helm template ./charts/chart --set prometheus.enabled=true --set prometheus.rules.enabled=true | grep -q "kind: PrometheusRule"
+          helm template ./charts/chart --set grafana.dashboard.enabled=true | grep -q 'grafana_dashboard: "1"'
+
+      - name: Everything enabled renders valid YAML
+        run: |
+          helm template ./charts/chart \
+            --set prometheus.enabled=true \
+            --set prometheus.rules.enabled=true \
+            --set grafana.dashboard.enabled=true \
+            | python3 -c 'import sys, yaml; list(yaml.safe_load_all(sys.stdin))'
+
 # TODO: Uncomment if cert-manager is enabled
 #      - name: Install cert-manager via Helm (wait for readiness)
 #        run: |

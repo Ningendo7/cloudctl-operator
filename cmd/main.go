@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -49,6 +50,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/controller"
+	"github.com/Ningendo7/cloudctl-operator/internal/observability"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -108,6 +110,7 @@ func (b *awsBootstrap) Start(ctx context.Context) error {
 		return err
 	}
 	b.ready.Store(true)
+	observability.AWSClientsReady.Set(1)
 	setupLog.Info("AWS clients initialized")
 	return nil
 }
@@ -185,6 +188,30 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
+	// Tracing is opt-in: with no OTLP endpoint configured nothing is
+	// initialised and every span the operator starts is a free no-op.
+	restConfig := ctrl.GetConfigOrDie()
+	if observability.TracingEnabled() {
+		shutdownTracing, err := observability.InitTracing(ctx)
+		if err != nil {
+			setupLog.Error(err, "Failed to initialize OpenTelemetry tracing")
+			os.Exit(1)
+		}
+		defer func() {
+			// ctx is already cancelled by the time this runs; the flush gets
+			// its own brief window.
+			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(flushCtx); err != nil {
+				setupLog.Error(err, "Failed to flush OpenTelemetry traces at shutdown")
+			}
+		}()
+		restConfig.Wrap(observability.TraceKubernetesRequests)
+		setupLog.Info("OpenTelemetry tracing enabled")
+	} else {
+		setupLog.Info("OpenTelemetry tracing disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)")
+	}
+
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
@@ -252,7 +279,7 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -321,6 +348,13 @@ func main() {
 	}
 	if err := mgr.Add(bootstrap); err != nil {
 		setupLog.Error(err, "Failed to register AWS bootstrap")
+		os.Exit(1)
+	}
+
+	// Reads the manager's cache on each scrape; registered here rather than
+	// at controller setup so the gauges exist even before AWS is reachable.
+	if err := metrics.Registry.Register(observability.NewStateCollector(mgr.GetClient(), controller.PendingDeletionGracePeriods())); err != nil {
+		setupLog.Error(err, "Failed to register the state metrics collector")
 		os.Exit(1)
 	}
 

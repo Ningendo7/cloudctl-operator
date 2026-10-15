@@ -75,7 +75,10 @@ const defaultMaxConcurrentReconciles = 5
 // +kubebuilder:rbac:groups=vpcresources.k8s.aws,resources=securitygrouppolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
-func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+	ctx, endSpan := startReconcileSpan(ctx, req)
+	defer func() { endSpan(err) }()
+
 	var cr depsv1alpha1.AppDependencies
 	if err := r.Get(ctx, req.NamespacedName, &cr); err != nil {
 		if apierror.IsNotFound(err) {
@@ -100,7 +103,10 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 		return ctrl.Result{}, err
 	}
 
-	if err := ensureFinalizer(ctx, r.Client, cr); err != nil {
+	finalizerCtx, endFinalizer := startSpan(ctx, "ensure finalizer")
+	finalizerErr := ensureFinalizer(finalizerCtx, r.Client, cr)
+	endFinalizer(finalizerErr)
+	if err := finalizerErr; err != nil {
 		log.Error(err, "Reconcile failed", "duration", time.Since(start))
 		return ctrl.Result{}, err
 	}
@@ -111,7 +117,10 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 
 	err := ensureDesiredState(ctx, r, cr, original)
 
-	if statusErr := r.Status().Patch(ctx, cr, statusPatch(original, cr)); statusErr != nil {
+	patchCtx, endPatch := startSpan(ctx, "patch status")
+	statusErr := r.Status().Patch(patchCtx, cr, statusPatch(original, cr))
+	endPatch(statusErr)
+	if statusErr != nil {
 		log.Error(statusErr, "failed to update status")
 		if err == nil {
 			err = statusErr

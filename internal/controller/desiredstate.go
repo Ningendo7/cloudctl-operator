@@ -30,6 +30,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/observability"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/configmap"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
@@ -83,6 +84,7 @@ func eventRecorderFor(r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependen
 		return nil
 	}
 	return func(eventType, reason, message string) {
+		observability.Events.WithLabelValues(eventType, reason).Inc()
 		r.Recorder.Eventf(cr, nil, eventType, reason, reason, "%s", message)
 	}
 }
@@ -199,9 +201,14 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 	lastCheckpointed := cr.Status.DeepCopy()
 	var firstErr error
 	for _, s := range allSections(r, original) {
-		if err := s.reconcile(ctx, cr); err != nil && firstErr == nil {
+		sectionStart := time.Now()
+		sectionCtx, endSection := startSectionSpan(ctx, s.name, "reconcile")
+		err := s.reconcile(sectionCtx, cr)
+		endSection(err)
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
+		observeSectionDuration(s.name, sectionStart)
 		if !equality.Semantic.DeepEqual(cr.Status, *lastCheckpointed) {
 			if err := checkpoint(ctx, cr.Status.ManagedResources); err != nil && firstErr == nil {
 				firstErr = err
@@ -219,10 +226,12 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 	// RDS credentials Secret is the same kind of connection-info delivery
 	// (just the one piece of it that's secret, not identifiers), so it
 	// shares this same condition and timing rather than getting its own.
-	connErr := configmap.Ensure(ctx, r.Client, r.APIReader, r.AWSClients.RDS, r.AWSClients.Region, r.AWSClients.AccountID, cr)
+	connCtx, endConn := startSectionSpan(ctx, "ConnectionInfoReady", "reconcile")
+	connErr := configmap.Ensure(connCtx, r.Client, r.APIReader, r.AWSClients.RDS, r.AWSClients.Region, r.AWSClients.AccountID, cr)
 	if connErr == nil {
-		connErr = rds.EnsureCredentialsSecret(ctx, r.AWSClients.SecretsManager, r.AWSClients.RDS, r.Client, r.APIReader, cr)
+		connErr = rds.EnsureCredentialsSecret(connCtx, r.AWSClients.SecretsManager, r.AWSClients.RDS, r.Client, r.APIReader, cr)
 	}
+	endConn(connErr)
 	setSectionCondition(ctx, cr, "ConnectionInfoReady", connErr, eventRecorderFor(r, cr))
 	if firstErr == nil {
 		firstErr = connErr
@@ -244,7 +253,9 @@ func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr 
 	// original is nil here: finalize closures only ever call Cleanup, never
 	// checkpointFor, so there's nothing that would dereference it.
 	for _, s := range finalizeOrder(allSections(r, nil)) {
-		done, sectionBlocked, err := s.finalize(ctx, cr)
+		sectionCtx, endSection := startSectionSpan(ctx, s.name, "finalize")
+		done, sectionBlocked, err := s.finalize(sectionCtx, cr)
+		endSection(err)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -271,6 +282,7 @@ func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr 
 }
 
 func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, conditionType string, err error, recordEvent status.EventRecorder) {
+	observeSection(conditionType, err)
 	if err == nil {
 		status.SetSectionCondition(
 			&cr.Status.Conditions,

@@ -23,7 +23,10 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/observability"
 )
 
 func TestWaitForAWSClients_RetriesUntilSuccess(t *testing.T) {
@@ -148,4 +151,50 @@ func TestAWSBootstrap_RunsOnStandbyReplicasToo(t *testing.T) {
 	if (&awsBootstrap{}).NeedLeaderElection() {
 		t.Error("expected NeedLeaderElection() = false so standby replicas become ready")
 	}
+}
+
+func TestAWSBootstrap_ReportsClientsReadyMetric(t *testing.T) {
+	observability.AWSClientsReady.Set(0)
+	b := &awsBootstrap{
+		newClients: func(context.Context) (*cloudctlaws.Clients, error) { return &cloudctlaws.Clients{}, nil },
+		interval:   time.Millisecond,
+		onReady:    func(context.Context, *cloudctlaws.Clients) error { return nil },
+	}
+
+	if got := clientsReadyGauge(t); got != 0 {
+		t.Fatalf("expected the gauge to read 0 before the clients are up, got %v", got)
+	}
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if got := clientsReadyGauge(t); got != 1 {
+		t.Errorf("expected the gauge to read 1 once the clients are up, got %v", got)
+	}
+}
+
+// Setup that fails after the clients came up is not ready: the gauge has to
+// agree with the readiness probe.
+func TestAWSBootstrap_SetupFailureLeavesClientsReadyMetricAtZero(t *testing.T) {
+	observability.AWSClientsReady.Set(0)
+	b := &awsBootstrap{
+		newClients: func(context.Context) (*cloudctlaws.Clients, error) { return &cloudctlaws.Clients{}, nil },
+		interval:   time.Millisecond,
+		onReady:    func(context.Context, *cloudctlaws.Clients) error { return errors.New("setup failed") },
+	}
+
+	if err := b.Start(context.Background()); err == nil {
+		t.Fatal("expected Start to return the setup error")
+	}
+	if got := clientsReadyGauge(t); got != 0 {
+		t.Errorf("expected the gauge to stay 0 when setup failed, got %v", got)
+	}
+}
+
+func clientsReadyGauge(t *testing.T) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := observability.AWSClientsReady.Write(&m); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	return m.GetGauge().GetValue()
 }

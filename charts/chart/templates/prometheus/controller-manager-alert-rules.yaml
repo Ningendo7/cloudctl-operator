@@ -1,0 +1,108 @@
+{{- if .Values.prometheus.rules.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "cloudctl-operator.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- with .Values.prometheus.rules.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  name: {{ include "cloudctl-operator.resourceName" (dict "suffix" "controller-manager-alert-rules" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  groups:
+    # Both replicas export the state gauges, so they are aggregated with max;
+    # only the leader makes AWS calls, so counters are summed.
+    - name: cloudctl-operator
+      rules:
+        - alert: CloudctlOperatorAbsent
+          expr: absent(cloudctl_aws_clients_ready)
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: No cloudctl-operator metrics are being scraped
+            description: The operator is down, or nothing scrapes its /metrics endpoint.
+
+        - alert: CloudctlAWSClientsNotReady
+          expr: max(cloudctl_aws_clients_ready) == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: cloudctl-operator is running but cannot reach AWS
+            description: No replica has initialised its AWS clients for 10 minutes. Check credentials, IRSA and network access to AWS.
+
+        - alert: CloudctlRDSInstanceNeedsManualDeletion
+          expr: max(cloudctl_pending_deletion_resources{type="rds",stuck="true"}) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: An RDS instance removed from spec is waiting for a human
+            description: '{{`{{ $value }}`}} RDS instance(s) were removed from spec with deletionPolicy Delete. The operator never deletes a database; a final snapshot has been taken. Billing continues until someone deletes them.'
+
+        - alert: CloudctlDataResourceMissing
+          expr: sum by (reason) (increase(cloudctl_events_total{reason=~"InstanceMissing|KeyMissing"}[30m])) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: A database or KMS key the operator manages no longer exists in AWS
+            description: '{{`{{ $labels.reason }}`}}: it was deleted outside the operator and will not be recreated. See the AppDependencies events and conditions for which one.'
+
+        - alert: CloudctlAppNotReady
+          expr: max by (namespace, name) (cloudctl_app_ready) == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'AppDependencies {{`{{ $labels.namespace }}`}}/{{`{{ $labels.name }}`}} has not been Ready for 30 minutes'
+            description: Check its status conditions; cloudctl_app_section_ready shows which section.
+
+        - alert: CloudctlAWSPermissionDenied
+          expr: sum by (service) (increase(cloudctl_aws_requests_total{result="permission_denied"}[15m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'AWS denies the operator calls to {{`{{ $labels.service }}`}}'
+            description: The operator's IAM role is missing permissions. See docs/threat-model.md for the actions it needs.
+
+        - alert: CloudctlAWSThrottling
+          expr: |
+            sum by (service) (rate(cloudctl_aws_requests_total{result="throttled"}[10m]))
+              / sum by (service) (rate(cloudctl_aws_requests_total[10m])) > 0.05
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'More than 5% of AWS calls to {{`{{ $labels.service }}`}} are throttled'
+            description: Lower that service's AWS_<SERVICE>_RATE_LIMIT_QPS, or raise the account's quota.
+
+        - alert: CloudctlResourceStuckPendingDeletion
+          expr: max by (type) (cloudctl_pending_deletion_resources{type!="rds",stuck="true"}) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: '{{`{{ $labels.type }}`}} resources are stuck pending deletion'
+            description: They were removed from spec but are not empty after the grace period. Drain them, or set force.
+
+        - alert: CloudctlOutOfBandDeletion
+          expr: sum by (reason) (increase(cloudctl_events_total{reason=~"QueueMissing|TopicMissing|BucketMissing"}[1h])) > 0
+          labels:
+            severity: info
+          annotations:
+            summary: Someone deleted a managed resource outside the operator
+            description: '{{`{{ $labels.reason }}`}}: the operator recreated it, empty. Find out who deleted it.'
+
+        - alert: CloudctlWorkqueueBacklog
+          expr: max(workqueue_depth{name="appdependencies"}) > 50
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: The operator's reconcile queue is backing up
+            description: More than 50 AppDependencies have been waiting for 15 minutes. Check AWS throttling and reconcile durations.
+{{- end }}

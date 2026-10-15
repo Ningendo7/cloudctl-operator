@@ -169,6 +169,13 @@ certManager:
 ##
 prometheus:
   enabled: false
+  ## PrometheusRule with the operator's alerts. Separate from enabled:
+  ## scraping is harmless, alerts that can page someone are a decision.
+  rules:
+    enabled: false
+    # Extra labels on the PrometheusRule, e.g. release: <kube-prometheus-stack
+    # release name> so its ruleSelector picks the rules up.
+    labels: {}
 
 ## Network policies for controlling traffic flow.
 ## Enable to restrict ingress to the controller manager.
@@ -176,3 +183,10 @@ prometheus:
 networkPolicy:
   enabled: false
 
+
+## Grafana dashboard, as a ConfigMap labeled grafana_dashboard: "1" for the
+## Grafana sidecar to discover.
+##
+grafana:
+  dashboard:
+    enabled: false

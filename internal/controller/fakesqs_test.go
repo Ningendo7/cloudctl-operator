@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/smithy-go"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // fakeQueue and fakeSQSClient are a minimal in-memory stand-in for the real
@@ -48,13 +49,18 @@ type fakeSQSClient struct {
 
 	createQueueErr error
 	getQueueUrlErr error
+
+	// createQueueSpan is the span context CreateQueue was called under, so
+	// a test can tell the section's span reached the AWS call.
+	createQueueSpan trace.SpanContext
 }
 
 func newFakeSQSClient() *fakeSQSClient {
 	return &fakeSQSClient{queues: map[string]*fakeQueue{}}
 }
 
-func (f *fakeSQSClient) CreateQueue(_ context.Context, in *sqs.CreateQueueInput, _ ...func(*sqs.Options)) (*sqs.CreateQueueOutput, error) {
+func (f *fakeSQSClient) CreateQueue(ctx context.Context, in *sqs.CreateQueueInput, _ ...func(*sqs.Options)) (*sqs.CreateQueueOutput, error) {
+	f.createQueueSpan = trace.SpanContextFromContext(ctx)
 	if f.createQueueErr != nil {
 		return nil, f.createQueueErr
 	}

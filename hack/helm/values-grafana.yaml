@@ -1,0 +1,7 @@
+
+## Grafana dashboard, as a ConfigMap labeled grafana_dashboard: "1" for the
+## Grafana sidecar to discover.
+##
+grafana:
+  dashboard:
+    enabled: false

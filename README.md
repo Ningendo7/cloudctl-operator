@@ -197,6 +197,9 @@ type, and a manifests/chart drift check. See
 - **[docs/threat-model.md](docs/threat-model.md)** — what a multi-tenant
   fleet of `AppDependencies` CRs can and can't cause this operator to do,
   given it runs with one set of broad AWS credentials.
+- **[docs/observability.md](docs/observability.md)** — the operator's
+  Prometheus metrics, the optional alerts and Grafana dashboard, and what
+  the platform has to provide to collect and keep them.
 
 Resources default to `deletionPolicy: Retain` — removing one from spec, or
 deleting the CR, leaves the AWS resource in place rather than risking data
@@ -220,7 +223,8 @@ that testing against it risked false confidence rather than real
 coverage (confirmed directly for alarms, not just assumed from KMS's own
 prior history).
 
-Still ahead: Prometheus/OpenTelemetry instrumentation.
+Prometheus metrics, alerts, a Grafana dashboard and opt-in OpenTelemetry
+tracing are in place; see [docs/observability.md](docs/observability.md).
 
 ## License
 
