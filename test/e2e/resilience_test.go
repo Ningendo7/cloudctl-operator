@@ -441,6 +441,8 @@ spec:
   sqs:
     resources:
       - name: orders
+        encryption:
+          enabled: true
 %s`, resilienceNamespace, sharedWith)
 		}
 		consumerKey := connectionKey("sqs", resilienceNamespace, "share-producer", "orders", "URL")
@@ -489,13 +491,19 @@ spec:
 
 		producerCR, err := getCR(resilienceNamespace, "share-producer")
 		Expect(err).NotTo(HaveOccurred())
-		queueARN := ""
+		queueARN, keyARN := "", ""
 		for _, r := range producerCR.Status.ManagedResources {
-			if r.Type == "sqs" && r.Name == "orders" {
-				queueARN = r.ARN
+			switch r.Type {
+			case "sqs":
+				if r.Name == "orders" {
+					queueARN = r.ARN
+				}
+			case "kms":
+				keyARN = r.ARN
 			}
 		}
 		Expect(queueARN).NotTo(BeEmpty())
+		Expect(keyARN).NotTo(BeEmpty(), "the shared queue is encrypted with its own key")
 		consumerCR, err := getCR(consumerNS, "share-consumer")
 		Expect(err).NotTo(HaveOccurred())
 		roleName := consumerCR.Status.IAMRoleARN[strings.LastIndex(consumerCR.Status.IAMRoleARN, "/")+1:]
@@ -504,6 +512,7 @@ spec:
 		By("the grant is real in AWS, not just in status")
 		policy := runAWSCLIPod(nextAWSPod("share-policy"), "iam", "get-role-policy", "--role-name", roleName, "--policy-name", "cloudctl-derived-policy")
 		Expect(policy).To(ContainSubstring(queueARN))
+		Expect(policy).To(ContainSubstring(keyARN), "a consumer of an encrypted queue needs its key too")
 
 		By("the owner revokes it")
 		_, err = kubectlApplyStdin(producer(false))

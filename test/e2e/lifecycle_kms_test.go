@@ -64,5 +64,27 @@ func kmsLifecycleSpec() {
 		alias := "alias/" + cloudctlaws.ResourceName(namespace, "e2e-orders", "kms", "app-key", 256-len("alias/"))
 		logs := runAWSCLIPod("verify-key", "kms", "describe-key", "--key-id", alias)
 		Expect(logs).To(ContainSubstring(keyArn), "expected the real key's ARN to match the one recorded in the ownership ledger")
+
+		By("verifying the key policy lets SNS and CloudWatch use the key")
+		keyPolicy := runAWSCLIPod(nextAWSPod("key-policy"), "kms", "get-key-policy", "--key-id", keyArn, "--policy-name", "default")
+		Expect(keyPolicy).To(And(ContainSubstring("cloudctl-sns-delivery"), ContainSubstring("cloudctl-cloudwatch-alarms")))
+
+		By("disabling the key outside the operator")
+		runAWSCLIPod(nextAWSPod("disable-key"), "kms", "disable-key", "--key-id", keyArn)
+		forceReconcile(namespace, "e2e-orders")
+		Eventually(func(g Gomega) {
+			cr, err := getCR(namespace, "e2e-orders")
+			g.Expect(err).NotTo(HaveOccurred())
+			status, reason, _ := cr.condition("KMSReady")
+			g.Expect(status).To(Equal("False"), "nothing encrypted with a disabled key works, so KMS must not stay Ready")
+			g.Expect(reason).To(Equal("KeyDisabled"))
+		}, 2*time.Minute, 3*time.Second).Should(Succeed())
+		Expect(runAWSCLIPod(nextAWSPod("disabled-key-state"), "kms", "describe-key", "--key-id", keyArn)).
+			To(ContainSubstring(`"Disabled"`), "the operator must not re-enable a key someone disabled")
+
+		By("re-enabling it by hand, which clears the condition")
+		runAWSCLIPod(nextAWSPod("enable-key"), "kms", "enable-key", "--key-id", keyArn)
+		forceReconcile(namespace, "e2e-orders")
+		Eventually(verifyReady, 2*time.Minute, 2*time.Second).Should(Succeed())
 	})
 }

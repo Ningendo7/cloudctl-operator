@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -78,9 +79,8 @@ func resolveTopicARN(ctx context.Context, k8sClient client.Client, namespace, cr
 // An entry that doesn't resolve yet (producer CR not created, topic not
 // reconciled there yet, sharedWith not granted) is skipped silently, the
 // same forward-reference tolerance as collectGrants - the next reconcile
-// picks it up once it resolves. An already-ledger-tracked entry is not
-// re-subscribed, but the queue policy grant is reasserted every
-// reconcile regardless, correcting any out-of-band drift on it cheaply.
+// picks it up once it resolves. A tracked subscription is re-checked once
+// per trust window; the queue policy grant is reasserted every reconcile.
 func EnsureSubscriptions(
 	ctx context.Context,
 	snsClient cloudctlaws.SNSClient,
@@ -99,14 +99,16 @@ func EnsureSubscriptions(
 		}
 
 		ledgerName := subscriptionLedgerName(queueName, ref)
-		if !status.HasManagedResource(ledger, subscriptionResourceType, ledgerName) {
-			protocol := "sqs"
-			endpoint := queueARN
-			topicARNCopy := topicARN
+		// Subscribe returns the existing ARN for an identical subscription,
+		// so calling it once per trust window also brings back one that was
+		// removed by hand or deleted along with a recreated topic.
+		entry, found := status.FindManagedResource(ledger, subscriptionResourceType, ledgerName)
+		if !found || status.NeedsRevalidation(entry) {
 			out, err := snsClient.Subscribe(ctx, &sns.SubscribeInput{
-				TopicArn: &topicARNCopy,
-				Protocol: &protocol,
-				Endpoint: &endpoint,
+				TopicArn:              aws.String(topicARN),
+				Protocol:              aws.String("sqs"),
+				Endpoint:              aws.String(queueARN),
+				ReturnSubscriptionArn: true,
 			})
 			if err != nil {
 				if firstErr == nil {
@@ -114,20 +116,29 @@ func EnsureSubscriptions(
 				}
 				continue
 			}
+			now := metav1.Now()
+			createdAt := now
+			if found {
+				createdAt = entry.CreatedAt
+			}
 			status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{
 				Type:           subscriptionResourceType,
 				Name:           ledgerName,
 				ARN:            *out.SubscriptionArn,
 				DeletionPolicy: depsv1alpha1.DeletionPolicyDelete,
 				State:          depsv1alpha1.ManagedResourceStateVerified,
-				CreatedAt:      metav1.Now(),
+				CreatedAt:      createdAt,
+				LastVerifiedAt: &now,
 			})
-			if recordEvent != nil {
-				recordEvent(
-					"Normal",
-					"SubscriptionCreated",
-					fmt.Sprintf("Subscribed queue %s to %s/%s/%s", queueName, ref.Namespace, ref.Name, ref.ResourceName),
-				)
+			switch {
+			case recordEvent == nil:
+			case !found:
+				recordEvent("Normal", "SubscriptionCreated",
+					fmt.Sprintf("Subscribed queue %s to %s/%s/%s", queueName, ref.Namespace, ref.Name, ref.ResourceName))
+			case entry.ARN != *out.SubscriptionArn:
+				recordEvent("Warning", "SubscriptionRepaired",
+					fmt.Sprintf("Subscription of queue %s to %s/%s/%s had disappeared and was recreated; messages published meanwhile were not delivered",
+						queueName, ref.Namespace, ref.Name, ref.ResourceName))
 			}
 		}
 

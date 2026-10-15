@@ -107,11 +107,41 @@ func (f *FakeKMSClient) CreateAlias(_ context.Context, in *kms.CreateAliasInput,
 	return &kms.CreateAliasOutput{}, nil
 }
 
+func (f *FakeKMSClient) EnableKey(_ context.Context, in *kms.EnableKeyInput, _ ...func(*kms.Options)) (*kms.EnableKeyOutput, error) {
+	arn := f.resolve(*in.KeyId)
+	if arn == "" {
+		return nil, &types.NotFoundException{}
+	}
+	f.keys[arn].keyState = types.KeyStateEnabled
+	return &kms.EnableKeyOutput{}, nil
+}
+
 func (f *FakeKMSClient) EnableKeyRotation(_ context.Context, in *kms.EnableKeyRotationInput, _ ...func(*kms.Options)) (*kms.EnableKeyRotationOutput, error) {
 	if f.resolve(*in.KeyId) == "" {
 		return nil, &types.NotFoundException{}
 	}
 	return &kms.EnableKeyRotationOutput{}, nil
+}
+
+func (f *FakeKMSClient) GetKeyRotationStatus(_ context.Context, in *kms.GetKeyRotationStatusInput, _ ...func(*kms.Options)) (*kms.GetKeyRotationStatusOutput, error) {
+	if f.resolve(*in.KeyId) == "" {
+		return nil, &types.NotFoundException{}
+	}
+	return &kms.GetKeyRotationStatusOutput{KeyRotationEnabled: true}, nil
+}
+
+func (f *FakeKMSClient) GetKeyPolicy(_ context.Context, in *kms.GetKeyPolicyInput, _ ...func(*kms.Options)) (*kms.GetKeyPolicyOutput, error) {
+	if f.resolve(*in.KeyId) == "" {
+		return nil, &types.NotFoundException{}
+	}
+	return &kms.GetKeyPolicyOutput{Policy: new(string)}, nil
+}
+
+func (f *FakeKMSClient) PutKeyPolicy(_ context.Context, in *kms.PutKeyPolicyInput, _ ...func(*kms.Options)) (*kms.PutKeyPolicyOutput, error) {
+	if f.resolve(*in.KeyId) == "" {
+		return nil, &types.NotFoundException{}
+	}
+	return &kms.PutKeyPolicyOutput{}, nil
 }
 
 func (f *FakeKMSClient) ListResourceTags(_ context.Context, in *kms.ListResourceTagsInput, _ ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
@@ -160,7 +190,7 @@ func (f *FakeKMSClient) CancelKeyDeletion(_ context.Context, in *kms.CancelKeyDe
 	if arn == "" {
 		return nil, &types.NotFoundException{}
 	}
-	f.keys[arn].keyState = types.KeyStateEnabled
+	f.keys[arn].keyState = types.KeyStateDisabled // as in AWS: cancelling leaves the key disabled
 	return &kms.CancelKeyDeletionOutput{}, nil
 }
 

@@ -34,6 +34,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -41,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -151,6 +154,71 @@ func TestLive_EnsureSubscriptions_RealSubscribeAndQueuePolicyGrant(t *testing.T)
 	if !strings.Contains(policy, f.topicARN) {
 		t.Errorf("expected the queue policy to scope the grant to topic ARN %q, got: %s", f.topicARN, policy)
 	}
+}
+
+// SNS isn't an IAM identity in the account, so delivery into a queue
+// encrypted with an operator-managed key works only if the key's own policy
+// lets SNS use it. Only real AWS enforces key policies.
+func TestLive_EnsureSubscriptions_DeliversIntoAQueueEncryptedWithItsDedicatedKey(t *testing.T) {
+	ctx := context.Background()
+	f := setupLiveSubscriptionFixture(t)
+	kmsClient := kms.NewFromConfig(skipUnlessLiveAWSCredentials(t))
+	namespace, crName := "live", liveUniqueSuffix(t)
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+	}}
+
+	ledger, err := Ensure(ctx, f.sqsClient, kmsClient, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
+	t.Cleanup(func() {
+		deleteQueueIfExists(t, f.sqsClient, namespace, crName, "orders")
+		if keyEntry, ok := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "orders")); ok {
+			windowDays := int32(7)
+			if _, err := kmsClient.ScheduleKeyDeletion(context.Background(), &kms.ScheduleKeyDeletionInput{KeyId: &keyEntry.ARN, PendingWindowInDays: &windowDays}); err != nil {
+				t.Logf("key cleanup warning: %v", err)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
+	urlOut, err := f.sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("real GetQueueUrl() error = %v", err)
+	}
+	attrsOut, err := f.sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl: urlOut.QueueUrl, AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		t.Fatalf("real GetQueueAttributes() error = %v", err)
+	}
+	queueARN := attrsOut.Attributes[string(types.QueueAttributeNameQueueArn)]
+
+	if _, err := EnsureSubscriptions(ctx, f.snsClient, f.sqsClient, f.k8sClient,
+		"default", "checkout-service", "orders", *urlOut.QueueUrl, queueARN,
+		[]depsv1alpha1.ConsumeRef{f.ref}, nil, nil); err != nil {
+		t.Fatalf("EnsureSubscriptions() error = %v", err)
+	}
+
+	const message = "cloudctl-live-encrypted-delivery"
+	if _, err := f.snsClient.Publish(ctx, &sns.PublishInput{TopicArn: &f.topicARN, Message: aws.String(message)}); err != nil {
+		t.Fatalf("real Publish() error = %v", err)
+	}
+	deadline := time.Now().Add(time.Minute)
+	for time.Now().Before(deadline) {
+		out, err := f.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+			QueueUrl: urlOut.QueueUrl, WaitTimeSeconds: 10, MaxNumberOfMessages: 10,
+		})
+		if err != nil {
+			t.Fatalf("real ReceiveMessage() error = %v", err)
+		}
+		for _, m := range out.Messages {
+			if strings.Contains(aws.ToString(m.Body), message) {
+				return
+			}
+		}
+	}
+	t.Fatal("the message published to the topic never reached the encrypted queue: SNS could not use its key")
 }
 
 func TestLive_CleanupSubscriptions_RealUnsubscribeAndPolicyRevoke(t *testing.T) {

@@ -18,6 +18,7 @@ package kms
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -566,7 +567,7 @@ func TestEnsure_CancelingScheduledDeletion_EmitsEvent(t *testing.T) {
 	client := newFakeKMS()
 	arn := "arn:aws:kms:us-east-1:123456789012:key/existing-id"
 	client.keys[arn] = &fakeKey{
-		arn: arn, keyID: "existing-id", keyState: types.KeyStatePendingDeletion,
+		arn: arn, keyID: "existing-id", keyState: types.KeyStatePendingDeletion, rotationEnabled: true,
 		tags: map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
 	}
 	ledger := []depsv1alpha1.ManagedResource{
@@ -625,5 +626,180 @@ func TestEnsure_DeletionScheduledOutOfBandWithinTrustWindow_IsCancelled(t *testi
 	}
 	if client.keys[arn].keyState != types.KeyStateEnabled {
 		t.Errorf("expected a deletion scheduled by someone else to be cancelled while the key is still declared, got %v", client.keys[arn].keyState)
+	}
+}
+
+func trustedKeyLedger(arn string) []depsv1alpha1.ManagedResource {
+	recentlyVerified := metav1.Now()
+	return []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
+			CreatedAt: metav1.Now(), LastVerifiedAt: &recentlyVerified, State: depsv1alpha1.ManagedResourceStateVerified},
+	}
+}
+
+// Every resource encrypted under a key that can't be used fails for the app,
+// so the key's own section must not stay Ready. Someone may have disabled it
+// on purpose, so it is reported, never re-enabled.
+func TestEnsure_KeyThatCannotBeUsedIsReportedNotReEnabled(t *testing.T) {
+	cases := []struct {
+		state      types.KeyState
+		wantReason string
+	}{
+		{types.KeyStateDisabled, "KeyDisabled"},
+		{types.KeyStateUnavailable, "KeyUnavailable"},
+		{types.KeyStatePendingImport, "KeyUnavailable"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.state), func(t *testing.T) {
+			client := newFakeKMS()
+			arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+			client.keys[arn] = ownedFakeKey(arn, "id-1")
+			client.keys[arn].keyState = tc.state
+			spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+			recordEvent, events := newEventCollector()
+
+			_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, trustedKeyLedger(arn), nil, recordEvent)
+			var reconcileErr *cloudctlaws.ReconcileError
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != tc.wantReason || reconcileErr.Retryable {
+				t.Fatalf("expected a non-retryable %s error, got %v", tc.wantReason, err)
+			}
+			if client.keys[arn].keyState != tc.state {
+				t.Errorf("key state changed to %v, want it left at %v", client.keys[arn].keyState, tc.state)
+			}
+			if len(*events) != 1 || (*events)[0].eventType != "Warning" || (*events)[0].reason != tc.wantReason {
+				t.Errorf("expected one %s warning, got %+v", tc.wantReason, *events)
+			}
+		})
+	}
+}
+
+func TestEnsure_RotationTurnedOffIsReEnabledAtRevalidation(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	client.keys[arn].rotationEnabled = false
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	ledger := trustedKeyLedger(arn)
+	ledger[0].LastVerifiedAt = &stale
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+	recordEvent, events := newEventCollector()
+
+	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, nil, recordEvent); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if !client.keys[arn].rotationEnabled {
+		t.Error("expected rotation to be re-enabled")
+	}
+	if len(*events) != 1 || (*events)[0].reason != "KeyRotationReenabled" {
+		t.Errorf("expected one KeyRotationReenabled event, got %+v", *events)
+	}
+}
+
+func TestEnsure_AdoptedKeyGetsRotation(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/foreign-id"
+	client.keys[arn] = &fakeKey{arn: arn, keyID: "foreign-id", keyState: types.KeyStateEnabled, tags: map[string]string{}}
+	client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] = arn
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary", Adopt: true}}}
+
+	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if !client.keys[arn].rotationEnabled {
+		t.Error("expected an adopted key to get the same rotation as a created one")
+	}
+}
+
+type policyStatementView struct {
+	Sid       string
+	Principal map[string]any
+	Condition map[string]map[string]string
+}
+
+func keyPolicyStatements(t *testing.T, policy string) map[string]policyStatementView {
+	t.Helper()
+	var doc struct{ Statement []policyStatementView }
+	if err := json.Unmarshal([]byte(policy), &doc); err != nil {
+		t.Fatalf("key policy is not valid JSON: %v\n%s", err, policy)
+	}
+	bySid := map[string]policyStatementView{}
+	for _, st := range doc.Statement {
+		bySid[st.Sid] = st
+	}
+	return bySid
+}
+
+// AWS services aren't IAM identities in the account, so only the key
+// policy can let SNS deliver into an encrypted queue, or CloudWatch publish
+// to an encrypted topic. Without it both fail silently.
+func TestEnsure_CreatedKeyPolicyLetsSNSAndCloudWatchUseTheKey(t *testing.T) {
+	client := newFakeKMS()
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+
+	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, resourceType, "primary")
+	statements := keyPolicyStatements(t, client.keys[entry.ARN].policy)
+
+	for sid, service := range map[string]string{"cloudctl-sns-delivery": "sns.amazonaws.com", "cloudctl-cloudwatch-alarms": "cloudwatch.amazonaws.com"} {
+		st, ok := statements[sid]
+		if !ok {
+			t.Errorf("expected statement %s, got %v", sid, statements)
+			continue
+		}
+		if st.Principal["Service"] != service {
+			t.Errorf("%s principal = %v, want %s", sid, st.Principal, service)
+		}
+		if st.Condition["StringEquals"]["aws:SourceAccount"] != "123456789012" {
+			t.Errorf("%s should be scoped to the key's own account, got %v", sid, st.Condition)
+		}
+	}
+	rootKept := false
+	for _, st := range statements {
+		if st.Principal["AWS"] == "arn:aws:iam::123456789012:root" {
+			rootKept = true
+		}
+	}
+	if !rootKept {
+		t.Error("expected the account root statement, without which IAM policies grant nothing and PutKeyPolicy is refused")
+	}
+}
+
+// PutKeyPolicy replaces the whole policy, so statements someone else added
+// must survive the operator adding its own.
+func TestEnsure_KeyPolicyKeepsOtherStatementsAndIsNotRewrittenWhenCurrent(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	client.keys[arn].rotationEnabled = true
+	client.keys[arn].policy = `{"Version":"2012-10-17","Statement":{"Sid":"team-admins","Effect":"Allow",` +
+		`"Principal":{"AWS":"arn:aws:iam::123456789012:role/admins"},"Action":"kms:*","Resource":"*"}}`
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	ledger := trustedKeyLedger(arn)
+	ledger[0].LastVerifiedAt = &stale
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+
+	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	statements := keyPolicyStatements(t, client.keys[arn].policy)
+	for _, sid := range []string{"team-admins", "cloudctl-sns-delivery", "cloudctl-cloudwatch-alarms"} {
+		if _, ok := statements[sid]; !ok {
+			t.Errorf("expected statement %s after the merge, got %v", sid, statements)
+		}
+	}
+	if client.putKeyPolicyCalls != 1 {
+		t.Fatalf("PutKeyPolicy calls = %d, want 1", client.putKeyPolicyCalls)
+	}
+
+	ledger[0].LastVerifiedAt = &stale
+	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if client.putKeyPolicyCalls != 1 {
+		t.Errorf("PutKeyPolicy calls = %d, want no rewrite of a policy that is already current", client.putKeyPolicyCalls)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/aws/smithy-go"
@@ -47,6 +48,7 @@ type fakeKey struct {
 	tags            map[string]string
 	keyState        types.KeyState
 	rotationEnabled bool
+	policy          string
 }
 
 type fakeKMS struct {
@@ -62,6 +64,7 @@ type fakeKMS struct {
 	scheduleKeyDeletionErr error
 	cancelKeyDeletionErr   error
 	describeKeyErr         error
+	putKeyPolicyErr        error
 
 	nextKeyNum int
 
@@ -70,6 +73,7 @@ type fakeKMS struct {
 	// actually skips re-verification rather than just trusting it does.
 	describeKeyCalls      map[string]int
 	listResourceTagsCalls map[string]int
+	putKeyPolicyCalls     int
 }
 
 func newFakeKMS() *fakeKMS {
@@ -123,6 +127,7 @@ func (f *fakeKMS) CreateKey(_ context.Context, in *kms.CreateKeyInput, _ ...func
 		keyID:    id,
 		tags:     tagsToMap(in.Tags),
 		keyState: types.KeyStateEnabled,
+		policy:   aws.ToString(in.Policy),
 	}
 	keyID, keyArn := id, arn
 	return &kms.CreateKeyOutput{KeyMetadata: &types.KeyMetadata{KeyId: &keyID, Arn: &keyArn, KeyState: types.KeyStateEnabled}}, nil
@@ -146,6 +151,15 @@ func (f *fakeKMS) CreateAlias(_ context.Context, in *kms.CreateAliasInput, _ ...
 	return &kms.CreateAliasOutput{}, nil
 }
 
+func (f *fakeKMS) EnableKey(_ context.Context, in *kms.EnableKeyInput, _ ...func(*kms.Options)) (*kms.EnableKeyOutput, error) {
+	arn := f.resolve(*in.KeyId)
+	if arn == "" {
+		return nil, &types.NotFoundException{}
+	}
+	f.keys[arn].keyState = types.KeyStateEnabled
+	return &kms.EnableKeyOutput{}, nil
+}
+
 func (f *fakeKMS) EnableKeyRotation(_ context.Context, in *kms.EnableKeyRotationInput, _ ...func(*kms.Options)) (*kms.EnableKeyRotationOutput, error) {
 	if f.enableKeyRotationErr != nil {
 		return nil, f.enableKeyRotationErr
@@ -156,6 +170,36 @@ func (f *fakeKMS) EnableKeyRotation(_ context.Context, in *kms.EnableKeyRotation
 	}
 	f.keys[arn].rotationEnabled = true
 	return &kms.EnableKeyRotationOutput{}, nil
+}
+
+func (f *fakeKMS) GetKeyRotationStatus(_ context.Context, in *kms.GetKeyRotationStatusInput, _ ...func(*kms.Options)) (*kms.GetKeyRotationStatusOutput, error) {
+	arn := f.resolve(*in.KeyId)
+	if arn == "" {
+		return nil, &types.NotFoundException{}
+	}
+	return &kms.GetKeyRotationStatusOutput{KeyRotationEnabled: f.keys[arn].rotationEnabled}, nil
+}
+
+func (f *fakeKMS) GetKeyPolicy(_ context.Context, in *kms.GetKeyPolicyInput, _ ...func(*kms.Options)) (*kms.GetKeyPolicyOutput, error) {
+	arn := f.resolve(*in.KeyId)
+	if arn == "" {
+		return nil, &types.NotFoundException{}
+	}
+	policy := f.keys[arn].policy
+	return &kms.GetKeyPolicyOutput{Policy: &policy}, nil
+}
+
+func (f *fakeKMS) PutKeyPolicy(_ context.Context, in *kms.PutKeyPolicyInput, _ ...func(*kms.Options)) (*kms.PutKeyPolicyOutput, error) {
+	if f.putKeyPolicyErr != nil {
+		return nil, f.putKeyPolicyErr
+	}
+	arn := f.resolve(*in.KeyId)
+	if arn == "" {
+		return nil, &types.NotFoundException{}
+	}
+	f.keys[arn].policy = aws.ToString(in.Policy)
+	f.putKeyPolicyCalls++
+	return &kms.PutKeyPolicyOutput{}, nil
 }
 
 func (f *fakeKMS) ListResourceTags(_ context.Context, in *kms.ListResourceTagsInput, _ ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
@@ -220,6 +264,6 @@ func (f *fakeKMS) CancelKeyDeletion(_ context.Context, in *kms.CancelKeyDeletion
 	if arn == "" {
 		return nil, &types.NotFoundException{}
 	}
-	f.keys[arn].keyState = types.KeyStateEnabled
+	f.keys[arn].keyState = types.KeyStateDisabled // as in AWS: cancelling leaves the key disabled
 	return &kms.CancelKeyDeletionOutput{}, nil
 }

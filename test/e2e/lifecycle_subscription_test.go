@@ -19,7 +19,9 @@ limitations under the License.
 package e2e
 
 import (
+	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -88,6 +90,36 @@ func subscriptionLifecycleSpec() {
 		deliveryLogs := runAWSCLIPod("verify-delivery", "sqs", "receive-message",
 			"--queue-url", queueURL, "--wait-time-seconds", "15", "--max-number-of-messages", "1")
 		Expect(deliveryLogs).To(ContainSubstring(testMessage), "expected the published message to actually be delivered into the queue")
+
+		By("unsubscribing by hand, behind the operator's back")
+		subscriptionARN := func() string {
+			out, _ := tryKubectl("get", "appdependencies", "e2e-orders", "-n", namespace,
+				"-o", `jsonpath={.status.managedResources[?(@.type=="sqssubscription")].arn}`)
+			return strings.TrimSpace(out)
+		}
+		oldARN := subscriptionARN()
+		Expect(oldARN).NotTo(BeEmpty())
+		runAWSCLIPod(nextAWSPod("unsubscribe"), "sns", "unsubscribe", "--subscription-arn", oldARN)
+
+		By("letting its trust window pass, then the operator subscribes it again")
+		cr, err := getCR(namespace, "e2e-orders")
+		Expect(err).NotTo(HaveOccurred())
+		for i, r := range cr.Status.ManagedResources {
+			if r.Type == "sqssubscription" {
+				mustKubectl("patch", "appdependencies", "e2e-orders", "-n", namespace, "--subresource=status", "--type=json",
+					"-p", fmt.Sprintf(`[{"op":"add","path":"/status/managedResources/%d/lastVerifiedAt","value":"2000-01-01T00:00:00Z"}]`, i))
+			}
+		}
+		forceReconcile(namespace, "e2e-orders")
+		Eventually(subscriptionARN, 2*time.Minute, 3*time.Second).Should(And(Not(BeEmpty()), Not(Equal(oldARN))))
+
+		const repairedMessage = "cloudctl-e2e-after-repair"
+		runAWSCLIPod(nextAWSPod("publish-after-repair"), "sns", "publish", "--topic-arn", topicARN, "--message", repairedMessage)
+		// The first test message was never deleted, so it can come back too.
+		Eventually(func() string {
+			return runAWSCLIPod(nextAWSPod("verify-delivery-after-repair"), "sqs", "receive-message",
+				"--queue-url", queueURL, "--wait-time-seconds", "10", "--max-number-of-messages", "10")
+		}, 2*time.Minute, time.Second).Should(ContainSubstring(repairedMessage), "messages must flow again once the subscription is repaired")
 
 		By("reverting the sample CR to drop subscribesTo/sharedWith")
 		cmd = exec.Command("kubectl", "apply", "-f", "test/e2e/testdata/sqs-sns-sample.yaml", "-n", namespace)
