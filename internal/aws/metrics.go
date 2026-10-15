@@ -9,7 +9,9 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	smithy "github.com/aws/smithy-go"
 	smithymiddleware "github.com/aws/smithy-go/middleware"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"github.com/aws/smithy-go/tracing"
+	"github.com/aws/smithy-go/tracing/smithyoteltracing"
+	"go.opentelemetry.io/otel"
 	"golang.org/x/time/rate"
 
 	"github.com/Ningendo7/cloudctl-operator/internal/observability"
@@ -83,12 +85,16 @@ func MetricsMiddleware(service string) func(*smithymiddleware.Stack) error {
 	}
 }
 
-// withObservability adds everything one service client needs on top of the
-// SDK's defaults: the rate limiter, the request metrics, and a trace span per
-// operation (named like "SQS.GetQueueUrl", nested under the span of the
-// section making the call, and a no-op with tracing off).
+// withObservability adds the rate limiter and the request metrics to one
+// service client. Tracing is the client's TracerProvider option, see
+// tracerProvider.
 func withObservability(options []func(*smithymiddleware.Stack) error, service string, limiter *rate.Limiter) []func(*smithymiddleware.Stack) error {
-	options = append(options, RateLimitMiddleware(service, limiter), MetricsMiddleware(service))
-	otelaws.AppendMiddlewares(&options)
-	return options
+	return append(options, RateLimitMiddleware(service, limiter), MetricsMiddleware(service))
+}
+
+// tracerProvider makes the SDK emit one span per operation (named like
+// "SQS.GetQueueUrl"), nested under the span of the section making the call.
+// It follows the global provider, so it is a no-op with tracing off.
+func tracerProvider() tracing.TracerProvider {
+	return smithyoteltracing.Adapt(otel.GetTracerProvider())
 }

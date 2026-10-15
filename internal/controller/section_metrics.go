@@ -105,5 +105,6 @@ func startReconcileSpan(ctx context.Context, req ctrl.Request) (context.Context,
 		attribute.String("cloudctl.namespace", req.Namespace),
 		attribute.String("cloudctl.name", req.Name),
 	)
-	return logf.IntoContext(ctx, observability.LoggerWithTrace(ctx, logf.FromContext(ctx))), end
+	log := logf.FromContext(ctx).WithValues(observability.TraceFields(ctx)...)
+	return logf.IntoContext(ctx, log), end
 }

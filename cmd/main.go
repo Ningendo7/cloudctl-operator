@@ -353,7 +353,8 @@ func main() {
 
 	// Reads the manager's cache on each scrape; registered here rather than
 	// at controller setup so the gauges exist even before AWS is reachable.
-	if err := metrics.Registry.Register(observability.NewStateCollector(mgr.GetClient(), controller.PendingDeletionGracePeriods())); err != nil {
+	stateCollector := observability.NewStateCollector(mgr.GetClient(), controller.PendingDeletionGracePeriods())
+	if err := metrics.Registry.Register(stateCollector); err != nil {
 		setupLog.Error(err, "Failed to register the state metrics collector")
 		os.Exit(1)
 	}

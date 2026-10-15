@@ -23,7 +23,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -88,16 +87,16 @@ func resourceOptions() []resource.Option {
 	return opts
 }
 
-// LoggerWithTrace adds the active span's trace ID to log, so a log line and
-// the trace of the reconcile that wrote it can be found from each other. It
-// returns log unchanged when there is no recording span, which is always the
-// case with tracing off.
-func LoggerWithTrace(ctx context.Context, log logr.Logger) logr.Logger {
+// TraceFields returns the active span's trace and span IDs as logger
+// key-values, so a log line and the trace of the reconcile that wrote it can
+// be found from each other. It returns nil when there is no recording span,
+// which is always the case with tracing off.
+func TraceFields(ctx context.Context) []any {
 	sc := trace.SpanContextFromContext(ctx)
 	if !sc.IsValid() {
-		return log
+		return nil
 	}
-	return log.WithValues("trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
+	return []any{"trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String()}
 }
 
 // TraceKubernetesRequests wraps the Kubernetes client's transport so each

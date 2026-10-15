@@ -76,7 +76,7 @@ func iamWorkloadCount(cr *depsv1alpha1.AppDependencies) int {
 // for the ServiceAccount itself.
 func iamSection(r *AppDependenciesReconciler) section {
 	return section{
-		name: "IAMReady",
+		name: conditionTypeIAMReady,
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
 			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, resourceTypeIAM, iamWorkloadCount(cr))
 			defer cancel()
@@ -116,7 +116,7 @@ func iamSection(r *AppDependenciesReconciler) section {
 			if err == nil {
 				err = saErr
 			}
-			setSectionCondition(ctx, cr, "IAMReady", err, eventRecorderFor(r, cr))
+			setSectionCondition(ctx, cr, conditionTypeIAMReady, err, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

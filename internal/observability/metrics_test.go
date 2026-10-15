@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +63,7 @@ func sampleKey(name string, labels []*dto.LabelPair) string {
 	for _, l := range labels {
 		pairs = append(pairs, l.GetName()+"="+l.GetValue())
 	}
-	sort.Strings(pairs)
+	slices.Sort(pairs)
 	return name + "{" + strings.Join(pairs, ",") + "}"
 }
 
@@ -84,11 +83,11 @@ func TestMetricNamesAndLabels(t *testing.T) {
 	labelsOf := map[string][]string{}
 	for _, f := range families {
 		for _, m := range f.GetMetric() {
-			var names []string
+			names := make([]string, 0, len(m.GetLabel()))
 			for _, l := range m.GetLabel() {
 				names = append(names, l.GetName())
 			}
-			sort.Strings(names)
+			slices.Sort(names)
 			labelsOf[f.GetName()] = names
 		}
 	}

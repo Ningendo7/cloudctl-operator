@@ -14,7 +14,7 @@ import (
 // r.Client to look up the producer CR a shared key belongs to.
 func dynamodbSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	return section{
-		name: "DynamoDBReady",
+		name: conditionTypeDynamoDBReady,
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
 			declared := 0
 			if cr.Spec.DynamoDB != nil {
@@ -39,7 +39,7 @@ func dynamodbSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDep
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(ctx, cr, "DynamoDBReady", err, eventRecorderFor(r, cr))
+			setSectionCondition(ctx, cr, conditionTypeDynamoDBReady, err, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

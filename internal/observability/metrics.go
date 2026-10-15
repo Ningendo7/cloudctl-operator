@@ -32,6 +32,14 @@ import (
 
 const namespace = "cloudctl"
 
+const (
+	subsystemAWS     = "aws"
+	subsystemSection = "section"
+	labelService     = "service"
+	labelSection     = "section"
+	labelResult      = "result"
+)
+
 // Outcomes of one AWS API operation, for AWSRequests.
 const (
 	ResultSuccess          = "success"
@@ -54,41 +62,41 @@ var (
 	// AWSRequests counts AWS API operations by service and outcome. One
 	// operation is one SDK call, however many times the SDK retried it.
 	AWSRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace, Subsystem: "aws", Name: "requests_total",
+		Namespace: namespace, Subsystem: subsystemAWS, Name: "requests_total",
 		Help: "AWS API operations by service and result (success, throttled, permission_denied, not_found, error).",
-	}, []string{"service", "result"})
+	}, []string{labelService, labelResult})
 
 	// AWSRequestDuration is the wall time of one operation, including any
 	// SDK retries and time spent waiting on this operator's own rate limiter.
 	AWSRequestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: namespace, Subsystem: "aws", Name: "request_duration_seconds",
+		Namespace: namespace, Subsystem: subsystemAWS, Name: "request_duration_seconds",
 		Help:    "Wall time of an AWS API operation, including SDK retries and rate-limiter waits, by service.",
 		Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 15},
-	}, []string{"service"})
+	}, []string{labelService})
 
 	// AWSRateLimitWait is the total time spent waiting on this operator's
 	// own rate limiter. rate() of it is the average number of calls
 	// queued behind the limiter at any moment.
 	AWSRateLimitWait = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace, Subsystem: "aws", Name: "rate_limit_wait_seconds_total",
+		Namespace: namespace, Subsystem: subsystemAWS, Name: "rate_limit_wait_seconds_total",
 		Help: "Total seconds spent waiting on this operator's own outgoing rate limiter, by service.",
-	}, []string{"service"})
+	}, []string{labelService})
 
 	// SectionReconciles counts each section's reconcile by outcome. Section
 	// is the condition type lowercased without its "Ready" suffix: sqs, sns,
 	// dynamodb, s3, rds, kms, alarms, iam.
 	SectionReconciles = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace, Subsystem: "section", Name: "reconcile_total",
+		Namespace: namespace, Subsystem: subsystemSection, Name: "reconcile_total",
 		Help: "Section reconciles by section and result (ready, transient, permission_denied, refused, error).",
-	}, []string{"section", "result"})
+	}, []string{labelSection, labelResult})
 
 	// SectionReconcileDuration is how long one section took, including its
 	// AWS calls and any waiting on them.
 	SectionReconcileDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: namespace, Subsystem: "section", Name: "reconcile_duration_seconds",
+		Namespace: namespace, Subsystem: subsystemSection, Name: "reconcile_duration_seconds",
 		Help:    "Wall time of one section's reconcile, by section.",
 		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 15, 60, 300},
-	}, []string{"section"})
+	}, []string{labelSection})
 
 	// Events counts every Kubernetes event the operator emits, by type and
 	// reason. The reasons are a fixed set in the code (QueueMissing,
@@ -103,7 +111,7 @@ var (
 	// AWSClientsReady is 1 once the AWS clients have initialized, 0 while
 	// the manager is up but cannot reach AWS.
 	AWSClientsReady = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace, Subsystem: "aws", Name: "clients_ready",
+		Namespace: namespace, Subsystem: subsystemAWS, Name: "clients_ready",
 		Help: "1 once the AWS clients are initialized, 0 while the manager is running without them.",
 	})
 )

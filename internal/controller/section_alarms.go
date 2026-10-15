@@ -58,7 +58,7 @@ func alarmEligibleResourceCount(cr *depsv1alpha1.AppDependencies) int {
 // first, IAM last" convention.
 func alarmsSection(r *AppDependenciesReconciler) section {
 	return section{
-		name: "AlarmsReady",
+		name: conditionTypeAlarmsReady,
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
 			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "alarm", alarmEligibleResourceCount(cr))
 			defer cancel()
@@ -69,7 +69,7 @@ func alarmsSection(r *AppDependenciesReconciler) section {
 				r.AWSClients.Region, r.AWSClients.AccountID,
 				cr.Spec.Alarms, cr.Spec.SQS, cr.Spec.SNS, cr.Spec.DynamoDB,
 			)
-			setSectionCondition(ctx, cr, "AlarmsReady", err, eventRecorderFor(r, cr))
+			setSectionCondition(ctx, cr, conditionTypeAlarmsReady, err, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

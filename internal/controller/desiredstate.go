@@ -120,8 +120,15 @@ const (
 	resourceTypeS3       = "s3"
 	resourceTypeRDS      = "rds"
 
-	conditionTypeS3Ready  = "S3Ready"
-	conditionTypeKMSReady = "KMSReady"
+	conditionTypeSQSReady            = "SQSReady"
+	conditionTypeSNSReady            = "SNSReady"
+	conditionTypeDynamoDBReady       = "DynamoDBReady"
+	conditionTypeS3Ready             = "S3Ready"
+	conditionTypeRDSReady            = "RDSReady"
+	conditionTypeKMSReady            = "KMSReady"
+	conditionTypeAlarmsReady         = "AlarmsReady"
+	conditionTypeIAMReady            = "IAMReady"
+	conditionTypeConnectionInfoReady = "ConnectionInfoReady"
 
 	reasonError                        = "Error"
 	reasonTransientError               = "TransientError"
@@ -133,7 +140,10 @@ const (
 // produce, used to compute the aggregate Ready condition. Kept in sync
 // with allSections above — each entry here should have a matching
 // section constructor registered there.
-var sectionTypes = []string{"SQSReady", "SNSReady", "DynamoDBReady", conditionTypeS3Ready, "RDSReady", conditionTypeKMSReady, "AlarmsReady", "IAMReady", "ConnectionInfoReady"}
+var sectionTypes = []string{
+	conditionTypeSQSReady, conditionTypeSNSReady, conditionTypeDynamoDBReady, conditionTypeS3Ready, conditionTypeRDSReady,
+	conditionTypeKMSReady, conditionTypeAlarmsReady, conditionTypeIAMReady, conditionTypeConnectionInfoReady,
+}
 
 type section struct {
 	name      string
@@ -226,13 +236,13 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 	// RDS credentials Secret is the same kind of connection-info delivery
 	// (just the one piece of it that's secret, not identifiers), so it
 	// shares this same condition and timing rather than getting its own.
-	connCtx, endConn := startSectionSpan(ctx, "ConnectionInfoReady", "reconcile")
+	connCtx, endConn := startSectionSpan(ctx, conditionTypeConnectionInfoReady, "reconcile")
 	connErr := configmap.Ensure(connCtx, r.Client, r.APIReader, r.AWSClients.RDS, r.AWSClients.Region, r.AWSClients.AccountID, cr)
 	if connErr == nil {
 		connErr = rds.EnsureCredentialsSecret(connCtx, r.AWSClients.SecretsManager, r.AWSClients.RDS, r.Client, r.APIReader, cr)
 	}
 	endConn(connErr)
-	setSectionCondition(ctx, cr, "ConnectionInfoReady", connErr, eventRecorderFor(r, cr))
+	setSectionCondition(ctx, cr, conditionTypeConnectionInfoReady, connErr, eventRecorderFor(r, cr))
 	if firstErr == nil {
 		firstErr = connErr
 	}

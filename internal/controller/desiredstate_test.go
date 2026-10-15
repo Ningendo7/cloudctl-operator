@@ -133,9 +133,10 @@ var _ = Describe("AppDependencies Controller", func() {
 			root := spanNamed(GinkgoT(), spans, "Reconcile")
 			Expect(root.Parent().IsValid()).To(BeFalse(), "the reconcile is the root of its trace")
 
-			names := []string{"ensure finalizer", "patch status", "reconcile connectioninfo"}
-			for _, section := range []string{"kms", "sqs", "sns", "dynamodb", "s3", "rds", "alarms", "iam"} {
-				names = append(names, "reconcile "+section)
+			names := []string{
+				"ensure finalizer", "patch status", "reconcile connectioninfo",
+				"reconcile kms", "reconcile sqs", "reconcile sns", "reconcile dynamodb",
+				"reconcile s3", "reconcile rds", "reconcile alarms", "reconcile iam",
 			}
 			for _, name := range names {
 				child := spanNamed(GinkgoT(), spans, name)

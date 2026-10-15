@@ -247,11 +247,11 @@ func TestWithObservability_TracesCountsAndLimitsOneOperation(t *testing.T) {
 	stub := &stubHTTP{respond: func(int) (int, string) {
 		return 200, `{"QueueUrl":"https://sqs.us-east-1.amazonaws.com/123456789012/q"}`
 	}}
-	client := sqsClient(stub, aws.NopRetryer{})
-	options := withObservability(nil, "obs_all", rate.NewLimiter(rate.Inf, 1))
-	client = sqs.New(sqs.Options{
+	client := sqs.New(sqs.Options{
 		Region: "us-east-1", Credentials: credentials.NewStaticCredentialsProvider("id", "secret", ""),
-		HTTPClient: stub, Retryer: aws.NopRetryer{}, APIOptions: options,
+		HTTPClient: stub, Retryer: aws.NopRetryer{},
+		APIOptions:     withObservability(nil, "obs_all", rate.NewLimiter(rate.Inf, 1)),
+		TracerProvider: tracerProvider(),
 	})
 
 	ctx, parent := provider.Tracer("test").Start(context.Background(), "reconcile sqs")

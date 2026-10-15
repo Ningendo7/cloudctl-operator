@@ -33,7 +33,7 @@ import (
 // need r.Client for cross-CR lookups.
 func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	return section{
-		name: "RDSReady",
+		name: conditionTypeRDSReady,
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
 			declared := 0
 			if cr.Spec.RDS != nil {
@@ -95,7 +95,7 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 					}
 				}
 			}
-			setSectionCondition(ctx, cr, "RDSReady", conditionErr, eventRecorderFor(r, cr))
+			setSectionCondition(ctx, cr, conditionTypeRDSReady, conditionErr, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

@@ -104,13 +104,13 @@ func capturingLogger() (logr.Logger, *[]string) {
 	return funcr.New(func(prefix, args string) { lines = append(lines, prefix+args) }, funcr.Options{}), &lines
 }
 
-func TestLoggerWithTrace_AddsTheTraceIDInsideASpan(t *testing.T) {
+func TestTraceFields_CarryTheIDsInsideASpan(t *testing.T) {
 	useRecorder(t)
 	ctx, span := Tracer().Start(context.Background(), "Reconcile")
 	defer span.End()
 
 	log, lines := capturingLogger()
-	LoggerWithTrace(ctx, log).Info("hello")
+	log.WithValues(TraceFields(ctx)...).Info("hello")
 
 	if len(*lines) != 1 || !strings.Contains((*lines)[0], span.SpanContext().TraceID().String()) {
 		t.Errorf("expected the trace ID %s in the log line, got %v", span.SpanContext().TraceID(), *lines)
@@ -120,9 +120,12 @@ func TestLoggerWithTrace_AddsTheTraceIDInsideASpan(t *testing.T) {
 	}
 }
 
-func TestLoggerWithTrace_LeavesTheLoggerAloneWithoutASpan(t *testing.T) {
+func TestTraceFields_AreEmptyWithoutASpan(t *testing.T) {
+	if got := TraceFields(context.Background()); len(got) != 0 {
+		t.Errorf("TraceFields() = %v, want none without a span", got)
+	}
 	log, lines := capturingLogger()
-	LoggerWithTrace(context.Background(), log).Info("hello")
+	log.WithValues(TraceFields(context.Background())...).Info("hello")
 	if len(*lines) != 1 || strings.Contains((*lines)[0], "trace_id") {
 		t.Errorf("expected no trace fields without a span, got %v", *lines)
 	}
