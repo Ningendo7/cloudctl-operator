@@ -230,7 +230,7 @@ func TestRecordKMSKeyARNs_StampsDeclaredResourcesAndTheirDLQ(t *testing.T) {
 	}
 }
 
-// G26: a non-empty encrypted resource removed from spec is held by its own
+// A non-empty encrypted resource removed from spec is held by its own
 // non-empty guard; its key must be held with it, not scheduled for deletion
 // once the key's quiet window passes.
 func TestReconcileNormal_KeyOfARemovedResourceStillHoldingDataIsKept(t *testing.T) {
@@ -270,7 +270,7 @@ func TestReconcileNormal_KeyOfARemovedResourceStillHoldingDataIsKept(t *testing.
 	}
 }
 
-// G26 on CR deletion: a key protecting retained data outlives the CR.
+// On CR deletion, a key protecting retained data outlives the CR.
 func TestFinalize_KeyOfRetainedDataIsRelinquishedNotDeleted(t *testing.T) {
 	const keyARN = "arn:aws:kms:us-east-1:123456789012:key/11111111-1111-1111-1111-000000000003"
 	longAgo := metav1.NewTime(metav1.Now().Add(-90 * 24 * time.Hour))
@@ -308,7 +308,7 @@ func TestFinalize_KeyOfRetainedDataIsRelinquishedNotDeleted(t *testing.T) {
 	}
 }
 
-// G26 on CR deletion: a key whose data is still draining holds the
+// On CR deletion, a key whose data is still draining holds the
 // finalizer until that data is gone.
 func TestFinalize_KeyOfDrainingDataBlocksDeletion(t *testing.T) {
 	const keyARN = "arn:aws:kms:us-east-1:123456789012:key/11111111-1111-1111-1111-000000000004"

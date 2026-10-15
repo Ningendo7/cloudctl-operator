@@ -73,6 +73,9 @@ func (h *CredentialHealth) setHealthy(healthy bool) {
 	h.healthy = healthy
 }
 
+// credentialCheckTimeout bounds one GetCallerIdentity call.
+const credentialCheckTimeout = 30 * time.Second
+
 // RunPeriodicCheck calls GetCallerIdentity on every tick of interval until
 // ctx is cancelled, updating health's result each time. Deliberately not
 // gated on leader election: a standby replica needs its own credential
@@ -92,7 +95,12 @@ func RunPeriodicCheck(ctx context.Context, stsClient STSClient, interval time.Du
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
+			// A check must not outlive the gap before the next one, or one
+			// half-open connection leaves the readyz state stale for good.
+			callCtx, cancel := context.WithTimeout(ctx, min(interval, credentialCheckTimeout))
+			_, err := stsClient.GetCallerIdentity(callCtx, &sts.GetCallerIdentityInput{})
+			cancel()
+			if err != nil {
 				log.Info("AWS credential re-check failed", "error", err.Error())
 				health.setHealthy(false)
 				continue

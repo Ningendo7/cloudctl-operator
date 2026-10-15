@@ -17,9 +17,12 @@ limitations under the License.
 package aws
 
 import (
+	"context"
 	"errors"
+	"net"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/smithy-go"
 )
@@ -102,7 +105,23 @@ func IsPermissionDenied(err error) bool {
 // table reaches ACTIVE, while backups are still being provisioned for it —
 // a completely normal sequence for any table created with backup enabled,
 // not a request problem.
+//
+// Failures that never reached AWS, or that the SDK gave up on, are transient
+// too: a deadline, the operator's own limiter refusing to wait past one, the
+// SDK's retry quota running dry (which drops the original throttling error
+// from the chain), and network errors.
 func IsRetryable(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrRateLimitWait) {
+		return true
+	}
+	var quota ratelimit.QuotaExceededError
+	if errors.As(err, &quota) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		if apiErr.ErrorFault() == smithy.FaultServer {

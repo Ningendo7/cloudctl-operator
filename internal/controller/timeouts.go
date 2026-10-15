@@ -20,6 +20,11 @@ import (
 	"context"
 	"time"
 
+	"golang.org/x/time/rate"
+	"k8s.io/client-go/util/workqueue"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 )
 
@@ -90,4 +95,48 @@ func boundedSectionContext(ctx context.Context, ledger []depsv1alpha1.ManagedRes
 	count := max(declaredCount, ledgerCount)
 	timeout := base + time.Duration(count)*perResource
 	return context.WithTimeout(ctx, timeout)
+}
+
+// connectionInfoContext bounds the connection-info step, which runs after
+// every section and reads RDS and Secrets Manager for each instance.
+func connectionInfoContext(ctx context.Context, cr *depsv1alpha1.AppDependencies) (context.Context, context.CancelFunc) {
+	declared := 0
+	if cr.Spec.RDS != nil {
+		declared = len(cr.Spec.RDS.Resources)
+	}
+	return sectionContext(ctx, cr.Status.ManagedResources, resourceTypeRDS, declared)
+}
+
+const (
+	// reconcileTimeout backstops a pass stuck outside every section's own
+	// deadline. It sits above the worst case of those deadlines (every
+	// section deleting the CRD's maximum of resources, about 35 minutes), so
+	// it never cuts off legitimate work.
+	reconcileTimeout = 45 * time.Minute
+
+	// retryBaseDelay is the first retry of a failed reconcile; it doubles up
+	// to DriftDetectionInterval, so a permanent error is never retried less
+	// often than a healthy CR is re-checked.
+	retryBaseDelay = 2 * time.Second
+)
+
+// statusWriteTimeout bounds the status patch that ends a pass. That patch
+// runs detached from the pass's own context, so a pass cut off by
+// reconcileTimeout still records why it failed.
+const statusWriteTimeout = 30 * time.Second
+
+func statusWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), statusWriteTimeout)
+}
+
+func controllerOptions(maxConcurrent int) controller.Options {
+	return controller.Options{
+		MaxConcurrentReconciles: maxConcurrent,
+		RateLimiter: workqueue.NewTypedMaxOfRateLimiter(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](retryBaseDelay, DriftDetectionInterval),
+			// controller-runtime's own overall limit, kept.
+			&workqueue.TypedBucketRateLimiter[reconcile.Request]{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
+		),
+		ReconciliationTimeout: reconcileTimeout,
+	}
 }

@@ -122,6 +122,28 @@ func TestRateLimitMiddleware_ContextCancelledStopsBeforeNext(t *testing.T) {
 	}
 }
 
+// x/time/rate refuses up front, with a plain error that wraps nothing, when
+// the wait would outlast the deadline. It must still read as transient.
+func TestRateLimitMiddleware_RefusingToWaitPastTheDeadlineIsRetryable(t *testing.T) {
+	limiter := rate.NewLimiter(rate.Every(time.Hour), 1)
+	limiter.Allow() // spend the only token
+	mw := registerRateLimitMiddleware(t, limiter)
+	next := &fakeFinalizeHandler{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	_, _, err := mw.HandleFinalize(ctx, smithymiddleware.FinalizeInput{}, next)
+	if !errors.Is(err, ErrRateLimitWait) {
+		t.Fatalf("expected ErrRateLimitWait, got %v", err)
+	}
+	if !IsRetryable(err) {
+		t.Errorf("IsRetryable(%v) = false, want true", err)
+	}
+	if next.called {
+		t.Error("expected the next handler NOT to be reached")
+	}
+}
+
 func TestRateLimitMiddleware_NilLimiterIsNoOp(t *testing.T) {
 	mw := registerRateLimitMiddleware(t, nil)
 	next := &fakeFinalizeHandler{}

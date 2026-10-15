@@ -237,6 +237,8 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 	// (just the one piece of it that's secret, not identifiers), so it
 	// shares this same condition and timing rather than getting its own.
 	connCtx, endConn := startSectionSpan(ctx, conditionTypeConnectionInfoReady, "reconcile")
+	connCtx, cancelConn := connectionInfoContext(connCtx, cr)
+	defer cancelConn()
 	connErr := configmap.Ensure(connCtx, r.Client, r.APIReader, r.AWSClients.RDS, r.AWSClients.Region, r.AWSClients.AccountID, cr)
 	if connErr == nil {
 		connErr = rds.EnsureCredentialsSecret(connCtx, r.AWSClients.SecretsManager, r.AWSClients.RDS, r.Client, r.APIReader, cr)
@@ -338,7 +340,13 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 	)
 }
 
+// isRetryable trusts a ReconcileError's own verdict, and otherwise
+// classifies whatever AWS or network error is in the chain, so an error
+// returned without a ReconcileError isn't treated as permanent.
 func isRetryable(err error) bool {
 	var reconcileErr *cloudctlaws.ReconcileError
-	return errors.As(err, &reconcileErr) && reconcileErr.Retryable
+	if errors.As(err, &reconcileErr) {
+		return reconcileErr.Retryable
+	}
+	return cloudctlaws.IsRetryable(err)
 }
