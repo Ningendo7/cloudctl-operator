@@ -63,7 +63,19 @@ const (
 	// or fails as an ordinary retryable/non-retryable error, never as an
 	// indefinitely-blocked state waiting on some other condition to change.
 	CleanupReasonPendingDeletion CleanupReason = "PendingDeletion"
+	// CleanupReasonInUse means the CR is being deleted but resources
+	// encrypted with the key are still in the ledger, draining. The key waits
+	// for them: deleting it first would make their data unreadable.
+	CleanupReasonInUse CleanupReason = "InUseByEncryptedData"
 )
+
+// KeyUse says a key still has data encrypted with it, from the caller's
+// view of the ledger. Retained is true when at least one of those resources
+// is kept on purpose (deletionPolicy Retain, or a final snapshot): the key
+// must then outlive this CR too, whatever its own deletionPolicy says.
+type KeyUse struct {
+	Retained bool
+}
 
 // CleanupResult reports what happened to a ledger entry Cleanup did not
 // delete, so status can surface *why* instead of one flat "orphaned"
@@ -79,10 +91,11 @@ type CleanupResult struct {
 // deletion during the quiet window, depending on their captured
 // deletionPolicy.
 //
-// dedicatedKeysStillNeeded carries the ledger names (e.g. "orders-key") of
-// dedicated keys other resource packages (sqs, sns, s3, dynamodb) have
-// provisioned via EnsureDedicatedKey and still want, computed by the
-// controller layer from every section's own spec. Those keys are never
+// inUse carries the ledger names of keys that other resources still need,
+// computed by the controller from both spec and ledger: dedicated keys
+// provisioned via EnsureDedicatedKey, keys referenced through kmsKeyRef, and
+// keys of resources that have left spec but still hold data (pending
+// deletion, retained, or an RDS final snapshot). Those keys are never
 // declared in spec.KMS.Resources — nothing about them is user-visible —
 // so without this, this function's own declared-vs-ledger diff would see
 // every dedicated key as "not declared" and try to delete it on every
@@ -95,8 +108,7 @@ type CleanupResult struct {
 // in the usual sense — a KMS key has no AWS-queryable signal analogous to
 // a message, item, or object count for "is anything still using this to
 // encrypt data." Keys are never shared across CRs, so the caller passes in
-// every key this CR's own resources still reference (see
-// dedicatedKeysStillNeeded). Something encrypted with this key entirely
+// every key this CR's own resources still reference (see inUse). Something encrypted with this key entirely
 // outside this operator's bookkeeping is invisible to that. The quiet
 // window, that list, and AWS's own PendingDeletion window are the only
 // safety layers, and there is no force override to skip any of them —
@@ -106,7 +118,7 @@ func Cleanup(
 	client kmsAPI,
 	namespace, crName, crUID string,
 	spec *depsv1alpha1.KMSSpec,
-	dedicatedKeysStillNeeded []string,
+	inUse map[string]KeyUse,
 	ledger []depsv1alpha1.ManagedResource,
 	deleting bool,
 	recordEvent status.EventRecorder,
@@ -118,7 +130,7 @@ func Cleanup(
 				declared[k.Name] = true
 			}
 		}
-		for _, name := range dedicatedKeysStillNeeded {
+		for name := range inUse {
 			declared[name] = true
 		}
 	}
@@ -128,6 +140,18 @@ func Cleanup(
 	for _, entry := range ledger {
 		if entry.Type != resourceType {
 			continue
+		}
+
+		if use, needed := inUse[entry.Name]; deleting && needed {
+			// The CR is going away but data encrypted with this key isn't.
+			if !use.Retained {
+				results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonInUse})
+				continue
+			}
+			if recordEvent != nil && entry.DeletionPolicy == depsv1alpha1.DeletionPolicyDelete {
+				recordEvent("Warning", "KeyRetainedForData", fmt.Sprintf("Keeping KMS key %s (%s) despite its Delete policy: resources encrypted with it are retained", entry.Name, entry.ARN))
+			}
+			entry.DeletionPolicy = depsv1alpha1.DeletionPolicyRetain
 		}
 
 		if declared[entry.Name] {

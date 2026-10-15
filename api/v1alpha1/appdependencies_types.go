@@ -956,6 +956,13 @@ type ManagedResource struct {
 	// when it was last polled.
 	// +optional
 	ObservedStatusSince *metav1.Time `json:"observedStatusSince,omitempty"`
+
+	// kmsKeyARN is the ARN of the KMS key this resource's data is encrypted
+	// with, if any. Recorded so the key is kept for as long as the resource
+	// is in the ledger, including after it leaves spec (pending deletion or
+	// retained), when spec alone no longer says which key it used.
+	// +optional
+	KMSKeyARN string `json:"kmsKeyARN,omitempty"`
 }
 
 // AppDependenciesStatus defines the observed state of AppDependencies.

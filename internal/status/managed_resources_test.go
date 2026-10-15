@@ -170,3 +170,17 @@ func TestNeedsEmptyCheck(t *testing.T) {
 		})
 	}
 }
+
+// Resource packages rebuild entries from scratch; the key ARN recorded on
+// an entry must survive that, or the key could be deleted under its data.
+func TestUpsertManagedResource_KeepsTheRecordedKMSKeyARN(t *testing.T) {
+	ledger := []depsv1alpha1.ManagedResource{{Type: "sqs", Name: "orders", KMSKeyARN: "arn:key-a"}}
+	UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{Type: "sqs", Name: "orders", State: depsv1alpha1.ManagedResourceStateVerified})
+	if ledger[0].KMSKeyARN != "arn:key-a" {
+		t.Errorf("rebuilt entry lost its key ARN: %+v", ledger[0])
+	}
+	UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{Type: "sqs", Name: "orders", KMSKeyARN: "arn:key-b"})
+	if ledger[0].KMSKeyARN != "arn:key-b" {
+		t.Errorf("an explicit new key ARN should replace the old one: %+v", ledger[0])
+	}
+}

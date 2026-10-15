@@ -51,10 +51,15 @@ func HasManagedResource(resources []depsv1alpha1.ManagedResource, resourceType, 
 }
 
 // UpsertManagedResource inserts or updates a ledger entry, matched by
-// type+name.
+// type+name. An update that doesn't set KMSKeyARN keeps the one already
+// recorded: the resource packages rebuild entries from scratch, and losing
+// it would let the key be deleted while the data it encrypts still exists.
 func UpsertManagedResource(resources *[]depsv1alpha1.ManagedResource, entry depsv1alpha1.ManagedResource) {
 	for i := range *resources {
 		if (*resources)[i].Type == entry.Type && (*resources)[i].Name == entry.Name {
+			if entry.KMSKeyARN == "" {
+				entry.KMSKeyARN = (*resources)[i].KMSKeyARN
+			}
 			(*resources)[i] = entry
 			return
 		}
