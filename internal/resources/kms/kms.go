@@ -239,7 +239,7 @@ func createKey(
 		recordEvent("Normal", "KeyCreated", fmt.Sprintf("Created KMS key %s", arn))
 	}
 
-	if _, err := ensureKeyPolicy(ctx, kmsClient, arn); err != nil {
+	if err := ensureKeyPolicy(ctx, kmsClient, arn); err != nil {
 		return ledger, wrapAWSError(err, "setting KMS key policy")
 	}
 
@@ -335,7 +335,7 @@ func resumeKey(
 		}
 	}
 
-	if _, err := ensureKeyPolicy(ctx, kmsClient, entry.ARN); err != nil {
+	if err := ensureKeyPolicy(ctx, kmsClient, entry.ARN); err != nil {
 		return ledger, wrapAWSError(err, fmt.Sprintf("re-asserting the key policy of KMS key %q", entry.Name))
 	}
 	reenabled, err := ensureRotation(ctx, kmsClient, keyID)
@@ -411,7 +411,7 @@ func adoptKey(
 	if err := keyStateError(arn, meta.KeyState, recordEvent); err != nil {
 		return ledger, err
 	}
-	if _, err := ensureKeyPolicy(ctx, kmsClient, arn); err != nil {
+	if err := ensureKeyPolicy(ctx, kmsClient, arn); err != nil {
 		return ledger, wrapAWSError(err, fmt.Sprintf("setting the key policy of adopted KMS key %q", alias))
 	}
 	if _, err := ensureRotation(ctx, kmsClient, *meta.KeyId); err != nil {
@@ -420,7 +420,11 @@ func adoptKey(
 	return ledger, nil
 }
 
-const keyPolicyName = "default"
+const (
+	keyPolicyName       = "default"
+	sidSNSDelivery      = "cloudctl-sns-delivery"
+	sidCloudWatchAlarms = "cloudctl-cloudwatch-alarms"
+)
 
 // serviceKeyStatements are the key policy statements the operator owns,
 // keyed by Sid. AWS services aren't IAM identities in the account, so only
@@ -438,8 +442,8 @@ func serviceKeyStatements(account string) map[string]any {
 		}
 	}
 	return map[string]any{
-		"cloudctl-sns-delivery":      statement("cloudctl-sns-delivery", "sns.amazonaws.com"),
-		"cloudctl-cloudwatch-alarms": statement("cloudctl-cloudwatch-alarms", "cloudwatch.amazonaws.com"),
+		sidSNSDelivery:      statement(sidSNSDelivery, "sns.amazonaws.com"),
+		sidCloudWatchAlarms: statement(sidCloudWatchAlarms, "cloudwatch.amazonaws.com"),
 	}
 }
 
@@ -505,25 +509,23 @@ func mergeKeyPolicy(policy, account string) (merged string, changed bool, err er
 
 // ensureKeyPolicy brings a key's policy up to date, writing it only when
 // something changed. The account comes from the key's own ARN.
-func ensureKeyPolicy(ctx context.Context, kmsClient kmsAPI, arn string) (changed bool, err error) {
+func ensureKeyPolicy(ctx context.Context, kmsClient kmsAPI, arn string) error {
 	parsed, err := awsarn.Parse(arn)
 	if err != nil {
-		return false, fmt.Errorf("parsing key ARN %q: %w", arn, err)
+		return fmt.Errorf("parsing key ARN %q: %w", arn, err)
 	}
 	out, err := kmsClient.GetKeyPolicy(ctx, &kms.GetKeyPolicyInput{KeyId: &arn, PolicyName: aws.String(keyPolicyName)})
 	if err != nil {
-		return false, err
+		return err
 	}
 	merged, changed, err := mergeKeyPolicy(aws.ToString(out.Policy), parsed.AccountID)
 	if err != nil || !changed {
-		return false, err
+		return err
 	}
-	if _, err := kmsClient.PutKeyPolicy(ctx, &kms.PutKeyPolicyInput{
+	_, err = kmsClient.PutKeyPolicy(ctx, &kms.PutKeyPolicyInput{
 		KeyId: &arn, PolicyName: aws.String(keyPolicyName), Policy: &merged,
-	}); err != nil {
-		return false, err
-	}
-	return true, nil
+	})
+	return err
 }
 
 // Reasons for a key the operator won't use, and won't change on its own:
