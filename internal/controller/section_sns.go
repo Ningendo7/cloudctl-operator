@@ -30,7 +30,7 @@ import (
 // look up the producer CR a shared key belongs to.
 func snsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	return section{
-		name: "SNSReady",
+		name: conditionTypeSNSReady,
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
 			declared := 0
 			if cr.Spec.SNS != nil {
@@ -73,7 +73,7 @@ func snsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(ctx, cr, "SNSReady", err, eventRecorderFor(r, cr))
+			setSectionCondition(ctx, cr, conditionTypeSNSReady, err, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

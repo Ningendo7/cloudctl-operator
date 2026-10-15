@@ -25,6 +25,8 @@ import (
 
 	smithymiddleware "github.com/aws/smithy-go/middleware"
 	"golang.org/x/time/rate"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/observability"
 )
 
 // This file paces this operator's own outgoing AWS calls, independent of
@@ -63,7 +65,7 @@ func NewLimiter(qps float64, burst int) *rate.Limiter {
 // misconfigured QPS/burst. Installed ahead of the SDK's retry middleware,
 // so each operation takes one token and the SDK's own backoff, not this
 // limiter, paces retries of a throttled call.
-func RateLimitMiddleware(limiter *rate.Limiter) func(*smithymiddleware.Stack) error {
+func RateLimitMiddleware(service string, limiter *rate.Limiter) func(*smithymiddleware.Stack) error {
 	return func(stack *smithymiddleware.Stack) error {
 		return stack.Finalize.Add(
 			smithymiddleware.FinalizeMiddlewareFunc("RateLimit", func(
@@ -72,9 +74,11 @@ func RateLimitMiddleware(limiter *rate.Limiter) func(*smithymiddleware.Stack) er
 				next smithymiddleware.FinalizeHandler,
 			) (smithymiddleware.FinalizeOutput, smithymiddleware.Metadata, error) {
 				if limiter != nil {
+					waitStart := time.Now()
 					if err := limiter.Wait(ctx); err != nil {
 						return smithymiddleware.FinalizeOutput{}, smithymiddleware.Metadata{}, fmt.Errorf("rate limit wait: %w", err)
 					}
+					observability.AWSRateLimitWait.WithLabelValues(service).Add(time.Since(waitStart).Seconds())
 				}
 				return next.HandleFinalize(ctx, in)
 			}),

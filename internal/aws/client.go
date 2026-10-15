@@ -156,13 +156,16 @@ func NewClients(ctx context.Context) (*Clients, error) {
 
 	return &Clients{
 		SQS: sqs.NewFromConfig(cfg, func(o *sqs.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameSQS]))
+			o.APIOptions = withObservability(o.APIOptions, serviceNameSQS, limiters[serviceNameSQS])
+			o.TracerProvider = tracerProvider()
 		}),
 		SNS: sns.NewFromConfig(cfg, func(o *sns.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameSNS]))
+			o.APIOptions = withObservability(o.APIOptions, serviceNameSNS, limiters[serviceNameSNS])
+			o.TracerProvider = tracerProvider()
 		}),
 		S3: s3.NewFromConfig(cfg, func(o *s3.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameS3]))
+			o.APIOptions = withObservability(o.APIOptions, serviceNameS3, limiters[serviceNameS3])
+			o.TracerProvider = tracerProvider()
 			// A non-nil BaseEndpoint only happens when AWS_ENDPOINT_URL is
 			// explicitly set - never true against real AWS, always true
 			// against a test double like LocalStack, whose virtual-hosted
@@ -173,25 +176,32 @@ func NewClients(ctx context.Context) (*Clients, error) {
 			}
 		}),
 		DynamoDB: dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameDynamoDB]))
+			o.APIOptions = withObservability(o.APIOptions, serviceNameDynamoDB, limiters[serviceNameDynamoDB])
+			o.TracerProvider = tracerProvider()
 		}),
 		KMS: kms.NewFromConfig(cfg, func(o *kms.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameKMS]))
+			o.APIOptions = withObservability(o.APIOptions, serviceNameKMS, limiters[serviceNameKMS])
+			o.TracerProvider = tracerProvider()
 		}),
 		IAM: iam.NewFromConfig(iamCfg, func(o *iam.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameIAM]))
+			o.APIOptions = withObservability(o.APIOptions, serviceNameIAM, limiters[serviceNameIAM])
+			o.TracerProvider = tracerProvider()
 		}),
 		CloudWatch: cloudwatch.NewFromConfig(cfg, func(o *cloudwatch.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameCloudWatch]))
+			o.APIOptions = withObservability(o.APIOptions, serviceNameCloudWatch, limiters[serviceNameCloudWatch])
+			o.TracerProvider = tracerProvider()
 		}),
 		RDS: rds.NewFromConfig(cfg, func(o *rds.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameRDS]))
+			o.APIOptions = withObservability(o.APIOptions, serviceNameRDS, limiters[serviceNameRDS])
+			o.TracerProvider = tracerProvider()
 		}),
 		EC2: ec2.NewFromConfig(cfg, func(o *ec2.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameEC2]))
+			o.APIOptions = withObservability(o.APIOptions, serviceNameEC2, limiters[serviceNameEC2])
+			o.TracerProvider = tracerProvider()
 		}),
 		SecretsManager: secretsmanager.NewFromConfig(cfg, func(o *secretsmanager.Options) {
-			o.APIOptions = append(o.APIOptions, RateLimitMiddleware(limiters[serviceNameSecretsManager]))
+			o.APIOptions = withObservability(o.APIOptions, serviceNameSecretsManager, limiters[serviceNameSecretsManager])
+			o.TracerProvider = tracerProvider()
 		}),
 		AccountID:    *identity.Account,
 		Region:       cfg.Region,

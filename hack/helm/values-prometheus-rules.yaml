@@ -1,0 +1,7 @@
+  ## PrometheusRule with the operator's alerts. Separate from enabled:
+  ## scraping is harmless, alerts that can page someone are a decision.
+  rules:
+    enabled: false
+    # Extra labels on the PrometheusRule, e.g. release: <kube-prometheus-stack
+    # release name> so its ruleSelector picks the rules up.
+    labels: {}

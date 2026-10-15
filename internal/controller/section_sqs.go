@@ -30,7 +30,7 @@ import (
 // look up the producer CR a shared key belongs to.
 func sqsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	return section{
-		name: "SQSReady",
+		name: conditionTypeSQSReady,
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
 			declared := 0
 			if cr.Spec.SQS != nil {
@@ -75,7 +75,7 @@ func sqsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			if err == nil {
 				err = cleanupErr
 			}
-			setSectionCondition(ctx, cr, "SQSReady", err, eventRecorderFor(r, cr))
+			setSectionCondition(ctx, cr, conditionTypeSQSReady, err, eventRecorderFor(r, cr))
 			return err
 		},
 		finalize: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) (bool, []string, error) {

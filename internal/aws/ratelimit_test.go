@@ -73,13 +73,13 @@ func (f *fakeFinalizeHandler) HandleFinalize(_ context.Context, _ smithymiddlewa
 }
 
 // registerRateLimitMiddleware builds a Stack and applies
-// RateLimitMiddleware(limiter) to it exactly as NewClients does via
+// RateLimitMiddleware(service, limiter) to it exactly as NewClients does via
 // Options.APIOptions, returning the registered middleware so tests can
 // invoke it directly without standing up a real AWS client.
 func registerRateLimitMiddleware(t *testing.T, limiter *rate.Limiter) smithymiddleware.FinalizeMiddleware {
 	t.Helper()
 	stack := smithymiddleware.NewStack("test", func() any { return struct{}{} })
-	if err := RateLimitMiddleware(limiter)(stack); err != nil {
+	if err := RateLimitMiddleware("test", limiter)(stack); err != nil {
 		t.Fatalf("RateLimitMiddleware returned error: %v", err)
 	}
 	mw, ok := stack.Finalize.Get("RateLimit")

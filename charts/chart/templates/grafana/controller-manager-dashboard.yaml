@@ -1,0 +1,18 @@
+{{- if .Values.grafana.dashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "cloudctl-operator.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    grafana_dashboard: "1"
+  name: {{ include "cloudctl-operator.resourceName" (dict "suffix" "controller-manager-dashboard" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+data:
+  # Read raw, not rendered: the dashboard's own legend templates
+  # must reach Grafana untouched.
+  cloudctl-operator.json: |-
+{{ .Files.Get "dashboards/cloudctl-operator.json" | indent 4 }}
+{{- end }}

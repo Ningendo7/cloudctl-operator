@@ -39,6 +39,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/observability"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -112,6 +113,70 @@ var _ = Describe("AppDependencies Controller", func() {
 			sqsReady := apimeta.FindStatusCondition(updated.Status.Conditions, "SQSReady")
 			Expect(sqsReady).NotTo(BeNil())
 			Expect(sqsReady.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("traces a reconcile as one tree: root, finalizer, every section, connection info, status patch", func() {
+			recorder := useSpanRecorder(GinkgoT())
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-traced-", Namespace: "default"},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			spans := recorder.Ended()
+			root := spanNamed(GinkgoT(), spans, "Reconcile")
+			Expect(root.Parent().IsValid()).To(BeFalse(), "the reconcile is the root of its trace")
+
+			names := []string{
+				"ensure finalizer", "patch status", "reconcile connectioninfo",
+				"reconcile kms", "reconcile sqs", "reconcile sns", "reconcile dynamodb",
+				"reconcile s3", "reconcile rds", "reconcile alarms", "reconcile iam",
+			}
+			for _, name := range names {
+				child := spanNamed(GinkgoT(), spans, name)
+				Expect(child.SpanContext().TraceID()).To(Equal(root.SpanContext().TraceID()), "%s should be in the reconcile's trace", name)
+				Expect(child.Parent().SpanID()).To(Equal(root.SpanContext().SpanID()), "%s should be a direct child of the reconcile", name)
+			}
+
+			// The section's span has to be what its AWS calls run under, or
+			// they would float outside the trace.
+			sqsSection := spanNamed(GinkgoT(), spans, "reconcile sqs")
+			Expect(fakeSQS.createQueueSpan.SpanID()).To(Equal(sqsSection.SpanContext().SpanID()),
+				"CreateQueue should run under the sqs section's span")
+		})
+
+		It("counts and times every section it runs", func() {
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-metrics-", Namespace: "default"},
+				Spec: depsv1alpha1.AppDependenciesSpec{
+					SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+			sections := []string{"kms", "sqs", "sns", "dynamodb", "s3", "rds", "alarms", "iam"}
+			durations := map[string]uint64{}
+			for _, section := range sections {
+				durations[section] = histogramCount(GinkgoT(), observability.SectionReconcileDuration, section)
+			}
+			sqsReady := counterValue(GinkgoT(), observability.SectionReconciles, "sqs", observability.SectionReady)
+
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			for _, section := range sections {
+				Expect(histogramCount(GinkgoT(), observability.SectionReconcileDuration, section)-durations[section]).
+					To(Equal(uint64(1)), "section %s should be timed exactly once per reconcile pass", section)
+			}
+			Expect(counterValue(GinkgoT(), observability.SectionReconciles, "sqs", observability.SectionReady) - sqsReady).
+				To(Equal(1.0))
 		})
 	})
 

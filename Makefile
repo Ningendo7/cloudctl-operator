@@ -379,6 +379,12 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
 	@# actually pushed. Prepending "v" here keeps the default correct for
 	@# every release without needing a tag override either.
 	sed -i 's@{{ .Values.manager.image.tag | default .Chart.AppVersion }}@{{ .Values.manager.image.tag | default (printf "v%s" .Chart.AppVersion) }}@' charts/chart/templates/manager/manager.yaml
+	@# Observability switches: the plugin knows the ServiceMonitor but not
+	@# the alert rules or the Grafana dashboard, so their values are re-added
+	@# after it rewrites values.yaml. Their templates, and the dashboard JSON
+	@# under charts/chart/dashboards, survive regeneration untouched.
+	sed -i -e '/^prometheus:$$/,/^$$/{' -e '/^  enabled: false$$/r hack/helm/values-prometheus-rules.yaml' -e '}' charts/chart/values.yaml
+	cat hack/helm/values-grafana.yaml >> charts/chart/values.yaml
 
 .PHONY: install-helm
 install-helm: ## Install the latest version of Helm.
