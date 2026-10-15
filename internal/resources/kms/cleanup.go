@@ -123,17 +123,7 @@ func Cleanup(
 	deleting bool,
 	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, results []CleanupResult, err error) {
-	declared := map[string]bool{}
-	if !deleting {
-		if spec != nil {
-			for _, k := range spec.Resources {
-				declared[k.Name] = true
-			}
-		}
-		for name := range inUse {
-			declared[name] = true
-		}
-	}
+	declared := declaredKeyNames(spec, inUse, deleting)
 
 	updatedLedger = ledger
 	var firstErr error
@@ -143,15 +133,12 @@ func Cleanup(
 		}
 
 		if use, needed := inUse[entry.Name]; deleting && needed {
-			// The CR is going away but data encrypted with this key isn't.
-			if !use.Retained {
+			held, waiting := holdKeyForData(entry, use, recordEvent)
+			if waiting {
 				results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonInUse})
 				continue
 			}
-			if recordEvent != nil && entry.DeletionPolicy == depsv1alpha1.DeletionPolicyDelete {
-				recordEvent("Warning", "KeyRetainedForData", fmt.Sprintf("Keeping KMS key %s (%s) despite its Delete policy: resources encrypted with it are retained", entry.Name, entry.ARN))
-			}
-			entry.DeletionPolicy = depsv1alpha1.DeletionPolicyRetain
+			entry = held
 		}
 
 		if declared[entry.Name] {
@@ -244,6 +231,41 @@ func Cleanup(
 	}
 
 	return updatedLedger, results, firstErr
+}
+
+// declaredKeyNames is the set of ledger names Cleanup treats as still wanted:
+// the keys declared under kms.resources and every key in use. While the CR is
+// being deleted nothing is declared, and inUse is handled key by key instead.
+func declaredKeyNames(spec *depsv1alpha1.KMSSpec, inUse map[string]KeyUse, deleting bool) map[string]bool {
+	declared := map[string]bool{}
+	if deleting {
+		return declared
+	}
+	if spec != nil {
+		for _, k := range spec.Resources {
+			declared[k.Name] = true
+		}
+	}
+	for name := range inUse {
+		declared[name] = true
+	}
+	return declared
+}
+
+// holdKeyForData decides what a CR's deletion does to a key that data is
+// still encrypted with. If that data is draining towards deletion, the key
+// waits (waiting is true). If it is retained, the key is retained too,
+// whatever its own deletionPolicy said, so it is relinquished like any
+// retained key instead of scheduled for deletion.
+func holdKeyForData(entry depsv1alpha1.ManagedResource, use KeyUse, recordEvent status.EventRecorder) (held depsv1alpha1.ManagedResource, waiting bool) {
+	if !use.Retained {
+		return entry, true
+	}
+	if recordEvent != nil && entry.DeletionPolicy == depsv1alpha1.DeletionPolicyDelete {
+		recordEvent("Warning", "KeyRetainedForData", fmt.Sprintf("Keeping KMS key %s (%s) despite its Delete policy: resources encrypted with it are retained", entry.Name, entry.ARN))
+	}
+	entry.DeletionPolicy = depsv1alpha1.DeletionPolicyRetain
+	return entry, false
 }
 
 func markPendingDeletion(
