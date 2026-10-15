@@ -18,6 +18,7 @@ package kms
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -227,7 +228,7 @@ func TestCleanup_TreatsADedicatedKeyStillNeededAsDeclared(t *testing.T) {
 		{Type: resourceType, Name: "orders-key", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &since},
 	}
 
-	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, []string{"orders-key"}, ledger, false, nil)
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, map[string]KeyUse{"orders-key": {}}, ledger, false, nil)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
@@ -322,5 +323,82 @@ func TestCleanup_SchedulingDeletion_EmitsScheduledEvent(t *testing.T) {
 
 	if len(*events) != 1 || (*events)[0].reason != "KeyDeletionScheduled" {
 		t.Errorf("expected exactly one KeyDeletionScheduled event, got %+v", *events)
+	}
+}
+
+// A CR being deleted must not take a key with it while resources encrypted
+// with that key are still draining: the key waits for them.
+func TestCleanup_Deleting_KeyStillInUseWaitsForItsData(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	past := metav1.NewTime(time.Now().Add(-time.Hour))
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "sqs#orders#key", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &past},
+	}
+
+	updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil,
+		map[string]KeyUse{"sqs#orders#key": {}}, ledger, true, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if client.keys[arn].keyState != types.KeyStateEnabled {
+		t.Errorf("expected no deletion while encrypted data still exists, got state %v", client.keys[arn].keyState)
+	}
+	if len(results) != 1 || results[0].Reason != CleanupReasonInUse {
+		t.Errorf("expected an InUseByEncryptedData result so the finalizer waits, got %+v", results)
+	}
+	if !status.HasManagedResource(updated, resourceType, "sqs#orders#key") {
+		t.Error("expected the key to stay in the ledger")
+	}
+}
+
+// A key protecting retained data outlives the CR whatever its own policy:
+// it is relinquished like a retained key, never scheduled for deletion.
+func TestCleanup_Deleting_KeyOfRetainedDataIsRetained(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "shared", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now()},
+	}
+
+	var events []string
+	record := func(_, reason, _ string) { events = append(events, reason) }
+	_, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil,
+		map[string]KeyUse{"shared": {Retained: true}}, ledger, true, record)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if client.keys[arn].keyState != types.KeyStateEnabled {
+		t.Errorf("expected the key to be kept for retained data, got state %v", client.keys[arn].keyState)
+	}
+	if cloudctlaws.IsOwnedBy(client.keys[arn].tags, "default", "checkout-service", "uid-1") {
+		t.Error("expected the key to be relinquished, like any key this CR retains")
+	}
+	if len(results) != 1 || results[0].Reason != CleanupReasonRetained {
+		t.Errorf("expected a Retained result, got %+v", results)
+	}
+	if !slices.Contains(events, "KeyRetainedForData") {
+		t.Errorf("expected a KeyRetainedForData warning explaining the override, got %v", events)
+	}
+}
+
+// A key nothing uses is still deleted normally on CR deletion.
+func TestCleanup_Deleting_UnusedKeyIsStillScheduled(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	past := metav1.NewTime(time.Now().Add(-time.Hour))
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "spare", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: metav1.Now(), PendingDeletionSince: &past},
+	}
+
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil,
+		map[string]KeyUse{"other": {}}, ledger, true, nil); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if client.keys[arn].keyState != types.KeyStatePendingDeletion {
+		t.Errorf("expected an unused key to be scheduled for deletion, got state %v", client.keys[arn].keyState)
 	}
 }

@@ -521,6 +521,98 @@ spec:
 		mustKubectl("delete", "appdependencies", "share-producer", "-n", resilienceNamespace, "--wait=true", "--timeout=3m")
 	})
 
+	It("keeps the encryption key of a non-empty queue that has left spec, even once its quiet window has passed", func() {
+		const header = `apiVersion: deps.cloudctl.io/v1alpha1
+kind: AppDependencies
+metadata:
+  name: key-hold
+  namespace: %s
+spec:
+`
+		manifest := func(withQueue bool) string {
+			if !withQueue {
+				return fmt.Sprintf(header, resilienceNamespace) + "  {}\n"
+			}
+			return fmt.Sprintf(header, resilienceNamespace) + `  sqs:
+    resources:
+      - name: orders
+        deletionPolicy: Delete
+        encryption:
+          enabled: true
+`
+		}
+		_, err := kubectlApplyStdin(manifest(true))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) { crReady(g, resilienceNamespace, "key-hold") }, 3*time.Minute, 3*time.Second).Should(Succeed())
+
+		keyARN := func() string {
+			out, _ := tryKubectl("get", "appdependencies", "key-hold", "-n", resilienceNamespace,
+				"-o", `jsonpath={.status.managedResources[?(@.type=="kms")].arn}`)
+			return strings.TrimSpace(out)
+		}
+		arn := keyARN()
+		Expect(arn).NotTo(BeEmpty(), "the queue's dedicated key should be in the ledger")
+
+		By("putting a message in the queue, so its non-empty guard holds it")
+		queueURL := strings.TrimSpace(mustKubectl("get", "configmap", "key-hold-connection", "-n", resilienceNamespace,
+			"-o", "jsonpath={.data.SQS_ORDERS_URL}"))
+		runAWSCLIPod(nextAWSPod("key-hold-send"), "sqs", "send-message", "--queue-url", queueURL, "--message-body", "must-stay-readable")
+
+		By("removing the queue from spec")
+		_, err = kubectlApplyStdin(manifest(false))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() string {
+			out, _ := tryKubectl("get", "appdependencies", "key-hold", "-n", resilienceNamespace,
+				"-o", `jsonpath={.status.managedResources[?(@.type=="sqs")].pendingDeletionSince}`)
+			return strings.TrimSpace(out)
+		}, 2*time.Minute, 3*time.Second).ShouldNot(BeEmpty(), "the non-empty queue should be held pending deletion")
+
+		By("letting the key's own quiet window pass, the way time would")
+		cr, err := getCR(resilienceNamespace, "key-hold")
+		Expect(err).NotTo(HaveOccurred())
+		for i, r := range cr.Status.ManagedResources {
+			if r.Type == "kms" {
+				mustKubectl("patch", "appdependencies", "key-hold", "-n", resilienceNamespace, "--subresource=status", "--type=json",
+					"-p", fmt.Sprintf(`[{"op":"add","path":"/status/managedResources/%d/pendingDeletionSince","value":"2000-01-01T00:00:00Z"}]`, i))
+			}
+		}
+		for range 3 {
+			forceReconcile(resilienceNamespace, "key-hold")
+			time.Sleep(5 * time.Second)
+		}
+
+		Expect(keyARN()).To(Equal(arn), "the key must stay in the ledger while its queue still holds data")
+		Expect(runAWSCLIPod(nextAWSPod("key-hold-state"), "kms", "describe-key", "--key-id", arn)).To(ContainSubstring("Enabled"),
+			"the key must not be scheduled for deletion while a message encrypted with it is still in the queue")
+
+		By("draining the queue by force and deleting the CR")
+		mustKubectl("annotate", "appdependencies", "key-hold", "-n", resilienceNamespace, "--overwrite", "cloudctl.io/force-delete-all=true")
+		mustKubectl("delete", "appdependencies", "key-hold", "-n", resilienceNamespace, "--wait=false")
+
+		By("starting the key's own quiet window only once no data is left")
+		Eventually(func() string {
+			out, _ := tryKubectl("get", "appdependencies", "key-hold", "-n", resilienceNamespace,
+				"-o", `jsonpath={.status.managedResources[?(@.type=="kms")].pendingDeletionSince}`)
+			return strings.TrimSpace(out)
+		}, 3*time.Minute, 3*time.Second).ShouldNot(BeEmpty())
+
+		By("letting that window pass, then the key goes with the CR")
+		cr, err = getCR(resilienceNamespace, "key-hold")
+		Expect(err).NotTo(HaveOccurred())
+		for i, r := range cr.Status.ManagedResources {
+			if r.Type == "kms" {
+				mustKubectl("patch", "appdependencies", "key-hold", "-n", resilienceNamespace, "--subresource=status", "--type=json",
+					"-p", fmt.Sprintf(`[{"op":"add","path":"/status/managedResources/%d/pendingDeletionSince","value":"2000-01-01T00:00:00Z"}]`, i))
+			}
+		}
+		Eventually(func(g Gomega) {
+			_ = tryForceReconcile(resilienceNamespace, "key-hold")
+			crGone(g, resilienceNamespace, "key-hold")
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+		Expect(runAWSCLIPod(nextAWSPod("key-hold-gone"), "kms", "describe-key", "--key-id", arn)).To(ContainSubstring("PendingDeletion"),
+			"once nothing is encrypted with it, the key is scheduled for deletion")
+	})
+
 	It("exposes reconcile metrics on the leader", func() {
 		_, err := kubectlApplyStdin(queueCRManifest(resilienceNamespace, "metrics-probe"))
 		Expect(err).NotTo(HaveOccurred())

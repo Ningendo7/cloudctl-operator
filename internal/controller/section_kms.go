@@ -25,6 +25,13 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
+)
+
+const (
+	resourceTypeKMS         = "kms"
+	rdsSnapshotResourceType = rds.SnapshotResourceType
 )
 
 // encryptedResource is one declared resource that can carry an encryption
@@ -79,11 +86,11 @@ func referencedKMSKeyNames(cr *depsv1alpha1.AppDependencies) []string {
 	return names
 }
 
-// neededKMSKeyNames collects the ledger names of keys this CR still needs
-// but that kms.Cleanup wouldn't otherwise see as declared: dedicated keys
-// of resources with encryption.enabled (never listed in spec.kms.resources,
-// see EnsureDedicatedKey), and keys a resource still references through
-// kmsKeyRef. Without it every such key would look unwanted on every pass.
+// neededKMSKeyNames collects the ledger names of keys this CR's spec still
+// needs but that kms.Cleanup wouldn't otherwise see as declared: dedicated
+// keys of resources with encryption.enabled (never listed in
+// spec.kms.resources, see EnsureDedicatedKey), and keys a resource still
+// references through kmsKeyRef.
 func neededKMSKeyNames(cr *depsv1alpha1.AppDependencies) []string {
 	names := referencedKMSKeyNames(cr)
 	for _, r := range encryptedResources(cr) {
@@ -92,6 +99,101 @@ func neededKMSKeyNames(cr *depsv1alpha1.AppDependencies) []string {
 		}
 	}
 	return names
+}
+
+// kmsKeyLedgerName is the name, among this CR's kms ledger entries, of the
+// key a resource's encryption block uses, or "" if it has none.
+func kmsKeyLedgerName(r encryptedResource) string {
+	switch {
+	case r.encryption == nil:
+		return ""
+	case r.encryption.KMSKeyRef != "":
+		return r.encryption.KMSKeyRef
+	case r.encryption.Enabled:
+		return kms.DedicatedKeyLedgerName(r.resourceType, r.name)
+	default:
+		return ""
+	}
+}
+
+// recordKMSKeyARNs stamps each declared resource's ledger entry with the ARN
+// of the key it is encrypted with. Once the resource leaves spec, this is
+// the only record of which key its data needs. An SQS dead-letter queue
+// uses its main queue's key.
+func recordKMSKeyARNs(cr *depsv1alpha1.AppDependencies) {
+	ledger := cr.Status.ManagedResources
+	for _, r := range encryptedResources(cr) {
+		keyName := kmsKeyLedgerName(r)
+		if keyName == "" {
+			continue
+		}
+		key, ok := status.FindManagedResource(ledger, resourceTypeKMS, keyName)
+		if !ok || key.ARN == "" {
+			continue
+		}
+		names := []string{r.name}
+		if r.resourceType == resourceTypeSQS {
+			names = append(names, cloudctlaws.DerivedKey(r.name, "dlq"))
+		}
+		for _, name := range names {
+			if entry, found := status.FindManagedResource(ledger, r.resourceType, name); found && entry.KMSKeyARN != key.ARN {
+				entry.KMSKeyARN = key.ARN
+				status.UpsertManagedResource(&ledger, entry)
+			}
+		}
+	}
+	cr.Status.ManagedResources = ledger
+}
+
+// kmsKeysInUse returns every key of this CR that data still depends on:
+// the keys the spec needs, plus the key of every resource still in the
+// ledger, whether it is declared, draining towards deletion, retained, or
+// an RDS final snapshot. A key whose dependents include a retained resource
+// is marked Retained, since it has to outlive the CR along with that data.
+//
+// The key is found through the KMSKeyARN recorded on the entry. Entries
+// recorded before that field existed fall back to the dedicated key derived
+// from the entry's own type and name, which covers encryption.enabled.
+func kmsKeysInUse(cr *depsv1alpha1.AppDependencies, includeSpec bool) map[string]kms.KeyUse {
+	inUse := map[string]kms.KeyUse{}
+	if includeSpec {
+		for _, name := range neededKMSKeyNames(cr) {
+			inUse[name] = kms.KeyUse{}
+		}
+	}
+
+	byARN := map[string]string{}
+	for _, e := range cr.Status.ManagedResources {
+		if e.Type == resourceTypeKMS {
+			byARN[e.ARN] = e.Name
+		}
+	}
+	mark := func(name string, retained bool) {
+		use := inUse[name]
+		use.Retained = use.Retained || retained
+		inUse[name] = use
+	}
+	for _, e := range cr.Status.ManagedResources {
+		if e.Type == resourceTypeKMS || e.Type == resourceTypeIAM {
+			continue
+		}
+		retained := e.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete
+		if name, ok := byARN[e.KMSKeyARN]; ok && e.KMSKeyARN != "" {
+			mark(name, retained)
+			continue
+		}
+		ownerType, resourceName := e.Type, e.Name
+		if ownerType == rdsSnapshotResourceType {
+			ownerType = resourceTypeRDS
+		}
+		if base, _, derived := strings.Cut(resourceName, "#"); derived {
+			resourceName = base
+		}
+		if dedicated := kms.DedicatedKeyLedgerName(ownerType, resourceName); status.HasManagedResource(cr.Status.ManagedResources, resourceTypeKMS, dedicated) {
+			mark(dedicated, retained)
+		}
+	}
+	return inUse
 }
 
 // undeclaredKMSKeyRefs returns referenced key names missing from
@@ -133,9 +235,10 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			)
 			cr.Status.ManagedResources = ledger
 
+			recordKMSKeyARNs(cr)
 			ledger, _, cleanupErr := kms.Cleanup(
 				ctx, awsClients.KMS, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.KMS, neededKMSKeyNames(cr), cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
+				cr.Spec.KMS, kmsKeysInUse(cr, true), cr.Status.ManagedResources, false, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 
@@ -166,12 +269,12 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			ctx, cancel := sectionDeletionContext(ctx, cr.Status.ManagedResources, "kms", declared)
 			defer cancel()
 
-			// The needed-keys list is irrelevant here — deleting is true,
-			// so kms.Cleanup tears down every kms-type ledger entry
-			// regardless, the same as every other resource type's finalize.
+			// KMS finalizes last, so whatever other resources are still in the
+			// ledger here are either draining or retained. Their keys wait for
+			// the first and stay with the second.
 			ledger, results, err := kms.Cleanup(
 				ctx, awsClients.KMS, cr.Namespace, cr.Name, string(cr.UID),
-				cr.Spec.KMS, nil, cr.Status.ManagedResources, true, eventRecorderFor(r, cr),
+				cr.Spec.KMS, kmsKeysInUse(cr, false), cr.Status.ManagedResources, true, eventRecorderFor(r, cr),
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {
@@ -179,7 +282,7 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			}
 			var blocked []string
 			for _, res := range results {
-				if res.Reason == kms.CleanupReasonPendingDeletion {
+				if res.Reason == kms.CleanupReasonPendingDeletion || res.Reason == kms.CleanupReasonInUse {
 					blocked = append(blocked, fmt.Sprintf("kms %q: %s", res.Name, res.Reason))
 				}
 			}

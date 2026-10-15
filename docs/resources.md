@@ -267,10 +267,17 @@ deliberately **no `force`**: unlike a queue or a bucket, a key isn't
 "non-empty" in a way force could legitimately override, since deleting one
 while anything still uses it to encrypt data makes that data permanently
 unrecoverable. `ScheduleKeyDeletion` uses AWS's maximum 30-day window for
-the same reason. A key that one of this CR's resources still references is
-never scheduled for deletion, even if it has been removed from
-`kms.resources`. On CR deletion, keys are removed last, after the
-resources encrypted with them.
+the same reason.
+
+A key is never scheduled for deletion while data encrypted with it still
+exists, whatever its own `deletionPolicy`. Each resource's ledger entry
+records the ARN of its key (`kmsKeyARN`), so this holds after the resource
+leaves spec too: a non-empty queue, bucket or table still pending deletion,
+a retained resource, or an RDS final snapshot all keep their key. On CR
+deletion, keys go last: a key whose data is still draining holds the
+finalizer until that data is gone, and a key protecting retained data is
+kept and relinquished with it (a `KeyRetainedForData` warning says so when
+the key's own policy was `Delete`).
 
 The CR's IAM role gets `kms:Decrypt` and `kms:GenerateDataKey` on every key
 the CR declares or provisions.

@@ -81,6 +81,11 @@ func iamSection(r *AppDependenciesReconciler) section {
 			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, resourceTypeIAM, iamWorkloadCount(cr))
 			defer cancel()
 
+			// Runs last, after every section has written this pass's new
+			// ledger entries, so a resource created this pass already carries
+			// its key before anything can remove it from spec.
+			recordKMSKeyARNs(cr)
+
 			ledger, roleARN, ensureErr := iam.Ensure(
 				ctx, r.AWSClients.IAM, r.Client,
 				r.OIDCProviderARN, r.OIDCProviderURL,

@@ -53,6 +53,9 @@ const deletionQuietWindow = 10 * time.Minute
 // podNetworkIdentityResourceType already takes for the pod security group.
 const snapshotResourceType = "rds-snapshot"
 
+// SnapshotResourceType is the ledger type of an instance's final snapshot.
+const SnapshotResourceType = snapshotResourceType
+
 type CleanupReason string
 
 const (
@@ -256,6 +259,9 @@ func ensureFinalSnapshot(
 			State:          depsv1alpha1.ManagedResourceStateCreating,
 			DeletionPolicy: depsv1alpha1.DeletionPolicyRetain,
 			CreatedAt:      metav1.Now(),
+			// A snapshot of an encrypted instance is encrypted with the same
+			// key, which has to outlive it.
+			KMSKeyARN: entry.KMSKeyARN,
 		})
 		if recordEvent != nil {
 			recordEvent("Normal", "FinalSnapshotCreating", fmt.Sprintf("Taking a final snapshot %q of stuck RDS instance %s before any manual deletion", snapshotID, entry.Name))

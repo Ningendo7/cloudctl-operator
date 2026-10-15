@@ -1302,6 +1302,13 @@ spec:
                       description: force mirrors the spec entry's force flag at the
                         same point.
                       type: boolean
+                    kmsKeyARN:
+                      description: |-
+                        kmsKeyARN is the ARN of the KMS key this resource's data is encrypted
+                        with, if any. Recorded so the key is kept for as long as the resource
+                        is in the ledger, including after it leaves spec (pending deletion or
+                        retained), when spec alone no longer says which key it used.
+                      type: string
                     lastEmptyCheckAt:
                       description: |-
                         lastEmptyCheckAt is the last time a real AWS "is it empty yet" call
