@@ -85,7 +85,10 @@ func Ensure(
 	cr *depsv1alpha1.AppDependencies,
 	ledger []depsv1alpha1.ManagedResource,
 ) (updatedLedger []depsv1alpha1.ManagedResource, roleARN string, err error) {
-	grants, skipped := collectGrants(ctx, k8sClient, cr)
+	grants, skipped, err := collectGrants(ctx, k8sClient, cr)
+	if err != nil {
+		return ledger, "", err
+	}
 	if len(grants) == 0 {
 		return ledger, "", skippedToError(skipped)
 	}

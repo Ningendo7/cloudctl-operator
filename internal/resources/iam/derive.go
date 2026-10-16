@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -100,6 +102,15 @@ var (
 	s3ObjectReadWrite    = []string{"s3:PutObject", "s3:DeleteObject"}
 )
 
+// grantActions is actionsFor without the actions a consumer never gets.
+func grantActions(g grant) []string {
+	actions := actionsFor(g.resourceType, g.readWrite)
+	if !g.consumed {
+		return actions
+	}
+	return slices.DeleteFunc(actions, func(a string) bool { return slices.Contains(notForConsumers[g.resourceType], a) })
+}
+
 func actionsFor(resourceType string, readWrite bool) []string {
 	set := actionSets[resourceType]
 	actions := append([]string{}, set.baseline...)
@@ -123,6 +134,15 @@ type grant struct {
 	resourceType string // "sqs", "sns", "dynamodb", "s3" - see the resourceType* constants
 	arn          string
 	readWrite    bool
+	consumed     bool // granted to another CR through sharedWith, not owned
+}
+
+// notForConsumers are owner actions a consumer never gets. A consumer that
+// could subscribe could point the owner's topic at any endpoint, and that
+// subscription would outlive a revocation; consumers get messages through
+// subscribesTo, which the operator removes when access is revoked.
+var notForConsumers = map[string][]string{
+	resourceTypeSNS: {"sns:Subscribe", "sns:Unsubscribe"},
 }
 
 // collectGrants gathers every resource this CR's IAM role needs access to:
@@ -141,7 +161,7 @@ type grant struct {
 // skipped collects a human-readable reason for each one.
 //
 //nolint:gocyclo // four structurally-identical, deliberately-duplicated per-resource-type blocks (own+dedicated-key+shared-key+consumes); already covered by extensive TestCollectGrants_* tests, and splitting risks a correctness bug in this operator's single most security-critical function
-func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDependencies) (grants []grant, skipped []string) {
+func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDependencies) (grants []grant, skipped []string, err error) {
 	if cr.Spec.SQS != nil {
 		for _, q := range cr.Spec.SQS.Resources {
 			grants, skipped = recordOwned(grants, skipped, cr, resourceTypeSQS, q.Name)
@@ -156,9 +176,13 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			}
 		}
 		for _, ref := range cr.Spec.SQS.Consumes {
-			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeSQS, ref); reason != "" {
+			g, reason, err := resolveConsume(ctx, k8sClient, cr, resourceTypeSQS, ref)
+			switch {
+			case err != nil:
+				return nil, nil, err
+			case reason != "":
 				skipped = append(skipped, reason)
-			} else {
+			default:
 				grants = append(grants, g...)
 			}
 		}
@@ -173,9 +197,13 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			}
 		}
 		for _, ref := range cr.Spec.SNS.Consumes {
-			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeSNS, ref); reason != "" {
+			g, reason, err := resolveConsume(ctx, k8sClient, cr, resourceTypeSNS, ref)
+			switch {
+			case err != nil:
+				return nil, nil, err
+			case reason != "":
 				skipped = append(skipped, reason)
-			} else {
+			default:
 				grants = append(grants, g...)
 			}
 		}
@@ -190,9 +218,13 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			}
 		}
 		for _, ref := range cr.Spec.DynamoDB.Consumes {
-			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeDynamoDB, ref); reason != "" {
+			g, reason, err := resolveConsume(ctx, k8sClient, cr, resourceTypeDynamoDB, ref)
+			switch {
+			case err != nil:
+				return nil, nil, err
+			case reason != "":
 				skipped = append(skipped, reason)
-			} else {
+			default:
 				grants = append(grants, g...)
 			}
 		}
@@ -207,9 +239,13 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			}
 		}
 		for _, ref := range cr.Spec.S3.Consumes {
-			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeS3, ref); reason != "" {
+			g, reason, err := resolveConsume(ctx, k8sClient, cr, resourceTypeS3, ref)
+			switch {
+			case err != nil:
+				return nil, nil, err
+			case reason != "":
 				skipped = append(skipped, reason)
-			} else {
+			default:
 				grants = append(grants, g...)
 			}
 		}
@@ -223,7 +259,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 		}
 	}
 
-	return grants, skipped
+	return grants, skipped, nil
 }
 
 // recordOwned appends a grant for an owned resource if it has a ledger
@@ -244,19 +280,24 @@ func recordOwned(grants []grant, skipped []string, cr *depsv1alpha1.AppDependenc
 // grant naming this CR, and resolves the resource's ARN from the
 // producer's own ledger, plus its encryption key's when it has one.
 // Returns a non-empty reason instead of an error for anything not yet
-// resolvable - see collectGrants' doc comment.
-func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) ([]grant, string) {
+// resolvable - see collectGrants' doc comment. A failed read is an error,
+// never a reason: it says nothing about whether access was revoked, so
+// callers must not narrow or remove anything on it.
+func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) ([]grant, string, error) {
 	prefix := fmt.Sprintf("%s/%s consumes %s/%s's %q", consumer.Namespace, consumer.Name, ref.Namespace, ref.Name, ref.ResourceName)
 
 	var producer depsv1alpha1.AppDependencies
 	key := client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}
 	if err := k8sClient.Get(ctx, key, &producer); err != nil {
-		return nil, prefix + ": producer CR not found yet"
+		if apierrors.IsNotFound(err) {
+			return nil, prefix + ": producer CR not found yet", nil
+		}
+		return nil, "", &cloudctlaws.ReconcileError{Err: fmt.Errorf("reading producer %s/%s: %w", ref.Namespace, ref.Name, err), Retryable: true}
 	}
 
 	sharedWith, encryption, ok := producerResource(&producer, resourceType, ref.ResourceName)
 	if !ok {
-		return nil, prefix + ": resource not declared there yet"
+		return nil, prefix + ": resource not declared there yet", nil
 	}
 
 	var grantedTo *depsv1alpha1.SharedWithEntry
@@ -267,26 +308,26 @@ func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *deps
 		}
 	}
 	if grantedTo == nil {
-		return nil, prefix + ": not authorized - owner hasn't granted this CR in sharedWith"
+		return nil, prefix + ": not authorized - owner hasn't granted this CR in sharedWith", nil
 	}
 
 	entry, found := status.FindManagedResource(producer.Status.ManagedResources, resourceType, ref.ResourceName)
 	if !found {
-		return nil, prefix + ": not reconciled there yet"
+		return nil, prefix + ": not reconciled there yet", nil
 	}
 
 	readWrite := grantedTo.Access == depsv1alpha1.AccessLevelReadWrite
-	grants := []grant{{resourceType: resourceType, arn: entry.ARN, readWrite: readWrite}}
+	grants := []grant{{resourceType: resourceType, arn: entry.ARN, readWrite: readWrite, consumed: true}}
 
 	// DynamoDB uses the key on the caller's behalf through its own grant.
 	if keyName := keyLedgerName(resourceType, ref.ResourceName, encryption); keyName != "" && resourceType != resourceTypeDynamoDB {
 		key, found := status.FindManagedResource(producer.Status.ManagedResources, resourceTypeKMS, keyName)
 		if !found {
-			return nil, prefix + ": its encryption key is not reconciled there yet"
+			return nil, prefix + ": its encryption key is not reconciled there yet", nil
 		}
 		grants = append(grants, grant{resourceType: resourceTypeKMS, arn: key.ARN, readWrite: readWrite})
 	}
-	return grants, ""
+	return grants, "", nil
 }
 
 // keyLedgerName is the ledger name of the key a resource is encrypted with,
@@ -317,12 +358,12 @@ func keyLedgerName(resourceType, name string, encryption *depsv1alpha1.Encryptio
 // expose a resource identifier this CR wasn't actually granted IAM access
 // to, and that has to stay in lockstep with collectGrants automatically,
 // not by two separate implementations agreeing by coincidence.
-func ResolveConsumeARN(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) (arn string, ok bool) {
-	grants, reason := resolveConsume(ctx, k8sClient, consumer, resourceType, ref)
-	if reason != "" {
-		return "", false
+func ResolveConsumeARN(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) (arn string, ok bool, err error) {
+	grants, reason, err := resolveConsume(ctx, k8sClient, consumer, resourceType, ref)
+	if err != nil || reason != "" {
+		return "", false, err
 	}
-	return grants[0].arn, true
+	return grants[0].arn, true, nil
 }
 
 // producerResource returns the sharedWith list and encryption of one
@@ -410,7 +451,7 @@ func buildPolicyDocument(grants []grant) (string, error) {
 		doc.Statement = append(doc.Statement, policyStatement{
 			Sid:      fmt.Sprintf("%s%d", g.resourceType, i),
 			Effect:   effectAllow,
-			Action:   actionsFor(g.resourceType, g.readWrite),
+			Action:   grantActions(g),
 			Resource: []string{g.arn},
 		})
 	}

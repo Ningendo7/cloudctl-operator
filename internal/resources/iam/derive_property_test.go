@@ -98,8 +98,8 @@ func TestBuildPolicyDocument_ReadWriteNeverRemovesReadOnlyActions(t *testing.T) 
 		resourceType := resourceTypeGen().Draw(t, "resourceType")
 		arn := arnGen(resourceType).Draw(t, "arn")
 
-		readOnly := flattenActions(decodePolicy(t, []grant{{resourceType, arn, false}}).Statement)
-		readWrite := flattenActions(decodePolicy(t, []grant{{resourceType, arn, true}}).Statement)
+		readOnly := flattenActions(decodePolicy(t, []grant{{resourceType: resourceType, arn: arn}}).Statement)
+		readWrite := flattenActions(decodePolicy(t, []grant{{resourceType: resourceType, arn: arn, readWrite: true}}).Statement)
 
 		for _, action := range readOnly {
 			if !containsString(readWrite, action) {

@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/smithy-go"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -285,8 +286,12 @@ func reconcileIngress(
 	desired := map[string]bool{}
 	var firstErr error
 	for _, consumer := range sharedWith {
-		consumerGroupARN, ok := consumerPodSecurityGroupARN(ctx, k8sClient, consumer.Namespace, consumer.Name,
+		consumerGroupARN, ok, err := consumerPodSecurityGroupARN(ctx, k8sClient, consumer.Namespace, consumer.Name,
 			depsv1alpha1.ConsumeRef{Namespace: ownerNamespace, Name: ownerName, ResourceName: resourceName})
+		if err != nil {
+			// A failed read is not a revocation: keep every rule this pass.
+			return err
+		}
 		if !ok {
 			// Forward reference not resolved yet - self-resolves on a
 			// later pass, same tolerance as every other cross-CR
@@ -296,7 +301,7 @@ func reconcileIngress(
 		consumerGroupID := SecurityGroupIDFromARN(consumerGroupARN)
 		desired[consumerGroupID] = true
 
-		_, err := ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
+		_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 			GroupId: &groupID,
 			IpPermissions: []types.IpPermission{{
 				IpProtocol:       aws.String("tcp"),
@@ -367,15 +372,19 @@ func revokeStaleIngress(ctx context.Context, ec2Client cloudctlaws.EC2Client, gr
 // group is not granted: it would only hold on to a group the consumer is
 // trying to delete, and a CR named in sharedWith that never asked for the
 // instance should not reach it.
-func consumerPodSecurityGroupARN(ctx context.Context, k8sClient client.Client, namespace, crName string, instance depsv1alpha1.ConsumeRef) (string, bool) {
+func consumerPodSecurityGroupARN(ctx context.Context, k8sClient client.Client, namespace, crName string, instance depsv1alpha1.ConsumeRef) (string, bool, error) {
 	var consumer depsv1alpha1.AppDependencies
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: crName}, &consumer); err != nil {
-		return "", false
+		if apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, &cloudctlaws.ReconcileError{Err: fmt.Errorf("reading consumer %s/%s: %w", namespace, crName, err), Retryable: true}
 	}
 	if consumer.DeletionTimestamp != nil || consumer.Spec.RDS == nil || !slices.Contains(consumer.Spec.RDS.Consumes, instance) {
-		return "", false
+		return "", false, nil
 	}
-	return PodNetworkIdentityARN(&consumer)
+	arn, ok := PodNetworkIdentityARN(&consumer)
+	return arn, ok, nil
 }
 
 func isDuplicatePermission(err error) bool {

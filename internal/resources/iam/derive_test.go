@@ -56,7 +56,7 @@ func TestCollectGrants_OwnedResourceAlwaysGrantedRegardlessOfSharing(t *testing.
 		},
 	}
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(), cr)
 	if len(skipped) != 0 {
 		t.Fatalf("expected no skipped entries, got %v", skipped)
 	}
@@ -81,7 +81,7 @@ func TestCollectGrants_EncryptedOwnedSQSResourceAlsoGrantsItsDedicatedKey(t *tes
 		},
 	}
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(), cr)
 	if len(skipped) != 0 {
 		t.Fatalf("expected no skipped entries, got %v", skipped)
 	}
@@ -132,7 +132,7 @@ func TestCollectGrants_EncryptedOwnedSNSResourceAlsoGrantsItsDedicatedKey(t *tes
 		},
 	}
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(), cr)
 	if len(skipped) != 0 {
 		t.Fatalf("expected no skipped entries, got %v", skipped)
 	}
@@ -167,7 +167,7 @@ func TestCollectGrants_EncryptedOwnedS3ResourceAlsoGrantsItsDedicatedKey(t *test
 		},
 	}
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(), cr)
 	if len(skipped) != 0 {
 		t.Fatalf("expected no skipped entries, got %v", skipped)
 	}
@@ -202,7 +202,7 @@ func TestCollectGrants_EncryptedOwnedDynamoDBResourceAlsoGrantsItsDedicatedKey(t
 		},
 	}
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(), cr)
 	if len(skipped) != 0 {
 		t.Fatalf("expected no skipped entries, got %v", skipped)
 	}
@@ -234,7 +234,7 @@ func TestCollectGrants_UnencryptedOwnedSQSResourceGrantsNoKMSAccess(t *testing.T
 		},
 	}
 
-	grants, _ := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	grants, _, _ := collectGrants(context.Background(), newFakeK8sClient(), cr)
 	for _, g := range grants {
 		if g.resourceType == "kms" {
 			t.Fatalf("expected no kms grant for a queue with no encryption declared, got %+v", g)
@@ -251,7 +251,7 @@ func TestCollectGrants_OwnedResourceWithoutLedgerEntryIsSkippedWithReason(t *tes
 		// No ManagedResources - as if creation hasn't succeeded yet.
 	}
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), cr)
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(), cr)
 	if len(grants) != 0 {
 		t.Errorf("expected no grants for an unreconciled owned resource, got %+v", grants)
 	}
@@ -290,7 +290,7 @@ func TestCollectGrants_ConsumedResourceGrantedWhenSharedWithMatches(t *testing.T
 		},
 	}
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
 	if len(skipped) != 0 {
 		t.Fatalf("expected no skipped entries, got %v", skipped)
 	}
@@ -313,7 +313,7 @@ func TestCollectGrants_ConsumedResourceDefaultsToReadOnly(t *testing.T) {
 		},
 	}
 
-	grants, _ := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	grants, _, _ := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
 	if len(grants) != 1 || grants[0].readWrite {
 		t.Errorf("expected an unset Access to default to ReadOnly, got %+v", grants)
 	}
@@ -352,7 +352,7 @@ func TestCollectGrants_ConsumedEncryptedResourceAlsoGrantsItsKey(t *testing.T) {
 	producer := encryptedProducer(&depsv1alpha1.EncryptionSpec{Enabled: true},
 		cloudctlaws.DedicatedKeyLedgerName("sqs", "orders"), true)
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), ordersConsumer())
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(producer), ordersConsumer())
 	if len(skipped) != 0 {
 		t.Fatalf("expected no skipped entries, got %v", skipped)
 	}
@@ -366,7 +366,7 @@ func TestCollectGrants_ConsumedResourceUsingADeclaredKeyGrantsThatKey(t *testing
 	producer := encryptedProducer(&depsv1alpha1.EncryptionSpec{KMSKeyRef: "shared"}, "shared", true)
 	producer.Spec.SQS.Resources[0].SharedWith[0].Access = ""
 
-	grants, _ := collectGrants(context.Background(), newFakeK8sClient(producer), ordersConsumer())
+	grants, _, _ := collectGrants(context.Background(), newFakeK8sClient(producer), ordersConsumer())
 	key := findGrant(grants, "kms")
 	if key == nil || key.arn != consumedKeyARN || key.readWrite {
 		t.Errorf("expected a read-only kms grant on %s, got %+v", consumedKeyARN, grants)
@@ -379,7 +379,7 @@ func TestCollectGrants_ConsumedResourceWhoseKeyIsNotReconciledYetIsSkipped(t *te
 	producer := encryptedProducer(&depsv1alpha1.EncryptionSpec{Enabled: true},
 		cloudctlaws.DedicatedKeyLedgerName("sqs", "orders"), false)
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), ordersConsumer())
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(producer), ordersConsumer())
 	if len(grants) != 0 {
 		t.Errorf("expected no grants until the key is reconciled, got %+v", grants)
 	}
@@ -414,7 +414,7 @@ func TestCollectGrants_ConsumedEncryptedTableGrantsNoKey(t *testing.T) {
 		},
 	}
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
 	if len(skipped) != 0 || len(grants) != 1 || grants[0].resourceType != "dynamodb" {
 		t.Errorf("expected only the table grant, got grants=%+v skipped=%v", grants, skipped)
 	}
@@ -439,7 +439,7 @@ func TestCollectGrants_SkipsWhenProducerNotFound(t *testing.T) {
 		},
 	}
 
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), consumer)
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(), consumer)
 	if len(grants) != 0 {
 		t.Errorf("expected no grants when the producer doesn't exist, got %+v", grants)
 	}
@@ -462,7 +462,7 @@ func TestCollectGrants_SkipsWhenResourceNotDeclaredOnProducer(t *testing.T) {
 		},
 	}
 
-	_, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	_, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
 	if len(skipped) != 1 || !strings.Contains(skipped[0], "not declared") {
 		t.Errorf("expected a 'resource not declared' reason, got %v", skipped)
 	}
@@ -479,7 +479,7 @@ func TestCollectGrants_SkipsWhenNotAuthorized(t *testing.T) {
 		},
 	}
 
-	_, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	_, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
 	if len(skipped) != 1 || !strings.Contains(skipped[0], "not authorized") {
 		t.Errorf("expected a 'not authorized' reason, got %v", skipped)
 	}
@@ -504,7 +504,7 @@ func TestCollectGrants_SkipsWhenProducerResourceNotYetReconciled(t *testing.T) {
 		},
 	}
 
-	_, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	_, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
 	if len(skipped) != 1 || !strings.Contains(skipped[0], "not reconciled") {
 		t.Errorf("expected a 'not reconciled' reason, got %v", skipped)
 	}
@@ -612,7 +612,7 @@ func keyReferencingCR(keyInLedger bool) *depsv1alpha1.AppDependencies {
 }
 
 func TestCollectGrants_ResourceEncryptedViaKMSKeyRefCanUseItsOwnKey(t *testing.T) {
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), keyReferencingCR(true))
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(), keyReferencingCR(true))
 	if len(skipped) != 0 {
 		t.Fatalf("expected no skipped entries, got %v", skipped)
 	}
@@ -642,7 +642,7 @@ func TestCollectGrants_ResourceEncryptedViaKMSKeyRefCanUseItsOwnKey(t *testing.T
 }
 
 func TestCollectGrants_KMSKeyNotCreatedYetIsReportedNotSilentlyDropped(t *testing.T) {
-	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(), keyReferencingCR(false))
+	grants, skipped, _ := collectGrants(context.Background(), newFakeK8sClient(), keyReferencingCR(false))
 	for _, g := range grants {
 		if g.resourceType == "kms" {
 			t.Fatalf("expected no kms grant before the key exists, got %+v", g)
@@ -650,5 +650,68 @@ func TestCollectGrants_KMSKeyNotCreatedYetIsReportedNotSilentlyDropped(t *testin
 	}
 	if len(skipped) != 1 || !strings.Contains(skipped[0], "not reconciled yet") {
 		t.Errorf("expected a 'not reconciled yet' reason for the missing key, got %v", skipped)
+	}
+}
+
+func policyActions(t *testing.T, grants []grant) []string {
+	t.Helper()
+	doc, err := buildPolicyDocument(grants)
+	if err != nil {
+		t.Fatalf("buildPolicyDocument() error = %v", err)
+	}
+	var parsed policyDocument
+	if err := json.Unmarshal([]byte(doc), &parsed); err != nil {
+		t.Fatalf("policy is not JSON: %v", err)
+	}
+	var actions []string
+	for _, st := range parsed.Statement {
+		actions = append(actions, st.Action...)
+	}
+	return actions
+}
+
+// A consumer that could subscribe could point the owner's topic at any
+// endpoint, and that subscription would keep receiving after the owner
+// revoked it. Consumers get messages through subscribesTo instead, which
+// the operator removes on revocation.
+func TestCollectGrants_TopicConsumersCannotSubscribeButOwnersCan(t *testing.T) {
+	const topicARN = "arn:aws:sns:us-east-1:123456789012:default-checkout-service-events"
+	producer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SNS: &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{
+			Name: "events", SharedWith: []depsv1alpha1.SharedWithEntry{
+				{Namespace: "default", Name: "fulfillment-service", Access: depsv1alpha1.AccessLevelReadWrite},
+			},
+		}}}},
+		Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
+			{Type: "sns", Name: "events", ARN: topicARN},
+		}},
+	}
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SNS: &depsv1alpha1.SNSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+			{Namespace: "default", Name: "checkout-service", ResourceName: "events"},
+		}}},
+	}
+	k8sClient := newFakeK8sClient(producer)
+
+	consumed, _, err := collectGrants(context.Background(), k8sClient, consumer)
+	if err != nil {
+		t.Fatalf("collectGrants(consumer) error = %v", err)
+	}
+	actions := policyActions(t, consumed)
+	if slices.Contains(actions, "sns:Subscribe") || slices.Contains(actions, "sns:Unsubscribe") {
+		t.Errorf("a consumer can subscribe: %v", actions)
+	}
+	if !slices.Contains(actions, "sns:Publish") {
+		t.Errorf("a ReadWrite consumer should still publish: %v", actions)
+	}
+
+	owned, _, err := collectGrants(context.Background(), k8sClient, producer)
+	if err != nil {
+		t.Fatalf("collectGrants(owner) error = %v", err)
+	}
+	if !slices.Contains(policyActions(t, owned), "sns:Subscribe") {
+		t.Error("the topic's owner should keep sns:Subscribe on its own topic")
 	}
 }

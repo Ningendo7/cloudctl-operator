@@ -18,6 +18,7 @@ package configmap
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -26,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
@@ -484,4 +486,51 @@ func keysOf(m map[string]string) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// withFailingCRReadsCM wraps c so that reading any AppDependencies fails, as
+// a cache or API-server hiccup would, once *failing is true.
+func withFailingCRReadsCM(c client.WithWatch, failing *bool) client.Client {
+	return interceptor.NewClient(c, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isCR := obj.(*depsv1alpha1.AppDependencies); isCR && *failing {
+				return errors.New("injected: API server unavailable")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+}
+
+// Dropping a consumed resource's key on a failed read would take its env
+// var away from pods that restart before the next pass.
+func TestEnsure_KeepsConsumedKeysWhenAProducerCannotBeRead(t *testing.T) {
+	producer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: "shared-cache", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "team-a", Name: "checkout-service"}}},
+		}}},
+		Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
+			{Type: "sqs", Name: "shared-cache", ARN: "arn:aws:sqs:us-east-1:123456789012:team-b-platform-service-shared-cache"},
+		}},
+	}
+	failing := false
+	c := withFailingCRReadsCM(fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer).Build(), &failing)
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+			{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-cache"},
+		}}},
+	}
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, consumer); err != nil {
+		t.Fatalf("first Ensure: %v", err)
+	}
+
+	failing = true
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, consumer); err == nil {
+		t.Fatal("expected an error when the producer can't be read")
+	}
+	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
+	if cm.Data["SQS_TEAM_B_PLATFORM_SERVICE_SHARED_CACHE_URL"] == "" {
+		t.Error("the consumed queue's key was removed because the producer couldn't be read")
+	}
 }

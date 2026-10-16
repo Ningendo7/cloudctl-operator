@@ -247,6 +247,10 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 		mgrDone   chan struct{}
 		chaos     *chaosSQS
 		nsA, nsB  string
+		// seenByOperator reads through the manager's own cache, which is
+		// what decides whether an edit made through k8sClient ever reaches
+		// the controller as an event.
+		seenByOperator client.Client
 	)
 
 	BeforeAll(func() {
@@ -270,6 +274,7 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 			},
 		})
 		Expect(err).NotTo(HaveOccurred())
+		seenByOperator = mgr.GetClient()
 
 		Expect((&AppDependenciesReconciler{
 			Client:    mgr.GetClient(),
@@ -478,6 +483,10 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 				return len(cm.Data)
 			}, timeout, poll).Should(BeNumerically(">", 0))
 
+			operatorHasSeen(seenByOperator, cmKey("cm-label"), func(cm *corev1.ConfigMap) bool {
+				return cm.Labels[depsv1alpha1.ManagedByLabelKey] == depsv1alpha1.ManagedByLabelValue
+			})
+
 			// Without the label the object drops out of the operator's
 			// filtered cache, so this exercises the path where it can only
 			// be found through the API reader.
@@ -500,6 +509,10 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 				_ = k8sClient.Get(ctx, cmKey("cm-owner"), &cm)
 				return len(cm.OwnerReferences)
 			}, timeout, poll).Should(Equal(1))
+
+			operatorHasSeen(seenByOperator, cmKey("cm-owner"), func(cm *corev1.ConfigMap) bool {
+				return len(cm.OwnerReferences) == 1
+			})
 
 			var cm corev1.ConfigMap
 			Expect(k8sClient.Get(ctx, cmKey("cm-owner"), &cm)).To(Succeed())
@@ -694,4 +707,17 @@ func updateCR(key client.ObjectKey, mutate func(*depsv1alpha1.AppDependencies)) 
 		mutate(&cr)
 		return k8sClient.Update(ctx, &cr)
 	})).To(Succeed())
+}
+
+// operatorHasSeen waits until the operator's cache holds the ConfigMap in the
+// state the test is about to tamper with. An edit made before the cache has
+// seen the original arrives as the object's first event, already tampered
+// with, and a stripped owner reference leaves nothing to map back to the CR,
+// so no reconcile is ever triggered.
+func operatorHasSeen(c client.Client, key types.NamespacedName, ready func(*corev1.ConfigMap) bool) {
+	GinkgoHelper()
+	Eventually(func() bool {
+		var cm corev1.ConfigMap
+		return c.Get(ctx, key, &cm) == nil && ready(&cm)
+	}, 30*time.Second, 50*time.Millisecond).Should(BeTrue(), "the operator's cache never saw the ConfigMap before it was tampered with")
 }

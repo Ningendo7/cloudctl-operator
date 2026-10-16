@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	applycorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 	applymetav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -61,36 +62,123 @@ const fieldOwner = client.FieldOwner("cloudctl-operator-serviceaccount")
 // exactly one ServiceAccount even when several coexist in it.
 const NetworkIdentityLabelKey = "cloudctl.io/network-identity"
 
-// networkIdentityFieldOwner is deliberately separate from fieldOwner
-// above - SSA lets multiple field managers jointly own different fields
-// on the same object without conflict, so this claim never needs to
-// coordinate with (or risk clobbering) whatever Ensure already applied
-// for the roleARN annotation.
-const networkIdentityFieldOwner = client.FieldOwner("cloudctl-operator-network-identity")
+// legacyNetworkIdentityFieldOwner is the one manager every CR used for the
+// label before each got its own; releases also drop it, so a label claimed
+// before an upgrade doesn't outlive the last CR using it.
+const legacyNetworkIdentityFieldOwner = client.FieldOwner("cloudctl-operator-network-identity")
 
-// EnsureNetworkIdentityLabel merges NetworkIdentityLabelKey onto the
-// target ServiceAccount, so EKS's Security Groups for Pods feature can
-// select exactly the pods running as it. Safe to call regardless of
-// whether this ServiceAccount is one Ensure above created and owns, or
-// one it only ever merges into - the label claim is independent either
-// way.
-func EnsureNetworkIdentityLabel(ctx context.Context, k8sClient client.Client, namespace, name string) error {
-	apply := applycorev1.ServiceAccount(name, namespace).
-		WithLabels(map[string]string{NetworkIdentityLabelKey: name})
-	return k8sClient.Apply(ctx, apply, networkIdentityFieldOwner, client.ForceOwnership)
+// networkIdentityFieldOwner is one CR's claim on the label. It is separate
+// from fieldOwner, and per CR, so CRs sharing a ServiceAccount each hold
+// the label and one releasing it doesn't take it from the others.
+func networkIdentityFieldOwner(crUID string) client.FieldOwner {
+	return client.FieldOwner("cloudctl-network-identity-" + crUID)
 }
 
-// ReleaseNetworkIdentityLabel gives up this field manager's claim on the
-// label, the same re-apply-without-the-field mechanism release() uses for
-// the roleARN annotation - safe to call even if the ServiceAccount is
-// already gone, or never had the label in the first place.
-func ReleaseNetworkIdentityLabel(ctx context.Context, k8sClient client.Client, namespace, name string) error {
+// AllowClaimAnnotation, set on a ServiceAccount to a CR's name, lets that CR
+// take over a ServiceAccount whose IAM role was set outside this operator.
+// Adding it needs write access to the ServiceAccount, which is what proves
+// consent; nothing in the CR itself can, since the CR's author is exactly
+// who may lack that access.
+const AllowClaimAnnotation = "cloudctl.io/allow-claim"
+
+// Reasons a ServiceAccount can't be used.
+const (
+	ReasonServiceAccountNotFound     = "ServiceAccountNotFound"
+	ReasonServiceAccountNotClaimable = "ServiceAccountNotClaimable"
+	ReasonServiceAccountInUse        = "ServiceAccountInUse"
+)
+
+// claimError says why the CR may not modify an existing ServiceAccount, or
+// nil. One already claimed by another CR is refused, and so is one carrying
+// an IAM role set outside this operator, unless it consents through
+// AllowClaimAnnotation: the operator can edit any ServiceAccount, and must
+// not do for a CR's author what their own access wouldn't allow.
+func claimError(sa *corev1.ServiceAccount, namespace, crName, crUID string) error {
+	if cloudctlaws.IsOwnedBy(sa.Annotations, namespace, crName, crUID) {
+		return nil
+	}
+	if owner := sa.Annotations[cloudctlaws.OwnerTagKey]; owner != "" {
+		return &cloudctlaws.ReconcileError{
+			Err:    fmt.Errorf("ServiceAccount %q is already claimed by a different AppDependencies CR (%s)", sa.Name, owner),
+			Reason: ReasonServiceAccountInUse,
+		}
+	}
+	if role := sa.Annotations[RoleARNAnnotation]; role != "" && sa.Annotations[AllowClaimAnnotation] != crName {
+		return &cloudctlaws.ReconcileError{
+			Err: fmt.Errorf("ServiceAccount %q already has IAM role %s, set outside this operator; to hand it to this CR, annotate it with %s=%s",
+				sa.Name, role, AllowClaimAnnotation, crName),
+			Reason: ReasonServiceAccountNotClaimable,
+		}
+	}
+	return nil
+}
+
+func notFoundError(name string) error {
+	return &cloudctlaws.ReconcileError{
+		Err:       fmt.Errorf("ServiceAccount %q does not exist; create it, or leave the name unset to have one created for this CR", name),
+		Retryable: true,
+		Reason:    ReasonServiceAccountNotFound,
+	}
+}
+
+// ownerReference makes the CR the controller owner of a ServiceAccount the
+// operator creates for it, so garbage collection removes the two together.
+func ownerReference(crName, crUID string) *applymetav1.OwnerReferenceApplyConfiguration {
+	return applymetav1.OwnerReference().
+		WithAPIVersion(depsv1alpha1.GroupVersion.String()).
+		WithKind("AppDependencies").
+		WithName(crName).
+		WithUID(types.UID(crUID)).
+		WithController(true).
+		WithBlockOwnerDeletion(true)
+}
+
+// EnsureNetworkIdentityLabel puts NetworkIdentityLabelKey on the
+// ServiceAccount a CR's pods run as, so EKS's Security Groups for Pods can
+// select exactly those pods. A ServiceAccount named after the CR is created
+// when missing, owned by the CR; any other name has to exist already, and
+// pass claimError, since the label decides which pods the database
+// security group replaces the groups of.
+func EnsureNetworkIdentityLabel(ctx context.Context, k8sClient client.Client, namespace, crName, crUID, name string) error {
+	existing, exists, err := getServiceAccount(ctx, k8sClient, namespace, name)
+	if err != nil {
+		return err
+	}
+	apply := applycorev1.ServiceAccount(name, namespace).
+		WithLabels(map[string]string{NetworkIdentityLabelKey: name})
+	switch {
+	case !exists && name != crName:
+		return notFoundError(name)
+	case !exists:
+		apply = apply.WithOwnerReferences(ownerReference(crName, crUID))
+	default:
+		if err := claimError(existing, namespace, crName, crUID); err != nil {
+			return err
+		}
+		if owner := metav1.GetControllerOf(existing); owner != nil && string(owner.UID) == crUID {
+			apply = apply.WithOwnerReferences(ownerReference(crName, crUID))
+		}
+	}
+	return k8sClient.Apply(ctx, apply, networkIdentityFieldOwner(crUID), client.ForceOwnership)
+}
+
+// ReleaseNetworkIdentityLabel gives up this CR's claim on the label, the
+// same re-apply-without-the-field mechanism release() uses for the role
+// annotation; the label stays while another CR still claims it. Safe to
+// call even if the ServiceAccount is already gone.
+func ReleaseNetworkIdentityLabel(ctx context.Context, k8sClient client.Client, namespace, crName, crUID, name string) error {
 	sa := &corev1.ServiceAccount{}
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sa); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	apply := applycorev1.ServiceAccount(name, namespace)
-	return k8sClient.Apply(ctx, apply, networkIdentityFieldOwner, client.ForceOwnership)
+	if owner := metav1.GetControllerOf(sa); owner != nil && string(owner.UID) == crUID {
+		apply = apply.WithOwnerReferences(ownerReference(crName, crUID))
+	}
+	if err := k8sClient.Apply(ctx, apply, networkIdentityFieldOwner(crUID), client.ForceOwnership); err != nil {
+		return err
+	}
+	return k8sClient.Apply(ctx, applycorev1.ServiceAccount(name, namespace), legacyNetworkIdentityFieldOwner, client.ForceOwnership)
 }
 
 // Ensure attaches roleARN to the ServiceAccount this CR's workload runs
@@ -116,22 +204,25 @@ func Ensure(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDe
 		target = cr.Name
 	}
 
-	if prev := cr.Status.ServiceAccountName; prev != "" && prev != target {
-		if err := release(ctx, k8sClient, cr, prev); err != nil {
-			return prev, err
-		}
-	}
-
 	existing, exists, err := getServiceAccount(ctx, k8sClient, cr.Namespace, target)
 	if err != nil {
 		return cr.Status.ServiceAccountName, err
 	}
-	if exists && existing.Annotations[cloudctlaws.OwnerTagKey] != "" &&
-		!cloudctlaws.IsOwnedBy(existing.Annotations, cr.Namespace, cr.Name, string(cr.UID)) {
-		return cr.Status.ServiceAccountName, fmt.Errorf(
-			"ServiceAccount %q is already claimed by a different AppDependencies CR (%s) — refusing to attach a different IAM role",
-			target, existing.Annotations[cloudctlaws.OwnerTagKey],
-		)
+	// Checked before releasing the previous target, so a refused retarget
+	// leaves the workload's current role in place.
+	switch {
+	case !exists && !defaultedName:
+		return cr.Status.ServiceAccountName, notFoundError(target)
+	case exists:
+		if err := claimError(existing, cr.Namespace, cr.Name, string(cr.UID)); err != nil {
+			return cr.Status.ServiceAccountName, err
+		}
+	}
+
+	if prev := cr.Status.ServiceAccountName; prev != "" && prev != target {
+		if err := release(ctx, k8sClient, cr, prev); err != nil {
+			return prev, err
+		}
 	}
 
 	isOwnedByUs := exists && cloudctlaws.IsOwnedBy(existing.Annotations, cr.Namespace, cr.Name, string(cr.UID))

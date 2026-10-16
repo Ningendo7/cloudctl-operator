@@ -64,7 +64,7 @@ func subscriptionAllowSid(ledgerName string) string {
 // already establishes for this package's other cross-CR reference
 // (encryption.kmsKeyRef), reused here rather than threading the whole CR
 // object through Ensure/Cleanup's per-queue call chain.
-func resolveTopicARN(ctx context.Context, k8sClient client.Client, namespace, crName string, ref depsv1alpha1.ConsumeRef) (string, bool) {
+func resolveTopicARN(ctx context.Context, k8sClient client.Client, namespace, crName string, ref depsv1alpha1.ConsumeRef) (string, bool, error) {
 	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName}}
 	return iam.ResolveConsumeARN(ctx, k8sClient, consumer, resourceTypeSNS, ref)
 }
@@ -93,7 +93,10 @@ func EnsureSubscriptions(
 ) ([]depsv1alpha1.ManagedResource, error) {
 	var firstErr error
 	for _, ref := range subscribesTo {
-		topicARN, ok := resolveTopicARN(ctx, k8sClient, namespace, crName, ref)
+		topicARN, ok, err := resolveTopicARN(ctx, k8sClient, namespace, crName, ref)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
 		if !ok {
 			continue
 		}
@@ -171,7 +174,13 @@ func CleanupSubscriptions(
 ) ([]depsv1alpha1.ManagedResource, error) {
 	authorized := map[string]bool{}
 	for _, ref := range subscribesTo {
-		if _, ok := resolveTopicARN(ctx, k8sClient, namespace, crName, ref); ok {
+		_, ok, err := resolveTopicARN(ctx, k8sClient, namespace, crName, ref)
+		if err != nil {
+			// A failed read is not a revocation: unsubscribing on it would
+			// drop messages until the next pass.
+			return ledger, err
+		}
+		if ok {
 			authorized[subscriptionLedgerName(queueName, ref)] = true
 		}
 	}
