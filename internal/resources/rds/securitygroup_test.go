@@ -23,10 +23,12 @@ import (
 
 	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 const (
@@ -42,6 +44,9 @@ const (
 func newConsumerWithPodIdentity(namespace, crName, podSGARN string) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName},
+		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{
+			Consumes: []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}},
+		}},
 		Status: depsv1alpha1.AppDependenciesStatus{
 			ManagedResources: []depsv1alpha1.ManagedResource{
 				{Type: podNetworkIdentityResourceType, Name: podNetworkIdentityLedgerName, ARN: podSGARN},
@@ -629,4 +634,201 @@ func TestEnsureSecurityGroup_AdoptTakesUntaggedOrStaleGroupButNeverAnotherCRs(t 
 			t.Error("the other CR's tags must be left alone")
 		}
 	})
+}
+
+// grantedGroups returns the consumer group IDs the instance's group admits.
+func grantedGroups(ec2Client *fakeEC2, instanceGroupARN string) []string {
+	rules := ec2Client.groups[SecurityGroupIDFromARN(instanceGroupARN)].ingress
+	ids := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		ids = append(ids, rule.sourceGroupID)
+	}
+	return ids
+}
+
+func ensureInstanceGroup(t *testing.T, ec2Client *fakeEC2, k8sClient client.Client, sharedWith ...depsv1alpha1.SharedWithEntry) string {
+	t.Helper()
+	arn, err := EnsureSecurityGroup(context.Background(), newFakeRDS(), ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith)
+	if err != nil {
+		t.Fatalf("EnsureSecurityGroup() error = %v", err)
+	}
+	return arn
+}
+
+var fulfillmentShare = depsv1alpha1.SharedWithEntry{Namespace: "fulfillment", Name: "fulfillment-service"}
+
+// A consumer that is being deleted, or has stopped listing the instance in
+// rds.consumes, no longer needs the database. Without this its group stays
+// referenced by a rule here, which is what stops the consumer from ever
+// deleting that group.
+func TestEnsureSecurityGroup_NoIngressForAConsumerBeingDeleted(t *testing.T) {
+	consumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+	now := metav1.Now()
+	consumer.DeletionTimestamp = &now
+	consumer.Finalizers = []string{"deps.cloudctl.io/finalizer"}
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
+
+	arn := ensureInstanceGroup(t, ec2Client, k8sClient, fulfillmentShare)
+	if got := grantedGroups(ec2Client, arn); len(got) != 0 {
+		t.Errorf("granted %v to a consumer that is being deleted, want none", got)
+	}
+}
+
+func TestEnsureSecurityGroup_NoIngressForAConsumerThatDoesNotConsumeThisInstance(t *testing.T) {
+	cases := map[string][]depsv1alpha1.ConsumeRef{
+		"no rds.consumes at all":            nil,
+		"a different instance of the owner": {{Namespace: "default", Name: "checkout-service", ResourceName: "other-db"}},
+		"a different owner":                 {{Namespace: "default", Name: "billing-service", ResourceName: "orders-db"}},
+	}
+	for name, consumes := range cases {
+		t.Run(name, func(t *testing.T) {
+			consumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+			consumer.Spec.RDS.Consumes = consumes
+			ec2Client := newFakeEC2()
+			k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
+
+			arn := ensureInstanceGroup(t, ec2Client, k8sClient, fulfillmentShare)
+			if got := grantedGroups(ec2Client, arn); len(got) != 0 {
+				t.Errorf("granted %v to a consumer that never asked for this instance, want none", got)
+			}
+		})
+	}
+}
+
+// The consumer marks its pod group as releasing before it deletes it, and
+// the owner has to let go of it as soon as it sees that.
+func TestEnsureSecurityGroup_RevokesIngressOnceTheConsumerIsReleasingItsGroup(t *testing.T) {
+	consumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
+
+	arn := ensureInstanceGroup(t, ec2Client, k8sClient, fulfillmentShare)
+	if got := grantedGroups(ec2Client, arn); len(got) != 1 {
+		t.Fatalf("setup: granted %v, want the consumer's group", got)
+	}
+
+	releasing := metav1.Now()
+	consumer.Status.ManagedResources[0].PendingDeletionSince = &releasing
+	if err := k8sClient.Update(context.Background(), consumer); err != nil {
+		t.Fatalf("updating consumer: %v", err)
+	}
+	ensureInstanceGroup(t, ec2Client, k8sClient, fulfillmentShare)
+	if got := grantedGroups(ec2Client, arn); len(got) != 0 {
+		t.Errorf("still granting %v to a consumer that is releasing its group", got)
+	}
+}
+
+func trackedInstanceGroup(t *testing.T, ec2Client *fakeEC2) ([]depsv1alpha1.ManagedResource, string) {
+	t.Helper()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	arn := ensureInstanceGroup(t, ec2Client, k8sClient)
+	return recordInstanceSecurityGroup(nil, "orders-db", arn), SecurityGroupIDFromARN(arn)
+}
+
+// An instance is only ever deleted by hand, and its security group used to
+// stay behind: it counted against the VPC quota forever and its rules kept
+// the consumers' groups from being deleted.
+func TestCleanupInstanceSecurityGroups_DeletesTheGroupOfAnInstanceThatIsGone(t *testing.T) {
+	ec2Client := newFakeEC2()
+	ledger, groupID := trackedInstanceGroup(t, ec2Client)
+
+	ledger, err := CleanupInstanceSecurityGroups(context.Background(), ec2Client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("CleanupInstanceSecurityGroups() error = %v", err)
+	}
+	if _, exists := ec2Client.groups[groupID]; exists {
+		t.Error("expected the group of the removed instance to be deleted")
+	}
+	if len(ledger) != 0 {
+		t.Errorf("expected the ledger entry removed, got %+v", ledger)
+	}
+}
+
+func TestCleanupInstanceSecurityGroups_KeepsTheGroupOfAnInstanceThatStillExists(t *testing.T) {
+	declared := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
+	tracked := []depsv1alpha1.ManagedResource{{Type: resourceType, Name: "orders-db"}}
+	cases := map[string]struct {
+		spec     *depsv1alpha1.RDSSpec
+		extra    []depsv1alpha1.ManagedResource
+		deleting bool
+	}{
+		"still declared":                   {spec: declared},
+		"retained, still in the ledger":    {spec: &depsv1alpha1.RDSSpec{}, extra: tracked},
+		"deleting, but the instance lives": {spec: declared, extra: tracked, deleting: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ec2Client := newFakeEC2()
+			ledger, groupID := trackedInstanceGroup(t, ec2Client)
+			ledger = append(ledger, tc.extra...)
+
+			ledger, err := CleanupInstanceSecurityGroups(context.Background(), ec2Client, "default", "checkout-service", "uid-1", tc.spec, ledger, tc.deleting)
+			if err != nil {
+				t.Fatalf("CleanupInstanceSecurityGroups() error = %v", err)
+			}
+			if _, exists := ec2Client.groups[groupID]; !exists {
+				t.Error("deleted the security group of an instance that still exists")
+			}
+			if !status.HasManagedResource(ledger, podNetworkIdentityResourceType, instanceSecurityGroupLedgerName("orders-db")) {
+				t.Error("dropped the ledger entry of an instance that still exists")
+			}
+		})
+	}
+}
+
+func TestCleanupInstanceSecurityGroups_WaitsWhileAConsumersRuleStillNamesTheGroup(t *testing.T) {
+	ec2Client := newFakeEC2()
+	ledger, groupID := trackedInstanceGroup(t, ec2Client)
+	ec2Client.groups["sg-other"] = &fakeSecurityGroup{id: "sg-other", name: "other", vpcID: "vpc-x",
+		ingress: []fakeIngressRule{{sourceGroupID: groupID, fromPort: 5432, toPort: 5432}}}
+
+	ledger, err := CleanupInstanceSecurityGroups(context.Background(), ec2Client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable error while another group still references it, got %v", err)
+	}
+	if !status.HasManagedResource(ledger, podNetworkIdentityResourceType, instanceSecurityGroupLedgerName("orders-db")) {
+		t.Error("the entry must stay, or the group could never be found again")
+	}
+}
+
+func TestCleanupInstanceSecurityGroups_NeverDeletesAGroupItNoLongerOwns(t *testing.T) {
+	ec2Client := newFakeEC2()
+	ledger, groupID := trackedInstanceGroup(t, ec2Client)
+	ec2Client.groups[groupID].tags = ownerTags("someone", "else", "uid-9")
+
+	ledger, err := CleanupInstanceSecurityGroups(context.Background(), ec2Client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false)
+	if err != nil {
+		t.Fatalf("CleanupInstanceSecurityGroups() error = %v", err)
+	}
+	if _, exists := ec2Client.groups[groupID]; !exists {
+		t.Error("deleted a security group owned by someone else")
+	}
+	if len(ledger) != 0 {
+		t.Errorf("expected the stale entry dropped, got %+v", ledger)
+	}
+}
+
+func TestCleanupInstanceSecurityGroups_AGroupThatIsAlreadyGoneJustDropsTheEntry(t *testing.T) {
+	ec2Client := newFakeEC2()
+	ledger, groupID := trackedInstanceGroup(t, ec2Client)
+	delete(ec2Client.groups, groupID)
+
+	ledger, err := CleanupInstanceSecurityGroups(context.Background(), ec2Client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false)
+	if err != nil || len(ledger) != 0 {
+		t.Errorf("got ledger=%+v err=%v, want an empty ledger and no error", ledger, err)
+	}
+}
+
+func TestCleanupInstanceSecurityGroups_IgnoresThePodIdentityEntry(t *testing.T) {
+	ec2Client := newFakeEC2()
+	podEntry := depsv1alpha1.ManagedResource{Type: podNetworkIdentityResourceType, Name: podNetworkIdentityLedgerName,
+		ARN: "arn:aws:ec2:us-east-1:123456789012:security-group/sg-pod"}
+
+	ledger, err := CleanupInstanceSecurityGroups(context.Background(), ec2Client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, []depsv1alpha1.ManagedResource{podEntry}, true)
+	if err != nil || len(ledger) != 1 || ec2Client.deleteSecurityGroupCalls != 0 {
+		t.Errorf("touched the pod identity entry: ledger=%+v err=%v deletes=%d", ledger, err, ec2Client.deleteSecurityGroupCalls)
+	}
 }

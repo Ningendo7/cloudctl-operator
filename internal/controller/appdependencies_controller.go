@@ -56,6 +56,10 @@ type AppDependenciesReconciler struct {
 	OIDCProviderARN string
 	OIDCProviderURL string
 
+	// PodBaseSecurityGroupIDs are the security groups the pods of a CR using
+	// rds.consumes keep next to the database group.
+	PodBaseSecurityGroupIDs []string
+
 	// MaxConcurrentReconciles bounds how many AppDependencies CRs this
 	// manager reconciles in parallel. Left at zero (the Go zero value, not
 	// a deliberate "disable" setting) falls back to defaultMaxConcurrentReconciles

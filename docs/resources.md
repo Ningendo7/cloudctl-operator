@@ -29,7 +29,7 @@ spec:
 | `force` | Allows deleting a queue that isn't empty (visible, in-flight, *and* delayed message counts are all checked independently). |
 | `adopt` | Required to bring an existing, differently-owned or untagged queue under this CR's management. |
 | `sharedWith` | Grants other `AppDependencies` CRs permission to consume this queue (up to 20 entries), and via `access`, how much (see [IAM](#iam) below). |
-| `subscribesTo` | Subscribes this queue to SNS topics (up to 20), each referenced by owner namespace, CR name and topic name. The operator creates the real SNS subscription and the queue policy that lets the topic deliver, and removes both when the entry goes. The subscription is re-checked every trust window, so one removed by hand, or deleted along with a recreated topic, comes back with a `SubscriptionRepaired` warning. The topic's owner must list this CR in its own `sharedWith`, the same as any cross-CR reference. |
+| `subscribesTo` | Subscribes this queue to SNS topics (up to 20), each referenced by owner namespace, CR name and topic name. The operator creates the real SNS subscription and the queue policy that lets the topic deliver, and removes both when the entry goes. A subscription removed behind the operator's back is restored. The topic's owner must list this CR in its own `sharedWith`, the same as any cross-CR reference. |
 | `overrides.visibilityTimeoutSeconds` | 0–43200. Drift-corrected on every reconcile if it diverges from spec. |
 | `overrides.maxReceiveCount` | 1–1000. Only meaningful with `dlq: true`. |
 | `overrides.contentBasedDeduplication` | Only meaningful with `fifo: true`. |
@@ -199,6 +199,10 @@ spec:
 
 **Network access.** Each instance gets its own security group, created and owned by the operator and never shared. `sharedWith` grants ingress from a consumer CR's pods, which therefore need EKS Security Groups for Pods: the consumer CR gets its own pod security group and a `SecurityGroupPolicy`. A security group found at the expected name is only reused if it carries this CR's ownership tags; `adopt: true` takes over an untagged one or one left by an earlier incarnation of the same CR.
 
+**Pod security groups.** Security Groups for Pods replaces a consumer pod's groups with the database group, which admits nothing, so list the groups the pods still need, normally the EKS cluster security group: `manager.podBaseSecurityGroupIds` in the chart (the manager's `--pod-base-security-group-ids` flag). Without it the pods can stop receiving Service, load balancer and probe traffic, and the operator warns with `PodBaseSecurityGroupsUnset`. It is one list for the whole cluster, and the VPC CNI must run in its default enforcing mode.
+
+Removing `rds.consumes` or deleting the consumer releases its group in order; `RDSReady` shows `WaitingForRuleRelease` until AWS lets it go. An instance's security group is deleted once the instance itself is gone.
+
 **Adopting an existing instance.** With `adopt: true`, an untagged instance at the expected name is adopted only if the spec describes it. Adoption never changes an instance, so it is refused with an `AdoptionConflict` reason, and before anything is created, tagged or modified, when the instance differs on any of:
 
 - `engine`, `dbSubnetGroupName`, or storage encryption (including the key, for a `kmsKeyRef`), none of which can be changed afterwards, or an instance that is publicly accessible;
@@ -282,27 +286,7 @@ the key's own policy was `Delete`).
 The CR's IAM role gets `kms:Decrypt` and `kms:GenerateDataKey` on every key
 the CR declares or provisions.
 
-A consumer granted an encrypted queue, topic or bucket gets `kms:Decrypt`
-on its key too, plus `kms:GenerateDataKey` with `ReadWrite` access; the
-grant waits until the producer's key is reconciled. DynamoDB consumers need
-neither, since DynamoDB uses the key through its own grant.
-
-A key that is `Disabled` or otherwise unusable fails `KMSReady` with reason
-`KeyDisabled` or `KeyUnavailable` and a Warning event, since nothing
-encrypted with it can be read or written. The operator never re-enables a
-key someone disabled. Automatic rotation is re-checked at every
-revalidation and turned back on with a `KeyRotationReenabled` warning.
-Cancelling a scheduled deletion re-enables the key as well, since AWS
-leaves it disabled.
-
-Every key's policy grants `sns.amazonaws.com` and `cloudwatch.amazonaws.com`
-`kms:GenerateDataKey*` and `kms:Decrypt`, scoped to the key's own account
-with `aws:SourceAccount`. AWS services aren't IAM identities, so without
-this SNS can't deliver into an encrypted queue and CloudWatch alarms can't
-publish to an encrypted topic, and both fail silently. The operator adds
-and updates only its own statements, by `Sid`, and keeps everything else in
-the policy. New keys get them at creation, existing ones at the next
-revalidation.
+A consumer of an encrypted queue, topic or bucket gets the key permissions it needs too. A key that is disabled or unavailable fails `KMSReady` (`KeyDisabled`, `KeyUnavailable`) and is never re-enabled by the operator. Keys also let SNS and CloudWatch use them, so SNS can deliver into an encrypted queue and alarms can publish to an encrypted topic.
 
 **Upgrading from v0.2.0.** `encryption.kmsKeyRef` used to be a cross-CR reference object, and `kms.resources[].sharedWith` and `kms.consumes` existed; v0.3.0 removed all three. After the CRD upgrade the API server drops the removed fields from stored objects, and a CR that used the object form is left with an empty `kmsKeyRef: {}`. From v0.3.1 the manager refuses such a CR: `KMSReady` goes `False` with reason `LegacyKMSKeyRef`, naming the resource, and nothing is reconciled for it until it's edited. Every other CR is unaffected. v0.3.0 cannot decode that object, which makes its cache fail to list every `AppDependencies`, so go straight to v0.3.1, or edit those CRs first.
 

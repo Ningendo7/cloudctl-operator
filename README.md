@@ -113,6 +113,9 @@ ungranted reference is reported, not silently dropped or silently allowed.
   every IAM role this operator derives is trust-scoped to your cluster's
   OIDC provider, so reconciliation for any CR needing IAM fails without
   them.
+- **Pod base security groups** — only if CRs use `rds.consumes`: set
+  `manager.podBaseSecurityGroupIds` (normally the EKS cluster security
+  group). See [docs/resources.md](docs/resources.md#rds).
 
 ### Helm (recommended)
 

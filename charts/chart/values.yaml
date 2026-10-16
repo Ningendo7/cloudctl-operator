@@ -27,6 +27,13 @@ manager:
   args:
     - --leader-elect
 
+  ## Security groups the pods of a CR using rds.consumes keep next to the
+  ## database group, normally the EKS cluster security group. Security Groups
+  ## for Pods replaces a pod's groups with the ones it is given, so without
+  ## these the pods can lose Service, load balancer and probe traffic.
+  ##
+  podBaseSecurityGroupIds: []
+
   ## Image pull secrets
   ##
   # imagePullSecrets:

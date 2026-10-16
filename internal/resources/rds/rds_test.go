@@ -1800,6 +1800,17 @@ func TestEnsure_AdoptionConflictDoesNotMaskOwnershipRefusals(t *testing.T) {
 	}
 }
 
+func TestEnsure_RecordsTheInstanceSecurityGroupInTheLedger(t *testing.T) {
+	ledger, err := ensureOnce(t, newFakeRDS(), baseInstanceSpec("orders-db"), nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	entry, found := status.FindManagedResource(ledger, podNetworkIdentityResourceType, instanceSecurityGroupLedgerName("orders-db"))
+	if !found || !strings.Contains(entry.ARN, ":security-group/sg-") {
+		t.Errorf("expected the instance's security group in the ledger, got %+v", ledger)
+	}
+}
+
 func TestEnsure_CreatesInstancePrivate(t *testing.T) {
 	client := newFakeRDS()
 	if _, err := ensureOnce(t, client, baseInstanceSpec("orders-db"), nil); err != nil {

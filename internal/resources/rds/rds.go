@@ -69,6 +69,7 @@ const (
 	statusFailed    = "failed"
 	enginePostgres  = "postgres"
 
+	errCodeDependencyViolation       = "DependencyViolation"
 	errCodeInvalidDBInstanceState    = "InvalidDBInstanceState"
 	errCodeInvalidGroupNotFound      = "InvalidGroup.NotFound"
 	errCodeInvalidPermissionNotFound = "InvalidPermission.NotFound"
@@ -179,6 +180,8 @@ func Ensure(
 			}
 			continue
 		}
+
+		ledger = recordInstanceSecurityGroup(ledger, r.Name, sgARN)
 
 		opts := instanceOptions{
 			deletionPolicy:    r.DeletionPolicy,

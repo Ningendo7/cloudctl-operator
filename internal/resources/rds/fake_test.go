@@ -625,6 +625,17 @@ func (f *fakeEC2) DeleteSecurityGroup(_ context.Context, in *ec2.DeleteSecurityG
 	if _, ok := f.groups[*in.GroupId]; !ok {
 		return nil, &fakeAWSError{code: "InvalidGroup.NotFound", fault: smithy.FaultClient}
 	}
+	// As in AWS, a group another group's rule still points at can't go.
+	for id, g := range f.groups {
+		if id == *in.GroupId {
+			continue
+		}
+		for _, rule := range g.ingress {
+			if rule.sourceGroupID == *in.GroupId {
+				return nil, &fakeAWSError{code: "DependencyViolation", fault: smithy.FaultClient}
+			}
+		}
+	}
 	delete(f.groups, *in.GroupId)
 	return &ec2.DeleteSecurityGroupOutput{}, nil
 }

@@ -363,6 +363,22 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
         env:\
           {{- toYaml .Values.manager.extraEnv | nindent 10 }}\
         {{- end }}' charts/chart/templates/manager/manager.yaml
+	@# manager.podBaseSecurityGroupIds: chart-only, like extraEnv. The flag
+	@# it feeds is on the manager, and a named value is easier to find and
+	@# harder to get wrong than adding to manager.args, which replaces the
+	@# whole list (--leader-elect included) when set from the command line.
+	sed -i '/^        command:$$/i\
+        {{- with .Values.manager.podBaseSecurityGroupIds }}\
+        - --pod-base-security-group-ids={{ join "," . }}\
+        {{- end }}' charts/chart/templates/manager/manager.yaml
+	sed -i '/^    - --leader-elect$$/a\
+\
+  ## Security groups the pods of a CR using rds.consumes keep next to the\
+  ## database group, normally the EKS cluster security group. Security Groups\
+  ## for Pods replaces a pod'"'"'s groups with the ones it is given, so without\
+  ## these the pods can lose Service, load balancer and probe traffic.\
+  ##\
+  podBaseSecurityGroupIds: []' charts/chart/values.yaml
 	@# manager.image.repository: the plugin's own default ("controller")
 	@# can never resolve to a real, pullable image - point it at the real
 	@# published one by default instead, so `helm install` with no image
