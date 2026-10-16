@@ -52,6 +52,14 @@ spec:
             summary: A database or KMS key the operator manages no longer exists in AWS
             description: '{{`{{ $labels.reason }}`}}: it was deleted outside the operator and will not be recreated. See the AppDependencies events and conditions for which one.'
 
+        - alert: CloudctlKMSKeyUnusable
+          expr: sum by (reason) (increase(cloudctl_events_total{reason=~"KeyDisabled|KeyUnavailable"}[30m])) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: A KMS key the operator manages is disabled or unavailable
+            description: '{{`{{ $labels.reason }}`}}: nothing encrypted with it can be read or written. The operator does not re-enable it. See the AppDependencies events for which key.'
+
         - alert: CloudctlAppNotReady
           expr: max by (namespace, name) (cloudctl_app_ready) == 0
           for: 30m

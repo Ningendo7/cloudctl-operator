@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,6 +53,7 @@ func policyStatementCount(t *testing.T, policyJSON string) int {
 type fakeSNSSubscriber struct {
 	subscriptions  map[string]string // topicArn+"|"+endpoint -> subscriptionArn
 	nextID         int
+	subscribeCalls int
 	subscribeErr   error
 	unsubscribeErr error
 	unsubscribed   []string // subscriptionArns passed to Unsubscribe, in order
@@ -64,9 +67,15 @@ func (f *fakeSNSSubscriber) Subscribe(_ context.Context, in *sns.SubscribeInput,
 	if f.subscribeErr != nil {
 		return nil, f.subscribeErr
 	}
+	f.subscribeCalls++
+	// As in AWS, subscribing the same endpoint again returns the existing ARN.
+	key := *in.TopicArn + "|" + *in.Endpoint
+	if arn, ok := f.subscriptions[key]; ok {
+		return &sns.SubscribeOutput{SubscriptionArn: &arn}, nil
+	}
 	f.nextID++
 	arn := fmt.Sprintf("%s:subscription-%d", *in.TopicArn, f.nextID)
-	f.subscriptions[*in.TopicArn+"|"+*in.Endpoint] = arn
+	f.subscriptions[key] = arn
 	return &sns.SubscribeOutput{SubscriptionArn: &arn}, nil
 }
 
@@ -222,14 +231,59 @@ func TestEnsureSubscriptions_AlreadySubscribed_DoesNotResubscribeButReassertsPol
 	if err != nil {
 		t.Fatalf("second EnsureSubscriptions() error = %v", err)
 	}
-	if len(snsClient.subscriptions) != 1 {
-		t.Errorf("expected no additional Subscribe call, got %d total subscriptions", len(snsClient.subscriptions))
+	if snsClient.subscribeCalls != 1 {
+		t.Errorf("expected no Subscribe call within the trust window, got %d calls in total", snsClient.subscribeCalls)
 	}
 	if sqsClient.queues["orders"].policy == "" {
 		t.Error("expected the queue policy grant to be reasserted after drift")
 	}
 	if len(ledger) != 1 {
 		t.Errorf("expected exactly one ledger entry, got %d", len(ledger))
+	}
+}
+
+// A subscription can vanish behind the ledger's back: unsubscribed by hand,
+// or deleted with its topic when the producer's topic is recreated. Messages
+// then never arrive while the queue reports Ready, so it is re-checked once
+// per trust window.
+func TestEnsureSubscriptions_RepairsASubscriptionThatVanished(t *testing.T) {
+	sqsClient := newFakeSQS()
+	snsClient := newFakeSNSSubscriber()
+	queueURL, queueARN := newSubscriptionTestQueue(sqsClient, "orders")
+	producer := newAuthorizedTopicProducer("team-b", "platform-service", "events",
+		"arn:aws:sns:us-east-1:123456789012:events", "default", "checkout-service")
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	ref := depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "events"}
+
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	ledger := []depsv1alpha1.ManagedResource{{
+		Type: subscriptionResourceType, Name: subscriptionLedgerName("orders", ref),
+		ARN: "arn:aws:sns:us-east-1:123456789012:events:gone", State: depsv1alpha1.ManagedResourceStateVerified,
+		DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, CreatedAt: stale, LastVerifiedAt: &stale,
+	}}
+	var events []string
+	record := func(eventType, reason, _ string) { events = append(events, eventType+"/"+reason) }
+
+	ledger, err := EnsureSubscriptions(context.Background(), snsClient, sqsClient, k8sClient,
+		"default", "checkout-service", "orders", queueURL, queueARN,
+		[]depsv1alpha1.ConsumeRef{ref}, ledger, record)
+	if err != nil {
+		t.Fatalf("EnsureSubscriptions() error = %v", err)
+	}
+	if len(snsClient.subscriptions) != 1 {
+		t.Fatalf("expected the subscription to exist again, got %d", len(snsClient.subscriptions))
+	}
+	entry, _ := status.FindManagedResource(ledger, subscriptionResourceType, subscriptionLedgerName("orders", ref))
+	for _, arn := range snsClient.subscriptions {
+		if entry.ARN != arn {
+			t.Errorf("ledger ARN = %q, want the live subscription %q", entry.ARN, arn)
+		}
+	}
+	if entry.LastVerifiedAt == nil || !entry.LastVerifiedAt.After(stale.Time) {
+		t.Error("expected LastVerifiedAt to be refreshed")
+	}
+	if !slices.Contains(events, "Warning/SubscriptionRepaired") {
+		t.Errorf("expected a SubscriptionRepaired warning, got %v", events)
 	}
 }
 

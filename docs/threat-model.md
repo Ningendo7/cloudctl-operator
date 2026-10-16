@@ -122,7 +122,7 @@ didn't create.
 | SNS | `CreateTopic`, `GetTopicAttributes`, `SetTopicAttributes`, `ListTagsForResource`, `TagResource`, `UntagResource`, `DeleteTopic`, `ListSubscriptionsByTopic`, `Subscribe`, `Unsubscribe` |
 | S3 | `HeadBucket`, `CreateBucket`, `DeleteBucket`, `GetBucketTagging`, `PutBucketTagging`, `Get`/`PutBucketVersioning`, `Get`/`PutBucketLifecycleConfiguration`, `DeleteBucketLifecycle`, `Get`/`PutBucketEncryption`, `Get`/`PutBucketPolicy`, `DeleteBucketPolicy`, `ListBucketVersions`, `DeleteObject`/`DeleteObjectVersion` (via `DeleteObjects`), `ListBucketMultipartUploads`, `AbortMultipartUpload` |
 | DynamoDB | `DescribeTable`, `CreateTable`, `DeleteTable`, `UpdateTable`, `ListTagsOfResource`, `TagResource`, `UntagResource`, `DescribeContinuousBackups`, `UpdateContinuousBackups`, `Scan` (emptiness check) |
-| KMS | `CreateKey`, `DescribeKey`, `CreateAlias`, `EnableKeyRotation`, `ListResourceTags`, `TagResource`, `UntagResource`, `ScheduleKeyDeletion`, `CancelKeyDeletion` |
+| KMS | `CreateKey`, `DescribeKey`, `CreateAlias`, `EnableKey`, `EnableKeyRotation`, `GetKeyRotationStatus`, `GetKeyPolicy`, `PutKeyPolicy`, `ListResourceTags`, `TagResource`, `UntagResource`, `ScheduleKeyDeletion`, `CancelKeyDeletion` |
 | IAM | `GetRole`, `CreateRole`, `UpdateAssumeRolePolicy`, `ListRoleTags`, `GetRolePolicy`, `PutRolePolicy`, `DeleteRolePolicy`, `DeleteRole` |
 | CloudWatch | `DescribeAlarms`, `PutMetricAlarm`, `DeleteAlarms`, `ListTagsForResource` |
 | RDS | `CreateDBInstance`, `ModifyDBInstance`, `DescribeDBInstances`, `DescribeDBSubnetGroups`, `DescribeDBEngineVersions`, `ListTagsForResource`, `AddTagsToResource`, `RemoveTagsFromResource`, `CreateDBSnapshot`, `DescribeDBSnapshots`, `DeleteDBSnapshot` (never `DeleteDBInstance`) |

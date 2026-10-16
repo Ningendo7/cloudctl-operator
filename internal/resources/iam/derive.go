@@ -159,7 +159,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeSQS, ref); reason != "" {
 				skipped = append(skipped, reason)
 			} else {
-				grants = append(grants, g)
+				grants = append(grants, g...)
 			}
 		}
 	}
@@ -176,7 +176,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeSNS, ref); reason != "" {
 				skipped = append(skipped, reason)
 			} else {
-				grants = append(grants, g)
+				grants = append(grants, g...)
 			}
 		}
 	}
@@ -193,7 +193,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeDynamoDB, ref); reason != "" {
 				skipped = append(skipped, reason)
 			} else {
-				grants = append(grants, g)
+				grants = append(grants, g...)
 			}
 		}
 	}
@@ -210,7 +210,7 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 			if g, reason := resolveConsume(ctx, k8sClient, cr, resourceTypeS3, ref); reason != "" {
 				skipped = append(skipped, reason)
 			} else {
-				grants = append(grants, g)
+				grants = append(grants, g...)
 			}
 		}
 	}
@@ -242,20 +242,21 @@ func recordOwned(grants []grant, skipped []string, cr *depsv1alpha1.AppDependenc
 
 // resolveConsume fetches the producer CR, finds the matching sharedWith
 // grant naming this CR, and resolves the resource's ARN from the
-// producer's own ledger. Returns a non-empty reason instead of an error
-// for anything not yet resolvable - see collectGrants' doc comment.
-func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) (grant, string) {
+// producer's own ledger, plus its encryption key's when it has one.
+// Returns a non-empty reason instead of an error for anything not yet
+// resolvable - see collectGrants' doc comment.
+func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) ([]grant, string) {
 	prefix := fmt.Sprintf("%s/%s consumes %s/%s's %q", consumer.Namespace, consumer.Name, ref.Namespace, ref.Name, ref.ResourceName)
 
 	var producer depsv1alpha1.AppDependencies
 	key := client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}
 	if err := k8sClient.Get(ctx, key, &producer); err != nil {
-		return grant{}, prefix + ": producer CR not found yet"
+		return nil, prefix + ": producer CR not found yet"
 	}
 
-	sharedWith, ok := producerSharedWith(&producer, resourceType, ref.ResourceName)
+	sharedWith, encryption, ok := producerResource(&producer, resourceType, ref.ResourceName)
 	if !ok {
-		return grant{}, prefix + ": resource not declared there yet"
+		return nil, prefix + ": resource not declared there yet"
 	}
 
 	var grantedTo *depsv1alpha1.SharedWithEntry
@@ -266,19 +267,41 @@ func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *deps
 		}
 	}
 	if grantedTo == nil {
-		return grant{}, prefix + ": not authorized - owner hasn't granted this CR in sharedWith"
+		return nil, prefix + ": not authorized - owner hasn't granted this CR in sharedWith"
 	}
 
 	entry, found := status.FindManagedResource(producer.Status.ManagedResources, resourceType, ref.ResourceName)
 	if !found {
-		return grant{}, prefix + ": not reconciled there yet"
+		return nil, prefix + ": not reconciled there yet"
 	}
 
-	return grant{
-		resourceType: resourceType,
-		arn:          entry.ARN,
-		readWrite:    grantedTo.Access == depsv1alpha1.AccessLevelReadWrite,
-	}, ""
+	readWrite := grantedTo.Access == depsv1alpha1.AccessLevelReadWrite
+	grants := []grant{{resourceType: resourceType, arn: entry.ARN, readWrite: readWrite}}
+
+	// DynamoDB uses the key on the caller's behalf through its own grant.
+	if keyName := keyLedgerName(resourceType, ref.ResourceName, encryption); keyName != "" && resourceType != resourceTypeDynamoDB {
+		key, found := status.FindManagedResource(producer.Status.ManagedResources, resourceTypeKMS, keyName)
+		if !found {
+			return nil, prefix + ": its encryption key is not reconciled there yet"
+		}
+		grants = append(grants, grant{resourceType: resourceTypeKMS, arn: key.ARN, readWrite: readWrite})
+	}
+	return grants, ""
+}
+
+// keyLedgerName is the ledger name of the key a resource is encrypted with,
+// or "" when it isn't encrypted with a customer managed key.
+func keyLedgerName(resourceType, name string, encryption *depsv1alpha1.EncryptionSpec) string {
+	switch {
+	case encryption == nil:
+		return ""
+	case encryption.KMSKeyRef != "":
+		return encryption.KMSKeyRef
+	case encryption.Enabled:
+		return cloudctlaws.DedicatedKeyLedgerName(resourceType, name)
+	default:
+		return ""
+	}
 }
 
 // ResolveConsumeARN resolves a ConsumeRef to the ARN of the resource it
@@ -295,55 +318,56 @@ func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *deps
 // to, and that has to stay in lockstep with collectGrants automatically,
 // not by two separate implementations agreeing by coincidence.
 func ResolveConsumeARN(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) (arn string, ok bool) {
-	g, reason := resolveConsume(ctx, k8sClient, consumer, resourceType, ref)
+	grants, reason := resolveConsume(ctx, k8sClient, consumer, resourceType, ref)
 	if reason != "" {
 		return "", false
 	}
-	return g.arn, true
+	return grants[0].arn, true
 }
 
-// producerSharedWith returns the sharedWith list for one resource entry
-// within the producer's given section, regardless of resource type.
-func producerSharedWith(producer *depsv1alpha1.AppDependencies, resourceType, resourceName string) ([]depsv1alpha1.SharedWithEntry, bool) {
+// producerResource returns the sharedWith list and encryption of one
+// resource entry within the producer's given section, regardless of
+// resource type.
+func producerResource(producer *depsv1alpha1.AppDependencies, resourceType, resourceName string) ([]depsv1alpha1.SharedWithEntry, *depsv1alpha1.EncryptionSpec, bool) {
 	switch resourceType {
 	case resourceTypeSQS:
 		if producer.Spec.SQS == nil {
-			return nil, false
+			return nil, nil, false
 		}
 		for _, q := range producer.Spec.SQS.Resources {
 			if q.Name == resourceName {
-				return q.SharedWith, true
+				return q.SharedWith, q.Encryption, true
 			}
 		}
 	case resourceTypeSNS:
 		if producer.Spec.SNS == nil {
-			return nil, false
+			return nil, nil, false
 		}
 		for _, t := range producer.Spec.SNS.Resources {
 			if t.Name == resourceName {
-				return t.SharedWith, true
+				return t.SharedWith, t.Encryption, true
 			}
 		}
 	case resourceTypeDynamoDB:
 		if producer.Spec.DynamoDB == nil {
-			return nil, false
+			return nil, nil, false
 		}
 		for _, tbl := range producer.Spec.DynamoDB.Resources {
 			if tbl.Name == resourceName {
-				return tbl.SharedWith, true
+				return tbl.SharedWith, tbl.Encryption, true
 			}
 		}
 	case resourceTypeS3:
 		if producer.Spec.S3 == nil {
-			return nil, false
+			return nil, nil, false
 		}
 		for _, b := range producer.Spec.S3.Resources {
 			if b.Name == resourceName {
-				return b.SharedWith, true
+				return b.SharedWith, b.Encryption, true
 			}
 		}
 	}
-	return nil, false
+	return nil, nil, false
 }
 
 // policyStatement mirrors the small subset of AWS policy JSON shape this

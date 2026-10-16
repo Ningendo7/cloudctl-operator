@@ -18,9 +18,15 @@ package kms
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"reflect"
+	"slices"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsarn "github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -233,9 +239,12 @@ func createKey(
 		recordEvent("Normal", "KeyCreated", fmt.Sprintf("Created KMS key %s", arn))
 	}
 
-	// Automatic rotation is a fire-and-forget, default-on decision — set
-	// once at creation, never exposed as spec config, never re-verified on
-	// later reconciles (AWS doesn't silently turn it off on its own).
+	if err := ensureKeyPolicy(ctx, kmsClient, arn); err != nil {
+		return ledger, wrapAWSError(err, "setting KMS key policy")
+	}
+
+	// Automatic rotation is always on and never exposed as spec config; it is
+	// re-asserted at revalidation in case someone turned it off.
 	if _, err := kmsClient.EnableKeyRotation(ctx, &kms.EnableKeyRotationInput{
 		KeyId: &keyID,
 	}); err != nil {
@@ -296,6 +305,9 @@ func resumeKey(
 	if err != nil {
 		return ledger, wrapAWSError(err, fmt.Sprintf("looking up KMS key %q", entry.Name))
 	}
+	if err := keyStateError(entry.ARN, describeOut.KeyMetadata.KeyState, recordEvent); err != nil {
+		return ledger, err
+	}
 
 	if !status.NeedsRevalidation(entry) && describeOut.KeyMetadata.KeyState != types.KeyStatePendingDeletion {
 		updated := entry
@@ -315,14 +327,23 @@ func resumeKey(
 	}
 
 	if describeOut.KeyMetadata.KeyState == types.KeyStatePendingDeletion {
-		if _, err := kmsClient.CancelKeyDeletion(ctx, &kms.CancelKeyDeletionInput{
-			KeyId: &entry.ARN,
-		}); err != nil {
+		if err := reviveKey(ctx, kmsClient, entry.ARN); err != nil {
 			return ledger, wrapAWSError(err, fmt.Sprintf("canceling scheduled deletion of KMS key %q now that it's declared again", entry.Name))
 		}
 		if recordEvent != nil {
 			recordEvent("Normal", "KeyDeletionCancelled", fmt.Sprintf("Canceled scheduled deletion of KMS key %s (alias %s); resource reappeared in spec", entry.ARN, alias))
 		}
+	}
+
+	if err := ensureKeyPolicy(ctx, kmsClient, entry.ARN); err != nil {
+		return ledger, wrapAWSError(err, fmt.Sprintf("re-asserting the key policy of KMS key %q", entry.Name))
+	}
+	reenabled, err := ensureRotation(ctx, kmsClient, keyID)
+	if err != nil {
+		return ledger, wrapAWSError(err, fmt.Sprintf("re-asserting automatic rotation of KMS key %q", entry.Name))
+	}
+	if reenabled && recordEvent != nil {
+		recordEvent("Warning", "KeyRotationReenabled", fmt.Sprintf("Automatic rotation of KMS key %s was off and has been turned back on", entry.ARN))
 	}
 
 	if err := ensureAlias(ctx, kmsClient, alias, entry.ARN, keyID); err != nil {
@@ -377,17 +398,187 @@ func adoptKey(
 	}
 
 	if meta.KeyState == types.KeyStatePendingDeletion {
-		if _, err := kmsClient.CancelKeyDeletion(ctx, &kms.CancelKeyDeletionInput{
-			KeyId: &arn,
-		}); err != nil {
+		if err := reviveKey(ctx, kmsClient, arn); err != nil {
 			return ledger, wrapAWSError(err, fmt.Sprintf("canceling scheduled deletion of adopted KMS key %q", alias))
 		}
 		if recordEvent != nil {
 			recordEvent("Normal", "KeyDeletionCancelled", fmt.Sprintf("Canceled scheduled deletion of adopted KMS key %s (alias %s)", arn, alias))
 		}
+		meta.KeyState = types.KeyStateEnabled
 	}
 
-	return recordKey(ledger, resourceName, arn, opts.deletionPolicy, depsv1alpha1.ManagedResourceStateVerified), nil
+	ledger = recordKey(ledger, resourceName, arn, opts.deletionPolicy, depsv1alpha1.ManagedResourceStateVerified)
+	if err := keyStateError(arn, meta.KeyState, recordEvent); err != nil {
+		return ledger, err
+	}
+	if err := ensureKeyPolicy(ctx, kmsClient, arn); err != nil {
+		return ledger, wrapAWSError(err, fmt.Sprintf("setting the key policy of adopted KMS key %q", alias))
+	}
+	if _, err := ensureRotation(ctx, kmsClient, *meta.KeyId); err != nil {
+		return ledger, wrapAWSError(err, fmt.Sprintf("enabling automatic rotation of adopted KMS key %q", alias))
+	}
+	return ledger, nil
+}
+
+const (
+	keyPolicyName       = "default"
+	sidSNSDelivery      = "cloudctl-sns-delivery"
+	sidCloudWatchAlarms = "cloudctl-cloudwatch-alarms"
+)
+
+// serviceKeyStatements are the key policy statements the operator owns,
+// keyed by Sid. AWS services aren't IAM identities in the account, so only
+// the key policy can let SNS deliver into an encrypted queue or CloudWatch
+// publish to an encrypted topic.
+func serviceKeyStatements(account string) map[string]any {
+	statement := func(sid, service string) any {
+		return map[string]any{
+			"Sid":       sid,
+			"Effect":    "Allow",
+			"Principal": map[string]any{"Service": service},
+			"Action":    []any{"kms:GenerateDataKey*", "kms:Decrypt"},
+			"Resource":  "*",
+			"Condition": map[string]any{"StringEquals": map[string]any{"aws:SourceAccount": account}},
+		}
+	}
+	return map[string]any{
+		sidSNSDelivery:      statement(sidSNSDelivery, "sns.amazonaws.com"),
+		sidCloudWatchAlarms: statement(sidCloudWatchAlarms, "cloudwatch.amazonaws.com"),
+	}
+}
+
+// mergeKeyPolicy adds or replaces the operator's statements in policy, by
+// Sid, and keeps every other statement: PutKeyPolicy replaces the whole
+// document. An empty policy gets the account root statement AWS's default
+// policy has, without which IAM policies grant nothing and PutKeyPolicy is
+// refused.
+func mergeKeyPolicy(policy, account string) (merged string, changed bool, err error) {
+	doc := map[string]any{}
+	if policy != "" {
+		if err := json.Unmarshal([]byte(policy), &doc); err != nil {
+			return "", false, fmt.Errorf("parsing key policy: %w", err)
+		}
+	}
+	var statements []any
+	switch st := doc["Statement"].(type) {
+	case []any:
+		statements = st
+	case map[string]any:
+		statements = []any{st}
+	}
+	if policy == "" {
+		doc["Version"] = "2012-10-17"
+		statements = append(statements, map[string]any{
+			"Sid":       "Enable IAM User Permissions",
+			"Effect":    "Allow",
+			"Principal": map[string]any{"AWS": "arn:aws:iam::" + account + ":root"},
+			"Action":    "kms:*",
+			"Resource":  "*",
+		})
+		changed = true
+	}
+
+	owned := serviceKeyStatements(account)
+	for i, st := range statements {
+		m, _ := st.(map[string]any)
+		sid, _ := m["Sid"].(string)
+		want, ours := owned[sid]
+		if !ours {
+			continue
+		}
+		if !reflect.DeepEqual(st, want) {
+			statements[i] = want
+			changed = true
+		}
+		delete(owned, sid)
+	}
+	for _, sid := range slices.Sorted(maps.Keys(owned)) {
+		statements = append(statements, owned[sid])
+		changed = true
+	}
+	if !changed {
+		return policy, false, nil
+	}
+	doc["Statement"] = statements
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return "", false, fmt.Errorf("encoding key policy: %w", err)
+	}
+	return string(encoded), true, nil
+}
+
+// ensureKeyPolicy brings a key's policy up to date, writing it only when
+// something changed. The account comes from the key's own ARN.
+func ensureKeyPolicy(ctx context.Context, kmsClient kmsAPI, arn string) error {
+	parsed, err := awsarn.Parse(arn)
+	if err != nil {
+		return fmt.Errorf("parsing key ARN %q: %w", arn, err)
+	}
+	out, err := kmsClient.GetKeyPolicy(ctx, &kms.GetKeyPolicyInput{KeyId: &arn, PolicyName: aws.String(keyPolicyName)})
+	if err != nil {
+		return err
+	}
+	merged, changed, err := mergeKeyPolicy(aws.ToString(out.Policy), parsed.AccountID)
+	if err != nil || !changed {
+		return err
+	}
+	_, err = kmsClient.PutKeyPolicy(ctx, &kms.PutKeyPolicyInput{
+		KeyId: &arn, PolicyName: aws.String(keyPolicyName), Policy: &merged,
+	})
+	return err
+}
+
+// Reasons for a key the operator won't use, and won't change on its own:
+// someone may have disabled it deliberately, during an incident for example.
+const (
+	reasonKeyDisabled    = "KeyDisabled"
+	reasonKeyUnavailable = "KeyUnavailable"
+)
+
+// keyStateError reports a key that can't encrypt or decrypt, since every
+// resource encrypted under it then fails for the app. PendingDeletion is
+// handled by its callers.
+func keyStateError(arn string, state types.KeyState, recordEvent status.EventRecorder) error {
+	reason := reasonKeyUnavailable
+	switch state {
+	case types.KeyStateEnabled, types.KeyStatePendingDeletion:
+		return nil
+	case types.KeyStateCreating, types.KeyStateUpdating:
+		return &cloudctlaws.ReconcileError{Err: fmt.Errorf("KMS key %s is %s", arn, state), Retryable: true}
+	case types.KeyStateDisabled:
+		reason = reasonKeyDisabled
+	}
+	msg := fmt.Sprintf("KMS key %s is %s, so nothing encrypted with it can be read or written; the operator does not re-enable it", arn, state)
+	if recordEvent != nil {
+		recordEvent("Warning", reason, msg)
+	}
+	return &cloudctlaws.ReconcileError{Err: errors.New(msg), Reason: reason}
+}
+
+// reviveKey cancels a scheduled deletion. AWS leaves a key Disabled after
+// that, so it is enabled again too.
+func reviveKey(ctx context.Context, kmsClient kmsAPI, arn string) error {
+	if _, err := kmsClient.CancelKeyDeletion(ctx, &kms.CancelKeyDeletionInput{KeyId: &arn}); err != nil {
+		return err
+	}
+	_, err := kmsClient.EnableKey(ctx, &kms.EnableKeyInput{KeyId: &arn})
+	return err
+}
+
+// ensureRotation turns automatic rotation back on if it is off, and reports
+// whether it had to.
+func ensureRotation(ctx context.Context, kmsClient kmsAPI, keyID string) (reenabled bool, err error) {
+	out, err := kmsClient.GetKeyRotationStatus(ctx, &kms.GetKeyRotationStatusInput{KeyId: &keyID})
+	if err != nil {
+		return false, err
+	}
+	if out.KeyRotationEnabled {
+		return false, nil
+	}
+	if _, err := kmsClient.EnableKeyRotation(ctx, &kms.EnableKeyRotationInput{KeyId: &keyID}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ensureAlias makes alias point at keyID/arn, tolerating the alias already

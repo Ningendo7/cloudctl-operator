@@ -69,6 +69,7 @@ whose ServiceAccount is bound to the chart's `metrics-reader` ClusterRole.
 | `CloudctlAWSClientsNotReady` | critical | No replica has reached AWS for 10 minutes. |
 | `CloudctlRDSInstanceNeedsManualDeletion` | critical | An RDS instance removed from spec with `deletionPolicy: Delete` is past its grace period. The operator never deletes a database, and billing continues. |
 | `CloudctlDataResourceMissing` | critical | An RDS instance or KMS key the operator manages was deleted outside it. Neither is ever recreated. |
+| `CloudctlKMSKeyUnusable` | critical | A KMS key the operator manages is disabled or unavailable, so every resource encrypted with it fails. The operator never re-enables it. |
 | `CloudctlAppNotReady` | warning | A CR has not been Ready for 30 minutes. |
 | `CloudctlAWSPermissionDenied` | warning | AWS has denied the operator calls to a service for 15 minutes. The actions it needs are listed in [threat-model.md](threat-model.md#aws-actions-the-managers-role-needs). |
 | `CloudctlAWSThrottling` | warning | More than 5% of a service's calls have been throttled for 15 minutes. |

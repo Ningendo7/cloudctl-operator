@@ -319,6 +319,116 @@ func TestCollectGrants_ConsumedResourceDefaultsToReadOnly(t *testing.T) {
 	}
 }
 
+const consumedKeyARN = "arn:aws:kms:us-east-1:123456789012:key/producer-key"
+
+// encryptedProducer shares an SQS queue encrypted with either its dedicated
+// key or a key it declares.
+func encryptedProducer(encryption *depsv1alpha1.EncryptionSpec, keyLedgerName string, keyInLedger bool) *depsv1alpha1.AppDependencies {
+	producer := producerCR("default", "checkout-service", []depsv1alpha1.SharedWithEntry{
+		{Namespace: "default", Name: "fulfillment-service", Access: depsv1alpha1.AccessLevelReadWrite},
+	}, "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders")
+	producer.Spec.SQS.Resources[0].Encryption = encryption
+	if keyInLedger {
+		producer.Status.ManagedResources = append(producer.Status.ManagedResources,
+			depsv1alpha1.ManagedResource{Type: "kms", Name: keyLedgerName, ARN: consumedKeyARN})
+	}
+	return producer
+}
+
+func ordersConsumer() *depsv1alpha1.AppDependencies {
+	return &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+				{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
+			}},
+		},
+	}
+}
+
+// Sending to or receiving from an SSE-KMS queue needs the key too, or the
+// consumer's workload gets AccessDenied while both CRs report Ready.
+func TestCollectGrants_ConsumedEncryptedResourceAlsoGrantsItsKey(t *testing.T) {
+	producer := encryptedProducer(&depsv1alpha1.EncryptionSpec{Enabled: true},
+		cloudctlaws.DedicatedKeyLedgerName("sqs", "orders"), true)
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), ordersConsumer())
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped entries, got %v", skipped)
+	}
+	key := findGrant(grants, "kms")
+	if key == nil || key.arn != consumedKeyARN || !key.readWrite {
+		t.Errorf("expected a read-write kms grant on %s, got %+v", consumedKeyARN, grants)
+	}
+}
+
+func TestCollectGrants_ConsumedResourceUsingADeclaredKeyGrantsThatKey(t *testing.T) {
+	producer := encryptedProducer(&depsv1alpha1.EncryptionSpec{KMSKeyRef: "shared"}, "shared", true)
+	producer.Spec.SQS.Resources[0].SharedWith[0].Access = ""
+
+	grants, _ := collectGrants(context.Background(), newFakeK8sClient(producer), ordersConsumer())
+	key := findGrant(grants, "kms")
+	if key == nil || key.arn != consumedKeyARN || key.readWrite {
+		t.Errorf("expected a read-only kms grant on %s, got %+v", consumedKeyARN, grants)
+	}
+}
+
+// Granting the resource without its key would hand the workload a policy
+// that fails on every call, so the consume waits for the key instead.
+func TestCollectGrants_ConsumedResourceWhoseKeyIsNotReconciledYetIsSkipped(t *testing.T) {
+	producer := encryptedProducer(&depsv1alpha1.EncryptionSpec{Enabled: true},
+		cloudctlaws.DedicatedKeyLedgerName("sqs", "orders"), false)
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), ordersConsumer())
+	if len(grants) != 0 {
+		t.Errorf("expected no grants until the key is reconciled, got %+v", grants)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "key") {
+		t.Errorf("expected one skip reason naming the key, got %v", skipped)
+	}
+}
+
+// DynamoDB uses the key on the caller's behalf through its own grant, so a
+// consumer needs no key permission.
+func TestCollectGrants_ConsumedEncryptedTableGrantsNoKey(t *testing.T) {
+	producer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			DynamoDB: &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{
+				Name:       "sessions",
+				Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true},
+				SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "default", Name: "fulfillment-service"}},
+			}}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
+			{Type: "dynamodb", Name: "sessions", ARN: "arn:aws:dynamodb:us-east-1:123456789012:table/sessions"},
+			{Type: "kms", Name: cloudctlaws.DedicatedKeyLedgerName("dynamodb", "sessions"), ARN: consumedKeyARN},
+		}},
+	}
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			DynamoDB: &depsv1alpha1.DynamoDBSpec{Consumes: []depsv1alpha1.ConsumeRef{
+				{Namespace: "default", Name: "checkout-service", ResourceName: "sessions"},
+			}},
+		},
+	}
+
+	grants, skipped := collectGrants(context.Background(), newFakeK8sClient(producer), consumer)
+	if len(skipped) != 0 || len(grants) != 1 || grants[0].resourceType != "dynamodb" {
+		t.Errorf("expected only the table grant, got grants=%+v skipped=%v", grants, skipped)
+	}
+}
+
+func findGrant(grants []grant, resourceType string) *grant {
+	for i := range grants {
+		if grants[i].resourceType == resourceType {
+			return &grants[i]
+		}
+	}
+	return nil
+}
+
 func TestCollectGrants_SkipsWhenProducerNotFound(t *testing.T) {
 	consumer := &depsv1alpha1.AppDependencies{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
