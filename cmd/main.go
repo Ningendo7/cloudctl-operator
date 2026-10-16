@@ -24,7 +24,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -200,6 +203,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if limit := limitMemoryFromCgroup(cgroupRoot); limit > 0 {
+		setupLog.Info("Set the Go memory limit from the container's", "bytes", limit)
+	}
+
 	ctx := ctrl.SetupSignalHandler()
 
 	// Tracing is opt-in: with no OTLP endpoint configured nothing is
@@ -293,6 +300,7 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	gracefulShutdownTimeout := 30 * time.Second
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -302,19 +310,16 @@ func main() {
 		LeaderElectionID:       "687fa3e1.cloudctl.io",
 		// Only cache our own Secrets/ConfigMaps, not the whole cluster's.
 		Cache: cache.Options{
-			ByObject: controller.ManagedObjectCache(),
+			ByObject:         controller.ManagedObjectCache(),
+			DefaultTransform: controller.ManagedCacheDefaultTransform(),
 		},
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+		// Time for a reconcile in flight to finish after SIGTERM, inside
+		// the pod's terminationGracePeriodSeconds.
+		GracefulShutdownTimeout: &gracefulShutdownTimeout,
+		// Hands the lease over on shutdown, so the standby takes over at
+		// once instead of after the lease expires. Safe because main exits
+		// as soon as mgr.Start returns.
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
@@ -417,4 +422,50 @@ func parseSecurityGroupIDs(value string) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+// memoryLimitHeadroom is the share of the container's memory limit the Go
+// runtime is asked to stay under. The rest covers memory the runtime doesn't
+// count in its heap: goroutine stacks, the binary, and the kernel's own
+// accounting.
+const memoryLimitHeadroom = 0.9
+
+// cgroupRoot is where the container's own cgroup is mounted.
+const cgroupRoot = "/sys/fs/cgroup"
+
+// limitMemoryFromCgroup makes the garbage collector work harder as the heap
+// nears the container's memory limit, instead of letting it overshoot and
+// get the pod OOM-killed. Without a limit the collector only aims at twice
+// the live heap, so a cold start that lists every informer at once can
+// cross the limit before a collection runs. An explicit GOMEMLIMIT wins.
+// It returns the limit it set, or 0 if it set none.
+func limitMemoryFromCgroup(root string) int64 {
+	if os.Getenv("GOMEMLIMIT") != "" {
+		return 0
+	}
+	limit := cgroupMemoryLimit(root)
+	if limit <= 0 {
+		return 0
+	}
+	soft := int64(float64(limit) * memoryLimitHeadroom)
+	debug.SetMemoryLimit(soft)
+	return soft
+}
+
+// cgroupMemoryLimit returns the memory limit in bytes of the cgroup mounted
+// at root, or 0 when it has none. It reads cgroup v2, then v1.
+func cgroupMemoryLimit(root string) int64 {
+	for _, file := range []string{"memory.max", "memory/memory.limit_in_bytes"} {
+		raw, err := os.ReadFile(filepath.Join(root, file))
+		if err != nil {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+		// v2 writes "max" for no limit; v1 writes a number just under 2^63.
+		if err != nil || n >= 1<<60 {
+			return 0
+		}
+		return n
+	}
+	return 0
 }

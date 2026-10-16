@@ -379,6 +379,24 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
   ## these the pods can lose Service, load balancer and probe traffic.\
   ##\
   podBaseSecurityGroupIds: []' charts/chart/values.yaml
+	@# Default pod anti-affinity: the plugin only emits an empty affinity, so
+	@# both replicas can land on, and be drained from, one node. Used only
+	@# when manager.affinity is unset and there is more than one replica;
+	@# any affinity set in values replaces it.
+	sed -i '/^      affinity: {{ toYaml \. | nindent 10 }}$$/a\
+      {{- else }}\
+      {{- if gt (int .Values.manager.replicas) 1 }}\
+      affinity:\
+        podAntiAffinity:\
+          preferredDuringSchedulingIgnoredDuringExecution:\
+          - weight: 100\
+            podAffinityTerm:\
+              topologyKey: kubernetes.io/hostname\
+              labelSelector:\
+                matchLabels:\
+                  app.kubernetes.io/name: {{ include "cloudctl-operator.name" . }}\
+                  app.kubernetes.io/instance: {{ .Release.Name }}\
+      {{- end }}' charts/chart/templates/manager/manager.yaml
 	@# manager.image.repository: the plugin's own default ("controller")
 	@# can never resolve to a real, pullable image - point it at the real
 	@# published one by default instead, so `helm install` with no image
@@ -401,6 +419,7 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
 	@# under charts/chart/dashboards, survive regeneration untouched.
 	sed -i -e '/^prometheus:$$/,/^$$/{' -e '/^  enabled: false$$/r hack/helm/values-prometheus-rules.yaml' -e '}' charts/chart/values.yaml
 	cat hack/helm/values-grafana.yaml >> charts/chart/values.yaml
+	cat hack/helm/values-pdb.yaml >> charts/chart/values.yaml
 
 .PHONY: install-helm
 install-helm: ## Install the latest version of Helm.

@@ -95,7 +95,7 @@ manager:
 
   ## Termination grace period seconds
   ##
-  terminationGracePeriodSeconds: 10
+  terminationGracePeriodSeconds: 45
 
   ## Custom Deployment labels
   ##
@@ -197,3 +197,11 @@ networkPolicy:
 grafana:
   dashboard:
     enabled: false
+
+## PodDisruptionBudget for the manager, so a node drain or a cluster upgrade
+## can't take both replicas down at once. Only created with more than one
+## replica.
+##
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1

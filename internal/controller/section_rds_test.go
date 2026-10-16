@@ -111,6 +111,7 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 			Cache: cache.Options{
 				DefaultNamespaces: map[string]cache.Config{testNS: {}},
 				ByObject:          ManagedObjectCache(),
+				DefaultTransform:  ManagedCacheDefaultTransform(),
 			},
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -297,6 +298,7 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 			Cache: cache.Options{
 				DefaultNamespaces: map[string]cache.Config{nsA: {}, nsB: {}},
 				ByObject:          ManagedObjectCache(),
+				DefaultTransform:  ManagedCacheDefaultTransform(),
 			},
 		})
 		Expect(err).NotTo(HaveOccurred())

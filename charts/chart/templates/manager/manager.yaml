@@ -64,6 +64,19 @@ spec:
       {{- end }}
       {{- with .Values.manager.affinity }}
       affinity: {{ toYaml . | nindent 10 }}
+      {{- else }}
+      {{- if gt (int .Values.manager.replicas) 1 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {{ include "cloudctl-operator.name" . }}
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- end }}
       {{- end }}
       {{- with .Values.manager.nodeSelector }}
       nodeSelector: {{ toYaml . | nindent 10 }}
