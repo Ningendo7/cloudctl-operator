@@ -406,7 +406,7 @@ var securityGroupIDPattern = regexp.MustCompile(`^sg-[0-9a-f]{8,17}$`)
 // cannot start.
 func parseSecurityGroupIDs(value string) ([]string, error) {
 	var ids []string
-	for _, id := range strings.Split(value, ",") {
+	for id := range strings.SplitSeq(value, ",") {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue

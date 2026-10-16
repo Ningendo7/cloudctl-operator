@@ -638,8 +638,9 @@ func TestEnsureSecurityGroup_AdoptTakesUntaggedOrStaleGroupButNeverAnotherCRs(t 
 
 // grantedGroups returns the consumer group IDs the instance's group admits.
 func grantedGroups(ec2Client *fakeEC2, instanceGroupARN string) []string {
-	var ids []string
-	for _, rule := range ec2Client.groups[SecurityGroupIDFromARN(instanceGroupARN)].ingress {
+	rules := ec2Client.groups[SecurityGroupIDFromARN(instanceGroupARN)].ingress
+	ids := make([]string, 0, len(rules))
+	for _, rule := range rules {
 		ids = append(ids, rule.sourceGroupID)
 	}
 	return ids
