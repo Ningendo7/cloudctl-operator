@@ -414,7 +414,10 @@ spec:
   `spec.serviceAccountName`, or on an operator-owned ServiceAccount named
   after the CR (`status.serviceAccountName` says which), and
   `<cr-name>-connection` carries env-var-shaped keys for every owned and
-  authorized consumed resource. A named ServiceAccount must already exist
+  authorized consumed resource; if two resources would map to the same key
+  (`Orders` and `orders`, `a-b` and `a_b`), `ConnectionInfoReady` fails with
+  `ConnectionKeyCollision` naming both, and nothing is written. A named
+  ServiceAccount must already exist
   (`ServiceAccountNotFound` otherwise), and one carrying an IAM role set
   outside the operator is only taken over once it's annotated
   `cloudctl.io/allow-claim: <cr-name>` (`ServiceAccountNotClaimable`). See

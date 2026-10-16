@@ -19,8 +19,10 @@ package configmap
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -209,16 +211,20 @@ func TestConnectionKV(t *testing.T) {
 func TestSetRDSConnectionKeys(t *testing.T) {
 	info := rds.ConnectionInfo{Host: "host.example", Port: 5432, Engine: "postgres", DBInstanceIdentifier: "id"}
 
-	owned := map[string]string{}
-	setRDSConnectionKeys(owned, "orders-db", "", "", info)
-	if _, ok := owned["RDS_ORDERS_DB_HOST"]; !ok {
-		t.Errorf("owned: expected RDS_ORDERS_DB_HOST, got %v", owned)
+	owned := rds.NewKeyedData()
+	if err := setRDSConnectionKeys(owned, "orders-db", "", "", info); err != nil {
+		t.Fatalf("owned: %v", err)
+	}
+	if _, ok := owned.Values()["RDS_ORDERS_DB_HOST"]; !ok {
+		t.Errorf("owned: expected RDS_ORDERS_DB_HOST, got %v", owned.Values())
 	}
 
-	consumed := map[string]string{}
-	setRDSConnectionKeys(consumed, "orders-db", "team-a", "checkout-service", info)
-	if _, ok := consumed["RDS_TEAM_A_CHECKOUT_SERVICE_ORDERS_DB_HOST"]; !ok {
-		t.Errorf("consumed: expected RDS_TEAM_A_CHECKOUT_SERVICE_ORDERS_DB_HOST, got %v", consumed)
+	consumed := rds.NewKeyedData()
+	if err := setRDSConnectionKeys(consumed, "orders-db", "team-a", "checkout-service", info); err != nil {
+		t.Fatalf("consumed: %v", err)
+	}
+	if _, ok := consumed.Values()["RDS_TEAM_A_CHECKOUT_SERVICE_ORDERS_DB_HOST"]; !ok {
+		t.Errorf("consumed: expected RDS_TEAM_A_CHECKOUT_SERVICE_ORDERS_DB_HOST, got %v", consumed.Values())
 	}
 }
 
@@ -532,5 +538,107 @@ func TestEnsure_KeepsConsumedKeysWhenAProducerCannotBeRead(t *testing.T) {
 	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
 	if cm.Data["SQS_TEAM_B_PLATFORM_SERVICE_SHARED_CACHE_URL"] == "" {
 		t.Error("the consumed queue's key was removed because the producer couldn't be read")
+	}
+}
+
+func sqsProducer(namespace, crName, queue string, shareWith ...depsv1alpha1.SharedWithEntry) *depsv1alpha1.AppDependencies {
+	return &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName},
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: queue, SharedWith: shareWith},
+		}}},
+		Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
+			{Type: "sqs", Name: queue, ARN: "arn:aws:sqs:us-east-1:123456789012:" + namespace + "-" + crName + "-" + queue},
+		}},
+	}
+}
+
+func assertCollision(t *testing.T, err error, sources ...string) {
+	t.Helper()
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != rds.ReasonKeyCollision {
+		t.Fatalf("expected %s, got %v", rds.ReasonKeyCollision, err)
+	}
+	for _, s := range sources {
+		if !strings.Contains(err.Error(), s) {
+			t.Errorf("the error should name %q: %v", s, err)
+		}
+	}
+}
+
+// Different producers can fold into one key: team-a/orders and team/a-orders
+// both give SQS_TEAM_A_ORDERS_Q_URL. The app would connect to the wrong
+// queue, so nothing is written.
+func TestEnsure_RefusesConsumedResourcesWhoseKeysCollide(t *testing.T) {
+	share := depsv1alpha1.SharedWithEntry{Namespace: "consumer-ns", Name: "app"}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(
+		sqsProducer("team-a", "orders", "q", share), sqsProducer("team", "a-orders", "q", share),
+	).Build()
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "consumer-ns", Name: "app", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+			{Namespace: "team-a", Name: "orders", ResourceName: "q"},
+			{Namespace: "team", Name: "a-orders", ResourceName: "q"},
+		}}},
+	}
+
+	err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, consumer)
+	assertCollision(t, err, "team-a/orders", "team/a-orders")
+	if getErr := c.Get(context.Background(), client.ObjectKey{Namespace: "consumer-ns", Name: ConfigMapName("app")}, &corev1.ConfigMap{}); !apierrors.IsNotFound(getErr) {
+		t.Errorf("no ConfigMap should be written on a collision, got %v", getErr)
+	}
+}
+
+func TestEnsure_RefusesAnOwnedResourceWhoseKeyCollidesWithAConsumedOne(t *testing.T) {
+	share := depsv1alpha1.SharedWithEntry{Namespace: "consumer-ns", Name: "app"}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(sqsProducer("team-a", "orders", "q", share)).Build()
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "consumer-ns", Name: "app", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{
+			Resources: []depsv1alpha1.SQSQueueSpec{{Name: "team-a-orders-q"}},
+			Consumes:  []depsv1alpha1.ConsumeRef{{Namespace: "team-a", Name: "orders", ResourceName: "q"}},
+		}},
+		Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
+			{Type: "sqs", Name: "team-a-orders-q", ARN: "arn:aws:sqs:us-east-1:123456789012:consumer-ns-app-team-a-orders-q"},
+		}},
+	}
+
+	assertCollision(t, Ensure(context.Background(), c, c, nil, testRegion, testAccountID, consumer), "team-a-orders-q", "team-a/orders")
+}
+
+// A collision must not take down a CR whose keys are all distinct, or the
+// same resource listed twice.
+func TestEnsure_DistinctAndRepeatedConsumedResourcesAreNotCollisions(t *testing.T) {
+	share := depsv1alpha1.SharedWithEntry{Namespace: "consumer-ns", Name: "app"}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(
+		sqsProducer("team-a", "orders", "q", share), sqsProducer("team-b", "orders", "q", share),
+	).Build()
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "consumer-ns", Name: "app", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+			{Namespace: "team-a", Name: "orders", ResourceName: "q"},
+			{Namespace: "team-b", Name: "orders", ResourceName: "q"},
+			{Namespace: "team-a", Name: "orders", ResourceName: "q"},
+		}}},
+	}
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, consumer); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	cm := getConfigMap(t, c, "consumer-ns", ConfigMapName("app"))
+	if len(cm.Data) != 2 {
+		t.Errorf("expected the two distinct queues, got %v", cm.Data)
+	}
+}
+
+// A failed read of the producer says nothing about whether it still shares
+// the instance, so it must not drop the keys of a consumed instance.
+func TestAddConsumedRDS_AFailedReadOfTheProducerIsAnError(t *testing.T) {
+	failing := true
+	c := withFailingCRReadsCM(fake.NewClientBuilder().WithScheme(newScheme(t)).Build(), &failing)
+	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "consumer-ns", Name: "app"}}
+	ref := depsv1alpha1.ConsumeRef{Namespace: "team-a", Name: "orders", ResourceName: "db"}
+
+	if err := addConsumedRDS(context.Background(), c, nil, rds.NewKeyedData(), consumer, ref); err == nil {
+		t.Fatal("expected an error, not a silent skip, when the producer can't be read")
 	}
 }
