@@ -292,7 +292,7 @@ func ensureInstanceObserving(
 	recordEvent status.EventRecorder,
 	observed *string,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	instanceID := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, 63)
+	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, namespace, crName, resourceType, resourceName, 63)
 
 	describeOut, err := describeDBInstanceCached(ctx, awsClient, instanceID)
 

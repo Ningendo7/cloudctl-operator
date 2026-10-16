@@ -278,7 +278,7 @@ func securityGroupPolicyObject(namespace, crName string) *unstructured.Unstructu
 	policy.SetAPIVersion("vpcresources.k8s.aws/v1beta1")
 	policy.SetKind("SecurityGroupPolicy")
 	policy.SetNamespace(namespace)
-	policy.SetName(cloudctlaws.ResourceName(namespace, crName, "rds-pod-sg-policy", "network-identity", 255))
+	policy.SetName(cloudctlaws.ResourceName(namespace, crName, "rds-pod-sg-policy", "network-identity", 253))
 	return policy
 }
 

@@ -98,15 +98,7 @@ func ensureTopic(
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	const snsNameMaxLen = 256
-	const fifoSuffix = ".fifo"
-	budget := snsNameMaxLen
-	if t.FIFO {
-		budget -= len(fifoSuffix)
-	}
-	topicName := cloudctlaws.ResourceName(namespace, crName, resourceType, t.Name, budget)
-	if t.FIFO {
-		topicName += fifoSuffix
-	}
+	topicName := cloudctlaws.QueueOrTopicName(namespace, crName, resourceType, t.FIFO, snsNameMaxLen, t.Name)
 	topicArn := cloudctlaws.TopicARN(region, accountID, topicName)
 
 	var kmsKeyARN *string

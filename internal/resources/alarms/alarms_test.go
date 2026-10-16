@@ -78,7 +78,7 @@ func TestEnsure_CreatesSQSAgeAlarm(t *testing.T) {
 	if got := aws.ToString(alarm.input.MetricName); got != "ApproximateAgeOfOldestMessage" {
 		t.Errorf("MetricName = %q, want ApproximateAgeOfOldestMessage", got)
 	}
-	if len(alarm.input.Dimensions) != 1 || aws.ToString(alarm.input.Dimensions[0].Value) != awsResourceNameWithFIFO("default", "checkout-service", "sqs", "orders", false, sqsNameMaxLen) {
+	if len(alarm.input.Dimensions) != 1 || aws.ToString(alarm.input.Dimensions[0].Value) != cloudctlaws.QueueOrTopicName("default", "checkout-service", "sqs", false, sqsNameMaxLen, "orders") {
 		t.Errorf("unexpected dimensions: %+v", alarm.input.Dimensions)
 	}
 	if alarm.tags[cloudctlaws.OwnerTagKey] != cloudctlaws.OwnerTagValue("default", "checkout-service") {
@@ -99,7 +99,7 @@ func TestEnsure_FIFOQueueUsesFIFODimensionValue(t *testing.T) {
 	if alarm == nil {
 		t.Fatal("expected the age alarm to exist")
 	}
-	if got := aws.ToString(alarm.input.Dimensions[0].Value); got != awsResourceNameWithFIFO("default", "checkout-service", "sqs", "orders", true, sqsNameMaxLen) {
+	if got := aws.ToString(alarm.input.Dimensions[0].Value); got != cloudctlaws.QueueOrTopicName("default", "checkout-service", "sqs", true, sqsNameMaxLen, "orders") {
 		t.Errorf("dimension value = %q, want the .fifo-suffixed queue name", got)
 	}
 }
@@ -121,8 +121,32 @@ func TestEnsure_DLQGetsBacklogAlarmSharingParentFIFOness(t *testing.T) {
 	if got := aws.ToString(alarm.input.MetricName); got != "ApproximateNumberOfMessagesVisible" {
 		t.Errorf("MetricName = %q, want ApproximateNumberOfMessagesVisible", got)
 	}
-	if got := aws.ToString(alarm.input.Dimensions[0].Value); got != awsResourceNameWithFIFO("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", "dlq"), true, sqsNameMaxLen) {
-		t.Errorf("dimension value = %q, want the DLQ's .fifo-suffixed name", got)
+	// The alarm watches the queue by name, so it has to be the DLQ's real
+	// name: the one the queue was created under, not a re-derivation of it.
+	if got, want := aws.ToString(alarm.input.Dimensions[0].Value), cloudctlaws.QueueOrTopicName("default", "checkout-service", "sqs", true, 80, "orders", "dlq"); got != want {
+		t.Errorf("dimension value = %q, want the real DLQ name %q", got, want)
+	}
+}
+
+// A CR named with a dot gets cleaned queue and topic names, and the alarms
+// have to watch those names, not the uncleaned ones.
+func TestEnsure_AlarmsWatchTheRealNamesOfQueuesAndTopicsOfADottedCR(t *testing.T) {
+	client := newFakeCloudWatch()
+	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DLQ: true}}}
+	snsSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
+	if err := Ensure(context.Background(), client, nil, "default", "orders.v2", "uid-1", testRegion, testAccountID,
+		&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, snsSpec, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	want := map[string]bool{
+		cloudctlaws.QueueOrTopicName("default", "orders.v2", "sqs", false, 80, "orders"):        true,
+		cloudctlaws.QueueOrTopicName("default", "orders.v2", "sqs", false, 80, "orders", "dlq"): true,
+		cloudctlaws.QueueOrTopicName("default", "orders.v2", "sns", false, 256, "events"):       true,
+	}
+	for name, alarm := range client.alarms {
+		if dim := aws.ToString(alarm.input.Dimensions[0].Value); !want[dim] {
+			t.Errorf("alarm %s watches %q, which is not a real queue or topic name", name, dim)
+		}
 	}
 }
 

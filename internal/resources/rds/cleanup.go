@@ -226,7 +226,7 @@ func ensureFinalSnapshot(
 	// this function at all requires it. Folded into the ID so a later,
 	// separate episode never collides with an earlier one's snapshot.
 	episodeID := strconv.FormatInt(entry.PendingDeletionSince.Unix(), 10)
-	expectedSnapshotID := cloudctlaws.DerivedResourceName(namespace, crName, resourceType, 255, entry.Name, "final-snapshot", episodeID)
+	expectedSnapshotID := cloudctlaws.DerivedResourceNameFor(cloudctlaws.NameStyleRDS, namespace, crName, resourceType, 255, entry.Name, "final-snapshot", episodeID)
 
 	existing, existingFound := status.FindManagedResource(ledger, snapshotResourceType, entry.Name)
 	if existingFound && existing.ARN != expectedSnapshotID {

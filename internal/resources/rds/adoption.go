@@ -50,7 +50,7 @@ func checkAdoptable(
 	if !r.Adopt || status.HasManagedResource(ledger, resourceType, r.Name) {
 		return nil
 	}
-	instanceID := cloudctlaws.ResourceName(namespace, crName, resourceType, r.Name, 63)
+	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, namespace, crName, resourceType, r.Name, 63)
 	out, err := describeDBInstanceCached(ctx, awsClient, instanceID)
 	var notFound *types.DBInstanceNotFoundFault
 	if errors.As(err, &notFound) {
