@@ -71,9 +71,9 @@ const aliasPrefix = "alias/"
 // second call, does.
 func aliasName(namespace, crName, resourceName string, opts keyOptions) string {
 	if len(opts.aliasParts) > 0 {
-		return aliasPrefix + cloudctlaws.DerivedResourceName(namespace, crName, resourceType, aliasMaxLen-len(aliasPrefix), opts.aliasParts...)
+		return aliasPrefix + cloudctlaws.DerivedResourceNameFor(cloudctlaws.NameStyleWordChars, namespace, crName, resourceType, aliasMaxLen-len(aliasPrefix), opts.aliasParts...)
 	}
-	return aliasPrefix + cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, aliasMaxLen-len(aliasPrefix))
+	return aliasPrefix + cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleWordChars, namespace, crName, resourceType, resourceName, aliasMaxLen-len(aliasPrefix))
 }
 
 // Ensure reconciles every declared KMS key against AWS, updating the

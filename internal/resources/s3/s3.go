@@ -87,7 +87,7 @@ const s3NameMaxLen = 63
 const accountHashLen = 8
 
 func bucketName(namespace, crName, resourceKey, accountID string) string {
-	base := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceKey, s3NameMaxLen-accountHashLen-1)
+	base := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleS3, namespace, crName, resourceType, resourceKey, s3NameMaxLen-accountHashLen-1)
 	sum := sha256.Sum256([]byte(accountID))
 	return fmt.Sprintf("%s-%s", base, hex.EncodeToString(sum[:])[:accountHashLen])
 }

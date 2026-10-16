@@ -176,7 +176,7 @@ func desiredAlarms(
 
 	if sqsSpec != nil {
 		for _, q := range sqsSpec.Resources {
-			queueName := awsResourceNameWithFIFO(namespace, crName, "sqs", q.Name, q.FIFO, sqsNameMaxLen)
+			queueName := cloudctlaws.QueueOrTopicName(namespace, crName, "sqs", q.FIFO, sqsNameMaxLen, q.Name)
 			defs = append(defs, alarmDef{
 				name:               cloudctlaws.ResourceName(namespace, crName, "sqs", cloudctlaws.DerivedKey(q.Name, sqsAgeAlarmSuffix), alarmNameMaxLen),
 				description:        fmt.Sprintf("Queue %q has a message older than 15 minutes - processing is falling behind.", q.Name),
@@ -198,7 +198,7 @@ func desiredAlarms(
 
 			if q.DLQ {
 				dlqKey := cloudctlaws.DerivedKey(q.Name, "dlq")
-				dlqName := awsResourceNameWithFIFO(namespace, crName, "sqs", dlqKey, q.FIFO, sqsNameMaxLen)
+				dlqName := cloudctlaws.QueueOrTopicName(namespace, crName, "sqs", q.FIFO, sqsNameMaxLen, q.Name, "dlq")
 				defs = append(defs, alarmDef{
 					name:               cloudctlaws.ResourceName(namespace, crName, "sqs", cloudctlaws.DerivedKey(dlqKey, sqsDLQBackLogAlarmSuffix), alarmNameMaxLen),
 					description:        fmt.Sprintf("Queue %q's dead-letter queue has at least one message - something is failing repeatedly.", q.Name),
@@ -219,7 +219,7 @@ func desiredAlarms(
 
 	if snsSpec != nil {
 		for _, t := range snsSpec.Resources {
-			topicName := awsResourceNameWithFIFO(namespace, crName, "sns", t.Name, t.FIFO, snsNameMaxLen)
+			topicName := cloudctlaws.QueueOrTopicName(namespace, crName, "sns", t.FIFO, snsNameMaxLen, t.Name)
 			defs = append(defs, alarmDef{
 				name:               cloudctlaws.ResourceName(namespace, crName, "sns", cloudctlaws.DerivedKey(t.Name, snsDeliveryFailedSuffix), alarmNameMaxLen),
 				description:        fmt.Sprintf("Topic %q failed to deliver at least one notification.", t.Name),
@@ -282,24 +282,7 @@ const (
 	snsNameMaxLen    = 256
 	dynamoNameMaxLen = 255
 	alarmNameMaxLen  = 255
-	fifoSuffix       = ".fifo"
 )
-
-// awsResourceNameWithFIFO mirrors the sqs/sns packages' own
-// name-plus-".fifo"-suffix construction — the CloudWatch dimension value
-// must match the real AWS-side resource name exactly, FIFO suffix
-// included, or the alarm will never see any data.
-func awsResourceNameWithFIFO(namespace, crName, resourceType, resourceKey string, fifo bool, maxLen int) string {
-	budget := maxLen
-	if fifo {
-		budget -= len(fifoSuffix)
-	}
-	name := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceKey, budget)
-	if fifo {
-		name += fifoSuffix
-	}
-	return name
-}
 
 // alarmARN constructs an alarm's ARN deterministically — confirmed format
 // from CloudWatch's own TagResource/ListTagsForResource docs. No

@@ -298,20 +298,11 @@ func ensureSingleQueue(
 	}
 
 	const sqsNameMaxLen = 80
-	const fifoSuffix = ".fifo"
-	budget := sqsNameMaxLen
-	if opts.fifo {
-		budget -= len(fifoSuffix)
-	}
-	var queueName string
+	keyParts := []string{resourceName}
 	if opts.derivedRole != "" {
-		queueName = cloudctlaws.DerivedResourceName(namespace, crName, resourceType, budget, opts.derivedFromKey, opts.derivedRole)
-	} else {
-		queueName = cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, budget)
+		keyParts = []string{opts.derivedFromKey, opts.derivedRole}
 	}
-	if opts.fifo {
-		queueName += fifoSuffix
-	}
+	queueName := cloudctlaws.QueueOrTopicName(namespace, crName, resourceType, opts.fifo, sqsNameMaxLen, keyParts...)
 	ownerTags := map[string]string{
 		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
 		cloudctlaws.OwnerUIDTagKey: crUID,

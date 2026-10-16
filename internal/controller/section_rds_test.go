@@ -187,7 +187,7 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 			return rdsReady != nil && rdsReady.Status == metav1.ConditionTrue
 		}, 10*time.Second, 100*time.Millisecond).Should(BeTrue(), "expected the grant's creation to immediately unblock the CR")
 
-		instanceID := cloudctlaws.ResourceName(cr.Namespace, cr.Name, "rds", "orders-db", 63)
+		instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, cr.Namespace, cr.Name, "rds", "orders-db", 63)
 		Expect(fakeRDS.hasInstance(instanceID)).To(BeTrue())
 	})
 

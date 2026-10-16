@@ -18,6 +18,7 @@ package aws
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -202,5 +203,151 @@ func TestTopicARN(t *testing.T) {
 	want := "arn:aws:sns:us-east-1:123456789012:default-checkout-service-orders"
 	if got != want {
 		t.Errorf("TopicARN() = %q, want %q", got, want)
+	}
+}
+
+var (
+	wordCharsName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	rdsName       = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*(-[A-Za-z0-9]+)*$`)
+	s3Name        = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
+)
+
+// validFor reports whether name is acceptable to the service a style stands
+// for: SQS, SNS and KMS aliases; RDS identifiers and snapshot IDs; S3 buckets.
+func validFor(style NameStyle, name string, maxLen int) bool {
+	if len(name) > maxLen {
+		return false
+	}
+	switch style {
+	case NameStyleWordChars:
+		return wordCharsName.MatchString(name)
+	case NameStyleRDS:
+		return rdsName.MatchString(name)
+	case NameStyleS3:
+		return len(name) >= 3 && s3Name.MatchString(name) &&
+			!strings.Contains(name, "..") && !strings.Contains(name, ".-") && !strings.Contains(name, "-.")
+	default:
+		return true
+	}
+}
+
+var nameStyles = map[string]struct {
+	style  NameStyle
+	maxLen int
+}{
+	"sqs/sns/kms": {NameStyleWordChars, 80},
+	"rds":         {NameStyleRDS, 63},
+	"s3":          {NameStyleS3, 50},
+}
+
+// Kubernetes lets a CR be called orders.v2; SQS, SNS, KMS aliases and RDS
+// reject the dot, and every one of those names used to be sent as it was.
+func TestResourceNameFor_DotsInACRNameProduceANameTheServiceAccepts(t *testing.T) {
+	for service, tc := range nameStyles {
+		t.Run(service, func(t *testing.T) {
+			for _, cr := range []string{"orders.v2", "payments.api.internal", "a.b"} {
+				name := ResourceNameFor(tc.style, "default", cr, "sqs", "orders", tc.maxLen)
+				if !validFor(tc.style, name, tc.maxLen) {
+					t.Errorf("ResourceNameFor(%q) = %q, which %s would reject", cr, name, service)
+				}
+			}
+		})
+	}
+}
+
+// Names that already work must keep their exact form: a different name
+// would orphan the resource that exists under the old one.
+func TestResourceNameFor_AlreadyValidNamesAreUnchanged(t *testing.T) {
+	for service, tc := range nameStyles {
+		t.Run(service, func(t *testing.T) {
+			rapid.Check(t, func(t *rapid.T) {
+				ns := rapid.StringMatching(`[a-z][a-z0-9]{0,8}(-[a-z0-9]{1,8}){0,2}`).Draw(t, "namespace")
+				cr := rapid.StringMatching(`[a-z0-9]{1,6}(\.[a-z0-9]{1,6}){0,2}(-[a-z0-9]{1,6}){0,2}`).Draw(t, "cr")
+				key := rapid.StringMatching(`[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,2}`).Draw(t, "key")
+				old := ResourceName(ns, cr, "sqs", key, tc.maxLen)
+				if !validFor(tc.style, old, tc.maxLen) {
+					return
+				}
+				if got := ResourceNameFor(tc.style, ns, cr, "sqs", key, tc.maxLen); got != old {
+					t.Fatalf("a valid name changed: %q became %q", old, got)
+				}
+			})
+		})
+	}
+}
+
+func TestResourceNameFor_NamesAlwaysSatisfyTheService(t *testing.T) {
+	for service, tc := range nameStyles {
+		t.Run(service, func(t *testing.T) {
+			rapid.Check(t, func(t *rapid.T) {
+				ns := rapid.StringMatching(`[a-z0-9]([a-z0-9-]{0,10}[a-z0-9])?`).Draw(t, "namespace")
+				cr := rapid.StringMatching(`[a-z0-9]{1,6}(\.[a-z0-9]{1,6}){0,3}(-[a-z0-9]{1,6}){0,2}`).Draw(t, "cr")
+				key := rapid.StringMatching(`[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,3}`).Draw(t, "key")
+				maxLen := rapid.IntRange(tc.maxLen-30, tc.maxLen).Draw(t, "maxLen")
+				name := ResourceNameFor(tc.style, ns, cr, "sqs", key, maxLen)
+				if !validFor(tc.style, name, maxLen) {
+					t.Fatalf("ResourceNameFor(%q, %q, %q, %d) = %q, which %s would reject", ns, cr, key, maxLen, name, service)
+				}
+			})
+		})
+	}
+}
+
+// The hash is over the identity as typed, so cleaning the readable prefix
+// can't make two different CRs share a name.
+func TestResourceNameFor_CleanedPrefixesStillDifferByIdentity(t *testing.T) {
+	for service, tc := range nameStyles {
+		a := ResourceNameFor(tc.style, "default", "orders.v2", "sqs", "q", tc.maxLen)
+		b := ResourceNameFor(tc.style, "default", "orders-v2", "sqs", "q", tc.maxLen)
+		if a == b {
+			t.Errorf("%s: orders.v2 and orders-v2 both became %q", service, a)
+		}
+	}
+}
+
+func TestResourceNameFor_RDSNamesStartWithALetterAndNeverEndInAHyphen(t *testing.T) {
+	cases := [][3]string{{"1team", "orders", "db"}, {"default", "a--b", "x"}, {"default", "orders", "db-"}}
+	for _, c := range cases {
+		for maxLen := 20; maxLen <= 63; maxLen++ {
+			if name := ResourceNameFor(NameStyleRDS, c[0], c[1], "rds", c[2], maxLen); !validFor(NameStyleRDS, name, maxLen) {
+				t.Fatalf("ResourceNameFor(%v, %d) = %q, which RDS would reject", c, maxLen, name)
+			}
+		}
+	}
+}
+
+func TestResourceNameFor_S3KeepsDotsButFixesAdjacentSeparators(t *testing.T) {
+	if got := ResourceNameFor(NameStyleS3, "default", "orders.v2", "s3", "receipts", 50); !strings.HasPrefix(got, "default-orders.v2-receipts-") {
+		t.Errorf("a dot S3 accepts was changed: %q", got)
+	}
+	for _, key := range []string{"a..b", "a.-b", "a-.b", "a."} {
+		for maxLen := 20; maxLen <= 50; maxLen++ {
+			if name := ResourceNameFor(NameStyleS3, "default", "orders", "s3", key, maxLen); !validFor(NameStyleS3, name, maxLen) {
+				t.Fatalf("ResourceNameFor(key %q, %d) = %q, which S3 would reject", key, maxLen, name)
+			}
+		}
+	}
+}
+
+func TestDerivedResourceNameFor_AppliesTheSameCleaning(t *testing.T) {
+	name := DerivedResourceNameFor(NameStyleRDS, "default", "orders.v2", "rds", 63, "db", "final-snapshot")
+	if !validFor(NameStyleRDS, name, 63) {
+		t.Errorf("DerivedResourceNameFor() = %q, which RDS would reject", name)
+	}
+	if got, want := DerivedResourceNameFor(NameStyleAny, "default", "orders.v2", "rds", 63, "db"), DerivedResourceName("default", "orders.v2", "rds", 63, "db"); got != want {
+		t.Errorf("the default style must not change a name: %q vs %q", got, want)
+	}
+}
+
+func TestQueueOrTopicName(t *testing.T) {
+	if got, want := QueueOrTopicName("default", "checkout", "sqs", false, 80, "orders"), ResourceName("default", "checkout", "sqs", "orders", 80); got != want {
+		t.Errorf("a valid queue name changed: %q, want %q", got, want)
+	}
+	if got, want := QueueOrTopicName("default", "checkout", "sqs", false, 80, "orders", "dlq"), DerivedResourceName("default", "checkout", "sqs", 80, "orders", "dlq"); got != want {
+		t.Errorf("a valid DLQ name changed: %q, want %q", got, want)
+	}
+	fifo := QueueOrTopicName("default", "orders.v2", "sqs", true, 80, "orders")
+	if !strings.HasSuffix(fifo, ".fifo") || len(fifo) > 80 || !validFor(NameStyleWordChars, strings.TrimSuffix(fifo, ".fifo"), 80) {
+		t.Errorf("FIFO name %q must end in .fifo, fit 80 characters and be valid before the suffix", fifo)
 	}
 }

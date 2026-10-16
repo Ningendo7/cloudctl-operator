@@ -333,6 +333,36 @@ spec:
 			NotTo(ContainSubstring(cloudctlaws.OwnerTagKey), "a retained queue must be released, not left claiming an owner that no longer exists")
 	})
 
+	// The alarm that watches the dead-letter queue is covered by unit tests:
+	// the pinned LocalStack answers DescribeAlarms with a 500 once any alarm
+	// exists (see docs/testing.md), so alarms can't run here.
+	It("brings up a CR whose name contains a dot, with its dead-letter queue", func() {
+		const name = "orders.v2"
+		_, err := kubectlApplyStdin(fmt.Sprintf(`apiVersion: deps.cloudctl.io/v1alpha1
+kind: AppDependencies
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  sqs:
+    resources:
+      - name: orders
+        dlq: true
+`, name, resilienceNamespace))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) { crReady(g, resilienceNamespace, name) }, 3*time.Minute, 2*time.Second).Should(Succeed(),
+			"SQS rejects a '.' in a queue name, so the derived names must not carry the CR's")
+
+		for _, queue := range []string{
+			cloudctlaws.QueueOrTopicName(resilienceNamespace, name, "sqs", false, 80, "orders"),
+			cloudctlaws.QueueOrTopicName(resilienceNamespace, name, "sqs", false, 80, "orders", "dlq"),
+		} {
+			Expect(runAWSCLIPod(nextAWSPod("dotted-queue"), "sqs", "get-queue-url", "--queue-name", queue)).To(ContainSubstring(queue))
+		}
+
+		mustKubectl("delete", "appdependencies", name, "-n", resilienceNamespace, "--wait=true", "--timeout=3m")
+	})
+
 	It("handles a burst of CRs without duplicates, leaks, or the manager running out of memory", func() {
 		const burst = 8
 		var manifests []string
