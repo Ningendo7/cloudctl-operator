@@ -322,8 +322,20 @@ func resumeKey(
 	if tErr != nil {
 		return ledger, wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of KMS key %q", entry.Name))
 	}
-	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, crUID) {
-		return ledger, fmt.Errorf("KMS key %q is no longer tagged as owned by this CR - refusing to manage it further", entry.Name)
+	if tagMap := tagsToMap(tags); !cloudctlaws.IsOwnedBy(tagMap, namespace, crName, crUID) {
+		staleUID, stale := cloudctlaws.IsStaleUID(tagMap, namespace, crName, crUID)
+		if !stale || !cloudctlaws.MayTransferFrom(ctx, staleUID) {
+			return ledger, fmt.Errorf("KMS key %q is no longer tagged as owned by this CR - refusing to manage it further", entry.Name)
+		}
+		if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
+			KeyId: &entry.ARN,
+			Tags:  mapToTags(cloudctlaws.MergeTags(tagMap, ownerTags(namespace, crName, crUID))),
+		}); err != nil {
+			return ledger, wrapAWSError(err, fmt.Sprintf("taking over KMS key %q (tagging)", entry.Name))
+		}
+		if recordEvent != nil {
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over KMS key %s from a previous incarnation of this CR", entry.ARN))
+		}
 	}
 
 	if describeOut.KeyMetadata.KeyState == types.KeyStatePendingDeletion {
@@ -379,10 +391,14 @@ func adoptKey(
 	if existingOwner, ok := tagMap[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 		return ledger, fmt.Errorf("KMS alias %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", alias, existingOwner)
 	}
+	transferred := false
 	if staleUID, stale := cloudctlaws.IsStaleUID(tagMap, namespace, crName, crUID); stale {
-		return ledger, fmt.Errorf("KMS alias %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", alias, staleUID)
+		if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
+			return ledger, fmt.Errorf("KMS alias %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", alias, staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
+		}
+		transferred = true
 	}
-	if !opts.adopt {
+	if !transferred && !opts.adopt {
 		return ledger, fmt.Errorf("KMS alias %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", alias)
 	}
 
@@ -394,7 +410,11 @@ func adoptKey(
 		return ledger, wrapAWSError(err, fmt.Sprintf("adopting KMS key %q (tagging)", alias))
 	}
 	if recordEvent != nil {
-		recordEvent("Normal", "KeyAdopted", fmt.Sprintf("Adopted existing KMS key %s (alias %s) under management", arn, alias))
+		if transferred {
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over KMS key %s (alias %s) from a previous incarnation of this CR", arn, alias))
+		} else {
+			recordEvent("Normal", "KeyAdopted", fmt.Sprintf("Adopted existing KMS key %s (alias %s) under management", arn, alias))
+		}
 	}
 
 	if meta.KeyState == types.KeyStatePendingDeletion {

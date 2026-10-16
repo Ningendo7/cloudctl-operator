@@ -16,7 +16,11 @@ limitations under the License.
 
 package aws
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 func TestIsOwnedBy(t *testing.T) {
 	tags := map[string]string{
@@ -60,5 +64,59 @@ func TestIsStaleUID(t *testing.T) {
 	}
 	if _, stale := IsStaleUID(nil, "default", "checkout-service", "new-uid"); stale {
 		t.Error("expected a genuinely untagged resource to not be reported stale")
+	}
+}
+
+func TestMayTransferFrom(t *testing.T) {
+	ctx := WithAdoptFromUID(context.Background(), "old-uid")
+	if !MayTransferFrom(ctx, "old-uid") {
+		t.Error("the UID the CR was told to take over from must be accepted")
+	}
+	if MayTransferFrom(ctx, "some-other-uid") {
+		t.Error("any other stale UID must still be refused")
+	}
+	if MayTransferFrom(context.Background(), "old-uid") {
+		t.Error("without the annotation nothing is transferable")
+	}
+	if MayTransferFrom(WithAdoptFromUID(context.Background(), ""), "") {
+		t.Error("an empty annotation must not match an empty UID")
+	}
+}
+
+func TestCheckExistingOwnership(t *testing.T) {
+	mine := func(uid string) map[string]string {
+		return map[string]string{OwnerTagKey: OwnerTagValue("ns", "app"), OwnerUIDTagKey: uid}
+	}
+	told := WithAdoptFromUID(context.Background(), "old-uid")
+	plain := context.Background()
+
+	tests := []struct {
+		name            string
+		ctx             context.Context
+		tags            map[string]string
+		adopt           bool
+		wantTransferred bool
+		wantErr         string
+	}{
+		{"untagged without adopt", plain, nil, false, false, "set adopt:true"},
+		{"untagged with adopt", plain, nil, true, false, ""},
+		{"another CR owns it, even with adopt", plain, map[string]string{OwnerTagKey: "ns/other"}, true, false, "naming collision"},
+		{"previous UID without the annotation, even with adopt", plain, mine("old-uid"), true, false, "adopt-from-uid=old-uid"},
+		{"previous UID named by the annotation", told, mine("old-uid"), false, true, ""},
+		{"a different previous UID than the annotation", told, mine("other-uid"), true, false, "adopt-from-uid=other-uid"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			transferred, err := CheckExistingOwnership(tc.ctx, "queue", "q", tc.tags, "ns", "app", "new-uid", tc.adopt)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			if transferred != tc.wantTransferred {
+				t.Errorf("transferred = %v, want %v", transferred, tc.wantTransferred)
+			}
+		})
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -189,6 +190,12 @@ func ensureTable(
 
 	var notFound *types.ResourceNotFoundException
 	if errors.As(err, &notFound) {
+		// Creation only ever happens for a table this CR has never had. One
+		// the ledger knows but DynamoDB no longer has was deleted out-of-band,
+		// and a replacement would be an empty table reported Ready.
+		if entry, found := status.FindManagedResource(ledger, resourceType, resourceName); found {
+			return ledger, tableMissingError(entry, tableName, recordEvent)
+		}
 		return createTable(ctx, awsClient, namespace, crName, crUID, tableName, resourceName, opts, ledger, recordEvent)
 	}
 	if err != nil {
@@ -253,14 +260,9 @@ func ensureTable(
 	currentTags := tagsToMap(tags)
 
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return ledger, fmt.Errorf("table %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", tableName, existingOwner)
-		}
-		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
-			return ledger, fmt.Errorf("table %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", tableName, staleUID)
-		}
-		if !opts.adopt {
-			return ledger, fmt.Errorf("table %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", tableName)
+		transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "table", tableName, currentTags, namespace, crName, crUID, opts.adopt)
+		if ownErr != nil {
+			return ledger, ownErr
 		}
 
 		// Refuse the adoption outright on a key-schema mismatch, rather than
@@ -296,7 +298,11 @@ func ensureTable(
 			return ledger, wrapAWSError(tagErr, "adopting table (tagging)")
 		}
 		if recordEvent != nil {
-			recordEvent("Normal", "TableAdopted", fmt.Sprintf("Adopted existing DynamoDB table %s under management", tableArn))
+			if transferred {
+				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over DynamoDB table %s from a previous incarnation of this CR", tableArn))
+			} else {
+				recordEvent("Normal", "TableAdopted", fmt.Sprintf("Adopted existing DynamoDB table %s under management", tableArn))
+			}
 		}
 	}
 
@@ -573,5 +579,30 @@ func wrapAWSError(err error, errContext string) error {
 	return &cloudctlaws.ReconcileError{
 		Err:       fmt.Errorf("%s: %w", errContext, err),
 		Retryable: cloudctlaws.IsRetryable(err),
+	}
+}
+
+// creationVisibilityGrace is how long a just-created table may be missing
+// from DescribeTable before that is treated as it having been deleted:
+// DynamoDB can briefly answer "no such table" right after CreateTable.
+const creationVisibilityGrace = 5 * time.Minute
+
+const reasonTableMissing = "TableMissing"
+
+func tableMissingError(entry depsv1alpha1.ManagedResource, tableName string, recordEvent status.EventRecorder) error {
+	if entry.State == depsv1alpha1.ManagedResourceStateCreating && time.Since(entry.CreatedAt.Time) < creationVisibilityGrace {
+		return &cloudctlaws.ReconcileError{
+			Err:       fmt.Errorf("table %q was just created and is not visible yet", tableName),
+			Retryable: true,
+		}
+	}
+	if recordEvent != nil {
+		recordEvent("Warning", "TableMissing", fmt.Sprintf("DynamoDB table %s no longer exists in AWS and will not be recreated", entry.ARN))
+	}
+	return &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("DynamoDB table %q (%s) no longer exists in AWS: it was deleted out-of-band, and this operator will not create an empty "+
+			"replacement. Restore it under the same name from a backup and set adopt: true, "+
+			"or remove it from spec and add it again to start fresh", tableName, entry.ARN),
+		Reason: reasonTableMissing,
 	}
 }

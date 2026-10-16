@@ -201,14 +201,9 @@ func ensureTopic(
 	// Topic already exists — verify we actually own it before trusting it.
 	currentTags := tagsToMap(tagsOut.Tags)
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return ledger, fmt.Errorf("topic %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", topicName, existingOwner)
-		}
-		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
-			return ledger, fmt.Errorf("topic %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", topicName, staleUID)
-		}
-		if !t.Adopt {
-			return ledger, fmt.Errorf("topic %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", topicName)
+		transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "topic", topicName, currentTags, namespace, crName, crUID, t.Adopt)
+		if ownErr != nil {
+			return ledger, ownErr
 		}
 		attrsOut, aErr := awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
 		if aErr != nil {
@@ -223,7 +218,11 @@ func ensureTopic(
 			return ledger, wrapAWSError(tagErr, "adopting topic (tagging)")
 		}
 		if recordEvent != nil {
-			recordEvent("Normal", "TopicAdopted", fmt.Sprintf("Adopted existing SNS topic %s under management", topicArn))
+			if transferred {
+				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SNS topic %s from a previous incarnation of this CR", topicArn))
+			} else {
+				recordEvent("Normal", "TopicAdopted", fmt.Sprintf("Adopted existing SNS topic %s under management", topicArn))
+			}
 		}
 	}
 

@@ -135,9 +135,9 @@ func buildCredentialsData(
 	awsClient rdsAPI,
 	cr *depsv1alpha1.AppDependencies,
 ) (map[string]string, error) {
-	data := map[string]string{}
+	data := NewKeyedData()
 	if cr.Spec.RDS == nil {
-		return data, nil
+		return data.Values(), nil
 	}
 
 	for _, r := range cr.Spec.RDS.Resources {
@@ -149,7 +149,7 @@ func buildCredentialsData(
 			return nil, err
 		}
 	}
-	return data, nil
+	return data.Values(), nil
 }
 
 // addCredentials resolves and adds one instance's username/password into
@@ -160,7 +160,7 @@ func addCredentials(
 	ctx context.Context,
 	secretsManagerClient cloudctlaws.SecretsManagerClient,
 	awsClient rdsAPI,
-	data map[string]string,
+	data *KeyedData,
 	instanceARN, resourceName string,
 ) error {
 	info, ok, err := ResolveConnectionInfo(ctx, awsClient, instanceARN)
@@ -184,12 +184,48 @@ func addCredentials(
 		return fmt.Errorf("parsing managed credentials secret for %q: %w", resourceName, err)
 	}
 
-	data[credentialsKey(resourceName, "USERNAME")] = parsed.Username
-	data[credentialsKey(resourceName, "PASSWORD")] = parsed.Password
-	return nil
+	source := fmt.Sprintf("RDS instance %q", resourceName)
+	if err := data.Put(credentialsKey(resourceName, "USERNAME"), parsed.Username, source); err != nil {
+		return err
+	}
+	return data.Put(credentialsKey(resourceName, "PASSWORD"), parsed.Password, source)
 }
 
 var invalidEnvChars = regexp.MustCompile(`[^A-Z0-9_]`)
+
+// ReasonKeyCollision marks two different sources that map to one key.
+const ReasonKeyCollision = "ConnectionKeyCollision"
+
+// KeyedData is the flat map behind a ConfigMap or Secret, remembering which
+// source wrote each key. Keys are upper-cased with every other character
+// turned into '_', so different names can fold into one key (Orders and
+// orders, a-b and a_b, team-a/orders and team/a-orders), and the second
+// write would silently replace the first and point the app at the wrong
+// resource. The configmap package uses it too, since it imports this one.
+type KeyedData struct {
+	values  map[string]string
+	sources map[string]string
+}
+
+func NewKeyedData() *KeyedData {
+	return &KeyedData{values: map[string]string{}, sources: map[string]string{}}
+}
+
+// Put stores value under key for source, or refuses when a different source
+// already owns the key. The same source writing a key again is fine.
+func (d *KeyedData) Put(key, value, source string) error {
+	if prior, taken := d.sources[key]; taken && prior != source {
+		return &cloudctlaws.ReconcileError{
+			Err:    fmt.Errorf("%s and %s would both be written to the key %s; rename one of them so their keys differ", prior, source, key),
+			Reason: ReasonKeyCollision,
+		}
+	}
+	d.values[key] = value
+	d.sources[key] = source
+	return nil
+}
+
+func (d *KeyedData) Values() map[string]string { return d.values }
 
 // credentialsKey uses configmap.go's owned-resource key shape without
 // importing that package, which would create an import cycle.

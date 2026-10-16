@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 )
@@ -35,6 +37,10 @@ type fakeRole struct {
 	tags        map[string]string
 	trustPolicy string
 	policies    map[string]string // policyName -> policyDocument
+
+	// Attached by someone other than the operator, which is what stops
+	// DeleteRole in AWS.
+	attachedPolicies []string
 }
 
 type fakeIAMClient struct {
@@ -82,6 +88,17 @@ func (f *fakeIAMClient) UpdateAssumeRolePolicy(_ context.Context, in *iam.Update
 	return &iam.UpdateAssumeRolePolicyOutput{}, nil
 }
 
+func (f *fakeIAMClient) TagRole(_ context.Context, in *iam.TagRoleInput, _ ...func(*iam.Options)) (*iam.TagRoleOutput, error) {
+	r, ok := f.roles[*in.RoleName]
+	if !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	for _, t := range in.Tags {
+		r.tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
+	return &iam.TagRoleOutput{}, nil
+}
+
 func (f *fakeIAMClient) ListRoleTags(_ context.Context, in *iam.ListRoleTagsInput, _ ...func(*iam.Options)) (*iam.ListRoleTagsOutput, error) {
 	r, ok := f.roles[*in.RoleName]
 	if !ok {
@@ -125,11 +142,34 @@ func (f *fakeIAMClient) DeleteRolePolicy(_ context.Context, in *iam.DeleteRolePo
 }
 
 func (f *fakeIAMClient) DeleteRole(_ context.Context, in *iam.DeleteRoleInput, _ ...func(*iam.Options)) (*iam.DeleteRoleOutput, error) {
-	if _, ok := f.roles[*in.RoleName]; !ok {
+	r, ok := f.roles[*in.RoleName]
+	if !ok {
 		return nil, &types.NoSuchEntityException{}
+	}
+	if len(r.attachedPolicies) > 0 {
+		return nil, &types.DeleteConflictException{Message: aws.String("Cannot delete entity, must detach all policies first.")}
 	}
 	delete(f.roles, *in.RoleName)
 	return &iam.DeleteRoleOutput{}, nil
+}
+
+func (f *fakeIAMClient) ListAttachedRolePolicies(_ context.Context, in *iam.ListAttachedRolePoliciesInput, _ ...func(*iam.Options)) (*iam.ListAttachedRolePoliciesOutput, error) {
+	r, ok := f.roles[*in.RoleName]
+	if !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	out := &iam.ListAttachedRolePoliciesOutput{}
+	for _, arn := range r.attachedPolicies {
+		out.AttachedPolicies = append(out.AttachedPolicies, types.AttachedPolicy{PolicyArn: aws.String(arn)})
+	}
+	return out, nil
+}
+
+func (f *fakeIAMClient) ListInstanceProfilesForRole(_ context.Context, in *iam.ListInstanceProfilesForRoleInput, _ ...func(*iam.Options)) (*iam.ListInstanceProfilesForRoleOutput, error) {
+	if _, ok := f.roles[*in.RoleName]; !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	return &iam.ListInstanceProfilesForRoleOutput{}, nil
 }
 
 func tagsFromIAMSlice(tags []types.Tag) map[string]string {

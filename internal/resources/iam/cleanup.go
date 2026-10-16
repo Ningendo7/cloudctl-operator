@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -93,7 +94,12 @@ func Cleanup(
 
 	if _, err := iamClient.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: &name}); err != nil {
 		var notFound *types.NoSuchEntityException
-		if !errors.As(err, &notFound) {
+		var conflict *types.DeleteConflictException
+		switch {
+		case errors.As(err, &notFound):
+		case errors.As(err, &conflict):
+			return ledger, roleInUseError(ctx, iamClient, name)
+		default:
 			return ledger, wrapAWSError(err, fmt.Sprintf("deleting IAM role %q", name))
 		}
 	}
@@ -113,4 +119,44 @@ func roleNameFromARN(arn string) (string, error) {
 		return "", fmt.Errorf("unexpected role ARN format: %s", arn)
 	}
 	return arn[idx+1:], nil
+}
+
+// ReasonRoleHasExternalAttachments marks a role AWS refuses to delete
+// because something other than this operator is attached to it.
+const ReasonRoleHasExternalAttachments = "RoleHasExternalAttachments"
+
+// roleInUseError explains why DeleteRole was refused. A managed policy
+// attached by hand (a common quick fix during an incident) or an instance
+// profile is not the operator's to detach, so it names them and retries.
+// Listing them is best effort: it only improves the message.
+func roleInUseError(ctx context.Context, iamClient iamAPI, name string) error {
+	var found []string
+	if out, err := iamClient.ListAttachedRolePolicies(ctx, &iam.ListAttachedRolePoliciesInput{RoleName: &name}); err == nil {
+		arns := make([]string, 0, len(out.AttachedPolicies))
+		for _, p := range out.AttachedPolicies {
+			arns = append(arns, aws.ToString(p.PolicyArn))
+		}
+		if len(arns) > 0 {
+			found = append(found, "managed policies "+strings.Join(arns, ", "))
+		}
+	}
+	if out, err := iamClient.ListInstanceProfilesForRole(ctx, &iam.ListInstanceProfilesForRoleInput{RoleName: &name}); err == nil {
+		profiles := make([]string, 0, len(out.InstanceProfiles))
+		for _, p := range out.InstanceProfiles {
+			profiles = append(profiles, aws.ToString(p.InstanceProfileName))
+		}
+		if len(profiles) > 0 {
+			found = append(found, "instance profiles "+strings.Join(profiles, ", "))
+		}
+	}
+	what := "managed policies or instance profiles"
+	if len(found) > 0 {
+		what = strings.Join(found, " and ")
+	}
+	return &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("IAM role %q can't be deleted while it has %s that this operator did not add; "+
+			"detach them and the deletion continues by itself", name, what),
+		Retryable: true,
+		Reason:    ReasonRoleHasExternalAttachments,
+	}
 }

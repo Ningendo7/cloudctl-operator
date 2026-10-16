@@ -163,3 +163,31 @@ func TestReconcileDelete_WithoutForceDeleteAllAnnotation_QueueSurvives(t *testin
 		t.Error("expected the non-empty queue to survive without the override annotation")
 	}
 }
+
+// The reason has to be on the CR, not only in the logs: that is where
+// whoever is waiting on the deletion will look.
+func TestReconcileDelete_ARoleWithExternalAttachmentsShowsOnTheCR(t *testing.T) {
+	roleName := "default-checkout-service-iam"
+	cr := newStuckDeletionCR()
+	cr.Status.ManagedResources = []depsv1alpha1.ManagedResource{{
+		Type: "iam", Name: "role", ARN: "arn:aws:iam::123456789012:role/" + roleName,
+		State: depsv1alpha1.ManagedResourceStateVerified, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete,
+	}}
+	patches := 0
+	r := newCountingReconciler(t, &patches, cr)
+	iamFake := r.AWSClients.IAM.(*fakeIAMClient)
+	iamFake.roles[roleName] = &fakeRole{
+		arn: cr.Status.ManagedResources[0].ARN, policies: map[string]string{},
+		tags:             map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+		attachedPolicies: []string{"arn:aws:iam::aws:policy/AdministratorAccess"},
+	}
+
+	if _, err := r.reconcileDelete(context.Background(), cr); err != nil {
+		t.Fatalf("reconcileDelete() error = %v, want a requeue", err)
+	}
+
+	cond := apimeta.FindStatusCondition(cr.Status.Conditions, "DeletionBlocked")
+	if cond == nil || cond.Status != metav1.ConditionTrue || !strings.Contains(cond.Message, "AdministratorAccess") {
+		t.Fatalf("expected DeletionBlocked naming the attached policy, got %+v", cond)
+	}
+}

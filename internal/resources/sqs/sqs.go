@@ -373,14 +373,9 @@ func ensureSingleQueue(
 	}
 
 	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, crUID) {
-		if existingOwner, ok := tagsOut.Tags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return ledger, fmt.Errorf("queue %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", queueName, existingOwner)
-		}
-		if staleUID, stale := cloudctlaws.IsStaleUID(tagsOut.Tags, namespace, crName, crUID); stale {
-			return ledger, fmt.Errorf("queue %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", queueName, staleUID)
-		}
-		if !opts.adopt {
-			return ledger, fmt.Errorf("queue %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", queueName)
+		transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "queue", queueName, tagsOut.Tags, namespace, crName, crUID, opts.adopt)
+		if ownErr != nil {
+			return ledger, ownErr
 		}
 		if opts.checkAdoptedKey != nil {
 			attrs, aErr := awsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
@@ -403,7 +398,11 @@ func ensureSingleQueue(
 			return ledger, wrapAWSError(tagErr, "adopting queue (tagging)")
 		}
 		if recordEvent != nil {
-			recordEvent("Normal", "QueueAdopted", fmt.Sprintf("Adopted existing SQS queue %s under management", queueName))
+			if transferred {
+				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SQS queue %s from a previous incarnation of this CR", queueName))
+			} else {
+				recordEvent("Normal", "QueueAdopted", fmt.Sprintf("Adopted existing SQS queue %s under management", queueName))
+			}
 		}
 	}
 

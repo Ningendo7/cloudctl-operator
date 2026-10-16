@@ -19,6 +19,7 @@ package iam
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -30,6 +31,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 func newFakeK8sClient(objs ...client.Object) client.Client {
@@ -713,5 +715,55 @@ func TestCollectGrants_TopicConsumersCannotSubscribeButOwnersCan(t *testing.T) {
 	}
 	if !slices.Contains(policyActions(t, owned), "sns:Subscribe") {
 		t.Error("the topic's owner should keep sns:Subscribe on its own topic")
+	}
+}
+
+func TestSkippedToError_StaysWithinTheMessageLimit(t *testing.T) {
+	skipped := make([]string, 400)
+	for i := range skipped {
+		skipped[i] = fmt.Sprintf("team-a/consumer consumes team-b/producer-%03d's %q: not reconciled there yet", i, "orders")
+	}
+	err := skippedToError(skipped)
+	if err == nil || len(err.Error()) > status.MaxMessageLength+200 {
+		t.Fatalf("expected an error of about %d bytes at most, got %d", status.MaxMessageLength, len(err.Error()))
+	}
+	if !strings.Contains(err.Error(), "… and ") {
+		t.Errorf("expected the error to say how many were left out: %.120s", err.Error())
+	}
+}
+
+func TestEnsureRole_TakesOverARoleFromTheUIDItWasTold(t *testing.T) {
+	for name, tc := range map[string]struct {
+		from        string
+		transferred bool
+	}{"the previous UID": {"old-uid", true}, "a different UID": {"another-uid", false}, "no UID": {"", false}} {
+		t.Run(name, func(t *testing.T) {
+			iamClient := newFakeIAM()
+			role := roleName("default", "checkout-service")
+			iamClient.roles[role] = &fakeRole{
+				arn: "arn:aws:iam::123456789012:role/" + role, policies: map[string]string{},
+				tags: map[string]string{
+					cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+					cloudctlaws.OwnerUIDTagKey: "old-uid",
+					"team":                     "payments",
+				},
+			}
+			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
+			_, err := ensureRole(ctx, iamClient, "default", "checkout-service", "new-uid", role, "{}")
+
+			tags := iamClient.roles[role].tags
+			if !tc.transferred {
+				if err == nil || tags[cloudctlaws.OwnerUIDTagKey] != "old-uid" {
+					t.Fatalf("expected a refusal that leaves the tags alone, got err=%v tags=%v", err, tags)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ensureRole() error = %v", err)
+			}
+			if tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" || tags["team"] != "payments" {
+				t.Errorf("expected the new UID with other tags kept, got %v", tags)
+			}
+		})
 	}
 }

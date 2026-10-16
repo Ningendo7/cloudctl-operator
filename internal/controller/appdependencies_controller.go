@@ -99,6 +99,10 @@ func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	// A CR told which previous UID to take resources over from (a restore,
+	// a new cluster) carries it to every section through the context.
+	ctx = cloudctlaws.WithAdoptFromUID(ctx, cr.Annotations[cloudctlaws.AdoptFromUIDAnnotation])
+
 	if !cr.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, &cr)
 	}

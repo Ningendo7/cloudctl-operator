@@ -1071,3 +1071,45 @@ func TestEnsure_RefusesToAdoptAQueueEncryptedWithAKeyItDoesNotManage(t *testing.
 		})
 	}
 }
+
+// A recreated CR (a restore, a new cluster) has a new UID. Told which UID to
+// take over from, it re-tags the queue; told a different one, it refuses.
+func TestEnsure_TakesOverAQueueFromTheUIDItWasTold(t *testing.T) {
+	for name, tc := range map[string]struct {
+		from        string
+		transferred bool
+	}{"the previous UID": {"old-uid", true}, "a different UID": {"another-uid", false}, "no UID": {"", false}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeSQS()
+			queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
+			_, _ = client.CreateQueue(context.Background(), &sqs.CreateQueueInput{QueueName: &queueName, Tags: map[string]string{
+				cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+				cloudctlaws.OwnerUIDTagKey: "old-uid",
+				"team":                     "payments",
+			}})
+			var events []string
+			record := func(_, reason, _ string) { events = append(events, reason) }
+
+			spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
+			_, err := Ensure(ctx, client, nil, nil, nil, "default", "checkout-service", "new-uid", spec, nil, nil, record)
+
+			tags := client.queues[queueName].tags
+			if !tc.transferred {
+				if err == nil || tags[cloudctlaws.OwnerUIDTagKey] != "old-uid" {
+					t.Fatalf("expected a refusal that leaves the tags alone, got err=%v tags=%v", err, tags)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			if tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" || tags["team"] != "payments" {
+				t.Errorf("expected the new UID with other tags kept, got %v", tags)
+			}
+			if !slices.Contains(events, cloudctlaws.EventOwnershipTransferred) || slices.Contains(events, "QueueAdopted") {
+				t.Errorf("expected OwnershipTransferred and no adoption event, got %v", events)
+			}
+		})
+	}
+}

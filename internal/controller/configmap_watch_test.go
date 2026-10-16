@@ -514,16 +514,22 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 				return len(cm.OwnerReferences) == 1
 			})
 
+			// A reconcile already past its ownership check re-applies the
+			// owner reference once, so the tamper is repeated until the
+			// operator reacts to it.
 			var cm corev1.ConfigMap
-			Expect(k8sClient.Get(ctx, cmKey("cm-owner"), &cm)).To(Succeed())
-			cm.OwnerReferences = nil
-			cm.Data = map[string]string{"HAND_EDITED": "true"}
-			Expect(k8sClient.Update(ctx, &cm)).To(Succeed())
-
-			// The owner reference is the only proof the object is ours, so
-			// without it the operator must not touch the data. The user
-			// recovers by deleting the ConfigMap.
 			Eventually(func() string {
+				if err := k8sClient.Get(ctx, cmKey("cm-owner"), &cm); err != nil {
+					return ""
+				}
+				if len(cm.OwnerReferences) > 0 {
+					cm.OwnerReferences = nil
+					cm.Data = map[string]string{"HAND_EDITED": "true"}
+					_ = k8sClient.Update(ctx, &cm)
+				}
+				// The owner reference is the only proof the object is ours,
+				// so without it the operator must not touch the data. The
+				// user recovers by deleting the ConfigMap.
 				if c := condition(nsA, "cm-owner", "ConnectionInfoReady"); c != nil && c.Status == metav1.ConditionFalse {
 					return c.Message
 				}

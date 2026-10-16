@@ -883,3 +883,43 @@ func TestEnsure_AdoptingAnAWSEncryptedBucketSwitchesNewObjectsToTheSpecsKey(t *t
 		t.Errorf("expected a note that existing objects keep their encryption, got %v", events)
 	}
 }
+
+func TestEnsure_TakesOverABucketFromTheUIDItWasTold(t *testing.T) {
+	for name, tc := range map[string]struct {
+		from        string
+		transferred bool
+	}{"the previous UID": {"old-uid", true}, "a different UID": {"another-uid", false}, "no UID": {"", false}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeS3()
+			bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+			client.buckets[bucket] = &fakeBucket{tags: map[string]string{
+				cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+				cloudctlaws.OwnerUIDTagKey: "old-uid",
+				"team":                     "payments",
+			}}
+			var events []string
+			record := func(_, reason, _ string) { events = append(events, reason) }
+
+			spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
+			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
+			_, err := Ensure(ctx, client, nil, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID, spec, nil, nil, record)
+
+			tags := client.buckets[bucket].tags
+			if !tc.transferred {
+				if err == nil || tags[cloudctlaws.OwnerUIDTagKey] != "old-uid" {
+					t.Fatalf("expected a refusal that leaves the tags alone, got err=%v tags=%v", err, tags)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			if tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" || tags["team"] != "payments" {
+				t.Errorf("expected the new UID with other tags kept, got %v", tags)
+			}
+			if !slices.Contains(events, cloudctlaws.EventOwnershipTransferred) || slices.Contains(events, "BucketAdopted") {
+				t.Errorf("expected OwnershipTransferred and no adoption event, got %v", events)
+			}
+		})
+	}
+}

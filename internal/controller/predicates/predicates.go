@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 )
 
@@ -40,9 +41,14 @@ func AppDependenciesPredicate() predicate.Predicate {
 		predicate.GenerationChangedPredicate{},
 		predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				oldVal := e.ObjectOld.GetAnnotations()[ForceReconcileAnnotation]
-				newVal := e.ObjectNew.GetAnnotations()[ForceReconcileAnnotation]
-				return oldVal != newVal
+				oldAnn, newAnn := e.ObjectOld.GetAnnotations(), e.ObjectNew.GetAnnotations()
+				if oldAnn[ForceReconcileAnnotation] != newAnn[ForceReconcileAnnotation] {
+					return true
+				}
+				// Taking the takeover annotation off changes nothing, so only
+				// setting or changing it reconciles.
+				adopt := newAnn[cloudctlaws.AdoptFromUIDAnnotation]
+				return adopt != "" && adopt != oldAnn[cloudctlaws.AdoptFromUIDAnnotation]
 			},
 		},
 	)

@@ -18,10 +18,12 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -105,5 +107,22 @@ func TestCheckConsumeReferences_StillMissingPastThreshold_EscalatesReason(t *tes
 	}
 	if !strings.Contains(cond.Message, "misconfiguration") {
 		t.Errorf("message = %q, want it to flag likely misconfiguration once past the threshold", cond.Message)
+	}
+}
+
+func TestCheckConsumeReferences_ManyDanglingRefsStayWithinTheMessageLimit(t *testing.T) {
+	consumer := consumerWithDanglingRef()
+	refs := make([]depsv1alpha1.ConsumeRef, 1000)
+	for i := range refs {
+		refs[i] = depsv1alpha1.ConsumeRef{Namespace: "default", Name: fmt.Sprintf("missing-producer-%04d", i), ResourceName: "orders"}
+	}
+	consumer.Spec.SQS.Consumes = refs
+	c := fake.NewClientBuilder().WithScheme(newSharedWithScheme(t)).Build()
+
+	checkConsumeReferences(context.Background(), c, consumer)
+
+	cond := apimeta.FindStatusCondition(consumer.Status.Conditions, conditionTypeConsumeReferences)
+	if cond == nil || len(cond.Message) > status.MaxMessageLength {
+		t.Fatalf("expected a message within %d bytes, got %v", status.MaxMessageLength, cond)
 	}
 }

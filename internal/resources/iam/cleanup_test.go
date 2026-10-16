@@ -19,6 +19,7 @@ package iam
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/smithy-go"
@@ -346,5 +347,70 @@ func TestCleanup_KeepsAConsumerOnlyRoleWhenTheProducerCannotBeRead(t *testing.T)
 	}
 	if _, kept := iamClient.roles[name]; !kept || !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("the role was deleted because the producer couldn't be read")
+	}
+}
+
+func roleWithExternalAttachments(t *testing.T, attached, profiles []string) (*fakeIAM, *fakeRole, string, []depsv1alpha1.ManagedResource) {
+	t.Helper()
+	iamClient := newFakeIAM()
+	name := roleName("default", "checkout-service")
+	arn := "arn:aws:iam::123456789012:role/" + name
+	role := &fakeRole{
+		arn:              arn,
+		tags:             map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+		policies:         map[string]string{roleInlinePolicyName: "{}"},
+		attachedPolicies: attached,
+		instanceProfiles: profiles,
+	}
+	iamClient.roles[name] = role
+	return iamClient, role, name, roleLedger(arn)
+}
+
+// A managed policy attached by hand during an incident, or an instance
+// profile, makes AWS refuse to delete the role. The operator didn't add
+// them, so it doesn't remove them; it says what is in the way, and carries
+// on by itself once they are gone.
+func TestCleanup_ARoleWithExternalAttachmentsIsReportedAndCompletesOnceTheyAreGone(t *testing.T) {
+	iamClient, role, name, ledger := roleWithExternalAttachments(t,
+		[]string{"arn:aws:iam::aws:policy/AdministratorAccess"}, []string{"batch-instances"})
+	cr := &depsv1alpha1.AppDependencies{}
+	cr.Namespace, cr.Name, cr.UID = "default", "checkout-service", "uid-1"
+
+	ledger, err := Cleanup(context.Background(), iamClient, newFakeK8sClient(), cr, ledger, true)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != ReasonRoleHasExternalAttachments || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable %s error, got %v", ReasonRoleHasExternalAttachments, err)
+	}
+	for _, want := range []string{"AdministratorAccess", "batch-instances"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error should name %q: %v", want, err)
+		}
+	}
+	if _, kept := iamClient.roles[name]; !kept || !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
+		t.Fatal("the role and its ledger entry must stay while something is attached")
+	}
+
+	role.attachedPolicies, role.instanceProfiles = nil, nil
+	ledger, err = Cleanup(context.Background(), iamClient, newFakeK8sClient(), cr, ledger, true)
+	if err != nil {
+		t.Fatalf("Cleanup() after detaching error = %v", err)
+	}
+	if _, kept := iamClient.roles[name]; kept || status.HasManagedResource(ledger, resourceType, roleLedgerName) {
+		t.Error("expected the role deleted once nothing is attached")
+	}
+}
+
+// Listing what is attached only makes the message better, so a failure to
+// list must not turn the conflict into a different error.
+func TestCleanup_ARoleConflictIsStillReportedWhenTheAttachmentsCannotBeListed(t *testing.T) {
+	iamClient, _, _, ledger := roleWithExternalAttachments(t, []string{"arn:aws:iam::aws:policy/ReadOnlyAccess"}, nil)
+	iamClient.listAttachedErr = &fakeAWSError{code: "AccessDenied"}
+	cr := &depsv1alpha1.AppDependencies{}
+	cr.Namespace, cr.Name, cr.UID = "default", "checkout-service", "uid-1"
+
+	_, err := Cleanup(context.Background(), iamClient, newFakeK8sClient(), cr, ledger, true)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != ReasonRoleHasExternalAttachments {
+		t.Fatalf("expected %s, got %v", ReasonRoleHasExternalAttachments, err)
 	}
 }

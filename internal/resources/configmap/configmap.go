@@ -147,7 +147,7 @@ func buildConnectionData(
 	accountID string,
 	cr *depsv1alpha1.AppDependencies,
 ) (map[string]string, error) {
-	data := map[string]string{}
+	data := rds.NewKeyedData()
 
 	if cr.Spec.SQS != nil {
 		for _, q := range cr.Spec.SQS.Resources {
@@ -210,7 +210,7 @@ func buildConnectionData(
 		}
 	}
 
-	return data, nil
+	return data.Values(), nil
 }
 
 // addOwnedRDS adds this CR's own RDS instance's connection info to data.
@@ -221,7 +221,7 @@ func buildConnectionData(
 // not-yet-reconciled or not-yet-ready instance (no ledger entry, or
 // ResolveConnectionInfo's ok is false) is skipped silently, same as every
 // other resource type's own forward-reference tolerance.
-func addOwnedRDS(ctx context.Context, rdsClient cloudctlaws.RDSClient, data map[string]string, cr *depsv1alpha1.AppDependencies, resourceName string) error {
+func addOwnedRDS(ctx context.Context, rdsClient cloudctlaws.RDSClient, data *rds.KeyedData, cr *depsv1alpha1.AppDependencies, resourceName string) error {
 	entry, entryFound := status.FindManagedResource(cr.Status.ManagedResources, resourceTypeRDS, resourceName)
 	if !entryFound {
 		return nil
@@ -233,8 +233,7 @@ func addOwnedRDS(ctx context.Context, rdsClient cloudctlaws.RDSClient, data map[
 	if !ok {
 		return nil
 	}
-	setRDSConnectionKeys(data, resourceName, "", "", info)
-	return nil
+	return setRDSConnectionKeys(data, resourceName, "", "", info)
 }
 
 // addConsumedRDS adds a consumed RDS instance's connection info to data,
@@ -244,10 +243,15 @@ func addOwnedRDS(ctx context.Context, rdsClient cloudctlaws.RDSClient, data map[
 // rather than feeding IAM policy derivation (RDS connects via a mirrored
 // username/password, not an AWS API call), so IAM's own consume-
 // resolution has no "rds" case to match against.
-func addConsumedRDS(ctx context.Context, k8sClient client.Client, rdsClient cloudctlaws.RDSClient, data map[string]string, consumer *depsv1alpha1.AppDependencies, ref depsv1alpha1.ConsumeRef) error {
+func addConsumedRDS(ctx context.Context, k8sClient client.Client, rdsClient cloudctlaws.RDSClient, data *rds.KeyedData, consumer *depsv1alpha1.AppDependencies, ref depsv1alpha1.ConsumeRef) error {
 	var producer depsv1alpha1.AppDependencies
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, &producer); err != nil {
-		return nil //nolint:nilerr // forward reference: resolves on a later pass
+		if apierrors.IsNotFound(err) {
+			return nil // forward reference: resolves on a later pass
+		}
+		// A failed read says nothing about whether it still shares the
+		// instance, so it must not drop the consumed keys.
+		return &cloudctlaws.ReconcileError{Err: fmt.Errorf("reading producer %s/%s: %w", ref.Namespace, ref.Name, err), Retryable: true}
 	}
 	if !rds.IsConsumerAuthorized(&producer, ref.ResourceName, consumer.Namespace, consumer.Name) {
 		return nil
@@ -263,24 +267,40 @@ func addConsumedRDS(ctx context.Context, k8sClient client.Client, rdsClient clou
 	if !ok {
 		return nil
 	}
-	setRDSConnectionKeys(data, ref.ResourceName, ref.Namespace, ref.Name, info)
-	return nil
+	return setRDSConnectionKeys(data, ref.ResourceName, ref.Namespace, ref.Name, info)
 }
 
 // setRDSConnectionKeys writes one RDS instance's host/port/engine/
 // identifier into data, keyed the same owned-vs-consumed way every other
 // resource type's connectionKV already keys its own single value.
-func setRDSConnectionKeys(data map[string]string, resourceName, producerNamespace, producerCRName string, info rds.ConnectionInfo) {
+func setRDSConnectionKeys(data *rds.KeyedData, resourceName, producerNamespace, producerCRName string, info rds.ConnectionInfo) error {
 	key := func(suffix string) string {
 		if producerCRName == "" {
 			return envKey(resourceTypeRDS, resourceName, suffix)
 		}
 		return envKey(resourceTypeRDS, producerNamespace, producerCRName, resourceName, suffix)
 	}
-	data[key("HOST")] = info.Host
-	data[key("PORT")] = strconv.Itoa(int(info.Port))
-	data[key("ENGINE")] = info.Engine
-	data[key("DB_INSTANCE_IDENTIFIER")] = info.DBInstanceIdentifier
+	source := sourceOf(resourceTypeRDS, resourceName, producerNamespace, producerCRName)
+	for suffix, value := range map[string]string{
+		"HOST":                   info.Host,
+		"PORT":                   strconv.Itoa(int(info.Port)),
+		"ENGINE":                 info.Engine,
+		"DB_INSTANCE_IDENTIFIER": info.DBInstanceIdentifier,
+	} {
+		if err := data.Put(key(suffix), value, source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sourceOf names where a key comes from, for a collision message: this CR's
+// own resource, or one consumed from another CR.
+func sourceOf(resourceType, resourceName, producerNamespace, producerCRName string) string {
+	if producerCRName == "" {
+		return fmt.Sprintf("%s %q (owned)", resourceType, resourceName)
+	}
+	return fmt.Sprintf("%s %q consumed from %s/%s", resourceType, resourceName, producerNamespace, producerCRName)
 }
 
 // addOwned adds this CR's own resource to data, keyed without a producer
@@ -290,7 +310,7 @@ func setRDSConnectionKeys(data map[string]string, resourceName, producerNamespac
 // self-resolves on a later reconcile once that section catches up, same
 // as collectGrants' own skip semantics in the iam package.
 func addOwned(
-	data map[string]string,
+	data *rds.KeyedData,
 	cr *depsv1alpha1.AppDependencies,
 	resourceType,
 	resourceName,
@@ -305,8 +325,7 @@ func addOwned(
 	if err != nil {
 		return err
 	}
-	data[key] = value
-	return nil
+	return data.Put(key, value, sourceOf(resourceType, resourceName, "", ""))
 }
 
 // addConsumed adds a consumed resource to data, but only if
@@ -317,7 +336,7 @@ func addOwned(
 func addConsumed(
 	ctx context.Context,
 	k8sClient client.Client,
-	data map[string]string,
+	data *rds.KeyedData,
 	consumer *depsv1alpha1.AppDependencies,
 	resourceType string,
 	ref depsv1alpha1.ConsumeRef,
@@ -332,8 +351,7 @@ func addConsumed(
 	if err != nil {
 		return err
 	}
-	data[key] = value
-	return nil
+	return data.Put(key, value, sourceOf(resourceType, ref.ResourceName, ref.Namespace, ref.Name))
 }
 
 // connectionKV derives the env-var-style key and the value a workload

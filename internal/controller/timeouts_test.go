@@ -359,3 +359,39 @@ func TestTransientDelay_SpreadsCRsThatFailedTogether(t *testing.T) {
 		t.Errorf("20 CRs got only %d distinct first delays, want them spread out", len(seen))
 	}
 }
+
+// End to end through Reconcile: a CR restored with a new UID finds its
+// queue tagged with the old one, and takes it over only when annotated.
+func TestReconcile_ARestoredCRTakesOverItsResourcesWhenAnnotated(t *testing.T) {
+	for name, tc := range map[string]struct {
+		annotations map[string]string
+		transferred bool
+	}{
+		"annotated with the previous UID": {map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "old-uid"}, true},
+		"not annotated":                   {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cr := transientCR()
+			cr.Annotations = tc.annotations
+			r, sqsFake := throttledReconciler(t, cr)
+			queueName := cloudctlaws.ResourceName(cr.Namespace, cr.Name, "sqs", "orders", 80)
+			sqsFake.queues[queueName] = &fakeQueue{
+				url: "https://sqs.us-east-1.amazonaws.com/123456789012/" + queueName, arn: "arn:aws:sqs:us-east-1:123456789012:" + queueName,
+				tags: map[string]string{
+					cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(cr.Namespace, cr.Name),
+					cloudctlaws.OwnerUIDTagKey: "old-uid",
+				},
+			}
+
+			_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}})
+
+			got := sqsFake.queues[queueName].tags[cloudctlaws.OwnerUIDTagKey]
+			if tc.transferred && got != string(cr.UID) {
+				t.Errorf("owner-uid = %q, want the CR's UID %q", got, cr.UID)
+			}
+			if !tc.transferred && got != "old-uid" {
+				t.Errorf("owner-uid = %q, want the old one left alone", got)
+			}
+		})
+	}
+}

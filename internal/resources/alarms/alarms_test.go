@@ -422,3 +422,41 @@ func TestAlarmMatches_DisabledAlarmIsDrift(t *testing.T) {
 		t.Error("an alarm someone disabled must count as drift")
 	}
 }
+
+func TestEnsure_TakesOverAnAlarmFromTheUIDItWasTold(t *testing.T) {
+	for name, tc := range map[string]struct {
+		from        string
+		transferred bool
+	}{"the previous UID": {"old-uid", true}, "a different UID": {"another-uid", false}, "no UID": {"", false}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeCloudWatch()
+			alarmName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", cloudctlaws.DerivedKey("orders", sqsAgeAlarmSuffix), alarmNameMaxLen)
+			client.alarms[alarmName] = &fakeAlarm{
+				input: &cloudwatch.PutMetricAlarmInput{AlarmName: aws.String(alarmName)},
+				tags: map[string]string{
+					cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+					cloudctlaws.OwnerUIDTagKey: "old-uid",
+				},
+			}
+			spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+
+			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
+			err := Ensure(ctx, client, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID,
+				&depsv1alpha1.AlarmsSpec{Enabled: true}, spec, nil, nil)
+
+			tags := client.alarms[alarmName].tags
+			if !tc.transferred {
+				if err == nil || tags[cloudctlaws.OwnerUIDTagKey] != "old-uid" {
+					t.Fatalf("expected a refusal that leaves the alarm alone, got err=%v tags=%v", err, tags)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			if tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" {
+				t.Errorf("expected the alarm re-created under the new UID, got %v", tags)
+			}
+		})
+	}
+}

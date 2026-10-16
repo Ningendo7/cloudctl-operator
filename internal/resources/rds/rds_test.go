@@ -2086,3 +2086,48 @@ func TestEnsure_AdoptionChecksEncryptionAgainstTheNewDefault(t *testing.T) {
 		})
 	}
 }
+
+func TestEnsure_TakesOverAnInstanceFromTheUIDItWasTold(t *testing.T) {
+	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, "default", "checkout-service", resourceType, "orders-db", 63)
+	for name, tc := range map[string]struct {
+		from        string
+		transferred bool
+	}{"the previous UID": {"old-uid", true}, "a different UID": {"another-uid", false}, "no UID": {"", false}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeRDS()
+			spec := baseInstanceSpec("orders-db")
+			instance := existingInstanceMatching(instanceID, spec)
+			instance.tags = map[string]string{
+				cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+				cloudctlaws.OwnerUIDTagKey: "old-uid",
+				"team":                     "payments",
+			}
+			client.instances[instanceID] = instance
+			var events []string
+			record := func(_, reason, _ string) { events = append(events, reason) }
+
+			grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+			k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
+			_, err := Ensure(ctx, client, kmsWithRDSKey(), newFakeEC2(), k8sClient, "default", "checkout-service", "new-uid", "us-east-1", "123456789012",
+				&depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, record)
+
+			tags := client.instances[instanceID].tags
+			if !tc.transferred {
+				if err == nil || tags[cloudctlaws.OwnerUIDTagKey] != "old-uid" {
+					t.Fatalf("expected a refusal that leaves the tags alone, got err=%v tags=%v", err, tags)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			if tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" || tags["team"] != "payments" {
+				t.Errorf("expected the new UID with other tags kept, got %v", tags)
+			}
+			if !slices.Contains(events, cloudctlaws.EventOwnershipTransferred) || slices.Contains(events, "InstanceAdopted") {
+				t.Errorf("expected OwnershipTransferred and no adoption event, got %v", events)
+			}
+		})
+	}
+}

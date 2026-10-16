@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -93,7 +92,7 @@ func checkConsumeReferences(ctx context.Context, k8sClient client.Client, cr *de
 	}
 
 	reason := reasonProducerNotFoundYet
-	message := strings.Join(dangling, "; ")
+	message := status.JoinCapped(dangling, "; ")
 	if existing := apimeta.FindStatusCondition(cr.Status.Conditions, conditionTypeConsumeReferences); existing != nil &&
 		existing.Status == metav1.ConditionFalse &&
 		time.Since(existing.LastTransitionTime.Time) > consumeReferenceDanglingThreshold {

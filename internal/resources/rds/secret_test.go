@@ -18,6 +18,7 @@ package rds
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -454,5 +455,51 @@ func TestCredentialsKey(t *testing.T) {
 		if got := credentialsKey(in, "USERNAME"); got != want {
 			t.Errorf("credentialsKey(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestKeyedData_RefusesASecondSourceForAKey(t *testing.T) {
+	d := NewKeyedData()
+	if err := d.Put("RDS_ORDERS_HOST", "a", "instance orders"); err != nil {
+		t.Fatalf("first Put() error = %v", err)
+	}
+	if err := d.Put("RDS_ORDERS_HOST", "a", "instance orders"); err != nil {
+		t.Errorf("the same source writing its key again is not a collision: %v", err)
+	}
+	err := d.Put("RDS_ORDERS_HOST", "b", "instance Orders")
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != ReasonKeyCollision || reconcileErr.Retryable {
+		t.Fatalf("expected a non-retryable %s error, got %v", ReasonKeyCollision, err)
+	}
+	for _, name := range []string{"instance orders", "instance Orders", "RDS_ORDERS_HOST"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("the error should name %q: %v", name, err)
+		}
+	}
+	if d.Values()["RDS_ORDERS_HOST"] != "a" {
+		t.Error("the first source's value must be kept")
+	}
+}
+
+// Two instances whose names differ only in case or in - versus _ would
+// share a key, and the app would read one database's password as the
+// other's.
+func TestEnsureCredentialsSecret_RefusesInstancesWhoseKeysCollide(t *testing.T) {
+	rdsClient := newFakeRDS()
+	smClient := newFakeSecretsManager()
+	first := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "u1", "p1")
+	second := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "Orders_DB", "u2", "p2")
+	first.Spec.RDS.Resources = append(first.Spec.RDS.Resources, second.Spec.RDS.Resources...)
+	first.Status.ManagedResources = append(first.Status.ManagedResources, second.Status.ManagedResources...)
+	k8sClient := newFakeK8sClientWithScheme(t, first)
+
+	err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, first)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != ReasonKeyCollision {
+		t.Fatalf("expected %s, got %v", ReasonKeyCollision, err)
+	}
+	var secret corev1.Secret
+	if getErr := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: CredentialsSecretName("checkout-service")}, &secret); getErr == nil {
+		t.Error("no Secret should be written when two instances map to one key")
 	}
 }

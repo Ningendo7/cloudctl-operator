@@ -37,7 +37,7 @@ import (
 // what cleanup_test.go is exercising.
 func setupInstance(t *testing.T, client *fakeRDS, namespace, crName, name string, deletionPolicy depsv1alpha1.DeletionPolicy) []depsv1alpha1.ManagedResource {
 	t.Helper()
-	instanceID := cloudctlaws.ResourceName(namespace, crName, resourceType, name, 63)
+	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, namespace, crName, resourceType, name, 63)
 	ledger, err := createInstance(context.Background(), client, namespace, crName, "uid-1", instanceID, name,
 		instanceOptions{deletionPolicy: deletionPolicy, engine: "postgres", engineVersion: "16.3", instanceClass: "db.t4g.micro", dbSubnetGroupName: "sg", securityGroupID: "sg-1"},
 		nil, nil)
