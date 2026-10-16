@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -289,6 +290,10 @@ func ensureBucket(
 			if err := opts.checkAdoptedKey(ctx, currentKey); err != nil {
 				return ledger, fmt.Errorf("bucket %q can't be adopted: %w", bucket, err)
 			}
+			if want := aws.ToString(opts.kmsKeyARN); want != "" && !sameKey(currentKey, want) && recordEvent != nil {
+				recordEvent("Normal", "BucketExistingObjectsKeepTheirEncryption", fmt.Sprintf(
+					"Adopted S3 bucket %s: new objects use KMS key %s; objects already in it keep their current encryption until they are rewritten", bucket, want))
+			}
 		}
 
 		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
@@ -488,6 +493,12 @@ func lifecycleRuleFingerprint(r types.LifecycleRule) (string, bool) {
 // created by this operator. Not an error condition either way. No typed
 // exception exists for this one in the SDK — same as isNoSuchTagSet's own
 // string-code check below.
+// sameKey reports whether a bucket's configured key, an ARN or a bare key
+// ID, is the key ARN want.
+func sameKey(current, want string) bool {
+	return current != "" && (current == want || strings.HasSuffix(want, "/"+current))
+}
+
 // bucketKMSKey returns the KMS key a bucket encrypts new objects with by
 // default, or "" for none, SSE-S3, or SSE-KMS with the AWS-managed aws/s3
 // key, which needs no key ID.
