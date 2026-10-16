@@ -441,7 +441,7 @@ var _ = Describe("AppDependencies Controller", func() {
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
 
-			instanceID := cloudctlaws.ResourceName(cr.Namespace, cr.Name, "rds", "orders-db", 63)
+			instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, cr.Namespace, cr.Name, "rds", "orders-db", 63)
 			Expect(fakeRDS.instances).To(HaveKey(instanceID))
 			Expect(fakeEC2.groupCount()).NotTo(BeZero())
 
@@ -499,7 +499,7 @@ var _ = Describe("AppDependencies Controller", func() {
 			_, err = reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
 
-			instanceID := cloudctlaws.ResourceName(cr.Namespace, cr.Name, "rds", "orders-db", 63)
+			instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, cr.Namespace, cr.Name, "rds", "orders-db", 63)
 			callsBefore := fakeRDS.describeDBInstancesCalls[instanceID]
 
 			_, err = reconciler.Reconcile(ctx, req)
@@ -594,7 +594,7 @@ var _ = Describe("AppDependencies Controller", func() {
 
 			// The instance itself is never deleted - this operator never
 			// calls DeleteDBInstance.
-			instanceID := cloudctlaws.ResourceName(updated.Namespace, updated.Name, "rds", "orders-db", 63)
+			instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, updated.Namespace, updated.Name, "rds", "orders-db", 63)
 			Expect(fakeRDS.instances).To(HaveKey(instanceID))
 		})
 	})
