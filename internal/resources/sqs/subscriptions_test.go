@@ -21,15 +21,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"

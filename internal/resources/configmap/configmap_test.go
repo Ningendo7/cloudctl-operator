@@ -19,7 +19,6 @@ package configmap
 import (
 	"context"
 	"errors"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
