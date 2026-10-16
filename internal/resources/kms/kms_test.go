@@ -846,3 +846,77 @@ func TestCheckAdoptedKey(t *testing.T) {
 		})
 	}
 }
+
+const previousUID = "old-uid"
+
+func staleOwnerTags() map[string]string {
+	return map[string]string{
+		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+		cloudctlaws.OwnerUIDTagKey: previousUID,
+		"team":                     "payments",
+	}
+}
+
+// A key found under this CR's alias but tagged with an earlier UID is taken
+// over only when the CR was told that exact UID.
+func TestEnsure_TakesOverAKeyFromTheUIDItWasTold(t *testing.T) {
+	for name, tc := range map[string]struct {
+		from        string
+		transferred bool
+	}{"the previous UID": {previousUID, true}, "a different UID": {"another-uid", false}, "no UID": {"", false}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeKMS()
+			arn := "arn:aws:kms:us-east-1:123456789012:key/old"
+			client.keys[arn] = &fakeKey{arn: arn, keyID: "old", keyState: types.KeyStateEnabled, rotationEnabled: true, tags: staleOwnerTags()}
+			client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] = arn
+			var events []string
+			record := func(_, reason, _ string) { events = append(events, reason) }
+
+			spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
+			_, err := Ensure(ctx, client, "default", "checkout-service", "new-uid", spec, nil, nil, record)
+
+			tags := client.keys[arn].tags
+			if !tc.transferred {
+				if err == nil || tags[cloudctlaws.OwnerUIDTagKey] != previousUID {
+					t.Fatalf("expected a refusal that leaves the tags alone, got err=%v tags=%v", err, tags)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			if tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" || tags["team"] != "payments" {
+				t.Errorf("expected the new UID with other tags kept, got %v", tags)
+			}
+			if !slices.Contains(events, cloudctlaws.EventOwnershipTransferred) || slices.Contains(events, "KeyAdopted") {
+				t.Errorf("expected OwnershipTransferred and no adoption event, got %v", events)
+			}
+		})
+	}
+}
+
+// With a restored ledger the key is already known, and the next ownership
+// re-check meets the old UID instead.
+func TestEnsure_TakesOverAKnownKeyWhoseTagsCarryThePreviousUID(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/old"
+	client.keys[arn] = &fakeKey{arn: arn, keyID: "old", keyState: types.KeyStateEnabled, rotationEnabled: true, tags: staleOwnerTags()}
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	ledger := []depsv1alpha1.ManagedResource{{
+		Type: resourceType, Name: "primary", ARN: arn, State: depsv1alpha1.ManagedResourceStateVerified,
+		CreatedAt: stale, LastVerifiedAt: &stale,
+	}}
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+
+	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "new-uid", spec, ledger, nil, nil); err == nil {
+		t.Fatal("without the annotation the key must be refused")
+	}
+	ctx := cloudctlaws.WithAdoptFromUID(context.Background(), previousUID)
+	if _, err := Ensure(ctx, client, "default", "checkout-service", "new-uid", spec, ledger, nil, nil); err != nil {
+		t.Fatalf("Ensure() with the annotation error = %v", err)
+	}
+	if client.keys[arn].tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" {
+		t.Errorf("expected the key re-tagged, got %v", client.keys[arn].tags)
+	}
+}

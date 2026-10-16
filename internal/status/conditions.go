@@ -19,6 +19,7 @@ package status
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,6 +36,55 @@ const ConditionTypeReady = "Ready"
 // path, never the normal one.
 const ConditionTypeDeletionBlocked = "DeletionBlocked"
 
+// MaxMessageLength caps every condition message. The API server rejects a
+// message over 32768 bytes and, with it, the whole status patch, ledger
+// checkpoints included, so a long joined error could leave a CR unwritable.
+// A few KiB is plenty to read, and well under the limit.
+const MaxMessageLength = 4096
+
+const truncatedMarker = "… (truncated)"
+
+// CapMessage shortens msg to MaxMessageLength bytes, on a character
+// boundary, saying that it was cut.
+func CapMessage(msg string) string {
+	if len(msg) <= MaxMessageLength {
+		return msg
+	}
+	cut := MaxMessageLength - len(truncatedMarker)
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + truncatedMarker
+}
+
+// JoinCapped joins items with sep as long as the result fits, ending with
+// "… and N more" for the rest, so the reader knows the list is longer.
+func JoinCapped(items []string, sep string) string {
+	whole := strings.Join(items, sep)
+	if len(whole) <= MaxMessageLength {
+		return whole
+	}
+	// Room for the longest possible ending, "… and 999999 more".
+	budget := MaxMessageLength - len(sep) - len("… and 999999 more")
+	var b strings.Builder
+	shown := 0
+	for _, item := range items {
+		if b.Len()+len(item) > budget {
+			break
+		}
+		if shown > 0 {
+			b.WriteString(sep)
+		}
+		b.WriteString(item)
+		shown++
+	}
+	if shown > 0 {
+		b.WriteString(sep)
+	}
+	fmt.Fprintf(&b, "… and %d more", len(items)-shown)
+	return b.String()
+}
+
 // SetSectionCondition sets a per-section readiness condition and
 // recomputes the aggregate Ready condition from it. sectionTypes lists
 // every section condition type that should currently exist given the CR's
@@ -44,7 +94,7 @@ func SetSectionCondition(conditions *[]metav1.Condition, conditionType string, s
 		Type:               conditionType,
 		Status:             status,
 		Reason:             reason,
-		Message:            message,
+		Message:            CapMessage(message),
 		ObservedGeneration: observedGeneration,
 	})
 	recomputeReady(conditions, sectionTypes, observedGeneration)
@@ -97,7 +147,7 @@ func recomputeReady(conditions *[]metav1.Condition, sectionTypes []string, obser
 // (the per-section conditions aren't touched by the deletion path at all, so
 // nothing else would ever correct it).
 func SetDeletionBlocked(conditions *[]metav1.Condition, observedGeneration int64, reasons []string) {
-	message := strings.Join(reasons, "; ")
+	message := JoinCapped(reasons, "; ")
 	apimeta.SetStatusCondition(conditions, metav1.Condition{
 		Type:               ConditionTypeDeletionBlocked,
 		Status:             metav1.ConditionTrue,

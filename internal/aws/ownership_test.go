@@ -16,7 +16,10 @@ limitations under the License.
 
 package aws
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestIsOwnedBy(t *testing.T) {
 	tags := map[string]string{
@@ -60,5 +63,21 @@ func TestIsStaleUID(t *testing.T) {
 	}
 	if _, stale := IsStaleUID(nil, "default", "checkout-service", "new-uid"); stale {
 		t.Error("expected a genuinely untagged resource to not be reported stale")
+	}
+}
+
+func TestMayTransferFrom(t *testing.T) {
+	ctx := WithAdoptFromUID(context.Background(), "old-uid")
+	if !MayTransferFrom(ctx, "old-uid") {
+		t.Error("the UID the CR was told to take over from must be accepted")
+	}
+	if MayTransferFrom(ctx, "some-other-uid") {
+		t.Error("any other stale UID must still be refused")
+	}
+	if MayTransferFrom(context.Background(), "old-uid") {
+		t.Error("without the annotation nothing is transferable")
+	}
+	if MayTransferFrom(WithAdoptFromUID(context.Background(), ""), "") {
+		t.Error("an empty annotation must not match an empty UID")
 	}
 }

@@ -21,6 +21,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -863,5 +866,44 @@ func TestEnsureSecurityGroup_KeepsAConsumersIngressWhenItCannotBeRead(t *testing
 	}
 	if got := grantedGroups(ec2Client, arn); len(got) != 1 || ec2Client.revokeSecurityGroupIngressCalls != 0 {
 		t.Errorf("revoked the consumer's database access because it couldn't be read: still granted %v", got)
+	}
+}
+
+// Both security groups (the instance's and a consumer's pods') are named
+// from the CR, so a restored CR meets the previous incarnation's groups.
+func TestFindOrCreateSecurityGroup_TakesOverAGroupFromTheUIDItWasTold(t *testing.T) {
+	for name, tc := range map[string]struct {
+		from        string
+		transferred bool
+	}{"the previous UID": {"old-uid", true}, "a different UID": {"another-uid", false}, "no UID": {"", false}} {
+		t.Run(name, func(t *testing.T) {
+			ec2Client := newFakeEC2()
+			created, err := ec2Client.CreateSecurityGroup(context.Background(), &ec2.CreateSecurityGroupInput{
+				GroupName: aws.String("shared-name"), VpcId: aws.String("vpc-a"),
+				TagSpecifications: []ec2types.TagSpecification{{
+					ResourceType: ec2types.ResourceTypeSecurityGroup,
+					Tags:         mapToEC2Tags(ownerTags("default", "checkout-service", "old-uid")),
+				}},
+			})
+			if err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+
+			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
+			id, err := findOrCreateSecurityGroup(ctx, ec2Client, "default", "checkout-service", "new-uid", "shared-name", "vpc-a", false)
+			tags := ec2Client.groups[*created.GroupId].tags
+			if !tc.transferred {
+				if err == nil || tags[cloudctlaws.OwnerUIDTagKey] != "old-uid" {
+					t.Fatalf("expected a refusal that leaves the tags alone, got err=%v tags=%v", err, tags)
+				}
+				return
+			}
+			if err != nil || id != *created.GroupId {
+				t.Fatalf("expected the existing group back, got %q, %v", id, err)
+			}
+			if tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" {
+				t.Errorf("expected the group re-tagged, got %v", tags)
+			}
+		})
 	}
 }

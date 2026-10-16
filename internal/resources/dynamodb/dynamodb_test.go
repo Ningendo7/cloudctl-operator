@@ -1077,3 +1077,46 @@ func TestCleanup_AMissingTableIsDroppedFromTheLedgerOnceRemovedFromSpec(t *testi
 		t.Error("expected the entry of a table that no longer exists to be dropped, so the name can be used again")
 	}
 }
+
+func TestEnsure_TakesOverATableFromTheUIDItWasTold(t *testing.T) {
+	for name, tc := range map[string]struct {
+		from        string
+		transferred bool
+	}{"the previous UID": {"old-uid", true}, "a different UID": {"another-uid", false}, "no UID": {"", false}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeDynamoDB()
+			tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+			client.tables[tableName] = &fakeTable{
+				arn: "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName, status: types.TableStatusActive, partitionKey: "id",
+				tags: map[string]string{
+					cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+					cloudctlaws.OwnerUIDTagKey: "old-uid",
+					"team":                     "payments",
+				},
+			}
+			var events []string
+			record := func(_, reason, _ string) { events = append(events, reason) }
+
+			spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id"}}}
+			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
+			_, err := Ensure(ctx, client, nil, nil, "default", "checkout-service", "new-uid", spec, nil, nil, record)
+
+			tags := client.tables[tableName].tags
+			if !tc.transferred {
+				if err == nil || tags[cloudctlaws.OwnerUIDTagKey] != "old-uid" {
+					t.Fatalf("expected a refusal that leaves the tags alone, got err=%v tags=%v", err, tags)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			if tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" || tags["team"] != "payments" {
+				t.Errorf("expected the new UID with other tags kept, got %v", tags)
+			}
+			if !slices.Contains(events, cloudctlaws.EventOwnershipTransferred) || slices.Contains(events, "TableAdopted") {
+				t.Errorf("expected OwnershipTransferred and no adoption event, got %v", events)
+			}
+		})
+	}
+}

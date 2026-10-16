@@ -181,7 +181,7 @@ func skippedToError(skipped []string) error {
 	if len(skipped) == 0 {
 		return nil
 	}
-	return fmt.Errorf("some consumed resources could not be granted yet (self-resolves once available): %s", strings.Join(skipped, "; "))
+	return fmt.Errorf("some consumed resources could not be granted yet (self-resolves once available): %s", status.JoinCapped(skipped, "; "))
 }
 
 // ensureRole creates the role if it doesn't exist, or verifies ownership
@@ -214,8 +214,18 @@ func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID,
 	if tErr != nil {
 		return "", wrapAWSError(tErr, "reading role tags")
 	}
-	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, crUID) {
-		return "", fmt.Errorf("IAM role %q already exists and is not owned by this CR — this looks like a naming collision", name)
+	if roleTags := tagsToMap(tags); !cloudctlaws.IsOwnedBy(roleTags, namespace, crName, crUID) {
+		staleUID, stale := cloudctlaws.IsStaleUID(roleTags, namespace, crName, crUID)
+		if !stale || !cloudctlaws.MayTransferFrom(ctx, staleUID) {
+			msg := fmt.Sprintf("IAM role %q already exists and is not owned by this CR — this looks like a naming collision", name)
+			if stale {
+				msg += fmt.Sprintf("; it is tagged with an earlier UID (%s), and to take it over, annotate this CR with %s=%s", staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
+			}
+			return "", errors.New(msg)
+		}
+		if _, err := iamClient.TagRole(ctx, &iam.TagRoleInput{RoleName: &name, Tags: mapToTags(ownerTags(namespace, crName, crUID))}); err != nil {
+			return "", wrapAWSError(err, "taking over IAM role (tagging)")
+		}
 	}
 
 	if getOut.Role.AssumeRolePolicyDocument == nil || !policyDocumentEquivalent(*getOut.Role.AssumeRolePolicyDocument, trustPolicy) {

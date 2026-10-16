@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -88,7 +87,7 @@ func checkSharedWithReferences(ctx context.Context, k8sClient client.Client, cr 
 	}
 	status.SetSectionCondition(
 		&cr.Status.Conditions, conditionTypeSharedWithReferences, metav1.ConditionFalse,
-		"StaleReferencesFound", strings.Join(stale, "; "),
+		"StaleReferencesFound", status.JoinCapped(stale, "; "),
 		cr.Generation, sectionTypes,
 	)
 }

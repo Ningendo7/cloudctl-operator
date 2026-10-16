@@ -16,7 +16,10 @@ limitations under the License.
 
 package aws
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 const (
 	// OwnerTagKey identifies which AppDependencies CR owns a resource, as
@@ -56,4 +59,35 @@ func IsStaleUID(tags map[string]string, namespace, name, uid string) (existingUI
 		return "", false
 	}
 	return existingUID, true
+}
+
+// AdoptFromUIDAnnotation, set on a CR to a previous owner UID, lets the CR
+// take over the resources that UID owned, once. A recreated CR gets a new
+// UID (a restore, a re-sync into a new cluster, a blue/green upgrade), and
+// every resource would otherwise be refused as belonging to a stale
+// incarnation. The annotation names the exact UID, so any other leftover is
+// still refused.
+const AdoptFromUIDAnnotation = "cloudctl.io/adopt-from-uid"
+
+// EventOwnershipTransferred is the reason of the event recorded when a
+// resource is taken over this way.
+const EventOwnershipTransferred = "OwnershipTransferred"
+
+type adoptFromUIDKey struct{}
+
+// WithAdoptFromUID returns ctx carrying the UID the CR was told to take
+// resources over from. An empty uid returns ctx unchanged.
+func WithAdoptFromUID(ctx context.Context, uid string) context.Context {
+	if uid == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, adoptFromUIDKey{}, uid)
+}
+
+// MayTransferFrom reports whether the CR was told to take over from exactly
+// this UID. Callers pass the stale UID IsStaleUID found on a resource that
+// already carries this CR's own name.
+func MayTransferFrom(ctx context.Context, staleUID string) bool {
+	from, _ := ctx.Value(adoptFromUIDKey{}).(string)
+	return from != "" && from == staleUID
 }

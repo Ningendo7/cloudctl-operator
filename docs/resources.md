@@ -406,7 +406,11 @@ spec:
   needed — CR deletion, or the CR no longer owning or consuming anything —
   following the same deletion-safety ledger as other resources. No quiet
   window, unlike SQS/SNS/DynamoDB/S3: a role holds no data, so there's
-  nothing to lose by deleting it promptly.
+  nothing to lose by deleting it promptly. If something else is attached to
+  the role (a managed policy added by hand, an instance profile), AWS
+  refuses the delete: the CR shows `DeletionBlocked` with
+  `RoleHasExternalAttachments` naming them, the operator leaves them alone,
+  and the deletion completes once they are detached.
 - **Reconcile propagation**: a producer's `sharedWith` change (or its
   deletion) triggers an immediate reconcile of every consumer CR that
   references it, so access is granted or revoked without waiting on that
@@ -424,6 +428,15 @@ spec:
   outside the operator is only taken over once it's annotated
   `cloudctl.io/allow-claim: <cr-name>` (`ServiceAccountNotClaimable`). See
   [architecture.md](architecture.md#resource-identity-delivery-to-workloads).
+
+## Moving to a new cluster, or restoring a CR
+
+A recreated CR gets a new UID, and its resources still carry the old one, so every resource is refused ("tagged with this CR's name but a different UID"), even with `adopt: true`. Two ways through:
+
+- **A planned move, with the old cluster healthy.** Set every resource to `deletionPolicy: Retain` and delete the CRs: retained resources are handed back with their ownership tags removed, while the IAM role, alarms, ConfigMap and Secret are deleted. Apply the CRs in the new cluster with `adopt: true` on each resource, and remove it once they are Ready.
+- **A restore, a lost cluster, or an old cluster you can't tear down.** Stop the old cluster's operator, find the old UID (in a backup of the CR, or the `cloudctl.io/owner-uid` tag on any of its resources), and annotate the new CR with `cloudctl.io/adopt-from-uid: <old-uid>`. Every resource tagged with that UID is re-tagged to the new one and an `OwnershipTransferred` event is recorded for each; remove the annotation afterwards. A resource carrying any other earlier UID is still refused.
+
+Never run two operators against the same resources: after the transfer, the old operator fails its own ownership check and stops touching them, but until then they would fight.
 
 ## Shared behavior
 

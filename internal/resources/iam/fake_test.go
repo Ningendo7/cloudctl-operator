@@ -19,6 +19,8 @@ package iam
 import (
 	"context"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/smithy-go"
@@ -46,6 +48,11 @@ type fakeRole struct {
 	tags        map[string]string
 	trustPolicy string
 	policies    map[string]string // policyName -> policyDocument
+
+	// Attached by someone other than the operator, which is what stops
+	// DeleteRole in AWS.
+	attachedPolicies []string // managed policy ARNs
+	instanceProfiles []string
 }
 
 type fakeIAM struct {
@@ -58,6 +65,8 @@ type fakeIAM struct {
 	putRolePolicyErr          error
 	deleteRolePolicyErr       error
 	deleteRoleErr             error
+	listAttachedErr           error
+	listProfilesErr           error
 
 	// putRolePolicyCalls counts every real call - lets a test prove the
 	// diff-before-write check actually skips the call when nothing
@@ -105,6 +114,17 @@ func (f *fakeIAM) UpdateAssumeRolePolicy(_ context.Context, in *iam.UpdateAssume
 	}
 	r.trustPolicy = *in.PolicyDocument
 	return &iam.UpdateAssumeRolePolicyOutput{}, nil
+}
+
+func (f *fakeIAM) TagRole(_ context.Context, in *iam.TagRoleInput, _ ...func(*iam.Options)) (*iam.TagRoleOutput, error) {
+	r, ok := f.roles[*in.RoleName]
+	if !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	for _, t := range in.Tags {
+		r.tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
+	return &iam.TagRoleOutput{}, nil
 }
 
 func (f *fakeIAM) ListRoleTags(_ context.Context, in *iam.ListRoleTagsInput, _ ...func(*iam.Options)) (*iam.ListRoleTagsOutput, error) {
@@ -166,9 +186,43 @@ func (f *fakeIAM) DeleteRole(_ context.Context, in *iam.DeleteRoleInput, _ ...fu
 	if f.deleteRoleErr != nil {
 		return nil, f.deleteRoleErr
 	}
-	if _, ok := f.roles[*in.RoleName]; !ok {
+	r, ok := f.roles[*in.RoleName]
+	if !ok {
 		return nil, &types.NoSuchEntityException{}
+	}
+	if len(r.attachedPolicies) > 0 || len(r.instanceProfiles) > 0 {
+		return nil, &types.DeleteConflictException{Message: aws.String("Cannot delete entity, must detach all policies first.")}
 	}
 	delete(f.roles, *in.RoleName)
 	return &iam.DeleteRoleOutput{}, nil
+}
+
+func (f *fakeIAM) ListAttachedRolePolicies(_ context.Context, in *iam.ListAttachedRolePoliciesInput, _ ...func(*iam.Options)) (*iam.ListAttachedRolePoliciesOutput, error) {
+	if f.listAttachedErr != nil {
+		return nil, f.listAttachedErr
+	}
+	r, ok := f.roles[*in.RoleName]
+	if !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	out := &iam.ListAttachedRolePoliciesOutput{}
+	for _, arn := range r.attachedPolicies {
+		out.AttachedPolicies = append(out.AttachedPolicies, types.AttachedPolicy{PolicyArn: aws.String(arn)})
+	}
+	return out, nil
+}
+
+func (f *fakeIAM) ListInstanceProfilesForRole(_ context.Context, in *iam.ListInstanceProfilesForRoleInput, _ ...func(*iam.Options)) (*iam.ListInstanceProfilesForRoleOutput, error) {
+	if f.listProfilesErr != nil {
+		return nil, f.listProfilesErr
+	}
+	r, ok := f.roles[*in.RoleName]
+	if !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	out := &iam.ListInstanceProfilesForRoleOutput{}
+	for _, name := range r.instanceProfiles {
+		out.InstanceProfiles = append(out.InstanceProfiles, types.InstanceProfile{InstanceProfileName: aws.String(name)})
+	}
+	return out, nil
 }

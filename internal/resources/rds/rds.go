@@ -357,10 +357,14 @@ func ensureInstanceObserving(
 			if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 				return ledger, fmt.Errorf("instance %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", instanceID, existingOwner)
 			}
+			transferred := false
 			if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
-				return ledger, fmt.Errorf("instance %q is tagged with this CR's name but a different UID (%s) - likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", instanceID, staleUID)
+				if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
+					return ledger, fmt.Errorf("instance %q is tagged with this CR's name but a different UID (%s) - likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", instanceID, staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
+				}
+				transferred = true
 			}
-			if !opts.adopt {
+			if !transferred && !opts.adopt {
 				return ledger, fmt.Errorf("instance %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", instanceID)
 			}
 
@@ -372,7 +376,11 @@ func ensureInstanceObserving(
 				return ledger, wrapAWSError(tagErr, "adopting instance (tagging)")
 			}
 			if recordEvent != nil {
-				recordEvent("Normal", "InstanceAdopted", fmt.Sprintf("Adopted existing RDS instance %s under management", instanceARN))
+				if transferred {
+					recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over RDS instance %s from a previous incarnation of this CR", instanceARN))
+				} else {
+					recordEvent("Normal", "InstanceAdopted", fmt.Sprintf("Adopted existing RDS instance %s under management", instanceARN))
+				}
 			}
 		}
 	}

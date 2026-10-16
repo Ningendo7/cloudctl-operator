@@ -17,7 +17,10 @@ limitations under the License.
 package status
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -93,5 +96,60 @@ func TestSetSectionCondition_StaleSectionFromOlderGenerationDoesNotSatisfyReady(
 	}
 	if ready.ObservedGeneration != 2 {
 		t.Fatalf("expected Ready's observedGeneration=2, got %d", ready.ObservedGeneration)
+	}
+}
+
+func TestCapMessage(t *testing.T) {
+	short := "queue is fine"
+	if got := CapMessage(short); got != short {
+		t.Errorf("a short message changed: %q", got)
+	}
+	long := strings.Repeat("é", MaxMessageLength) // two bytes each, so a naive cut could split one
+	got := CapMessage(long)
+	if len(got) > MaxMessageLength {
+		t.Errorf("capped message is %d bytes, want at most %d", len(got), MaxMessageLength)
+	}
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, truncatedMarker) {
+		t.Errorf("capped message must stay valid UTF-8 and say it was cut: %q", got[len(got)-20:])
+	}
+}
+
+func TestJoinCapped(t *testing.T) {
+	if got := JoinCapped([]string{"a", "b", "c"}, "; "); got != "a; b; c" {
+		t.Errorf("JoinCapped() = %q, want %q", got, "a; b; c")
+	}
+	items := make([]string, 1000)
+	for i := range items {
+		items[i] = fmt.Sprintf("stale reference %04d to team-a/some-consumer", i)
+	}
+	got := JoinCapped(items, "; ")
+	if len(got) > MaxMessageLength {
+		t.Fatalf("joined message is %d bytes, want at most %d", len(got), MaxMessageLength)
+	}
+	var shown, more int
+	if _, err := fmt.Sscanf(got[strings.LastIndex(got, "… and ")+len("… and "):], "%d more", &more); err != nil {
+		t.Fatalf("expected an \"… and N more\" ending: %q", got[len(got)-40:])
+	}
+	shown = strings.Count(got, "stale reference")
+	if shown+more != len(items) || more == 0 {
+		t.Errorf("shown %d + more %d should account for all %d items", shown, more, len(items))
+	}
+}
+
+// A message over the API server's limit gets the whole status patch
+// rejected, ledger checkpoints included.
+func TestConditionsNeverExceedTheMessageLimit(t *testing.T) {
+	var conditions []metav1.Condition
+	SetSectionCondition(&conditions, "SQSReady", metav1.ConditionFalse, "Error", strings.Repeat("x", 100000), 1, []string{"SQSReady"})
+	reasons := make([]string, 2000)
+	for i := range reasons {
+		reasons[i] = fmt.Sprintf("sqs %q: PendingDeletion", fmt.Sprint("queue-", i))
+	}
+	SetDeletionBlocked(&conditions, 1, reasons)
+
+	for _, c := range conditions {
+		if len(c.Message) > MaxMessageLength {
+			t.Errorf("condition %s message is %d bytes, want at most %d", c.Type, len(c.Message), MaxMessageLength)
+		}
 	}
 }

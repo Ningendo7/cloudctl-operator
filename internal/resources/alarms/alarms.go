@@ -331,14 +331,27 @@ func reconcileAlarms(
 			continue
 		}
 		if exists {
-			owned, err := isAlarmOwnedByUs(ctx, cwClient, own, d.name)
+			owner, err := alarmOwnership(ctx, cwClient, own, d.name)
 			if err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}
 				continue
 			}
-			if !owned {
+			switch {
+			case owner.ours:
+			case owner.transferable:
+				// CloudWatch tags an alarm only when it is created, so an
+				// alarm left by a previous incarnation of this CR is
+				// replaced: it holds no data.
+				if _, err := cwClient.DeleteAlarms(ctx, &cloudwatch.DeleteAlarmsInput{AlarmNames: []string{d.name}}); err != nil {
+					if firstErr == nil {
+						firstErr = wrapAWSError(err, fmt.Sprintf("replacing alarm %q from a previous incarnation of this CR", d.name))
+					}
+					continue
+				}
+				exists = false
+			default:
 				if firstErr == nil {
 					firstErr = fmt.Errorf("alarm %q already exists but isn't tagged as owned by this CR — refusing to overwrite it", d.name)
 				}
@@ -437,11 +450,19 @@ func listAlarmsByPrefix(ctx context.Context, cwClient cloudctlaws.CloudWatchClie
 // isAlarmOwnedByUs reads an existing alarm's tags and checks them against
 // this CR's ownership triple — the same check every other resource type
 // runs before ever mutating or deleting something it didn't just create.
-func isAlarmOwnedByUs(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ownership, alarmName string) (bool, error) {
+type alarmOwner struct {
+	// ours: tagged with this CR's name and UID.
+	ours bool
+	// transferable: tagged with this CR's name and exactly the UID the CR
+	// was told to take over from.
+	transferable bool
+}
+
+func alarmOwnership(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ownership, alarmName string) (alarmOwner, error) {
 	arn := alarmARN(own.region, own.accountID, alarmName)
 	out, err := cwClient.ListTagsForResource(ctx, &cloudwatch.ListTagsForResourceInput{ResourceARN: &arn})
 	if err != nil {
-		return false, wrapAWSError(err, "reading alarm tags")
+		return alarmOwner{}, wrapAWSError(err, "reading alarm tags")
 	}
 	tags := make(map[string]string, len(out.Tags))
 	for _, t := range out.Tags {
@@ -449,7 +470,16 @@ func isAlarmOwnedByUs(ctx context.Context, cwClient cloudctlaws.CloudWatchClient
 			tags[*t.Key] = *t.Value
 		}
 	}
-	return cloudctlaws.IsOwnedBy(tags, own.namespace, own.crName, own.crUID), nil
+	if cloudctlaws.IsOwnedBy(tags, own.namespace, own.crName, own.crUID) {
+		return alarmOwner{ours: true}, nil
+	}
+	staleUID, stale := cloudctlaws.IsStaleUID(tags, own.namespace, own.crName, own.crUID)
+	return alarmOwner{transferable: stale && cloudctlaws.MayTransferFrom(ctx, staleUID)}, nil
+}
+
+func isAlarmOwnedByUs(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ownership, alarmName string) (bool, error) {
+	owner, err := alarmOwnership(ctx, cwClient, own, alarmName)
+	return owner.ours, err
 }
 
 // putAlarm creates or updates one alarm. Tags are only ever sent on

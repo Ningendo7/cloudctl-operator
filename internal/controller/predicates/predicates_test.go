@@ -19,6 +19,7 @@ package predicates
 import (
 	"testing"
 
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
@@ -137,5 +138,33 @@ func TestProducerChangedPredicate_StillPassesSpecChanges(t *testing.T) {
 	updated := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
 	if !ProducerChangedPredicate().Update(event.UpdateEvent{ObjectOld: old, ObjectNew: updated}) {
 		t.Error("expected a generation bump to still pass")
+	}
+}
+
+func crWithAnnotations(annotations map[string]string) *depsv1alpha1.AppDependencies {
+	return &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Generation: 1, Annotations: annotations}}
+}
+
+// The annotation is how a person hands a CR its previous incarnation's
+// resources; setting it has to trigger a reconcile, not wait for the next
+// drift pass.
+func TestAppDependenciesPredicate_ReactsToTheAdoptFromAnnotation(t *testing.T) {
+	pred := AppDependenciesPredicate()
+	for name, tc := range map[string]struct {
+		old, new map[string]string
+		want     bool
+	}{
+		"annotation added":       {nil, map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "old-uid"}, true},
+		"annotation changed":     {map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "a"}, map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "b"}, true},
+		"annotation removed":     {map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "a"}, nil, false},
+		"unrelated annotation":   {nil, map[string]string{"example.com/x": "1"}, false},
+		"force-reconcile bumped": {nil, map[string]string{ForceReconcileAnnotation: "1"}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := pred.Update(event.UpdateEvent{ObjectOld: crWithAnnotations(tc.old), ObjectNew: crWithAnnotations(tc.new)})
+			if got != tc.want {
+				t.Errorf("Update() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

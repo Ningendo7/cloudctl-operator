@@ -276,10 +276,14 @@ func ensureBucket(
 		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 			return ledger, fmt.Errorf("bucket %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", bucket, existingOwner)
 		}
+		transferred := false
 		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
-			return ledger, fmt.Errorf("bucket %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", bucket, staleUID)
+			if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
+				return ledger, fmt.Errorf("bucket %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", bucket, staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
+			}
+			transferred = true
 		}
-		if !opts.adopt {
+		if !transferred && !opts.adopt {
 			return ledger, fmt.Errorf("bucket %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", bucket)
 		}
 		if opts.checkAdoptedKey != nil {
@@ -304,7 +308,11 @@ func ensureBucket(
 			return ledger, wrapAWSError(tagErr, "tagging bucket")
 		}
 		if recordEvent != nil {
-			recordEvent("Normal", "BucketAdopted", fmt.Sprintf("Adopted existing S3 bucket %s under management", bucket))
+			if transferred {
+				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over S3 bucket %s from a previous incarnation of this CR", bucket))
+			} else {
+				recordEvent("Normal", "BucketAdopted", fmt.Sprintf("Adopted existing S3 bucket %s under management", bucket))
+			}
 		}
 	}
 

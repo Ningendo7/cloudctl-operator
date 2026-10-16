@@ -263,10 +263,14 @@ func ensureTable(
 		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
 			return ledger, fmt.Errorf("table %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", tableName, existingOwner)
 		}
+		transferred := false
 		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
-			return ledger, fmt.Errorf("table %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically", tableName, staleUID)
+			if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
+				return ledger, fmt.Errorf("table %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", tableName, staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
+			}
+			transferred = true
 		}
-		if !opts.adopt {
+		if !transferred && !opts.adopt {
 			return ledger, fmt.Errorf("table %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", tableName)
 		}
 
@@ -303,7 +307,11 @@ func ensureTable(
 			return ledger, wrapAWSError(tagErr, "adopting table (tagging)")
 		}
 		if recordEvent != nil {
-			recordEvent("Normal", "TableAdopted", fmt.Sprintf("Adopted existing DynamoDB table %s under management", tableArn))
+			if transferred {
+				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over DynamoDB table %s from a previous incarnation of this CR", tableArn))
+			} else {
+				recordEvent("Normal", "TableAdopted", fmt.Sprintf("Adopted existing DynamoDB table %s under management", tableArn))
+			}
 		}
 	}
 
