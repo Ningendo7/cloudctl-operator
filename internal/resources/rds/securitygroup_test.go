@@ -275,7 +275,7 @@ func TestEnsureSecurityGroup_GrantsEveryMissingConsumerInOneCall(t *testing.T) {
 func TestEnsureSecurityGroup_ADuplicateGrantFromARaceIsNotAnError(t *testing.T) {
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()
-	ec2Client.authorizeSecurityGroupIngressErr = &fakeAWSError{code: "InvalidPermission.Duplicate", fault: smithy.FaultClient}
+	ec2Client.authorizeSecurityGroupIngressErr = &fakeAWSError{code: errCodeInvalidPermissionDuplicate, fault: smithy.FaultClient}
 	consumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
 

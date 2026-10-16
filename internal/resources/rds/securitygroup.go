@@ -397,7 +397,7 @@ func consumerPodSecurityGroupARN(ctx context.Context, k8sClient client.Client, n
 
 func isDuplicatePermission(err error) bool {
 	var apiErr smithy.APIError
-	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidPermission.Duplicate"
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == errCodeInvalidPermissionDuplicate
 }
 
 // isNotFoundPermission reports a revoke racing against (or retrying

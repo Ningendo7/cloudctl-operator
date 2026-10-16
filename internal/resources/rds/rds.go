@@ -69,10 +69,11 @@ const (
 	statusFailed    = "failed"
 	enginePostgres  = "postgres"
 
-	errCodeDependencyViolation       = "DependencyViolation"
-	errCodeInvalidDBInstanceState    = "InvalidDBInstanceState"
-	errCodeInvalidGroupNotFound      = "InvalidGroup.NotFound"
-	errCodeInvalidPermissionNotFound = "InvalidPermission.NotFound"
+	errCodeDependencyViolation        = "DependencyViolation"
+	errCodeInvalidDBInstanceState     = "InvalidDBInstanceState"
+	errCodeInvalidGroupNotFound       = "InvalidGroup.NotFound"
+	errCodeInvalidPermissionNotFound  = "InvalidPermission.NotFound"
+	errCodeInvalidPermissionDuplicate = "InvalidPermission.Duplicate"
 )
 
 // defaultBackupRetentionDays is AWS's own long-standing default retention
@@ -314,7 +315,7 @@ func ensureInstanceObserving(
 	// the ledger knows but AWS no longer has was deleted out-of-band, and a
 	// replacement would be an empty database reported Ready.
 	missing := func() ([]depsv1alpha1.ManagedResource, error) {
-		if entry, found := status.FindManagedResource(ledger, resourceType, resourceName); found && entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+		if entry, found := trackedInstance(ledger, resourceName); found {
 			return ledger, instanceMissingError(entry, instanceID, recordEvent)
 		}
 		return create()
@@ -779,4 +780,12 @@ func isInTransitionError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// trackedInstance returns the ledger entry of an instance this operator is
+// still responsible for. A relinquished one is not: it is no longer checked
+// against AWS, so its absence says nothing about this CR's data.
+func trackedInstance(ledger []depsv1alpha1.ManagedResource, resourceName string) (depsv1alpha1.ManagedResource, bool) {
+	entry, found := status.FindManagedResource(ledger, resourceType, resourceName)
+	return entry, found && entry.State != depsv1alpha1.ManagedResourceStateRelinquished
 }

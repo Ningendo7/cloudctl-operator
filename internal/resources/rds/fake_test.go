@@ -590,7 +590,7 @@ func (f *fakeEC2) AuthorizeSecurityGroupIngress(_ context.Context, in *ec2.Autho
 		for _, pair := range perm.UserIdGroupPairs {
 			rule := fakeIngressRule{sourceGroupID: *pair.GroupId, fromPort: *perm.FromPort, toPort: *perm.ToPort}
 			if slices.Contains(g.ingress, rule) || slices.Contains(added, rule) {
-				return nil, &fakeAWSError{code: "InvalidPermission.Duplicate", fault: smithy.FaultClient}
+				return nil, &fakeAWSError{code: errCodeInvalidPermissionDuplicate, fault: smithy.FaultClient}
 			}
 			added = append(added, rule)
 		}

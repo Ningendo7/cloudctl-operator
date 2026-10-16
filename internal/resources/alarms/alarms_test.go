@@ -26,7 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -52,7 +52,7 @@ func newScheme(t *testing.T) *runtime.Scheme {
 func ensureAlarms(
 	ctx context.Context,
 	cwClient cloudctlaws.CloudWatchClient,
-	k8sClient client.Client,
+	k8sClient ctrlclient.Client,
 	namespace, crName, crUID, region, accountID string,
 	alarmsSpec *depsv1alpha1.AlarmsSpec,
 	sqsSpec *depsv1alpha1.SQSSpec,
