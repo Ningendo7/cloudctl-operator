@@ -27,7 +27,7 @@ spec:
 | `fifo` | Ordered, deduplicated delivery. **Immutable once set** — AWS doesn't support converting between FIFO and standard queues. |
 | `deletionPolicy` | `Retain` (default) or `Delete`. See [architecture.md](architecture.md#deletion-is-a-lifecycle-not-a-single-api-call). |
 | `force` | Allows deleting a queue that isn't empty (visible, in-flight, *and* delayed message counts are all checked independently). |
-| `adopt` | Required to bring an existing, differently-owned or untagged queue under this CR's management. |
+| `adopt` | Required to bring an existing, differently-owned or untagged queue under this CR's management. A resource encrypted with a customer-managed KMS key the spec doesn't name is refused with `AdoptionConflict`: declare that key under `kms.resources` with `adopt: true` and point `encryption.kmsKeyRef` at it. This applies to every resource type. |
 | `sharedWith` | Grants other `AppDependencies` CRs permission to consume this queue (up to 20 entries), and via `access`, how much (see [IAM](#iam) below). |
 | `subscribesTo` | Subscribes this queue to SNS topics (up to 20), each referenced by owner namespace, CR name and topic name. The operator creates the real SNS subscription and the queue policy that lets the topic deliver, and removes both when the entry goes. A subscription removed behind the operator's back is restored. The topic's owner must list this CR in its own `sharedWith`, the same as any cross-CR reference. |
 | `overrides.visibilityTimeoutSeconds` | 0–43200. Drift-corrected on every reconcile if it diverges from spec. |
@@ -194,6 +194,8 @@ spec:
 **Credentials.** The operator never sets or generates a password. RDS creates and rotates the master user's password in Secrets Manager, and the operator mirrors it into a Secret named `<cr>-rds-credentials` in the *owning* CR's namespace only. Rotation reaches the Secret within one drift-detection interval, but never a running pod's environment. The master user can do anything in the database, so consumers never receive it: the owner creates per-app database users and hands the credentials to each team.
 
 **Connection info.** The owner's and each consumer's connection ConfigMap carries `RDS_<NAME>_HOST`, `_PORT`, `_ENGINE` and `_DB_INSTANCE_IDENTIFIER` (consumers' keys also include the producer's namespace and CR name).
+
+**Encrypted and protected by default.** Without `encryption`, a new instance is encrypted with AWS's own RDS key; `encryption: {enabled: false}` opts out. Instances the operator creates have deletion protection on and kept on while declared (`deletionProtection: false` turns it off), so removing one by hand means turning protection off first. An adopted instance keeps its own setting unless the field is set, with a `DeletionProtectionOff` warning when it's off.
 
 **Private by default.** Instances are created with `PubliclyAccessible` explicitly off, since AWS otherwise defaults to public in a default VPC. If an instance later becomes public, the operator emits an `InstancePubliclyAccessible` warning each reconcile but does not change it: that may be a deliberate decision, and the security group is the only access it controls. An adopted instance keeps the security groups it already has, so check them too.
 

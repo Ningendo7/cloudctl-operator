@@ -823,3 +823,36 @@ func TestEnsure_RecreatesBucketDeletedOutOfBandWithinTrustWindow(t *testing.T) {
 		t.Errorf("expected a BucketMissing event, got %v", events)
 	}
 }
+
+func TestEnsure_RefusesToAdoptABucketEncryptedWithAKeyItDoesNotManage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		awsManaged bool
+		refused    bool
+	}{"customer key": {false, true}, "AWS-managed key": {true, false}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeS3()
+			bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+			const key = "arn:aws:kms:us-east-1:123456789012:key/team-owned"
+			client.buckets[bucket] = &fakeBucket{tags: map[string]string{}, kmsKeyARN: key}
+			kmsClient := kmstest.NewFakeKMSClient()
+			kmsClient.AddKey(key, tc.awsManaged)
+
+			spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts", Adopt: true}}}
+			_, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+			owned := cloudctlaws.IsOwnedBy(client.buckets[bucket].tags, "default", "checkout-service", "uid-1")
+			if !tc.refused {
+				if err != nil || !owned {
+					t.Fatalf("expected the bucket adopted, got err=%v owned=%v", err, owned)
+				}
+				return
+			}
+			var reconcileErr *cloudctlaws.ReconcileError
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != "AdoptionConflict" {
+				t.Fatalf("expected an AdoptionConflict for a resource encrypted with a key the spec doesn't name, got %v", err)
+			}
+			if owned {
+				t.Error("a refused bucket must not be tagged as owned")
+			}
+		})
+	}
+}

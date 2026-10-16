@@ -31,16 +31,18 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 )
 
 type fakeKey struct {
-	arn      string
-	keyID    string
-	tags     map[string]string
-	keyState types.KeyState
+	arn        string
+	keyID      string
+	tags       map[string]string
+	keyState   types.KeyState
+	keyManager types.KeyManagerType
 }
 
 // FakeKMSClient implements cloudctlaws.KMSClient.
@@ -83,7 +85,22 @@ func (f *FakeKMSClient) DescribeKey(_ context.Context, in *kms.DescribeKeyInput,
 	}
 	k := f.keys[arn]
 	keyID, keyArn, state := k.keyID, k.arn, k.keyState
-	return &kms.DescribeKeyOutput{KeyMetadata: &types.KeyMetadata{KeyId: &keyID, Arn: &keyArn, KeyState: state}}, nil
+	manager := k.keyManager
+	if manager == "" {
+		manager = types.KeyManagerTypeCustomer
+	}
+	return &kms.DescribeKeyOutput{KeyMetadata: &types.KeyMetadata{KeyId: &keyID, Arn: &keyArn, KeyState: state, KeyManager: manager}}, nil
+}
+
+// AddKey registers a key that exists outside this operator, as one AWS
+// manages for a service when awsManaged is true, or a customer's otherwise.
+func (f *FakeKMSClient) AddKey(arn string, awsManaged bool) {
+	manager := types.KeyManagerTypeCustomer
+	if awsManaged {
+		manager = types.KeyManagerTypeAws
+	}
+	id := arn[strings.LastIndex(arn, "/")+1:]
+	f.keys[arn] = &fakeKey{arn: arn, keyID: id, tags: map[string]string{}, keyState: types.KeyStateEnabled, keyManager: manager}
 }
 
 func (f *FakeKMSClient) CreateKey(_ context.Context, in *kms.CreateKeyInput, _ ...func(*kms.Options)) (*kms.CreateKeyOutput, error) {

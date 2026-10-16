@@ -167,7 +167,7 @@ func Cleanup(
 			if recordEvent != nil {
 				recordEvent("Warning", "InstanceDeletionRequiresManualAction", fmt.Sprintf(
 					"RDS instance %s (%s) is no longer declared. A final snapshot will be taken proactively after %s, "+
-						"and this will be flagged as needing manual deletion after %s - this operator never deletes a database automatically.",
+						"and this will be flagged as needing manual deletion after %s - this operator never deletes a database automatically; turn off its deletion protection first.",
 					entry.Name, entry.ARN, deletionQuietWindow, PendingDeletionGracePeriod))
 			}
 			continue

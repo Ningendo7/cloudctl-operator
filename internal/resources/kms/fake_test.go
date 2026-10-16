@@ -49,6 +49,7 @@ type fakeKey struct {
 	keyState        types.KeyState
 	rotationEnabled bool
 	policy          string
+	keyManager      types.KeyManagerType
 }
 
 type fakeKMS struct {
@@ -112,7 +113,11 @@ func (f *fakeKMS) DescribeKey(_ context.Context, in *kms.DescribeKeyInput, _ ...
 	}
 	k := f.keys[arn]
 	keyID, keyArn, state := k.keyID, k.arn, k.keyState
-	return &kms.DescribeKeyOutput{KeyMetadata: &types.KeyMetadata{KeyId: &keyID, Arn: &keyArn, KeyState: state}}, nil
+	manager := k.keyManager
+	if manager == "" {
+		manager = types.KeyManagerTypeCustomer
+	}
+	return &kms.DescribeKeyOutput{KeyMetadata: &types.KeyMetadata{KeyId: &keyID, Arn: &keyArn, KeyState: state, KeyManager: manager}}, nil
 }
 
 func (f *fakeKMS) CreateKey(_ context.Context, in *kms.CreateKeyInput, _ ...func(*kms.Options)) (*kms.CreateKeyOutput, error) {

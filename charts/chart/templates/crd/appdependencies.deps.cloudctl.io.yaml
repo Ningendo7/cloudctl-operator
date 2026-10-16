@@ -438,12 +438,21 @@ spec:
                           - Retain
                           - Delete
                           type: string
+                        deletionProtection:
+                          description: |-
+                            deletionProtection makes AWS refuse to delete the instance until it
+                            is turned off. Unset means on for an instance this operator creates,
+                            and the instance is kept in line with it while declared. Unset on an
+                            adopted instance, the instance's own setting is left alone and only
+                            reported when off.
+                          type: boolean
                         encryption:
                           description: |-
-                            encryption enables storage encryption with a KMS key. See
-                            EncryptionSpec. Immutable: AWS cannot change an instance's storage
-                            encryption in place, so it can be neither added to, changed on, nor
-                            removed from an existing entry.
+                            encryption chooses the KMS key for storage encryption. See
+                            EncryptionSpec. Unset, storage is encrypted with AWS's own RDS key;
+                            enabled: false without a kmsKeyRef leaves it unencrypted. Immutable:
+                            AWS cannot change an instance's storage encryption in place, so it can
+                            be neither added to, changed on, nor removed from an existing entry.
                           properties:
                             enabled:
                               default: false

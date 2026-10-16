@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sns/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -208,6 +209,13 @@ func ensureTopic(
 		}
 		if !t.Adopt {
 			return ledger, fmt.Errorf("topic %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", topicName)
+		}
+		attrsOut, aErr := awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
+		if aErr != nil {
+			return ledger, wrapAWSError(aErr, "reading the topic's encryption before adopting it")
+		}
+		if err := kms.CheckAdoptedKey(ctx, kmsClient, attrsOut.Attributes["KmsMasterKeyId"], aws.ToString(kmsKeyARN)); err != nil {
+			return ledger, fmt.Errorf("topic %q can't be adopted: %w", topicName, err)
 		}
 
 		merged := cloudctlaws.MergeTags(currentTags, ownerTags)

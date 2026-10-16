@@ -601,3 +601,23 @@ func TestEnsure_RecreatesTopicDeletedOutOfBandWithinTrustWindow(t *testing.T) {
 		t.Errorf("expected a TopicMissing event, got %v", events)
 	}
 }
+
+func TestEnsure_RefusesToAdoptATopicEncryptedWithAKeyItDoesNotManage(t *testing.T) {
+	client := newFakeSNS()
+	topicName := cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256)
+	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, topicName)
+	const key = "arn:aws:kms:us-east-1:123456789012:key/team-owned"
+	client.topics[topicArn] = &fakeTopic{arn: topicArn, tags: map[string]string{}, attributes: map[string]string{"KmsMasterKeyId": key}}
+	kmsClient := kmstest.NewFakeKMSClient()
+	kmsClient.AddKey(key, false)
+
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", Adopt: true}}}
+	_, err := Ensure(context.Background(), client, kmsClient, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != "AdoptionConflict" {
+		t.Fatalf("expected an AdoptionConflict for a resource encrypted with a key the spec doesn't name, got %v", err)
+	}
+	if cloudctlaws.IsOwnedBy(client.topics[topicArn].tags, "default", "checkout-service", "uid-1") {
+		t.Error("a refused topic must not be tagged as owned")
+	}
+}

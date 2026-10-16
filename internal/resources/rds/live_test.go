@@ -591,6 +591,10 @@ func deleteInstanceWithRetry(t *testing.T, client *rds.Client, instanceID string
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Minute)
 	for {
+		// The operator creates instances with deletion protection on.
+		_, _ = client.ModifyDBInstance(context.Background(), &rds.ModifyDBInstanceInput{
+			DBInstanceIdentifier: &instanceID, DeletionProtection: aws.Bool(false), ApplyImmediately: aws.Bool(true),
+		})
 		_, err := client.DeleteDBInstance(context.Background(), &rds.DeleteDBInstanceInput{
 			DBInstanceIdentifier: &instanceID, SkipFinalSnapshot: aws.Bool(true),
 		})

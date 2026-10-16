@@ -80,6 +80,9 @@ type tableOptions struct {
 	retentionDays  *int32
 	billingMode    depsv1alpha1.DynamoDBBillingMode
 	kmsKeyARN      *string
+	// checkAdoptedKey vets the key an existing table is encrypted with
+	// before it is adopted; nil skips the check.
+	checkAdoptedKey func(ctx context.Context, currentKey string) error
 }
 
 // billingModeFor maps the CRD's decision-level billing mode to the SDK's
@@ -155,6 +158,8 @@ func Ensure(
 				opts.kmsKeyARN = &arn
 			}
 		}
+
+		opts.checkAdoptedKey = kms.AdoptedKeyCheck(kmsClient, opts.kmsKeyARN)
 
 		var err error
 		ledger, err = ensureTable(ctx, awsClient, namespace, crName, crUID, t.Name, opts, ledger, recordEvent)
@@ -271,6 +276,16 @@ func ensureTable(
 				"table %q exists with key schema (partitionKey=%q, sortKey=%q) that doesn't match this CR's declared (partitionKey=%q, sortKey=%q) — AWS doesn't support changing a table's key schema, so it can't be adopted with mismatched keys",
 				tableName, actualPartitionKey, actualSortKey, opts.partitionKey, opts.sortKey,
 			)
+		}
+
+		if opts.checkAdoptedKey != nil {
+			currentKey := ""
+			if table.SSEDescription != nil {
+				currentKey = aws.ToString(table.SSEDescription.KMSMasterKeyArn)
+			}
+			if err := opts.checkAdoptedKey(ctx, currentKey); err != nil {
+				return ledger, fmt.Errorf("table %q can't be adopted: %w", tableName, err)
+			}
 		}
 
 		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
