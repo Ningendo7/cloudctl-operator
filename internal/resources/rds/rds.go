@@ -314,7 +314,7 @@ func ensureInstanceObserving(
 	// the ledger knows but AWS no longer has was deleted out-of-band, and a
 	// replacement would be an empty database reported Ready.
 	missing := func() ([]depsv1alpha1.ManagedResource, error) {
-		if entry, found := status.FindManagedResource(ledger, resourceType, resourceName); found {
+		if entry, found := status.FindManagedResource(ledger, resourceType, resourceName); found && entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
 			return ledger, instanceMissingError(entry, instanceID, recordEvent)
 		}
 		return create()

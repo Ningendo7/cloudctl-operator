@@ -540,3 +540,69 @@ func TestCleanup_DeletingTable_EmitsDeletedEvent(t *testing.T) {
 		t.Errorf("expected exactly one TableDeleted event, got %+v", *events)
 	}
 }
+
+func TestCleanup_ARetainedTableIsRelinquishedOnceAndKeptInTheLedger(t *testing.T) {
+	client := newFakeDynamoDB()
+	ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyRetain, false)
+	ctx := context.Background()
+	cleanup := func() {
+		t.Helper()
+		var err error
+		if ledger, _, err = Cleanup(ctx, client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+	}
+
+	cleanup()
+	entry, found := status.FindManagedResource(ledger, resourceType, "sessions")
+	if !found || entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+		t.Fatalf("expected the entry kept as Relinquished, got %+v (found=%v)", entry, found)
+	}
+	reads := client.listTagsCalls
+	cleanup()
+	if client.listTagsCalls != reads {
+		t.Errorf("tag reads on a relinquished table = %d, want none", client.listTagsCalls-reads)
+	}
+
+	// A table deleted by hand after being relinquished is created fresh,
+	// not reported as lost data it no longer holds.
+	delete(client.tables, sessionsTableName())
+	if _, err := Ensure(ctx, client, nil, nil, "default", "checkout-service", "uid-1", sessionsSpec(false), ledger, nil, nil); err != nil {
+		t.Fatalf("Ensure() after a relinquished table was deleted by hand: %v", err)
+	}
+}
+
+// A pending table waiting out the quiet window or the empty-check backoff
+// costs no AWS call at all: the ownership re-check only matters ahead of
+// something that changes it.
+func TestCleanup_PendingDeletion_ReadsNothingWhileWaiting(t *testing.T) {
+	client := newFakeDynamoDB()
+	ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyDelete, false)
+	client.tables[cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)].itemCount = 5
+	cleanup := func() ([]depsv1alpha1.ManagedResource, []CleanupResult) {
+		t.Helper()
+		updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
+		if err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+		return updated, results
+	}
+
+	ledger, _ = cleanup()
+	reads := client.listTagsCalls
+	for _, phase := range []string{"quiet window", "backoff"} {
+		if phase == "backoff" {
+			advancePastEmptyCheckBackoffStart(t, ledger, "sessions")
+			ledger, _ = cleanup() // the real check, which stamps LastEmptyCheckAt
+			reads = client.listTagsCalls
+		}
+		var results []CleanupResult
+		ledger, results = cleanup()
+		if got := client.listTagsCalls; got != reads {
+			t.Errorf("%s: %d reads while waiting, want none", phase, got-reads)
+		}
+		if r := findResult(results, "sessions"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+			t.Errorf("%s: expected PendingDeletion, got %+v", phase, results)
+		}
+	}
+}

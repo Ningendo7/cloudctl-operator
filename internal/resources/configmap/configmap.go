@@ -24,6 +24,7 @@ package configmap
 import (
 	"context"
 	"fmt"
+	"maps"
 	"regexp"
 	"strconv"
 	"strings"
@@ -110,6 +111,13 @@ func Ensure(ctx context.Context, k8sClient client.Client, apiReader client.Reade
 			return nil
 		}
 		return client.IgnoreNotFound(k8sClient.Delete(ctx, existing))
+	}
+	// Ownership was checked above. An apply that changes nothing still runs
+	// every admission webhook in the cluster and writes an audit entry.
+	if exists && maps.Equal(existing.Data, data) &&
+		existing.Labels[depsv1alpha1.ManagedByLabelKey] == depsv1alpha1.ManagedByLabelValue &&
+		status.AppliedBy(existing, string(fieldOwner)) {
+		return nil
 	}
 
 	gvk, err := apiutil.GVKForObject(cr, k8sClient.Scheme())

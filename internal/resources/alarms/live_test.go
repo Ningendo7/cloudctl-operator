@@ -90,7 +90,7 @@ func TestLive_Ensure_CreatesRealAlarmWithTagsAndCleansUp(t *testing.T) {
 	})
 
 	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
-	if err := Ensure(ctx, client, nil, namespace, crName, "uid-1", region, accountID,
+	if err := ensureAlarms(ctx, client, nil, namespace, crName, "uid-1", region, accountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}

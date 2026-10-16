@@ -72,6 +72,8 @@ type fakeIAM struct {
 	// diff-before-write check actually skips the call when nothing
 	// changed, not just trusts it does.
 	putRolePolicyCalls int
+	listRoleTagsCalls  int
+	getRolePolicyCalls int
 }
 
 func newFakeIAM() *fakeIAM {
@@ -128,6 +130,7 @@ func (f *fakeIAM) TagRole(_ context.Context, in *iam.TagRoleInput, _ ...func(*ia
 }
 
 func (f *fakeIAM) ListRoleTags(_ context.Context, in *iam.ListRoleTagsInput, _ ...func(*iam.Options)) (*iam.ListRoleTagsOutput, error) {
+	f.listRoleTagsCalls++
 	if f.listRoleTagsErr != nil {
 		return nil, f.listRoleTagsErr
 	}
@@ -139,6 +142,7 @@ func (f *fakeIAM) ListRoleTags(_ context.Context, in *iam.ListRoleTagsInput, _ .
 }
 
 func (f *fakeIAM) GetRolePolicy(_ context.Context, in *iam.GetRolePolicyInput, _ ...func(*iam.Options)) (*iam.GetRolePolicyOutput, error) {
+	f.getRolePolicyCalls++
 	if f.getRolePolicyErr != nil {
 		return nil, f.getRolePolicyErr
 	}

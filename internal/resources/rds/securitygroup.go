@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -82,13 +83,13 @@ func EnsureSecurityGroup(
 	}
 
 	groupName := cloudctlaws.ResourceName(namespace, crName, "rds-sg", resourceName, 255)
-	groupID, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, adopt)
+	groupID, currentIngress, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, adopt)
 	if err != nil {
 		return "", err
 	}
 	arn := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, groupID)
 
-	if err := reconcileIngress(ctx, ec2Client, k8sClient, groupID, engine, namespace, crName, resourceName, sharedWith); err != nil {
+	if err := reconcileIngress(ctx, ec2Client, k8sClient, groupID, currentIngress, engine, namespace, crName, resourceName, sharedWith); err != nil {
 		return arn, err
 	}
 
@@ -223,7 +224,7 @@ func resolveVPCID(ctx context.Context, rdsClient rdsAPI, dbSubnetGroupName strin
 // operator goes on to rewrite this group's ingress rules. adopt takes over
 // an untagged group, or one left by an earlier incarnation of this same CR
 // (a retained instance outlives its CR); another CR's group is never taken.
-func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Client, namespace, crName, crUID, groupName, vpcID string, adopt bool) (string, error) {
+func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Client, namespace, crName, crUID, groupName, vpcID string, adopt bool) (groupID string, ingress []types.IpPermission, err error) {
 	describeOut, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
 		Filters: []types.Filter{
 			{Name: aws.String("group-name"), Values: []string{groupName}},
@@ -231,29 +232,29 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 		},
 	})
 	if err != nil {
-		return "", wrapEC2Error(err, "looking up security group")
+		return "", nil, wrapEC2Error(err, "looking up security group")
 	}
 	if len(describeOut.SecurityGroups) > 0 {
 		existing := describeOut.SecurityGroups[0]
-		groupID := aws.ToString(existing.GroupId)
+		groupID = aws.ToString(existing.GroupId)
 		tags := ec2TagsToMap(existing.Tags)
 		if cloudctlaws.IsOwnedBy(tags, namespace, crName, crUID) {
-			return groupID, nil
+			return groupID, existing.IpPermissions, nil
 		}
 		if owner, ok := tags[cloudctlaws.OwnerTagKey]; ok && owner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return "", fmt.Errorf("security group %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", groupID, owner)
+			return "", nil, fmt.Errorf("security group %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", groupID, owner)
 		}
 		staleUID, stale := cloudctlaws.IsStaleUID(tags, namespace, crName, crUID)
 		if !adopt && (!stale || !cloudctlaws.MayTransferFrom(ctx, staleUID)) {
-			return "", fmt.Errorf("security group %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", groupID)
+			return "", nil, fmt.Errorf("security group %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", groupID)
 		}
 		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 			Resources: []string{groupID},
 			Tags:      mapToEC2Tags(ownerTags(namespace, crName, crUID)),
 		}); err != nil {
-			return "", wrapEC2Error(err, "adopting security group (tagging)")
+			return "", nil, wrapEC2Error(err, "adopting security group (tagging)")
 		}
-		return groupID, nil
+		return groupID, existing.IpPermissions, nil
 	}
 
 	createOut, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
@@ -266,26 +267,42 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 		}},
 	})
 	if err != nil {
-		return "", wrapEC2Error(err, "creating security group")
+		return "", nil, wrapEC2Error(err, "creating security group")
 	}
-	return *createOut.GroupId, nil
+	return *createOut.GroupId, nil, nil
 }
 
-// reconcileIngress grants ingress for every currently-authorized consumer
-// and revokes it for anyone no longer authorized - safe to treat
-// sharedWith as the complete desired state since this security group is
-// never shared (see EnsureSecurityGroup). Idempotent either way: Authorize
-// and Revoke both tolerate their own already-applied error.
+// reconcileIngress makes the group's ingress on the engine's port exactly the
+// currently-authorized consumers: it grants the ones missing and revokes the
+// ones no longer authorized. sharedWith is the complete desired state since
+// this security group is never shared (see EnsureSecurityGroup). current is
+// the rules the group's lookup already returned, so a pass with nothing to
+// change makes no call; granting a rule that already exists would be a
+// failing write on every pass, counted against EC2's mutating-call quota.
 func reconcileIngress(
 	ctx context.Context,
 	ec2Client cloudctlaws.EC2Client,
 	k8sClient client.Client,
-	groupID, engine, ownerNamespace, ownerName, resourceName string,
+	groupID string,
+	current []types.IpPermission,
+	engine, ownerNamespace, ownerName, resourceName string,
 	sharedWith []depsv1alpha1.SharedWithEntry,
 ) error {
 	port := enginePort(engine)
+	have := map[string]bool{}
+	for _, perm := range current {
+		if aws.ToInt32(perm.FromPort) != port || aws.ToInt32(perm.ToPort) != port {
+			continue
+		}
+		for _, pair := range perm.UserIdGroupPairs {
+			if pair.GroupId != nil {
+				have[*pair.GroupId] = true
+			}
+		}
+	}
+
 	desired := map[string]bool{}
-	var firstErr error
+	var missing []types.UserIdGroupPair
 	for _, consumer := range sharedWith {
 		consumerGroupARN, ok, err := consumerPodSecurityGroupARN(ctx, k8sClient, consumer.Namespace, consumer.Name,
 			depsv1alpha1.ConsumeRef{Namespace: ownerNamespace, Name: ownerName, ResourceName: resourceName})
@@ -300,64 +317,54 @@ func reconcileIngress(
 			continue
 		}
 		consumerGroupID := SecurityGroupIDFromARN(consumerGroupARN)
+		if !desired[consumerGroupID] && !have[consumerGroupID] {
+			missing = append(missing, types.UserIdGroupPair{GroupId: aws.String(consumerGroupID)})
+		}
 		desired[consumerGroupID] = true
+	}
 
-		_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
+	var firstErr error
+	if len(missing) > 0 {
+		_, err := ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 			GroupId: &groupID,
 			IpPermissions: []types.IpPermission{{
 				IpProtocol:       aws.String("tcp"),
 				FromPort:         aws.Int32(port),
 				ToPort:           aws.Int32(port),
-				UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: &consumerGroupID}},
+				UserIdGroupPairs: missing,
 			}},
 		})
 		if err != nil && !isDuplicatePermission(err) {
-			if firstErr == nil {
-				firstErr = wrapEC2Error(err, fmt.Sprintf("granting %s/%s ingress", consumer.Namespace, consumer.Name))
-			}
+			firstErr = wrapEC2Error(err, fmt.Sprintf("granting ingress to %d consumer group(s)", len(missing)))
 		}
 	}
 
-	if err := revokeStaleIngress(ctx, ec2Client, groupID, port, desired); err != nil && firstErr == nil {
+	if err := revokeStaleIngress(ctx, ec2Client, groupID, port, have, desired); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return firstErr
 }
 
 // revokeStaleIngress removes ingress rules, on the engine's own port, for
-// any consumer group not in desired. Only touches rules shaped like ones
-// this package creates, so anything unexpected is left alone.
-func revokeStaleIngress(ctx context.Context, ec2Client cloudctlaws.EC2Client, groupID string, port int32, desired map[string]bool) error {
-	describeOut, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: []string{groupID}})
-	if err != nil {
-		return wrapEC2Error(err, "checking current ingress rules before revoking stale ones")
-	}
-	if len(describeOut.SecurityGroups) == 0 {
-		return nil
-	}
-
+// any consumer group in have but not in desired. Only touches rules shaped
+// like ones this package creates, so anything unexpected is left alone.
+func revokeStaleIngress(ctx context.Context, ec2Client cloudctlaws.EC2Client, groupID string, port int32, have, desired map[string]bool) error {
 	var firstErr error
-	for _, perm := range describeOut.SecurityGroups[0].IpPermissions {
-		if aws.ToInt32(perm.FromPort) != port || aws.ToInt32(perm.ToPort) != port {
+	for _, staleGroupID := range slices.Sorted(maps.Keys(have)) {
+		if desired[staleGroupID] {
 			continue
 		}
-		for _, pair := range perm.UserIdGroupPairs {
-			if pair.GroupId == nil || desired[*pair.GroupId] {
-				continue
-			}
-			staleGroupID := *pair.GroupId
-			_, err := ec2Client.RevokeSecurityGroupIngress(ctx, &ec2.RevokeSecurityGroupIngressInput{
-				GroupId: &groupID,
-				IpPermissions: []types.IpPermission{{
-					IpProtocol:       aws.String("tcp"),
-					FromPort:         aws.Int32(port),
-					ToPort:           aws.Int32(port),
-					UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: &staleGroupID}},
-				}},
-			})
-			if err != nil && !isNotFoundPermission(err) && firstErr == nil {
-				firstErr = wrapEC2Error(err, fmt.Sprintf("revoking stale ingress for security group %q", staleGroupID))
-			}
+		_, err := ec2Client.RevokeSecurityGroupIngress(ctx, &ec2.RevokeSecurityGroupIngressInput{
+			GroupId: &groupID,
+			IpPermissions: []types.IpPermission{{
+				IpProtocol:       aws.String("tcp"),
+				FromPort:         aws.Int32(port),
+				ToPort:           aws.Int32(port),
+				UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: aws.String(staleGroupID)}},
+			}},
+		})
+		if err != nil && !isNotFoundPermission(err) && firstErr == nil {
+			firstErr = wrapEC2Error(err, fmt.Sprintf("revoking stale ingress for security group %q", staleGroupID))
 		}
 	}
 	return firstErr

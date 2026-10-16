@@ -204,6 +204,42 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		}
 	})
 
+	t.Run("RelinquishedEntryIsKeptAndNeedsAdoptToComeBack", func(t *testing.T) {
+		s := newSubject(t)
+		ctx := context.Background()
+		ledger, err := s.EnsureOne(ctx, nil, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+		if err != nil {
+			t.Fatalf("EnsureOne() error = %v", err)
+		}
+		for range 2 {
+			var results []CleanupResult
+			if ledger, results, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+				t.Fatalf("Cleanup() error = %v", err)
+			}
+			if r := findResult(results, "kept"); r == nil || r.Reason != CleanupReasonRetained {
+				t.Fatalf("expected a Retained result, got %+v", results)
+			}
+		}
+		// The entry is what keeps the key its data is encrypted with.
+		entry, found := status.FindManagedResource(ledger, s.ResourceType(), "kept")
+		if !found || entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+			t.Fatalf("expected the entry kept as Relinquished, got %+v (found=%v)", entry, found)
+		}
+
+		// Its last verification is recent, but its tags are gone: declaring
+		// it again must not trust it.
+		if _, err := s.EnsureOne(ctx, ledger, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}); err == nil {
+			t.Fatal("expected re-declaring a relinquished resource without adopt to be refused")
+		}
+		ledger, err = s.EnsureOne(ctx, ledger, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true})
+		if err != nil {
+			t.Fatalf("EnsureOne() with adopt error = %v", err)
+		}
+		if entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "kept"); entry.State != depsv1alpha1.ManagedResourceStateVerified {
+			t.Errorf("expected the adopted entry to be Verified, got %s", entry.State)
+		}
+	})
+
 	t.Run("DeleteBlockedWhenNonEmpty", func(t *testing.T) {
 		s := newSubject(t)
 		ctx := context.Background()

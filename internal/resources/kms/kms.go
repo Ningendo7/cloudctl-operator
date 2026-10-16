@@ -178,7 +178,9 @@ func ensureKey(
 ) ([]depsv1alpha1.ManagedResource, error) {
 	alias := aliasName(namespace, crName, resourceName, opts)
 
-	if entry, entryFound := status.FindManagedResource(ledger, resourceType, resourceName); entryFound {
+	// A relinquished key is no longer tagged as ours, so it is looked up
+	// by alias and needs adopt like any other existing key.
+	if entry, entryFound := status.FindManagedResource(ledger, resourceType, resourceName); entryFound && entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
 		return resumeKey(ctx, kmsClient, namespace, crName, crUID, alias, opts, entry, ledger, recordEvent)
 	}
 

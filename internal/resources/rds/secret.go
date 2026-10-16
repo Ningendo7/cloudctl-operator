@@ -17,9 +17,11 @@ limitations under the License.
 package rds
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 
@@ -102,14 +104,20 @@ func EnsureCredentialsSecret(
 		return client.IgnoreNotFound(k8sClient.Delete(ctx, existing))
 	}
 
-	gvk, err := apiutil.GVKForObject(cr, k8sClient.Scheme())
-	if err != nil {
-		return err
-	}
-
 	byteData := make(map[string][]byte, len(data))
 	for k, v := range data {
 		byteData[k] = []byte(v)
+	}
+	// Ownership was checked above; skip an apply that would change nothing.
+	if exists && maps.EqualFunc(existing.Data, byteData, bytes.Equal) &&
+		existing.Labels[depsv1alpha1.ManagedByLabelKey] == depsv1alpha1.ManagedByLabelValue &&
+		status.AppliedBy(existing, string(secretFieldOwner)) {
+		return nil
+	}
+
+	gvk, err := apiutil.GVKForObject(cr, k8sClient.Scheme())
+	if err != nil {
+		return err
 	}
 
 	apply := applycorev1.Secret(name, cr.Namespace).

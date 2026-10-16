@@ -109,6 +109,11 @@ type ownership struct {
 // exists under this CR's deterministic name prefix — creating, updating,
 // or deleting as needed. k8sClient is only ever touched when
 // alarms.snsTopicRef is set.
+//
+// mayExist is the previous pass's answer (nil when unknown). When it is
+// false and no alarm is desired, nothing is listed: only this operator
+// creates these alarms, and it would have recorded doing so. The returned
+// value is the answer to record for the next pass.
 func Ensure(
 	ctx context.Context,
 	cwClient cloudctlaws.CloudWatchClient,
@@ -118,7 +123,8 @@ func Ensure(
 	sqsSpec *depsv1alpha1.SQSSpec,
 	snsSpec *depsv1alpha1.SNSSpec,
 	dynamodbSpec *depsv1alpha1.DynamoDBSpec,
-) error {
+	mayExist *bool,
+) (bool, error) {
 	own := ownership{
 		namespace: namespace,
 		crName:    crName,
@@ -141,10 +147,10 @@ func Ensure(
 		}}
 		arn, ok, err := iam.ResolveConsumeARN(ctx, k8sClient, consumer, resourceType, ref)
 		if err != nil {
-			return err
+			return mayExistAfterFailure(mayExist), err
 		}
 		if !ok {
-			return &cloudctlaws.ReconcileError{
+			return mayExistAfterFailure(mayExist), &cloudctlaws.ReconcileError{
 				Err:       fmt.Errorf("alarms.snsTopicRef %s/%s/%s is not yet authorized (producer must list this CR in the topic's sharedWith) or does not exist yet", ref.Namespace, ref.Name, ref.ResourceName),
 				Retryable: true,
 			}
@@ -152,7 +158,20 @@ func Ensure(
 		alarmActions = []string{arn}
 	}
 
-	return reconcileAlarms(ctx, cwClient, own, desired, alarmActions)
+	if len(desired) == 0 && mayExist != nil && !*mayExist {
+		return false, nil
+	}
+	if err := reconcileAlarms(ctx, cwClient, own, desired, alarmActions); err != nil {
+		// A failed pass may have created some alarms, or failed to delete
+		// some: assume they exist.
+		return true, err
+	}
+	return len(desired) > 0, nil
+}
+
+// mayExistAfterFailure keeps a known false: nothing was listed or created.
+func mayExistAfterFailure(mayExist *bool) bool {
+	return mayExist == nil || *mayExist
 }
 
 // Cleanup removes every alarm this CR owns, unconditionally — called from

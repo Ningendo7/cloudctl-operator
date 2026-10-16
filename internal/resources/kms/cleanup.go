@@ -151,15 +151,18 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
-			if relErr != nil {
-				if firstErr == nil {
-					firstErr = relErr
+			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+				relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+				if relErr != nil {
+					if firstErr == nil {
+						firstErr = relErr
+					}
+					continue
 				}
-				continue
-			}
-			if relinquished && recordEvent != nil {
-				recordEvent("Normal", "KeyOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained KMS key %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				if relinquished && recordEvent != nil {
+					recordEvent("Normal", "KeyOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained KMS key %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				}
+				status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
 			}
 			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
 			continue

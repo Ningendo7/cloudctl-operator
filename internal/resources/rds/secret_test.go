@@ -25,8 +25,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -501,5 +503,54 @@ func TestEnsureCredentialsSecret_RefusesInstancesWhoseKeysCollide(t *testing.T) 
 	var secret corev1.Secret
 	if getErr := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: CredentialsSecretName("checkout-service")}, &secret); getErr == nil {
 		t.Error("no Secret should be written when two instances map to one key")
+	}
+}
+
+// countingApplies returns a fake client that records managedFields, as the
+// API server does, and counts the applies it receives.
+func countingApplies(t *testing.T, objs ...client.Object) (client.WithWatch, *int) {
+	t.Helper()
+	applies := 0
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objs...).WithReturnManagedFields().
+		WithInterceptorFuncs(interceptor.Funcs{
+			Apply: func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+				applies++
+				return c.Apply(ctx, obj, opts...)
+			},
+		}).Build()
+	return c, &applies
+}
+
+func TestEnsureCredentialsSecret_AppliesOnlyWhenTheCredentialsChange(t *testing.T) {
+	rdsClient := newFakeRDS()
+	smClient := newFakeSecretsManager()
+	cr := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
+	k8sClient, applies := countingApplies(t, cr)
+	ensure := func() {
+		t.Helper()
+		if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
+			t.Fatalf("EnsureCredentialsSecret() error = %v", err)
+		}
+	}
+
+	ensure()
+	ensure()
+	if *applies != 1 {
+		t.Fatalf("applies = %d after two passes with nothing changed, want 1", *applies)
+	}
+
+	for arn := range smClient.secrets {
+		smClient.secrets[arn] = `{"username":"cloudctl_admin","password":"rotated"}`
+	}
+	ensure()
+	if *applies != 2 {
+		t.Fatalf("applies = %d after a rotation, want 2", *applies)
+	}
+	var secret corev1.Secret
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: CredentialsSecretName("checkout-service")}, &secret); err != nil {
+		t.Fatalf("getting mirrored Secret: %v", err)
+	}
+	if string(secret.Data["RDS_ORDERS_DB_PASSWORD"]) != "rotated" {
+		t.Errorf("password = %q, want the rotated one", secret.Data["RDS_ORDERS_DB_PASSWORD"])
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -448,5 +449,85 @@ func TestCleanupSubscriptions_KeepsSubscriptionsWhenTheTopicOwnerCannotBeRead(t 
 	}
 	if !status.HasManagedResource(ledger, subscriptionResourceType, subscriptionLedgerName("orders", ref)) {
 		t.Error("the subscription's ledger entry was dropped")
+	}
+}
+
+func TestEnsureSubscriptions_WritesThePolicyOnlyWhenAGrantIsMissingOrDiffers(t *testing.T) {
+	sqsClient := newFakeSQS()
+	snsClient := newFakeSNSSubscriber()
+	queueURL, queueARN := newSubscriptionTestQueue(sqsClient, "orders")
+	events := newAuthorizedTopicProducer("team-b", "platform-service", "events",
+		"arn:aws:sns:us-east-1:123456789012:events", "default", "checkout-service")
+	audit := newAuthorizedTopicProducer("team-c", "audit-service", "audit",
+		"arn:aws:sns:us-east-1:123456789012:audit", "default", "checkout-service")
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(events, audit).Build()
+	refs := []depsv1alpha1.ConsumeRef{
+		{Namespace: "team-b", Name: "platform-service", ResourceName: "events"},
+		{Namespace: "team-c", Name: "audit-service", ResourceName: "audit"},
+	}
+	var ledger []depsv1alpha1.ManagedResource
+	pass := func() {
+		t.Helper()
+		var err error
+		ledger, err = EnsureSubscriptions(context.Background(), snsClient, sqsClient, k8sClient,
+			"default", "checkout-service", "orders", queueURL, queueARN, refs, ledger, nil)
+		if err != nil {
+			t.Fatalf("EnsureSubscriptions() error = %v", err)
+		}
+	}
+	q := sqsClient.queues["orders"]
+
+	pass()
+	if sqsClient.setQueueAttributesCalls != 1 || policyStatementCount(t, q.policy) != 2 {
+		t.Fatalf("first pass: %d writes and %d statements, want one write with both grants", sqsClient.setQueueAttributesCalls, policyStatementCount(t, q.policy))
+	}
+
+	// A stored policy may come back with one-element lists collapsed, and
+	// with statements someone else added.
+	q.policy = strings.ReplaceAll(q.policy, `["sqs:SendMessage"]`, `"sqs:SendMessage"`)
+	var doc policyDocument
+	if err := json.Unmarshal([]byte(q.policy), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc.Statement = append(doc.Statement, json.RawMessage(`{"Sid":"team-owned","Effect":"Allow","Principal":"*","Action":"sqs:GetQueueUrl","Resource":"*"}`))
+	encoded, _ := json.Marshal(doc)
+	q.policy = string(encoded)
+
+	pass()
+	if sqsClient.setQueueAttributesCalls != 1 {
+		t.Fatalf("writes = %d after a pass with every grant in place, want still 1", sqsClient.setQueueAttributesCalls)
+	}
+
+	q.policy = strings.Replace(q.policy, "arn:aws:sns:us-east-1:123456789012:audit", "arn:aws:sns:us-east-1:123456789012:other", 1)
+	pass()
+	if sqsClient.setQueueAttributesCalls != 2 {
+		t.Fatalf("writes = %d after a grant was changed by hand, want 2", sqsClient.setQueueAttributesCalls)
+	}
+	if !strings.Contains(q.policy, "team-owned") || !strings.Contains(q.policy, ":audit") || strings.Contains(q.policy, ":other") {
+		t.Errorf("expected the grant repaired and the other statement kept, got %s", q.policy)
+	}
+}
+
+func TestEnsure_ASubscribedQueueIsLookedUpOncePerPass(t *testing.T) {
+	sqsClient := newFakeSQS()
+	snsClient := newFakeSNSSubscriber()
+	producer := newAuthorizedTopicProducer("team-b", "platform-service", "events",
+		"arn:aws:sns:us-east-1:123456789012:events", "default", "checkout-service")
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{
+		Name:         "orders",
+		SubscribesTo: []depsv1alpha1.ConsumeRef{{Namespace: "team-b", Name: "platform-service", ResourceName: "events"}},
+	}}}
+
+	ledger, err := Ensure(context.Background(), sqsClient, nil, snsClient, k8sClient, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	before := sqsClient.getQueueUrlCalls
+	if _, err := Ensure(context.Background(), sqsClient, nil, snsClient, k8sClient, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if got := sqsClient.getQueueUrlCalls - before; got != 1 {
+		t.Errorf("GetQueueUrl calls in a steady-state pass = %d, want 1", got)
 	}
 }

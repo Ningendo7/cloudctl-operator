@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -80,7 +81,8 @@ func resolveTopicARN(ctx context.Context, k8sClient client.Client, namespace, cr
 // reconciled there yet, sharedWith not granted) is skipped silently, the
 // same forward-reference tolerance as collectGrants - the next reconcile
 // picks it up once it resolves. A tracked subscription is re-checked once
-// per trust window; the queue policy grant is reasserted every reconcile.
+// per trust window; the queue policy grants are checked every reconcile
+// and written only when one is missing or differs.
 func EnsureSubscriptions(
 	ctx context.Context,
 	snsClient cloudctlaws.SNSClient,
@@ -92,6 +94,7 @@ func EnsureSubscriptions(
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	var firstErr error
+	var allows []subscriptionAllowStatement
 	for _, ref := range subscribesTo {
 		topicARN, ok, err := resolveTopicARN(ctx, k8sClient, namespace, crName, ref)
 		if err != nil && firstErr == nil {
@@ -145,13 +148,24 @@ func EnsureSubscriptions(
 			}
 		}
 
-		if err := addSubscriptionAllow(ctx, sqsClient, queueURL, queueARN, topicARN, subscriptionAllowSid(ledgerName)); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("granting %s/%s/%s send access to queue %q: %w", ref.Namespace, ref.Name, ref.ResourceName, queueName, err)
-			}
-		}
+		allows = append(allows, subscriptionAllow(subscriptionAllowSid(ledgerName), queueARN, topicARN))
+	}
+	if err := ensureSubscriptionAllows(ctx, sqsClient, queueURL, allows); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("granting subscribed topics send access to queue %q: %w", queueName, err)
 	}
 	return ledger, firstErr
+}
+
+// hasSubscriptionEntries reports whether the ledger tracks any subscription
+// of the named queue.
+func hasSubscriptionEntries(ledger []depsv1alpha1.ManagedResource, queueName string) bool {
+	prefix := queueName + subscriptionLedgerSeparator
+	for _, entry := range ledger {
+		if entry.Type == subscriptionResourceType && strings.HasPrefix(entry.Name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // CleanupSubscriptions unsubscribes and revokes the queue-policy grant
@@ -228,31 +242,96 @@ type subscriptionAllowStatement struct {
 	Condition map[string]map[string]string `json:"Condition"`
 }
 
-// addSubscriptionAllow merges an Allow statement for sqs:SendMessage,
-// scoped to the one topic via a SourceArn condition, into the queue's
-// resource policy - the delivery half of an SNS->SQS subscription; AWS
-// doesn't fail Subscribe if this is missing, it just silently drops
-// every message. Idempotent under the same Sid, like
-// addPendingDeletionDeny.
-func addSubscriptionAllow(ctx context.Context, sqsClient sqsAPI, queueURL, queueArn, topicArn, sid string) error {
-	doc, err := readPolicy(ctx, sqsClient, queueURL)
-	if err != nil {
-		return err
-	}
-	doc.Statement = removeStatementBySid(doc.Statement, sid)
-	stmt, err := json.Marshal(subscriptionAllowStatement{
+// subscriptionAllow grants one SNS topic sqs:SendMessage on the queue,
+// scoped by SourceArn: the delivery half of an SNS->SQS subscription. AWS
+// doesn't fail Subscribe if it is missing, it just silently drops every
+// message.
+func subscriptionAllow(sid, queueArn, topicArn string) subscriptionAllowStatement {
+	return subscriptionAllowStatement{
 		Sid:       sid,
 		Effect:    "Allow",
 		Principal: map[string]string{"Service": "sns.amazonaws.com"},
 		Action:    []string{"sqs:SendMessage"},
 		Resource:  queueArn,
 		Condition: map[string]map[string]string{"ArnEquals": {"aws:SourceArn": topicArn}},
-	})
-	if err != nil {
-		return fmt.Errorf("encoding subscription allow statement: %w", err)
 	}
-	doc.Statement = append(doc.Statement, stmt)
+}
+
+// ensureSubscriptionAllows merges allows into the queue's resource policy
+// by Sid, keeping every other statement, and writes only when one is
+// missing or differs. Every write is a read-modify-write of a document
+// people and other tools edit too, so fewer writes lose fewer of their
+// edits.
+func ensureSubscriptionAllows(ctx context.Context, sqsClient sqsAPI, queueURL string, allows []subscriptionAllowStatement) error {
+	if len(allows) == 0 {
+		return nil
+	}
+	doc, err := readPolicy(ctx, sqsClient, queueURL)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for _, allow := range allows {
+		stmt, err := json.Marshal(allow)
+		if err != nil {
+			return fmt.Errorf("encoding subscription allow statement: %w", err)
+		}
+		if current, ok := statementBySid(doc.Statement, allow.Sid); ok && statementsEquivalent(current, stmt) {
+			continue
+		}
+		doc.Statement = append(removeStatementBySid(doc.Statement, allow.Sid), stmt)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
 	return writePolicy(ctx, sqsClient, queueURL, doc)
+}
+
+func statementBySid(statements []json.RawMessage, sid string) (json.RawMessage, bool) {
+	for _, s := range statements {
+		var probe struct {
+			Sid string `json:"Sid"`
+		}
+		if err := json.Unmarshal(s, &probe); err == nil && probe.Sid == sid {
+			return s, true
+		}
+	}
+	return nil, false
+}
+
+// statementsEquivalent compares two policy statements as JSON values,
+// treating a one-element list and its element as equal, since a stored
+// policy may come back with either. Anything else that differs counts as
+// a difference, which only costs a write.
+func statementsEquivalent(a, b json.RawMessage) bool {
+	var av, bv any
+	if json.Unmarshal(a, &av) != nil || json.Unmarshal(b, &bv) != nil {
+		return false
+	}
+	return reflect.DeepEqual(collapseSingletons(av), collapseSingletons(bv))
+}
+
+func collapseSingletons(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = collapseSingletons(e)
+		}
+		return out
+	case []any:
+		if len(t) == 1 {
+			return collapseSingletons(t[0])
+		}
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = collapseSingletons(e)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // removeSubscriptionAllow removes exactly the Sid addSubscriptionAllow

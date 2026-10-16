@@ -164,7 +164,7 @@ func ensureQueue(
 		// own dedicated one - it holds a copy of the exact same sensitive
 		// data, so a second key would add cost and complexity with no
 		// actual isolation benefit.
-		ledger, err = ensureSingleQueue(ctx, awsClient, namespace, crName, crUID, dlqName, queueOptions{
+		ledger, _, err = ensureSingleQueue(ctx, awsClient, namespace, crName, crUID, dlqName, queueOptions{
 			deletionPolicy:  q.DeletionPolicy,
 			force:           q.Force,
 			adopt:           q.Adopt,
@@ -214,7 +214,7 @@ func ensureQueue(
 		visibilityTimeout = q.Overrides.VisibilityTimeoutSeconds
 	}
 
-	ledger, err := ensureSingleQueue(ctx, awsClient, namespace, crName, crUID, q.Name, queueOptions{
+	ledger, queueURL, err := ensureSingleQueue(ctx, awsClient, namespace, crName, crUID, q.Name, queueOptions{
 		deletionPolicy:            q.DeletionPolicy,
 		force:                     q.Force,
 		adopt:                     q.Adopt,
@@ -241,11 +241,7 @@ func ensureQueue(
 	if err != nil {
 		return ledger, fmt.Errorf("resolving queue name for subscription management: %w", err)
 	}
-	urlOut, err := awsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
-	if err != nil {
-		return ledger, fmt.Errorf("resolving queue URL for subscription management: %w", err)
-	}
-	return EnsureSubscriptions(ctx, snsClient, awsClient, k8sClient, namespace, crName, queueName, *urlOut.QueueUrl, entry.ARN, q.SubscribesTo, ledger, recordEvent)
+	return EnsureSubscriptions(ctx, snsClient, awsClient, k8sClient, namespace, crName, queueName, queueURL, entry.ARN, q.SubscribesTo, ledger, recordEvent)
 }
 
 // ensureSingleQueue creates the named queue if it doesn't exist (tagging is
@@ -262,7 +258,7 @@ func ensureSingleQueue(
 	opts queueOptions,
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
-) ([]depsv1alpha1.ManagedResource, error) {
+) (updatedLedger []depsv1alpha1.ManagedResource, queueURL string, err error) {
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, resourceName); existingFound && !status.NeedsRevalidation(existing) {
 		// Still within the trust window - skip re-verifying ownership, but
 		// attribute drift correction is a different concern and must still
@@ -281,7 +277,7 @@ func ensureSingleQueue(
 		// deleted out-of-band must not stay reported Ready until it lapses.
 		queueName, nameErr := queueNameFromARN(existing.ARN)
 		if nameErr != nil {
-			return ledger, nameErr
+			return ledger, "", nameErr
 		}
 		urlOut, err := awsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 			QueueName: &queueName,
@@ -294,14 +290,14 @@ func ensureSingleQueue(
 			}
 			// Falls through to the full path below, which recreates it.
 		case err != nil:
-			return ledger, wrapAWSError(err, "resolving queue URL for drift correction")
+			return ledger, "", wrapAWSError(err, "resolving queue URL for drift correction")
 		default:
 			if len(desiredAttributes(opts)) > 0 {
 				if err := reconcileAttributes(ctx, awsClient, *urlOut.QueueUrl, opts); err != nil {
-					return ledger, wrapAWSError(err, "reconciling queue attributes")
+					return ledger, "", wrapAWSError(err, "reconciling queue attributes")
 				}
 			}
-			return ledger, nil
+			return ledger, *urlOut.QueueUrl, nil
 		}
 	}
 
@@ -339,19 +335,19 @@ func ensureSingleQueue(
 		if cErr != nil {
 			var deletedRecently *types.QueueDeletedRecently
 			if errors.As(cErr, &deletedRecently) {
-				return ledger, &cloudctlaws.ReconcileError{
+				return ledger, "", &cloudctlaws.ReconcileError{
 					Err:       fmt.Errorf("queue %q was deleted too recently to recreate yet (AWS enforces a cooldown): %w", queueName, cErr),
 					Retryable: true,
 				}
 			}
-			return ledger, wrapAWSError(cErr, "creating queue")
+			return ledger, "", wrapAWSError(cErr, "creating queue")
 		}
 		if recordEvent != nil {
 			recordEvent("Normal", "QueueCreated", fmt.Sprintf("Created SQS queue %s", queueName))
 		}
 		// Attributes were just set atomically at creation — nothing to
 		// drift-correct yet.
-		return recordVerified(
+		ledger, err = recordVerified(
 			ctx,
 			awsClient,
 			*createOut.QueueUrl,
@@ -360,22 +356,23 @@ func ensureSingleQueue(
 			opts.force,
 			ledger,
 		)
+		return ledger, *createOut.QueueUrl, err
 	}
 	if err != nil {
-		return ledger, wrapAWSError(err, "looking up queue")
+		return ledger, "", wrapAWSError(err, "looking up queue")
 	}
 
 	// Queue already exists — verify we actually own it before trusting it.
-	queueURL := *getOut.QueueUrl
+	queueURL = *getOut.QueueUrl
 	tagsOut, tErr := awsClient.ListQueueTags(ctx, &sqs.ListQueueTagsInput{QueueUrl: &queueURL})
 	if tErr != nil {
-		return ledger, wrapAWSError(tErr, "reading queue tags")
+		return ledger, "", wrapAWSError(tErr, "reading queue tags")
 	}
 
 	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, crUID) {
 		transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "queue", queueName, tagsOut.Tags, namespace, crName, crUID, opts.adopt)
 		if ownErr != nil {
-			return ledger, ownErr
+			return ledger, "", ownErr
 		}
 		if opts.checkAdoptedKey != nil {
 			attrs, aErr := awsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
@@ -383,10 +380,10 @@ func ensureSingleQueue(
 				AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameKmsMasterKeyId},
 			})
 			if aErr != nil {
-				return ledger, wrapAWSError(aErr, "reading the queue's encryption before adopting it")
+				return ledger, "", wrapAWSError(aErr, "reading the queue's encryption before adopting it")
 			}
 			if err := opts.checkAdoptedKey(ctx, attrs.Attributes[string(types.QueueAttributeNameKmsMasterKeyId)]); err != nil {
-				return ledger, fmt.Errorf("queue %q can't be adopted: %w", queueName, err)
+				return ledger, "", fmt.Errorf("queue %q can't be adopted: %w", queueName, err)
 			}
 		}
 
@@ -395,7 +392,7 @@ func ensureSingleQueue(
 			QueueUrl: &queueURL,
 			Tags:     merged,
 		}); tagErr != nil {
-			return ledger, wrapAWSError(tagErr, "adopting queue (tagging)")
+			return ledger, "", wrapAWSError(tagErr, "adopting queue (tagging)")
 		}
 		if recordEvent != nil {
 			if transferred {
@@ -407,10 +404,10 @@ func ensureSingleQueue(
 	}
 
 	if err := reconcileAttributes(ctx, awsClient, queueURL, opts); err != nil {
-		return ledger, wrapAWSError(err, "reconciling queue attributes")
+		return ledger, "", wrapAWSError(err, "reconciling queue attributes")
 	}
 
-	return recordVerified(
+	ledger, err = recordVerified(
 		ctx,
 		awsClient,
 		queueURL,
@@ -419,6 +416,7 @@ func ensureSingleQueue(
 		opts.force,
 		ledger,
 	)
+	return ledger, queueURL, err
 }
 
 // desiredAttributes computes the mutable attributes this package manages

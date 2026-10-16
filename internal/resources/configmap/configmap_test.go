@@ -642,3 +642,99 @@ func TestAddConsumedRDS_AFailedReadOfTheProducerIsAnError(t *testing.T) {
 		t.Fatal("expected an error, not a silent skip, when the producer can't be read")
 	}
 }
+
+// countingApplies returns a fake client that records managedFields, as the
+// API server does, and counts the applies it receives.
+func countingApplies(t *testing.T, objs ...client.Object) (client.WithWatch, *int) {
+	t.Helper()
+	applies := 0
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objs...).WithReturnManagedFields().
+		WithInterceptorFuncs(interceptor.Funcs{
+			Apply: func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+				applies++
+				return c.Apply(ctx, obj, opts...)
+			},
+		}).Build()
+	return c, &applies
+}
+
+func TestEnsure_AppliesOnlyWhenSomethingDiffers(t *testing.T) {
+	c, applies := countingApplies(t)
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:team-a-checkout-service-orders"},
+			},
+		},
+	}
+	ensure := func() {
+		t.Helper()
+		if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+	}
+
+	ensure()
+	ensure()
+	if *applies != 1 {
+		t.Fatalf("applies = %d after two passes with nothing changed, want 1", *applies)
+	}
+
+	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
+	cm.Data["SQS_ORDERS_URL"] = "hand-edited"
+	if err := c.Update(context.Background(), cm); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	ensure()
+	if *applies != 2 {
+		t.Fatalf("applies = %d after a hand edit, want 2", *applies)
+	}
+	if got := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service")).Data["SQS_ORDERS_URL"]; got == "hand-edited" {
+		t.Error("the hand edit was not repaired")
+	}
+
+	cr.Status.ManagedResources[0].ARN += "-v2"
+	ensure()
+	if *applies != 3 {
+		t.Errorf("applies = %d after the data changed, want 3", *applies)
+	}
+}
+
+func TestEnsure_AppliesWhenMatchingDataWasWrittenByAnotherManager(t *testing.T) {
+	// Taking the fields over matters: a later apply that drops a key only
+	// removes it if this operator's manager owns it.
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:team-a-checkout-service-orders"},
+			},
+		},
+	}
+	isController := true
+	restored := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "team-a", Name: ConfigMapName("checkout-service"),
+			Labels: map[string]string{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: depsv1alpha1.GroupVersion.String(), Kind: "AppDependencies",
+				Name: "checkout-service", UID: "uid-1", Controller: &isController,
+			}},
+		},
+		Data: map[string]string{"SQS_ORDERS_URL": "https://sqs.us-east-1.amazonaws.com/123456789012/team-a-checkout-service-orders"},
+	}
+	c, applies := countingApplies(t, restored)
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if *applies != 1 {
+		t.Errorf("applies = %d, want 1", *applies)
+	}
+}

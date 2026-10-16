@@ -889,7 +889,7 @@ type AppDependenciesSpec struct {
 
 // ManagedResourceState reflects the ownership-ledger trust window for a
 // single managed resource.
-// +kubebuilder:validation:Enum=Creating;TagPending;Verified;NeedsVerification
+// +kubebuilder:validation:Enum=Creating;TagPending;Verified;NeedsVerification;Relinquished
 type ManagedResourceState string
 
 const (
@@ -897,6 +897,11 @@ const (
 	ManagedResourceStateTagPending        ManagedResourceState = "TagPending"
 	ManagedResourceStateVerified          ManagedResourceState = "Verified"
 	ManagedResourceStateNeedsVerification ManagedResourceState = "NeedsVerification"
+	// ManagedResourceStateRelinquished marks a retained resource whose
+	// ownership tags were removed. The entry stays while the CR exists, so
+	// the KMS key its data is encrypted with is kept, but AWS is no longer
+	// read for it.
+	ManagedResourceStateRelinquished ManagedResourceState = "Relinquished"
 )
 
 // ManagedResource is one entry in the ownership ledger — every AWS resource
@@ -972,6 +977,12 @@ type ManagedResource struct {
 	// retained), when spec alone no longer says which key it used.
 	// +optional
 	KMSKeyARN string `json:"kmsKeyARN,omitempty"`
+
+	// appliedDigest is a digest of the last policy document confirmed on
+	// this resource (the IAM role's permissions policy), so an unchanged
+	// document isn't read back until the trust window expires.
+	// +optional
+	AppliedDigest string `json:"appliedDigest,omitempty"`
 }
 
 // AppDependenciesStatus defines the observed state of AppDependencies.
@@ -1006,6 +1017,12 @@ type AppDependenciesStatus struct {
 	// the annotation it left on the *previous* target.
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// alarmsMayExist is false once a pass has found no CloudWatch alarms
+	// owned by this CR, so a CR without alarms doesn't list them on every
+	// pass. Unset means not yet known.
+	// +optional
+	AlarmsMayExist *bool `json:"alarmsMayExist,omitempty"`
 }
 
 // +kubebuilder:object:root=true

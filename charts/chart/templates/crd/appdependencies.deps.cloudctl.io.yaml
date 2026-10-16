@@ -1213,6 +1213,12 @@ spec:
           status:
             description: status defines the observed state of AppDependencies
             properties:
+              alarmsMayExist:
+                description: |-
+                  alarmsMayExist is false once a pass has found no CloudWatch alarms
+                  owned by this CR, so a CR without alarms doesn't list them on every
+                  pass. Unset means not yet known.
+                type: boolean
               conditions:
                 description: |-
                   conditions reflect per-section readiness (e.g. "SQSReady", "S3Ready",
@@ -1292,6 +1298,12 @@ spec:
                     removed (spec alone can't represent "used to exist, now gone"), and gated
                     behind a trust window before being trusted for any mutating action.
                   properties:
+                    appliedDigest:
+                      description: |-
+                        appliedDigest is a digest of the last policy document confirmed on
+                        this resource (the IAM role's permissions policy), so an unchanged
+                        document isn't read back until the trust window expires.
+                      type: string
                     arn:
                       description: arn of the underlying AWS resource.
                       type: string
@@ -1366,6 +1378,7 @@ spec:
                       - TagPending
                       - Verified
                       - NeedsVerification
+                      - Relinquished
                       type: string
                     type:
                       description: type of resource, e.g. "sqs", "s3", "sns", "dynamodb",

@@ -193,7 +193,9 @@ func ensureTable(
 		// Creation only ever happens for a table this CR has never had. One
 		// the ledger knows but DynamoDB no longer has was deleted out-of-band,
 		// and a replacement would be an empty table reported Ready.
-		if entry, found := status.FindManagedResource(ledger, resourceType, resourceName); found {
+		// A relinquished entry is no longer checked against AWS, so its
+		// table being gone says nothing about this CR's data.
+		if entry, found := status.FindManagedResource(ledger, resourceType, resourceName); found && entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
 			return ledger, tableMissingError(entry, tableName, recordEvent)
 		}
 		return createTable(ctx, awsClient, namespace, crName, crUID, tableName, resourceName, opts, ledger, recordEvent)

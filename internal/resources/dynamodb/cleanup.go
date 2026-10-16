@@ -110,24 +110,37 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
-			if relErr != nil {
-				if firstErr == nil {
-					firstErr = relErr
+			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+				if relErr != nil {
+					if firstErr == nil {
+						firstErr = relErr
+					}
+					continue
 				}
-				continue
-			}
-			if gone {
-				// Deleted by hand after being retained: forget it, so
-				// declaring it again creates a fresh table instead of
-				// tripping over an entry for one that no longer exists.
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				continue
-			}
-			if relinquished && recordEvent != nil {
-				recordEvent("Normal", "TableOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained table %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				if gone {
+					// Deleted by hand after being retained: forget it, so
+					// declaring it again creates a fresh table instead of
+					// tripping over an entry for one that no longer exists.
+					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
+					continue
+				}
+				if relinquished && recordEvent != nil {
+					recordEvent("Normal", "TableOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained table %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				}
+				status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
 			}
 			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
+			continue
+		}
+
+		// While a pending table is waiting out the quiet window or the
+		// empty-check backoff nothing is read: the gates that decide that
+		// need no AWS call, and the ownership re-check below runs before
+		// anything that changes the table.
+		if !entry.Force && !forceDeleteAll && entry.PendingDeletionSince != nil &&
+			(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
+			results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
 			continue
 		}
 
@@ -158,16 +171,6 @@ func Cleanup(
 				}
 				continue
 			}
-			if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
-				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-				continue
-			}
-
-			if !status.NeedsEmptyCheck(entry) {
-				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-				continue
-			}
-
 			empty, emptyErr := tableIsEmpty(ctx, client, entry.ARN)
 			if emptyErr != nil {
 				if firstErr == nil {

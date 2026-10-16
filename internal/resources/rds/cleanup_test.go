@@ -1065,3 +1065,26 @@ func TestCleanup_RetainedInstanceDeletedByHand_IsForgotten(t *testing.T) {
 		t.Errorf("expected nothing to report for an instance that no longer exists, got %+v", results)
 	}
 }
+
+func TestCleanup_ARetainedInstanceIsRelinquishedOnceAndKeptInTheLedger(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyRetain)
+	cleanup := func() {
+		t.Helper()
+		var err error
+		if ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+	}
+
+	cleanup()
+	entry, found := status.FindManagedResource(ledger, resourceType, "orders-db")
+	if !found || entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+		t.Fatalf("expected the entry kept as Relinquished, got %+v (found=%v)", entry, found)
+	}
+	reads := client.listTagsForResourceCalls
+	cleanup()
+	if client.listTagsForResourceCalls != reads {
+		t.Errorf("tag reads on a relinquished instance = %d, want none", client.listTagsForResourceCalls-reads)
+	}
+}

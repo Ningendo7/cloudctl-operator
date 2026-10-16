@@ -18,6 +18,8 @@ package iam
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -105,17 +107,31 @@ func Ensure(
 		return ledger, "", err
 	}
 
-	arn, err := ensureRole(ctx, iamClient, cr.Namespace, cr.Name, string(cr.UID), name, trustPolicy)
+	// Inside the trust window the role's tags and its permissions policy
+	// are not read back. GetRole still runs every pass, so a deleted role
+	// or a changed trust policy is caught at once.
+	entry, found := status.FindManagedResource(ledger, resourceType, roleLedgerName)
+	trusted := found && !status.NeedsRevalidation(entry)
+
+	arn, created, err := ensureRole(ctx, iamClient, cr.Namespace, cr.Name, string(cr.UID), name, trustPolicy, !trusted)
 	if err != nil {
 		return ledger, "", err
 	}
 
-	if err := ensureRolePolicy(ctx, iamClient, name, permissionsPolicy); err != nil {
-		return ledger, "", err
+	digest := policyDigest(permissionsPolicy)
+	if !trusted || created || entry.AppliedDigest != digest {
+		if err := ensureRolePolicy(ctx, iamClient, name, permissionsPolicy); err != nil {
+			return ledger, "", err
+		}
 	}
 
-	updatedLedger = recordVerified(ledger, arn)
+	updatedLedger = recordVerified(ledger, arn, digest, trusted && !created)
 	return updatedLedger, arn, skippedToError(skipped)
+}
+
+func policyDigest(document string) string {
+	sum := sha256.Sum256([]byte(document))
+	return hex.EncodeToString(sum[:])
 }
 
 // ensureTrustPolicy builds the IRSA trust policy this CR's role needs,
@@ -191,7 +207,7 @@ func skippedToError(skipped []string) error {
 // under different ownership means something else in this account claimed
 // the exact deterministic name this CR needs, not a resource this CR could
 // ever legitimately want to take over.
-func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID, name, trustPolicy string) (string, error) {
+func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID, name, trustPolicy string, verifyOwnership bool) (arn string, created bool, err error) {
 	getOut, err := iamClient.GetRole(ctx, &iam.GetRoleInput{RoleName: &name})
 
 	var notFound *types.NoSuchEntityException
@@ -202,29 +218,17 @@ func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID,
 			Tags:                     mapToTags(ownerTags(namespace, crName, crUID)),
 		})
 		if cErr != nil {
-			return "", wrapAWSError(cErr, "creating IAM role")
+			return "", false, wrapAWSError(cErr, "creating IAM role")
 		}
-		return *createOut.Role.Arn, nil
+		return *createOut.Role.Arn, true, nil
 	}
 	if err != nil {
-		return "", wrapAWSError(err, "looking up IAM role")
+		return "", false, wrapAWSError(err, "looking up IAM role")
 	}
 
-	tags, tErr := listAllRoleTags(ctx, iamClient, name)
-	if tErr != nil {
-		return "", wrapAWSError(tErr, "reading role tags")
-	}
-	if roleTags := tagsToMap(tags); !cloudctlaws.IsOwnedBy(roleTags, namespace, crName, crUID) {
-		staleUID, stale := cloudctlaws.IsStaleUID(roleTags, namespace, crName, crUID)
-		if !stale || !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-			msg := fmt.Sprintf("IAM role %q already exists and is not owned by this CR — this looks like a naming collision", name)
-			if stale {
-				msg += fmt.Sprintf("; it is tagged with an earlier UID (%s), and to take it over, annotate this CR with %s=%s", staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
-			}
-			return "", errors.New(msg)
-		}
-		if _, err := iamClient.TagRole(ctx, &iam.TagRoleInput{RoleName: &name, Tags: mapToTags(ownerTags(namespace, crName, crUID))}); err != nil {
-			return "", wrapAWSError(err, "taking over IAM role (tagging)")
+	if verifyOwnership {
+		if err := verifyRoleOwnership(ctx, iamClient, namespace, crName, crUID, name); err != nil {
+			return "", false, err
 		}
 	}
 
@@ -233,11 +237,34 @@ func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID,
 			RoleName:       &name,
 			PolicyDocument: &trustPolicy,
 		}); err != nil {
-			return "", wrapAWSError(err, "correcting IAM role trust policy")
+			return "", false, wrapAWSError(err, "correcting IAM role trust policy")
 		}
 	}
 
-	return *getOut.Role.Arn, nil
+	return *getOut.Role.Arn, false, nil
+}
+
+// verifyRoleOwnership refuses a role tagged for anyone else, and takes over
+// one tagged with the previous UID this CR was told to take over from.
+func verifyRoleOwnership(ctx context.Context, iamClient iamAPI, namespace, crName, crUID, name string) error {
+	tags, tErr := listAllRoleTags(ctx, iamClient, name)
+	if tErr != nil {
+		return wrapAWSError(tErr, "reading role tags")
+	}
+	if roleTags := tagsToMap(tags); !cloudctlaws.IsOwnedBy(roleTags, namespace, crName, crUID) {
+		staleUID, stale := cloudctlaws.IsStaleUID(roleTags, namespace, crName, crUID)
+		if !stale || !cloudctlaws.MayTransferFrom(ctx, staleUID) {
+			msg := fmt.Sprintf("IAM role %q already exists and is not owned by this CR — this looks like a naming collision", name)
+			if stale {
+				msg += fmt.Sprintf("; it is tagged with an earlier UID (%s), and to take it over, annotate this CR with %s=%s", staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
+			}
+			return errors.New(msg)
+		}
+		if _, err := iamClient.TagRole(ctx, &iam.TagRoleInput{RoleName: &name, Tags: mapToTags(ownerTags(namespace, crName, crUID))}); err != nil {
+			return wrapAWSError(err, "taking over IAM role (tagging)")
+		}
+	}
+	return nil
 }
 
 // policyDocumentEquivalent compares a freshly-built policy document
@@ -312,11 +339,18 @@ func listAllRoleTags(ctx context.Context, iamClient iamAPI, roleName string) ([]
 	}
 }
 
-func recordVerified(ledger []depsv1alpha1.ManagedResource, arn string) []depsv1alpha1.ManagedResource {
+// recordVerified records the role. keepVerifiedAt keeps the previous
+// LastVerifiedAt when the ownership tags weren't read this pass, so the
+// trust window still expires on time.
+func recordVerified(ledger []depsv1alpha1.ManagedResource, arn, digest string, keepVerifiedAt bool) []depsv1alpha1.ManagedResource {
 	now := metav1.Now()
 	createdAt := now
+	verifiedAt := &now
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, roleLedgerName); existingFound {
 		createdAt = existing.CreatedAt
+		if keepVerifiedAt && existing.LastVerifiedAt != nil {
+			verifiedAt = existing.LastVerifiedAt
+		}
 	}
 	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{
 		Type: resourceType,
@@ -328,8 +362,9 @@ func recordVerified(ledger []depsv1alpha1.ManagedResource, arn string) []depsv1a
 		// identity serves no purpose once that CR is gone.
 		DeletionPolicy: depsv1alpha1.DeletionPolicyDelete,
 		CreatedAt:      createdAt,
-		LastVerifiedAt: &now,
+		LastVerifiedAt: verifiedAt,
 		State:          depsv1alpha1.ManagedResourceStateVerified,
+		AppliedDigest:  digest,
 	})
 	return ledger
 }

@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -582,4 +583,87 @@ func TestReleaseNetworkIdentityLabel_KeepsTheLabelWhileAnotherCRStillUsesIt(t *t
 // plainSA is a ServiceAccount a team created, with no IAM role on it yet.
 func plainSA(name string) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name}}
+}
+
+// countingApplies returns a fake client that records managedFields, as the
+// API server does, and counts the applies it receives.
+func countingApplies(t *testing.T, objs ...client.Object) (client.WithWatch, *int) {
+	t.Helper()
+	applies := 0
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objs...).WithReturnManagedFields().
+		WithInterceptorFuncs(interceptor.Funcs{
+			Apply: func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+				applies++
+				return c.Apply(ctx, obj, opts...)
+			},
+		}).Build()
+	return c, &applies
+}
+
+func TestEnsure_AppliesOnlyWhenSomethingDiffers(t *testing.T) {
+	c, applies := countingApplies(t)
+	cr := newCR("ns", "checkout", "")
+	ensure := func(roleARN string) {
+		t.Helper()
+		if _, err := Ensure(context.Background(), c, cr, roleARN); err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+	}
+
+	ensure("arn:aws:iam::123456789012:role/a")
+	ensure("arn:aws:iam::123456789012:role/a")
+	if *applies != 1 {
+		t.Fatalf("applies = %d after two passes with nothing changed, want 1", *applies)
+	}
+	ensure("arn:aws:iam::123456789012:role/b")
+	if *applies != 2 {
+		t.Fatalf("applies = %d after the role changed, want 2", *applies)
+	}
+
+	sa := getSA(t, c, "ns", "checkout")
+	delete(sa.Annotations, RoleARNAnnotation)
+	if err := c.Update(context.Background(), sa); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	ensure("arn:aws:iam::123456789012:role/b")
+	if *applies != 3 {
+		t.Fatalf("applies = %d after the annotation was removed by hand, want 3", *applies)
+	}
+	if got := getSA(t, c, "ns", "checkout").Annotations[RoleARNAnnotation]; got != "arn:aws:iam::123456789012:role/b" {
+		t.Errorf("role annotation = %q, want it restored", got)
+	}
+
+	// Naming the same ServiceAccount explicitly drops the owner reference,
+	// which only an apply can do.
+	cr.Spec.ServiceAccountName = "checkout"
+	ensure("arn:aws:iam::123456789012:role/b")
+	if *applies != 4 {
+		t.Errorf("applies = %d after the owner reference stopped being wanted, want 4", *applies)
+	}
+}
+
+func TestEnsureNetworkIdentityLabel_AppliesOnlyWhenTheLabelIsMissing(t *testing.T) {
+	c, applies := countingApplies(t, plainSA("app"))
+	ensure := func() {
+		t.Helper()
+		if err := EnsureNetworkIdentityLabel(context.Background(), c, "ns", "checkout", "uid-1", "app"); err != nil {
+			t.Fatalf("EnsureNetworkIdentityLabel: %v", err)
+		}
+	}
+
+	ensure()
+	ensure()
+	if *applies != 1 {
+		t.Fatalf("applies = %d after two passes with nothing changed, want 1", *applies)
+	}
+
+	sa := getSA(t, c, "ns", "app")
+	delete(sa.Labels, NetworkIdentityLabelKey)
+	if err := c.Update(context.Background(), sa); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	ensure()
+	if *applies != 2 {
+		t.Errorf("applies = %d after the label was removed by hand, want 2", *applies)
+	}
 }

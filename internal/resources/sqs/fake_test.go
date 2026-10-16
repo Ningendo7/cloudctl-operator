@@ -63,6 +63,8 @@ type fakeSQS struct {
 	getQueueUrlErr error
 
 	getQueueAttributesCalls int
+	setQueueAttributesCalls int
+	getQueueUrlCalls        int
 }
 
 func newFakeSQS() *fakeSQS {
@@ -88,6 +90,7 @@ func (f *fakeSQS) CreateQueue(_ context.Context, in *sqs.CreateQueueInput, _ ...
 }
 
 func (f *fakeSQS) GetQueueUrl(_ context.Context, in *sqs.GetQueueUrlInput, _ ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error) {
+	f.getQueueUrlCalls++
 	if f.getQueueUrlErr != nil {
 		return nil, f.getQueueUrlErr
 	}
@@ -116,6 +119,7 @@ func (f *fakeSQS) GetQueueAttributes(_ context.Context, in *sqs.GetQueueAttribut
 }
 
 func (f *fakeSQS) SetQueueAttributes(_ context.Context, in *sqs.SetQueueAttributesInput, _ ...func(*sqs.Options)) (*sqs.SetQueueAttributesOutput, error) {
+	f.setQueueAttributesCalls++
 	q := f.findByURL(*in.QueueUrl)
 	if q == nil {
 		return nil, fmt.Errorf("queue not found: %s", *in.QueueUrl)

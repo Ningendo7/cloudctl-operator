@@ -668,22 +668,18 @@ func TestEnsureDesiredState_UnchangedReconcile_SkipsRedundantCheckpoints(t *test
 		t.Fatal("expected the first reconcile (creating a new queue) to checkpoint at least once")
 	}
 
-	// Second reconcile: same CR, nothing in spec changed. SQS's own ledger
-	// entry is stable (inside its trust window, so its section produces no
-	// diff at all) - but the derived IAM role has no such trust window and
-	// always re-stamps LastVerifiedAt to metav1.Now() on every reconcile,
-	// so the IAM section's own checkpoint still fires every time regardless
-	// of this optimization (the same pre-existing gap KMS has). Expected
-	// total is therefore 2, not 1: IAM's unavoidable-for-now checkpoint,
-	// plus reconcileNormal's own trailing write, which is unconditional and
-	// not part of this optimization at all.
+	// Second reconcile: same CR, nothing in spec changed. Every section's
+	// ledger entry is stable (inside its trust window), so none produces a
+	// diff and none checkpoints. What remains is reconcileNormal's own
+	// trailing write, which is unconditional and not part of this
+	// optimization.
 	patchCount = 0
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("second Reconcile() error = %v", err)
 	}
 
-	if patchCount != 2 {
-		t.Errorf("expected exactly 2 status Patch calls on a no-op reconcile (IAM's re-verify checkpoint + the trailing write), got %d", patchCount)
+	if patchCount != 1 {
+		t.Errorf("expected exactly 1 status Patch call on a no-op reconcile (the trailing write), got %d", patchCount)
 	}
 }
 

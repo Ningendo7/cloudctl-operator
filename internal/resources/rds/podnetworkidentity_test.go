@@ -870,3 +870,27 @@ func TestEnsurePodNetworkIdentity_ChangingTheBaseGroupsUpdatesThePolicy(t *testi
 		t.Errorf("groupIds = %v, want sg-old replaced by sg-new", got)
 	}
 }
+
+func TestEnsureSecurityGroupPolicy_AppliesOnlyWhenTheSpecChanges(t *testing.T) {
+	k8sClient, applies := countingApplies(t)
+	ensure := func(serviceAccountName string, groupIDs ...string) {
+		t.Helper()
+		if err := ensureSecurityGroupPolicy(context.Background(), k8sClient, "fulfillment", "fulfillment-service", serviceAccountName, groupIDs); err != nil {
+			t.Fatalf("ensureSecurityGroupPolicy: %v", err)
+		}
+	}
+
+	ensure("worker", "sg-base", "sg-db")
+	ensure("worker", "sg-base", "sg-db")
+	if *applies != 1 {
+		t.Fatalf("applies = %d after two passes with nothing changed, want 1", *applies)
+	}
+	ensure("worker", "sg-base", "sg-db-2")
+	if *applies != 2 {
+		t.Fatalf("applies = %d after the group changed, want 2", *applies)
+	}
+	ensure("other-worker", "sg-base", "sg-db-2")
+	if *applies != 3 {
+		t.Errorf("applies = %d after the ServiceAccount changed, want 3", *applies)
+	}
+}
