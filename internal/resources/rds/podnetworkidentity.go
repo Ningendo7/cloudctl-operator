@@ -153,7 +153,7 @@ func EnsurePodNetworkIdentity(
 	}
 	arn := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, groupID)
 
-	if err := serviceaccount.EnsureNetworkIdentityLabel(ctx, k8sClient, namespace, serviceAccountName); err != nil {
+	if err := serviceaccount.EnsureNetworkIdentityLabel(ctx, k8sClient, namespace, crName, crUID, serviceAccountName); err != nil {
 		return ledger, fmt.Errorf("labeling ServiceAccount %q for network identity: %w", serviceAccountName, err)
 	}
 	if len(options.baseGroupIDs) == 0 && options.recordEvent != nil {
@@ -342,7 +342,7 @@ func CleanupPodNetworkIdentity(
 	if err := k8sClient.Delete(ctx, policy); err != nil && !apierrors.IsNotFound(err) {
 		return ledger, fmt.Errorf("deleting SecurityGroupPolicy: %w", err)
 	}
-	if err := serviceaccount.ReleaseNetworkIdentityLabel(ctx, k8sClient, namespace, serviceAccountName); err != nil {
+	if err := serviceaccount.ReleaseNetworkIdentityLabel(ctx, k8sClient, namespace, crName, crUID, serviceAccountName); err != nil {
 		return ledger, fmt.Errorf("releasing network identity label on ServiceAccount %q: %w", serviceAccountName, err)
 	}
 

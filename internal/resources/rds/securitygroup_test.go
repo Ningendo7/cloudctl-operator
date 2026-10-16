@@ -19,6 +19,7 @@ package rds
 import (
 	"context"
 	"errors"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"testing"
 
 	"github.com/aws/smithy-go"
@@ -830,5 +831,37 @@ func TestCleanupInstanceSecurityGroups_IgnoresThePodIdentityEntry(t *testing.T) 
 	ledger, err := CleanupInstanceSecurityGroups(context.Background(), ec2Client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, []depsv1alpha1.ManagedResource{podEntry}, true)
 	if err != nil || len(ledger) != 1 || ec2Client.deleteSecurityGroupCalls != 0 {
 		t.Errorf("touched the pod identity entry: ledger=%+v err=%v deletes=%d", ledger, err, ec2Client.deleteSecurityGroupCalls)
+	}
+}
+
+// withFailingCRReadsSG wraps c so that reading any AppDependencies fails, as
+// a cache or API-server hiccup would, once *failing is true.
+func withFailingCRReadsSG(c client.WithWatch, failing *bool) client.Client {
+	return interceptor.NewClient(c, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isCR := obj.(*depsv1alpha1.AppDependencies); isCR && *failing {
+				return errors.New("injected: API server unavailable")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+}
+
+func TestEnsureSecurityGroup_KeepsAConsumersIngressWhenItCannotBeRead(t *testing.T) {
+	consumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+	ec2Client := newFakeEC2()
+	failing := false
+	k8sClient := withFailingCRReadsSG(fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build(), &failing)
+	arn := ensureInstanceGroup(t, ec2Client, k8sClient, fulfillmentShare)
+
+	failing = true
+	_, err := EnsureSecurityGroup(context.Background(), newFakeRDS(), ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false,
+		[]depsv1alpha1.SharedWithEntry{fulfillmentShare})
+	if err == nil {
+		t.Fatal("expected an error, not a revoke, when the consumer can't be read")
+	}
+	if got := grantedGroups(ec2Client, arn); len(got) != 1 || ec2Client.revokeSecurityGroupIngressCalls != 0 {
+		t.Errorf("revoked the consumer's database access because it couldn't be read: still granted %v", got)
 	}
 }

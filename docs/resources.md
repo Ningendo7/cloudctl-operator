@@ -379,11 +379,13 @@ spec:
   namespace+name) in that resource's `sharedWith`, and the level of access
   (`ReadOnly` or `ReadWrite`) is the *owner's* choice via `sharedWith[].access`,
   never the consumer's. `ReadOnly` still includes whatever's mechanically
-  required to consume at all (`sqs:DeleteMessage`, `sns:Subscribe`, ...);
+  required to consume at all (`sqs:DeleteMessage`, `sns:GetTopicAttributes`, ...);
   `ReadWrite` adds the ability to write new data (`sqs:SendMessage`,
   `sns:Publish`, `s3:PutObject`, `dynamodb:PutItem`, ...). A `consumes` entry
   with no matching `sharedWith` grant is reported as unauthorized rather
-  than silently dropped or silently honored.
+  than silently dropped or silently honored. A topic's consumers can't
+  subscribe endpoints themselves: they receive its messages through
+  `subscribesTo`, which the operator removes when access is revoked.
 - **Role naming and trust policy**: one role per CR, trust-scoped via IRSA
   (`sts:AssumeRoleWithWebIdentity`) to `system:serviceaccount:<namespace>:<serviceAccountName>`
   using the cluster's OIDC provider. **`--oidc-provider-arn` and
@@ -412,7 +414,10 @@ spec:
   `spec.serviceAccountName`, or on an operator-owned ServiceAccount named
   after the CR (`status.serviceAccountName` says which), and
   `<cr-name>-connection` carries env-var-shaped keys for every owned and
-  authorized consumed resource. See
+  authorized consumed resource. A named ServiceAccount must already exist
+  (`ServiceAccountNotFound` otherwise), and one carrying an IAM role set
+  outside the operator is only taken over once it's annotated
+  `cloudctl.io/allow-claim: <cr-name>` (`ServiceAccountNotClaimable`). See
   [architecture.md](architecture.md#resource-identity-delivery-to-workloads).
 
 ## Shared behavior

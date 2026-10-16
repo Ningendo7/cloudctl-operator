@@ -18,6 +18,9 @@ package iam
 
 import (
 	"context"
+	"errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"testing"
 
 	"github.com/aws/smithy-go"
@@ -294,5 +297,54 @@ func TestCleanup_TreatsAlreadyGoneInlinePolicyAsSuccess(t *testing.T) {
 	}
 	if status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("expected the ledger entry to be removed")
+	}
+}
+
+// withFailingCRReads wraps c so that reading any AppDependencies fails, as
+// a cache or API-server hiccup would, once *failing is true.
+func withFailingCRReads(c client.WithWatch, failing *bool) client.Client {
+	return interceptor.NewClient(c, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isCR := obj.(*depsv1alpha1.AppDependencies); isCR && *failing {
+				return errors.New("injected: API server unavailable")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+}
+
+// A failed read of the producer is not a revocation. Treating it as one
+// narrowed the role's policy, or deleted a consumer-only CR's role outright,
+// until the next pass, and IAM propagation lag made the outage longer.
+func TestCollectGrants_AFailedReadOfTheProducerIsNotARevocation(t *testing.T) {
+	failing := true
+	producer := encryptedProducer(nil, "", false)
+	c := withFailingCRReads(newFakeK8sClient(producer).(client.WithWatch), &failing)
+
+	grants, skipped, err := collectGrants(context.Background(), c, ordersConsumer())
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable error, got grants=%v skipped=%v err=%v", grants, skipped, err)
+	}
+}
+
+func TestCleanup_KeepsAConsumerOnlyRoleWhenTheProducerCannotBeRead(t *testing.T) {
+	failing := true
+	iamClient := newFakeIAM()
+	cr := ordersConsumer()
+	name := roleName(cr.Namespace, cr.Name)
+	arn := "arn:aws:iam::123456789012:role/" + name
+	iamClient.roles[name] = &fakeRole{arn: arn, tags: map[string]string{
+		cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue(cr.Namespace, cr.Name), cloudctlaws.OwnerUIDTagKey: string(cr.UID),
+	}}
+	producer := encryptedProducer(nil, "", false)
+	c := withFailingCRReads(newFakeK8sClient(producer).(client.WithWatch), &failing)
+
+	ledger, err := Cleanup(context.Background(), iamClient, c, cr, roleLedger(arn), false)
+	if err == nil {
+		t.Fatal("expected an error, not a cleanup decision, when the producer can't be read")
+	}
+	if _, kept := iamClient.roles[name]; !kept || !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
+		t.Error("the role was deleted because the producer couldn't be read")
 	}
 }

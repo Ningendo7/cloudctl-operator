@@ -324,9 +324,9 @@ func addConsumed(
 	region,
 	accountID string,
 ) error {
-	arn, ok := iam.ResolveConsumeARN(ctx, k8sClient, consumer, resourceType, ref)
-	if !ok {
-		return nil
+	arn, ok, err := iam.ResolveConsumeARN(ctx, k8sClient, consumer, resourceType, ref)
+	if err != nil || !ok {
+		return err
 	}
 	key, value, err := connectionKV(resourceType, ref.ResourceName, arn, region, accountID, ref.Namespace, ref.Name)
 	if err != nil {

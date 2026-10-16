@@ -19,7 +19,10 @@ package sqs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"slices"
 	"testing"
 	"time"
@@ -403,5 +406,47 @@ func TestSubscriptionLedgerName_UniquePerQueueAndRef(t *testing.T) {
 	}
 	if subscriptionLedgerName("orders", refA) == subscriptionLedgerName("shipments", refA) {
 		t.Error("expected the same ref on different queues to produce different ledger names")
+	}
+}
+
+// withFailingCRReadsSub wraps c so that reading any AppDependencies fails, as
+// a cache or API-server hiccup would, once *failing is true.
+func withFailingCRReadsSub(c client.WithWatch, failing *bool) client.Client {
+	return interceptor.NewClient(c, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isCR := obj.(*depsv1alpha1.AppDependencies); isCR && *failing {
+				return errors.New("injected: API server unavailable")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+}
+
+func TestCleanupSubscriptions_KeepsSubscriptionsWhenTheTopicOwnerCannotBeRead(t *testing.T) {
+	sqsClient := newFakeSQS()
+	snsClient := newFakeSNSSubscriber()
+	queueURL, queueARN := newSubscriptionTestQueue(sqsClient, "orders")
+	producer := newAuthorizedTopicProducer("team-b", "platform-service", "events",
+		"arn:aws:sns:us-east-1:123456789012:events", "default", "checkout-service")
+	failing := false
+	k8sClient := withFailingCRReadsSub(fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build(), &failing)
+	ref := depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "events"}
+	ledger, err := EnsureSubscriptions(context.Background(), snsClient, sqsClient, k8sClient,
+		"default", "checkout-service", "orders", queueURL, queueARN, []depsv1alpha1.ConsumeRef{ref}, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsureSubscriptions() error = %v", err)
+	}
+
+	failing = true
+	ledger, err = CleanupSubscriptions(context.Background(), snsClient, sqsClient, k8sClient,
+		"default", "checkout-service", "orders", queueURL, []depsv1alpha1.ConsumeRef{ref}, ledger, nil)
+	if err == nil {
+		t.Fatal("expected an error, not an unsubscribe, when the topic owner can't be read")
+	}
+	if len(snsClient.unsubscribed) != 0 || len(snsClient.subscriptions) != 1 {
+		t.Errorf("unsubscribed %v because the topic owner couldn't be read", snsClient.unsubscribed)
+	}
+	if !status.HasManagedResource(ledger, subscriptionResourceType, subscriptionLedgerName("orders", ref)) {
+		t.Error("the subscription's ledger entry was dropped")
 	}
 }

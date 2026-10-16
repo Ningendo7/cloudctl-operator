@@ -18,6 +18,9 @@ package serviceaccount
 
 import (
 	"context"
+	"errors"
+	"maps"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -101,27 +104,17 @@ func TestEnsure_DefaultName_CreatesOwnedServiceAccount(t *testing.T) {
 	}
 }
 
-func TestEnsure_ExplicitName_CreatesUnownedServiceAccount(t *testing.T) {
+// Creating a ServiceAccount the user named but never made would let a CR
+// author create ServiceAccounts their own RBAC may not allow, and nothing
+// would ever delete it.
+func TestEnsure_ExplicitNameThatDoesNotExist_IsReportedNotCreated(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	cr := newCR("ns", "checkout", "custom-sa")
 
-	got, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/ns-checkout-role")
-	if err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
-	if got != "custom-sa" {
-		t.Errorf("expected explicit name %q, got %q", "custom-sa", got)
-	}
-
-	sa := getSA(t, c, "ns", "custom-sa")
-	if sa.Annotations[RoleARNAnnotation] == "" {
-		t.Error("expected role-arn annotation to be set")
-	}
-	// Never take ownership of a user-named target, even one this call had
-	// to create because it didn't exist yet — its lifecycle belongs to
-	// whatever the user's own manifests do with it.
-	if owner := metav1.GetControllerOf(sa); owner != nil {
-		t.Errorf("expected no owner reference on an explicitly user-named ServiceAccount, got %+v", owner)
+	_, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/ns-checkout-role")
+	assertReason(t, err, ReasonServiceAccountNotFound)
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "custom-sa"}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected the ServiceAccount not to be created, got %v", err)
 	}
 }
 
@@ -156,7 +149,7 @@ func TestEnsure_PreExisting_MergesWithoutClobberingOtherAnnotations(t *testing.T
 // TestEnsure_DifferentCROwnsTarget_Refused guards against two CRs sharing
 // one serviceAccountName silently taking turns owning its IRSA role.
 func TestEnsure_DifferentCROwnsTarget_Refused(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(plainSA("shared-sa")).Build()
 
 	owner := newCR("ns", "checkout", "shared-sa")
 	if _, err := Ensure(context.Background(), c, owner, "arn:aws:iam::123456789012:role/checkout"); err != nil {
@@ -207,7 +200,7 @@ func TestEnsure_DefaultName_StaleOwnerFromRecreatedCR_Refused(t *testing.T) {
 // TestEnsure_SameCRReconcilingAgain_UpdatesOwnRoleARN confirms the
 // ownership check only blocks a *different* CR, not the owner reconciling.
 func TestEnsure_SameCRReconcilingAgain_UpdatesOwnRoleARN(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(plainSA("shared-sa")).Build()
 	cr := newCR("ns", "checkout", "shared-sa")
 
 	if _, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/v1"); err != nil {
@@ -264,7 +257,7 @@ func TestEnsure_Rename_CleansUpPreviousTarget(t *testing.T) {
 			Annotations: map[string]string{"unrelated": "keep-me"},
 		},
 	}
-	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(old).Build()
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(old, plainSA("new-sa")).Build()
 
 	crOld := newCR("ns", "checkout", "old-sa")
 	if _, err := Ensure(context.Background(), c, crOld, "arn:aws:iam::123456789012:role/x"); err != nil {
@@ -439,4 +432,154 @@ func TestCleanup_UserProvidedName_NeverGainsAnOwnerReference(t *testing.T) {
 	if got := getSA(t, c, "ns", "team-sa"); len(got.OwnerReferences) != 0 {
 		t.Errorf("a ServiceAccount the user created must never be owned, got %v", got.OwnerReferences)
 	}
+}
+
+func assertReason(t *testing.T, err error, reason string) {
+	t.Helper()
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reason {
+		t.Fatalf("expected reason %s, got %v", reason, err)
+	}
+}
+
+const platformRole = "arn:aws:iam::123456789012:role/platform-payments"
+
+func saWithRole(name string, annotations map[string]string) *corev1.ServiceAccount {
+	all := map[string]string{RoleARNAnnotation: platformRole}
+	maps.Copy(all, annotations)
+	return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, Annotations: all}}
+}
+
+// A CR author who can't edit ServiceAccounts must not be able to swap a
+// workload's IAM role through the operator. The role someone else set is
+// left alone unless the ServiceAccount itself consents.
+func TestEnsure_RefusesToReplaceARoleSetOutsideTheOperator(t *testing.T) {
+	for name, tc := range map[string]struct {
+		annotations map[string]string
+		wantClaimed bool
+	}{
+		"no consent":             {nil, false},
+		"consent for another CR": {map[string]string{AllowClaimAnnotation: "someone-else"}, false},
+		"consent for this CR":    {map[string]string{AllowClaimAnnotation: "checkout"}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(saWithRole("payments-api", tc.annotations)).Build()
+			cr := newCR("ns", "checkout", "payments-api")
+
+			_, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/ns-checkout-role")
+			role := getSA(t, c, "ns", "payments-api").Annotations[RoleARNAnnotation]
+			if tc.wantClaimed {
+				if err != nil || role != "arn:aws:iam::123456789012:role/ns-checkout-role" {
+					t.Fatalf("expected the consenting ServiceAccount claimed, got err=%v role=%s", err, role)
+				}
+				return
+			}
+			assertReason(t, err, ReasonServiceAccountNotClaimable)
+			if !strings.Contains(err.Error(), AllowClaimAnnotation) {
+				t.Errorf("the error should say how to consent: %v", err)
+			}
+			if role != platformRole {
+				t.Errorf("the platform's role was replaced with %s", role)
+			}
+		})
+	}
+}
+
+// Checks come before releasing the previous ServiceAccount, or a refused
+// retarget would leave the workload with no role at all.
+func TestEnsure_ARefusedRetargetKeepsThePreviousServiceAccount(t *testing.T) {
+	plain := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "checkout-sa"}}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(plain, saWithRole("payments-api", nil)).Build()
+	cr := newCR("ns", "checkout", "checkout-sa")
+	const role = "arn:aws:iam::123456789012:role/ns-checkout-role"
+	got, err := Ensure(context.Background(), c, cr, role)
+	if err != nil {
+		t.Fatalf("first Ensure: %v", err)
+	}
+	cr.Status.ServiceAccountName = got
+
+	cr.Spec.ServiceAccountName = "payments-api"
+	_, err = Ensure(context.Background(), c, cr, role)
+	assertReason(t, err, ReasonServiceAccountNotClaimable)
+	if getSA(t, c, "ns", "checkout-sa").Annotations[RoleARNAnnotation] != role {
+		t.Error("the previous ServiceAccount lost its role although the retarget was refused")
+	}
+}
+
+// --- network identity label ---
+
+func TestEnsureNetworkIdentityLabel_OnlyLabelsServiceAccountsItMay(t *testing.T) {
+	cases := map[string]struct {
+		objects    []client.Object
+		saName     string
+		wantReason string
+	}{
+		"a named ServiceAccount that doesn't exist":    {nil, "payments-api", ReasonServiceAccountNotFound},
+		"one carrying a role set outside the operator": {[]client.Object{saWithRole("payments-api", nil)}, "payments-api", ReasonServiceAccountNotClaimable},
+		"the same, consenting":                         {[]client.Object{saWithRole("payments-api", map[string]string{AllowClaimAnnotation: "checkout"})}, "payments-api", ""},
+		"a plain ServiceAccount":                       {[]client.Object{&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "app"}}}, "app", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(tc.objects...).Build()
+			err := EnsureNetworkIdentityLabel(context.Background(), c, "ns", "checkout", "uid-1", tc.saName)
+			if tc.wantReason != "" {
+				assertReason(t, err, tc.wantReason)
+				return
+			}
+			if err != nil {
+				t.Fatalf("EnsureNetworkIdentityLabel: %v", err)
+			}
+			if getSA(t, c, "ns", tc.saName).Labels[NetworkIdentityLabelKey] != tc.saName {
+				t.Error("expected the label")
+			}
+		})
+	}
+}
+
+// The CR's own default ServiceAccount is created when missing, owned by the
+// CR so it goes when the CR does.
+func TestEnsureNetworkIdentityLabel_CreatesTheCRsOwnServiceAccount(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	if err := EnsureNetworkIdentityLabel(context.Background(), c, "ns", "checkout", "uid-1", "checkout"); err != nil {
+		t.Fatalf("EnsureNetworkIdentityLabel: %v", err)
+	}
+	sa := getSA(t, c, "ns", "checkout")
+	if owner := metav1.GetControllerOf(sa); owner == nil || owner.UID != "uid-1" || owner.Kind != "AppDependencies" {
+		t.Errorf("expected the CR as controller owner, got %+v", owner)
+	}
+	if sa.Labels[NetworkIdentityLabelKey] != "checkout" {
+		t.Error("expected the label")
+	}
+}
+
+// Each CR holds the label under its own field manager, so one releasing it
+// doesn't take it away from another that still needs it.
+func TestReleaseNetworkIdentityLabel_KeepsTheLabelWhileAnotherCRStillUsesIt(t *testing.T) {
+	plain := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "app"}}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(plain).Build()
+	ctx := context.Background()
+	for _, cr := range []string{"one", "two"} {
+		if err := EnsureNetworkIdentityLabel(ctx, c, "ns", cr, "uid-"+cr, "app"); err != nil {
+			t.Fatalf("EnsureNetworkIdentityLabel(%s): %v", cr, err)
+		}
+	}
+
+	if err := ReleaseNetworkIdentityLabel(ctx, c, "ns", "one", "uid-one", "app"); err != nil {
+		t.Fatalf("release one: %v", err)
+	}
+	if getSA(t, c, "ns", "app").Labels[NetworkIdentityLabelKey] != "app" {
+		t.Fatal("the label went away while CR two still uses it")
+	}
+	if err := ReleaseNetworkIdentityLabel(ctx, c, "ns", "two", "uid-two", "app"); err != nil {
+		t.Fatalf("release two: %v", err)
+	}
+	if _, still := getSA(t, c, "ns", "app").Labels[NetworkIdentityLabelKey]; still {
+		t.Error("expected the label gone once no CR uses it")
+	}
+}
+
+// plainSA is a ServiceAccount a team created, with no IAM role on it yet.
+func plainSA(name string) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name}}
 }

@@ -139,7 +139,10 @@ func Ensure(
 			Namespace: namespace,
 			Name:      crName,
 		}}
-		arn, ok := iam.ResolveConsumeARN(ctx, k8sClient, consumer, resourceType, ref)
+		arn, ok, err := iam.ResolveConsumeARN(ctx, k8sClient, consumer, resourceType, ref)
+		if err != nil {
+			return err
+		}
 		if !ok {
 			return &cloudctlaws.ReconcileError{
 				Err:       fmt.Errorf("alarms.snsTopicRef %s/%s/%s is not yet authorized (producer must list this CR in the topic's sharedWith) or does not exist yet", ref.Namespace, ref.Name, ref.ResourceName),

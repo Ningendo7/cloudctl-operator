@@ -53,7 +53,10 @@ func Cleanup(
 	}
 
 	if !deleting {
-		grants, _ := collectGrants(ctx, k8sClient, cr)
+		grants, _, err := collectGrants(ctx, k8sClient, cr)
+		if err != nil {
+			return ledger, err
+		}
 		if len(grants) > 0 {
 			return ledger, nil // still needed
 		}
