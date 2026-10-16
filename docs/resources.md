@@ -288,7 +288,7 @@ the CR declares or provisions.
 
 A consumer of an encrypted queue, topic or bucket gets the key permissions it needs too. A key that is disabled or unavailable fails `KMSReady` (`KeyDisabled`, `KeyUnavailable`) and is never re-enabled by the operator. Keys also let SNS and CloudWatch use them, so SNS can deliver into an encrypted queue and alarms can publish to an encrypted topic.
 
-**Upgrading from v0.2.0.** `encryption.kmsKeyRef` used to be a cross-CR reference object, and `kms.resources[].sharedWith` and `kms.consumes` existed; v0.3.0 removed all three. After the CRD upgrade the API server drops the removed fields from stored objects, and a CR that used the object form is left with an empty `kmsKeyRef: {}`. From v0.3.1 the manager refuses such a CR: `KMSReady` goes `False` with reason `LegacyKMSKeyRef`, naming the resource, and nothing is reconciled for it until it's edited. Every other CR is unaffected. v0.3.0 cannot decode that object, which makes its cache fail to list every `AppDependencies`, so go straight to v0.3.1, or edit those CRs first.
+**Upgrading from v0.2.0.** v0.3.0 removed the cross-CR `encryption.kmsKeyRef` object and `kms.resources[].sharedWith` / `kms.consumes`. Go straight to v0.3.1 or later, since v0.3.0 cannot decode a CR that still has the object form; from v0.3.1 such a CR fails `KMSReady` with `LegacyKMSKeyRef` until it is edited.
 
 **Known gap:** drift correction only ever moves in the "enable, or point
 at a different key" direction — removing `encryption` from spec doesn't
@@ -406,33 +406,12 @@ spec:
   references it, so access is granted or revoked without waiting on that
   consumer's own next periodic reconcile.
 
-- **ServiceAccount wiring**: once a role exists, the controller attaches
-  `eks.amazonaws.com/role-arn` to `spec.serviceAccountName`, or, if unset,
-  to an operator-owned ServiceAccount named after the CR (created if it
-  doesn't exist, owner-referenced so native GC removes it with the CR). A
-  pre-existing ServiceAccount at either name is never adopted by force —
-  only one this operator itself creates gets an owner reference; an
-  existing one is merged into (read-merge-write, same discipline as every
-  AWS-side tag write) so other annotations on it survive. Renaming
-  `spec.serviceAccountName` cleans the annotation off the previous target.
-  `status.serviceAccountName` reports which ServiceAccount currently
-  carries it.
-
-- **Connection ConfigMap**: `<cr-name>-connection` carries flat,
-  env-var-shaped keys for every owned resource (`SQS_ORDERS_URL`,
-  `S3_RECEIPTS_BUCKET`, `DYNAMODB_SESSIONS_TABLE_NAME`, `SNS_EVENTS_ARN`)
-  plus every *authorized* `consumes` entry, mirrored with the producer
-  CR's name folded into the key to avoid collisions. Regenerated every
-  reconcile, deleted outright once nothing remains to report. See
-  [architecture.md](architecture.md#resource-identity-delivery-to-workloads)
-  for the full design, including why a consumed entry is silently omitted
-  rather than exposed when the producer hasn't actually granted it.
-
-**Not yet built:**
-- Stale `sharedWith` entries pointing at a deleted consumer CR aren't
-  pruned from spec (mutating a user-authored field would fight a
-  GitOps-managed manifest on its next sync), but they are surfaced —
-  see `SharedWithReferencesValid` below.
+- **ServiceAccount and connection ConfigMap**: the role ARN goes on
+  `spec.serviceAccountName`, or on an operator-owned ServiceAccount named
+  after the CR (`status.serviceAccountName` says which), and
+  `<cr-name>-connection` carries env-var-shaped keys for every owned and
+  authorized consumed resource. See
+  [architecture.md](architecture.md#resource-identity-delivery-to-workloads).
 
 ## Shared behavior
 
