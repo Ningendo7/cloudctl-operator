@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -25,12 +26,14 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -64,6 +67,11 @@ type AppDependenciesReconciler struct {
 	// manager reconciles in parallel. Left at zero (the Go zero value, not
 	// a deliberate "disable" setting) falls back to defaultMaxConcurrentReconciles
 	MaxConcurrentReconciles int
+
+	// transientBackoff counts each CR's consecutive transient failures; see
+	// transientDelay. Created on first use, so a zero-valued reconciler works.
+	transientBackoff     workqueue.TypedRateLimiter[reconcile.Request]
+	transientBackoffOnce sync.Once
 }
 
 const defaultMaxConcurrentReconciles = 5
@@ -85,6 +93,7 @@ func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	var cr depsv1alpha1.AppDependencies
 	if err := r.Get(ctx, req.NamespacedName, &cr); err != nil {
 		if apierror.IsNotFound(err) {
+			r.resetTransientBackoff(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -132,14 +141,18 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 		}
 	}
 
+	key := client.ObjectKeyFromObject(cr)
 	if err != nil {
 		if isRetryable(err) {
-			log.Info("Reconcile hit a transient error, requeuing", "error", err.Error(), "requeueAfter", transientRequeueInterval, "duration", time.Since(start))
-			return ctrl.Result{RequeueAfter: transientRequeueInterval}, nil
+			delay := r.transientDelay(key)
+			log.Info("Reconcile hit a transient error, requeuing", "error", err.Error(), "requeueAfter", delay, "failures", r.transientBackoffLimiter().NumRequeues(reconcile.Request{NamespacedName: key}), "duration", time.Since(start))
+			return ctrl.Result{RequeueAfter: delay}, nil
 		}
+		r.resetTransientBackoff(key)
 		log.Error(err, "Reconcile failed", "duration", time.Since(start))
 		return ctrl.Result{}, err
 	}
+	r.resetTransientBackoff(key)
 
 	requeueAfter := jitteredDriftRequeue()
 	log.Info("Reconcile succeeded", "requeueAfter", requeueAfter, "duration", time.Since(start))
@@ -164,14 +177,18 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 		log.Error(statusErr, "failed to update status during deletion")
 	}
 
+	key := client.ObjectKeyFromObject(cr)
 	if err != nil {
 		if isRetryable(err) {
-			log.Info("Deletion reconcile hit a transient error, requeuing", "error", err.Error(), "requeueAfter", transientRequeueInterval, "duration", time.Since(start))
-			return ctrl.Result{RequeueAfter: transientRequeueInterval}, nil
+			delay := r.transientDelay(key)
+			log.Info("Deletion reconcile hit a transient error, requeuing", "error", err.Error(), "requeueAfter", delay, "duration", time.Since(start))
+			return ctrl.Result{RequeueAfter: delay}, nil
 		}
+		r.resetTransientBackoff(key)
 		log.Error(err, "Deletion reconcile failed", "duration", time.Since(start))
 		return ctrl.Result{}, err
 	}
+	r.resetTransientBackoff(key)
 
 	if !done {
 		requeueAfter := jitteredDriftRequeue()

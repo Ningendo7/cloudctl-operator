@@ -24,7 +24,9 @@ import (
 	"time"
 
 	"github.com/aws/smithy-go"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -246,5 +248,114 @@ func TestStatusWriteContext_OutlivesACancelledPass(t *testing.T) {
 	}
 	if got := timeoutOf(ctx, t); got > statusWriteTimeout {
 		t.Errorf("timeout = %v, want at most %v", got, statusWriteTimeout)
+	}
+}
+
+// withinJitter reports whether got is want give or take the requeue jitter.
+func withinJitter(got, want time.Duration) bool {
+	return got >= time.Duration(float64(want)*(1-driftRequeueJitterFraction)) &&
+		got <= time.Duration(float64(want)*(1+driftRequeueJitterFraction))
+}
+
+func throttledReconciler(t *testing.T, cr *depsv1alpha1.AppDependencies) (*AppDependenciesReconciler, *fakeSQSClient) {
+	t.Helper()
+	patches := 0
+	r := newCountingReconciler(t, &patches, cr)
+	sqsFake := r.AWSClients.SQS.(*fakeSQSClient)
+	return r, sqsFake
+}
+
+func transientCR() *depsv1alpha1.AppDependencies {
+	return &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service", UID: "uid-1", Finalizers: []string{finalizerName}},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
+		},
+	}
+}
+
+// A transient failure keeps being retried, but further apart each time, up
+// to a cap: during a long AWS problem a CR shouldn't re-run all its sections
+// every 30 seconds, and the cap keeps a waiting state (an instance still
+// creating) from being noticed more than a couple of minutes late.
+func TestReconcile_TransientFailuresBackOffUpToACap(t *testing.T) {
+	cr := transientCR()
+	r, sqsFake := throttledReconciler(t, cr)
+	sqsFake.getQueueUrlErr = &smithy.GenericAPIError{Code: "ThrottlingException"}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+	want := []time.Duration{transientRequeueInterval, 2 * transientRequeueInterval, 4 * transientRequeueInterval, transientMaxDelay, transientMaxDelay}
+	for i, w := range want {
+		res, err := r.Reconcile(context.Background(), req)
+		if err != nil {
+			t.Fatalf("pass %d: Reconcile() error = %v, want a requeue instead of an error", i+1, err)
+		}
+		if !withinJitter(res.RequeueAfter, w) {
+			t.Errorf("pass %d: RequeueAfter = %v, want about %v", i+1, res.RequeueAfter, w)
+		}
+	}
+}
+
+func TestReconcile_ASuccessfulPassStartsTheBackoffOver(t *testing.T) {
+	cr := transientCR()
+	r, sqsFake := throttledReconciler(t, cr)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+	sqsFake.getQueueUrlErr = &smithy.GenericAPIError{Code: "ThrottlingException"}
+	for range 3 {
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+	}
+
+	sqsFake.getQueueUrlErr = nil
+	if res, err := r.Reconcile(context.Background(), req); err != nil || res.RequeueAfter < time.Minute {
+		t.Fatalf("expected a healthy pass to requeue at the drift interval, got %v, %v", res.RequeueAfter, err)
+	}
+
+	sqsFake.getQueueUrlErr = &smithy.GenericAPIError{Code: "ThrottlingException"}
+	res, err := r.Reconcile(context.Background(), req)
+	if err != nil || !withinJitter(res.RequeueAfter, transientRequeueInterval) {
+		t.Errorf("after a success the first failure should wait about %v again, got %v, %v", transientRequeueInterval, res.RequeueAfter, err)
+	}
+}
+
+func TestReconcile_EachCRBacksOffOnItsOwn(t *testing.T) {
+	cr := transientCR()
+	r, sqsFake := throttledReconciler(t, cr)
+	sqsFake.getQueueUrlErr = &smithy.GenericAPIError{Code: "ThrottlingException"}
+
+	failing := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+	for range 3 {
+		if _, err := r.Reconcile(context.Background(), failing); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+	}
+	other := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "billing-service", UID: "uid-2", Finalizers: []string{finalizerName}},
+		Spec:       transientCR().Spec,
+	}
+	if err := r.Create(context.Background(), other); err != nil {
+		t.Fatalf("creating the second CR: %v", err)
+	}
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: other.Namespace, Name: other.Name}})
+	if err != nil || !withinJitter(res.RequeueAfter, transientRequeueInterval) {
+		t.Errorf("a CR's first failure should wait about %v whatever another CR has been through, got %v, %v", transientRequeueInterval, res.RequeueAfter, err)
+	}
+}
+
+// CRs that failed together shouldn't all come back at the same instant.
+func TestTransientDelay_SpreadsCRsThatFailedTogether(t *testing.T) {
+	r := &AppDependenciesReconciler{}
+	seen := map[time.Duration]bool{}
+	for i := range 20 {
+		d := r.transientDelay(types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("cr-%d", i)})
+		if !withinJitter(d, transientRequeueInterval) {
+			t.Fatalf("first delay %v is not about %v", d, transientRequeueInterval)
+		}
+		seen[d] = true
+	}
+	if len(seen) < 10 {
+		t.Errorf("20 CRs got only %d distinct first delays, want them spread out", len(seen))
 	}
 }
