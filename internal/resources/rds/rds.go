@@ -107,7 +107,11 @@ type instanceOptions struct {
 	multiAZ           bool
 	backupEnabled     bool
 	kmsKeyARN         *string
-	securityGroupID   string
+	// encryptionOff is an explicit encryption: {enabled: false}; without
+	// it, an instance with no key is encrypted with AWS's RDS key.
+	encryptionOff      bool
+	deletionProtection *bool
+	securityGroupID    string
 }
 
 // Ensure reconciles every declared RDS instance against AWS, updating the
@@ -166,7 +170,7 @@ func Ensure(
 			continue
 		}
 
-		if err := checkAdoptable(ctx, awsClient, namespace, crName, r, ledger); err != nil {
+		if err := checkAdoptable(ctx, awsClient, kmsClient, namespace, crName, r, ledger); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("instance %q: %w", r.Name, err)
 			}
@@ -184,16 +188,18 @@ func Ensure(
 		ledger = recordInstanceSecurityGroup(ledger, r.Name, sgARN)
 
 		opts := instanceOptions{
-			deletionPolicy:    r.DeletionPolicy,
-			adopt:             r.Adopt,
-			engine:            r.Engine,
-			engineVersion:     r.EngineVersion,
-			instanceClass:     r.InstanceClass,
-			allocatedStorage:  r.AllocatedStorage,
-			applyImmediately:  r.ApplyImmediately,
-			allowMajor:        r.AllowMajorVersionUpgrade,
-			dbSubnetGroupName: r.DBSubnetGroupName,
-			securityGroupID:   SecurityGroupIDFromARN(sgARN),
+			deletionPolicy:     r.DeletionPolicy,
+			adopt:              r.Adopt,
+			engine:             r.Engine,
+			engineVersion:      r.EngineVersion,
+			instanceClass:      r.InstanceClass,
+			allocatedStorage:   r.AllocatedStorage,
+			applyImmediately:   r.ApplyImmediately,
+			allowMajor:         r.AllowMajorVersionUpgrade,
+			dbSubnetGroupName:  r.DBSubnetGroupName,
+			securityGroupID:    SecurityGroupIDFromARN(sgARN),
+			encryptionOff:      r.Encryption != nil && !r.Encryption.Enabled && r.Encryption.KMSKeyRef == "",
+			deletionProtection: r.DeletionProtection,
 		}
 		if r.HighAvailability != nil {
 			opts.multiAZ = r.HighAvailability.Enabled
@@ -449,10 +455,16 @@ func createInstance(
 	} else {
 		input.BackupRetentionPeriod = aws.Int32(0)
 	}
-	if opts.kmsKeyARN != nil {
+	switch {
+	case opts.kmsKeyARN != nil:
 		input.StorageEncrypted = aws.Bool(true)
 		input.KmsKeyId = opts.kmsKeyARN
+	case !opts.encryptionOff:
+		// Encryption can't be added later, so it is on unless the spec
+		// opts out; with no key named, RDS uses its own managed key.
+		input.StorageEncrypted = aws.Bool(true)
 	}
+	input.DeletionProtection = aws.Bool(opts.deletionProtection == nil || *opts.deletionProtection)
 
 	createOut, err := awsClient.CreateDBInstance(ctx, input)
 	if err != nil {
@@ -532,7 +544,9 @@ func reconcileInstanceAttributes(ctx context.Context, awsClient rdsAPI, instance
 		modify.VpcSecurityGroupIds = groups
 	}
 
-	if !storageGrowth && !otherChange && !groupMissing {
+	protectionChange := reconcileDeletionProtection(modify, instance, instanceARN, opts, recordEvent)
+
+	if !storageGrowth && !otherChange && !groupMissing && !protectionChange {
 		return nil
 	}
 	// An immediate modify also applies every change already pending, so
@@ -549,6 +563,30 @@ func reconcileInstanceAttributes(ctx context.Context, awsClient rdsAPI, instance
 		recordEvent("Normal", "ChangeDeferred", fmt.Sprintf("Changes to RDS instance %s will apply in its next maintenance window (set applyImmediately to apply now)", instanceARN))
 	}
 	return nil
+}
+
+// reconcileDeletionProtection keeps deletion protection in line with the
+// spec, on by default, for an instance this operator created. An adopted
+// instance's own setting is only changed when the spec sets it, and only
+// reported otherwise. The change applies at once, with no maintenance
+// window or downtime.
+func reconcileDeletionProtection(modify *rds.ModifyDBInstanceInput, instance types.DBInstance, instanceARN string, opts instanceOptions, recordEvent status.EventRecorder) bool {
+	have := aws.ToBool(instance.DeletionProtection)
+	if opts.adopt && opts.deletionProtection == nil {
+		if !have && recordEvent != nil {
+			recordEvent("Warning", "DeletionProtectionOff", fmt.Sprintf("Adopted RDS instance %s has deletion protection off; the operator leaves an adopted instance's setting alone unless deletionProtection is set in its spec", instanceARN))
+		}
+		return false
+	}
+	want := opts.deletionProtection == nil || *opts.deletionProtection
+	if have == want {
+		return false
+	}
+	modify.DeletionProtection = aws.Bool(want)
+	if want && recordEvent != nil {
+		recordEvent("Warning", "DeletionProtectionEnabled", fmt.Sprintf("Turned on deletion protection for RDS instance %s; set deletionProtection: false to allow deleting it", instanceARN))
+	}
+	return true
 }
 
 // withSecurityGroup returns the instance's current security groups plus

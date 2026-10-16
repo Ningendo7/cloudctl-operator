@@ -929,3 +929,28 @@ func TestEnsure_AdoptingTable_EmitsAdoptedEvent(t *testing.T) {
 		t.Errorf("expected exactly one TableAdopted event, got %+v", *events)
 	}
 }
+
+func TestEnsure_RefusesToAdoptATableEncryptedWithAKeyItDoesNotManage(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	const key = "arn:aws:kms:us-east-1:123456789012:key/team-owned"
+	client.tables[tableName] = &fakeTable{
+		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:       types.TableStatusActive,
+		tags:         map[string]string{},
+		partitionKey: "id",
+		kmsKeyARN:    key,
+	}
+	kmsClient := kmstest.NewFakeKMSClient()
+	kmsClient.AddKey(key, false)
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id", Adopt: true}}}
+	_, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != "AdoptionConflict" {
+		t.Fatalf("expected an AdoptionConflict for a resource encrypted with a key the spec doesn't name, got %v", err)
+	}
+	if cloudctlaws.IsOwnedBy(client.tables[tableName].tags, "default", "checkout-service", "uid-1") {
+		t.Error("a refused table must not be tagged as owned")
+	}
+}

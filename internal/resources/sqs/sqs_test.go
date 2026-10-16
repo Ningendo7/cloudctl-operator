@@ -1032,3 +1032,42 @@ func TestEnsure_WithinTrustWindow_OtherLookupErrorsStillSurface(t *testing.T) {
 		t.Fatal("expected a lookup failure that isn't 'queue missing' to be reported, not treated as a reason to recreate")
 	}
 }
+
+// A queue encrypted with a customer key the spec doesn't name is refused:
+// the operator would not grant, track or protect that key, and messages
+// already in the queue stay encrypted with it.
+func TestEnsure_RefusesToAdoptAQueueEncryptedWithAKeyItDoesNotManage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		awsManaged bool
+		refused    bool
+	}{"customer key": {false, true}, "AWS-managed key": {true, false}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeSQS()
+			queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
+			const key = "arn:aws:kms:us-east-1:123456789012:key/team-owned"
+			_, _ = client.CreateQueue(context.Background(), &sqs.CreateQueueInput{
+				QueueName: &queueName, Attributes: map[string]string{"KmsMasterKeyId": key},
+			})
+			client.queues[queueName].tags = nil
+			kmsClient := kmstest.NewFakeKMSClient()
+			kmsClient.AddKey(key, tc.awsManaged)
+
+			spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", Adopt: true}}}
+			_, err := Ensure(context.Background(), client, kmsClient, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+			owned := cloudctlaws.IsOwnedBy(client.queues[queueName].tags, "default", "checkout-service", "uid-1")
+			if !tc.refused {
+				if err != nil || !owned {
+					t.Fatalf("expected the queue adopted, got err=%v owned=%v", err, owned)
+				}
+				return
+			}
+			var reconcileErr *cloudctlaws.ReconcileError
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != "AdoptionConflict" {
+				t.Fatalf("expected an AdoptionConflict for a resource encrypted with a key the spec doesn't name, got %v", err)
+			}
+			if owned {
+				t.Error("a refused queue must not be tagged as owned")
+			}
+		})
+	}
+}

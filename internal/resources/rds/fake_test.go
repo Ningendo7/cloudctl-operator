@@ -72,7 +72,12 @@ type fakeInstance struct {
 	storageType           string
 	iops                  *int32
 	publiclyAccessible    bool
+	deletionProtection    bool
 }
+
+// awsManagedRDSKey stands for the key RDS uses when encryption is on and no
+// key is named.
+const awsManagedRDSKey = "arn:aws:kms:us-east-1:123456789012:key/aws-rds"
 
 type fakeSnapshot struct {
 	id, arn, instanceID, status string
@@ -160,6 +165,8 @@ func (f *fakeRDS) CreateDBInstance(_ context.Context, in *rds.CreateDBInstanceIn
 	var kmsKeyARN string
 	if in.KmsKeyId != nil {
 		kmsKeyARN = *in.KmsKeyId
+	} else if aws.ToBool(in.StorageEncrypted) {
+		kmsKeyARN = awsManagedRDSKey
 	}
 	var backupRetention int32
 	if in.BackupRetentionPeriod != nil {
@@ -192,6 +199,7 @@ func (f *fakeRDS) CreateDBInstance(_ context.Context, in *rds.CreateDBInstanceIn
 		kmsKeyARN:             kmsKeyARN,
 		masterUsername:        masterUsername,
 		manageMasterPassword:  manageMasterPassword,
+		deletionProtection:    aws.ToBool(in.DeletionProtection),
 	}
 	return &rds.CreateDBInstanceOutput{
 		DBInstance: &types.DBInstance{
@@ -217,6 +225,9 @@ func (f *fakeRDS) ModifyDBInstance(_ context.Context, in *rds.ModifyDBInstanceIn
 	// whatever was already pending.
 	if in.VpcSecurityGroupIds != nil {
 		i.securityGroupIDs = in.VpcSecurityGroupIds
+	}
+	if in.DeletionProtection != nil {
+		i.deletionProtection = *in.DeletionProtection
 	}
 	if i.pending == nil {
 		i.pending = &types.PendingModifiedValues{}
@@ -314,6 +325,7 @@ func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInsta
 				MasterUserSecret:      masterUserSecret,
 				StorageEncrypted:      boolPtr(i.kmsKeyARN != ""),
 				PubliclyAccessible:    boolPtr(i.publiclyAccessible),
+				DeletionProtection:    boolPtr(i.deletionProtection),
 			},
 		},
 	}, nil

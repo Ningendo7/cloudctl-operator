@@ -68,6 +68,10 @@ type queueOptions struct {
 	// DerivedResourceName's own doc comment for why).
 	derivedFromKey string
 	derivedRole    string
+
+	// checkAdoptedKey vets the key an existing queue is encrypted with
+	// before it is adopted; nil skips the check.
+	checkAdoptedKey func(ctx context.Context, currentKey string) error
 }
 
 // Ensure reconciles every declared SQS queue (and its DLQ, if requested)
@@ -148,6 +152,8 @@ func ensureQueue(
 		}
 	}
 
+	checkAdoptedKey := kms.AdoptedKeyCheck(kmsClient, kmsKeyARN)
+
 	var dlqArn string
 	if q.DLQ {
 		dlqName := cloudctlaws.DerivedKey(q.Name, "dlq")
@@ -159,13 +165,14 @@ func ensureQueue(
 		// data, so a second key would add cost and complexity with no
 		// actual isolation benefit.
 		ledger, err = ensureSingleQueue(ctx, awsClient, namespace, crName, crUID, dlqName, queueOptions{
-			deletionPolicy: q.DeletionPolicy,
-			force:          q.Force,
-			adopt:          q.Adopt,
-			fifo:           q.FIFO,
-			kmsKeyARN:      kmsKeyARN,
-			derivedFromKey: q.Name,
-			derivedRole:    "dlq",
+			deletionPolicy:  q.DeletionPolicy,
+			force:           q.Force,
+			adopt:           q.Adopt,
+			fifo:            q.FIFO,
+			kmsKeyARN:       kmsKeyARN,
+			derivedFromKey:  q.Name,
+			derivedRole:     "dlq",
+			checkAdoptedKey: checkAdoptedKey,
 		}, ledger, recordEvent)
 		if err != nil {
 			return ledger, fmt.Errorf("dlq: %w", err)
@@ -216,6 +223,7 @@ func ensureQueue(
 		visibilityTimeoutSeconds:  visibilityTimeout,
 		redrivePolicy:             redrivePolicy,
 		kmsKeyARN:                 kmsKeyARN,
+		checkAdoptedKey:           checkAdoptedKey,
 	}, ledger, recordEvent)
 	if err != nil {
 		return ledger, err
@@ -373,6 +381,18 @@ func ensureSingleQueue(
 		}
 		if !opts.adopt {
 			return ledger, fmt.Errorf("queue %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", queueName)
+		}
+		if opts.checkAdoptedKey != nil {
+			attrs, aErr := awsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+				QueueUrl:       &queueURL,
+				AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameKmsMasterKeyId},
+			})
+			if aErr != nil {
+				return ledger, wrapAWSError(aErr, "reading the queue's encryption before adopting it")
+			}
+			if err := opts.checkAdoptedKey(ctx, attrs.Attributes[string(types.QueueAttributeNameKmsMasterKeyId)]); err != nil {
+				return ledger, fmt.Errorf("queue %q can't be adopted: %w", queueName, err)
+			}
 		}
 
 		merged := cloudctlaws.MergeTags(tagsOut.Tags, ownerTags)

@@ -803,3 +803,46 @@ func TestEnsure_KeyPolicyKeepsOtherStatementsAndIsNotRewrittenWhenCurrent(t *tes
 		t.Errorf("PutKeyPolicy calls = %d, want no rewrite of a policy that is already current", client.putKeyPolicyCalls)
 	}
 }
+
+// Adopting a resource encrypted with a key the operator doesn't know would
+// leave that key untracked and unprotected, and not granted to the CR's
+// role, while data already written stays encrypted with it.
+func TestCheckAdoptedKey(t *testing.T) {
+	client := newFakeKMS()
+	const customer = "arn:aws:kms:us-east-1:123456789012:key/customer"
+	const awsManaged = "arn:aws:kms:us-east-1:123456789012:key/aws-sqs"
+	client.keys[customer] = &fakeKey{arn: customer, keyID: "customer", keyState: types.KeyStateEnabled}
+	client.keys[awsManaged] = &fakeKey{arn: awsManaged, keyID: "aws-sqs", keyState: types.KeyStateEnabled, keyManager: types.KeyManagerTypeAws}
+	client.aliases["alias/team-key"] = customer
+
+	cases := []struct {
+		name          string
+		current, want string
+		wantRefused   bool
+	}{
+		{"not encrypted, or with a key AWS owns", "", "", false},
+		{"a key AWS manages for the service", awsManaged, "", false},
+		{"the key the spec names", customer, customer, false},
+		{"the key the spec names, found by alias", "alias/team-key", customer, false},
+		{"a customer key the spec doesn't name", customer, "", true},
+		{"a customer key other than the one the spec names", customer, "arn:aws:kms:us-east-1:123456789012:key/other", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckAdoptedKey(context.Background(), client, tc.current, tc.want)
+			if !tc.wantRefused {
+				if err != nil {
+					t.Errorf("CheckAdoptedKey() = %v, want nil", err)
+				}
+				return
+			}
+			var reconcileErr *cloudctlaws.ReconcileError
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != "AdoptionConflict" || reconcileErr.Retryable {
+				t.Fatalf("expected a non-retryable AdoptionConflict, got %v", err)
+			}
+			if !strings.Contains(err.Error(), customer) || !strings.Contains(err.Error(), "kmsKeyRef") {
+				t.Errorf("the error should name the key and say how to adopt it: %v", err)
+			}
+		})
+	}
+}

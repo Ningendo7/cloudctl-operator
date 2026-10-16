@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -73,6 +74,9 @@ type bucketOptions struct {
 	lifecycleOverride    []depsv1alpha1.S3LifecycleRule
 	lifecycleOverrideSet bool
 	kmsKeyARN            *string
+	// checkAdoptedKey vets the key an existing bucket is encrypted with
+	// before it is adopted; nil skips the check.
+	checkAdoptedKey func(ctx context.Context, currentKey string) error
 }
 
 // bucketName derives the actual AWS bucket name. Unlike SQS/SNS/DynamoDB,
@@ -157,6 +161,8 @@ func Ensure(
 				opts.kmsKeyARN = &arn
 			}
 		}
+
+		opts.checkAdoptedKey = kms.AdoptedKeyCheck(kmsClient, opts.kmsKeyARN)
 
 		var err error
 		ledger, err = ensureBucket(ctx, awsClient, namespace, crName, crUID, region, accountID, b.Name, opts, ledger, recordEvent)
@@ -275,6 +281,19 @@ func ensureBucket(
 		}
 		if !opts.adopt {
 			return ledger, fmt.Errorf("bucket %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", bucket)
+		}
+		if opts.checkAdoptedKey != nil {
+			currentKey, keyErr := bucketKMSKey(ctx, awsClient, bucket)
+			if keyErr != nil {
+				return ledger, keyErr
+			}
+			if err := opts.checkAdoptedKey(ctx, currentKey); err != nil {
+				return ledger, fmt.Errorf("bucket %q can't be adopted: %w", bucket, err)
+			}
+			if want := aws.ToString(opts.kmsKeyARN); want != "" && !sameKey(currentKey, want) && recordEvent != nil {
+				recordEvent("Normal", "BucketExistingObjectsKeepTheirEncryption", fmt.Sprintf(
+					"Adopted S3 bucket %s: new objects use KMS key %s; objects already in it keep their current encryption until they are rewritten", bucket, want))
+			}
 		}
 
 		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
@@ -474,6 +493,34 @@ func lifecycleRuleFingerprint(r types.LifecycleRule) (string, bool) {
 // created by this operator. Not an error condition either way. No typed
 // exception exists for this one in the SDK — same as isNoSuchTagSet's own
 // string-code check below.
+// sameKey reports whether a bucket's configured key, an ARN or a bare key
+// ID, is the key ARN want.
+func sameKey(current, want string) bool {
+	return current != "" && (current == want || strings.HasSuffix(want, "/"+current))
+}
+
+// bucketKMSKey returns the KMS key a bucket encrypts new objects with by
+// default, or "" for none, SSE-S3, or SSE-KMS with the AWS-managed aws/s3
+// key, which needs no key ID.
+func bucketKMSKey(ctx context.Context, awsClient s3API, bucket string) (string, error) {
+	out, err := awsClient.GetBucketEncryption(ctx, &s3sdk.GetBucketEncryptionInput{Bucket: &bucket})
+	if isServerSideEncryptionConfigurationNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", wrapAWSError(err, "reading the bucket's encryption before adopting it")
+	}
+	if out.ServerSideEncryptionConfiguration == nil {
+		return "", nil
+	}
+	for _, rule := range out.ServerSideEncryptionConfiguration.Rules {
+		if def := rule.ApplyServerSideEncryptionByDefault; def != nil && def.KMSMasterKeyID != nil {
+			return *def.KMSMasterKeyID, nil
+		}
+	}
+	return "", nil
+}
+
 func isServerSideEncryptionConfigurationNotFound(err error) bool {
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "ServerSideEncryptionConfigurationNotFoundError"

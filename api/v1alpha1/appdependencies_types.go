@@ -716,6 +716,14 @@ type RDSInstanceSpec struct {
 	// +optional
 	Adopt bool `json:"adopt,omitempty"`
 
+	// deletionProtection makes AWS refuse to delete the instance until it
+	// is turned off. Unset means on for an instance this operator creates,
+	// and the instance is kept in line with it while declared. Unset on an
+	// adopted instance, the instance's own setting is left alone and only
+	// reported when off.
+	// +optional
+	DeletionProtection *bool `json:"deletionProtection,omitempty"`
+
 	// sharedWith grants other AppDependencies CRs network access to this
 	// instance via a dedicated, operator-owned security group - not an
 	// IAM grant. It authorizes network reachability only: a consumer gets
@@ -741,10 +749,11 @@ type RDSInstanceSpec struct {
 	// +optional
 	Replication *RDSReplicationSpec `json:"replication,omitempty"`
 
-	// encryption enables storage encryption with a KMS key. See
-	// EncryptionSpec. Immutable: AWS cannot change an instance's storage
-	// encryption in place, so it can be neither added to, changed on, nor
-	// removed from an existing entry.
+	// encryption chooses the KMS key for storage encryption. See
+	// EncryptionSpec. Unset, storage is encrypted with AWS's own RDS key;
+	// enabled: false without a kmsKeyRef leaves it unencrypted. Immutable:
+	// AWS cannot change an instance's storage encryption in place, so it can
+	// be neither added to, changed on, nor removed from an existing entry.
 	// +optional
 	Encryption *EncryptionSpec `json:"encryption,omitempty"`
 }

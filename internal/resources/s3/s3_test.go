@@ -823,3 +823,63 @@ func TestEnsure_RecreatesBucketDeletedOutOfBandWithinTrustWindow(t *testing.T) {
 		t.Errorf("expected a BucketMissing event, got %v", events)
 	}
 }
+
+func TestEnsure_RefusesToAdoptABucketEncryptedWithAKeyItDoesNotManage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		awsManaged bool
+		refused    bool
+	}{"customer key": {false, true}, "AWS-managed key": {true, false}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeS3()
+			bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+			const key = "arn:aws:kms:us-east-1:123456789012:key/team-owned"
+			client.buckets[bucket] = &fakeBucket{tags: map[string]string{}, kmsKeyARN: key}
+			kmsClient := kmstest.NewFakeKMSClient()
+			kmsClient.AddKey(key, tc.awsManaged)
+
+			spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts", Adopt: true}}}
+			_, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+			owned := cloudctlaws.IsOwnedBy(client.buckets[bucket].tags, "default", "checkout-service", "uid-1")
+			if !tc.refused {
+				if err != nil || !owned {
+					t.Fatalf("expected the bucket adopted, got err=%v owned=%v", err, owned)
+				}
+				return
+			}
+			var reconcileErr *cloudctlaws.ReconcileError
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != "AdoptionConflict" {
+				t.Fatalf("expected an AdoptionConflict for a resource encrypted with a key the spec doesn't name, got %v", err)
+			}
+			if owned {
+				t.Error("a refused bucket must not be tagged as owned")
+			}
+		})
+	}
+}
+
+// AWS already encrypts every bucket, so adopting one while the spec names a
+// key is allowed: new objects get the key, but existing ones keep their old
+// encryption until rewritten, which the operator says rather than implies.
+func TestEnsure_AdoptingAnAWSEncryptedBucketSwitchesNewObjectsToTheSpecsKey(t *testing.T) {
+	client := newFakeS3()
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	client.buckets[bucket] = &fakeBucket{tags: map[string]string{}}
+	kmsClient := kmstest.NewFakeKMSClient()
+	var events []string
+	record := func(_, reason, _ string) { events = append(events, reason) }
+
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{
+		Name: "receipts", Adopt: true, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true},
+	}}}
+	ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, record)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	key, _ := kms.SharedKeyARN(ledger, cloudctlaws.DedicatedKeyLedgerName("s3", "receipts"))
+	if key == "" || client.buckets[bucket].kmsKeyARN != key {
+		t.Errorf("bucket key = %q, want new objects on the dedicated key %q", client.buckets[bucket].kmsKeyARN, key)
+	}
+	if !slices.Contains(events, "BucketExistingObjectsKeepTheirEncryption") {
+		t.Errorf("expected a note that existing objects keep their encryption, got %v", events)
+	}
+}

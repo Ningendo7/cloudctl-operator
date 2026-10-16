@@ -528,6 +528,46 @@ func ensureKeyPolicy(ctx context.Context, kmsClient kmsAPI, arn string) error {
 	return err
 }
 
+// reasonAdoptionConflict is the reason RDS gives for the same kind of refusal.
+const reasonAdoptionConflict = "AdoptionConflict"
+
+// CheckAdoptedKey decides whether a resource found encrypted with currentKey
+// (a key ID, ARN or alias; empty for none or a key AWS owns) can be adopted
+// by a spec that wants wantKey (an ARN, empty for none). A key AWS manages
+// for the service is usable by any role in the account, so it is fine. Any
+// other key must be the one the spec names: the operator only grants,
+// tracks and protects keys it knows, and data already written stays
+// encrypted with the old key even if the resource is switched to a new one.
+func CheckAdoptedKey(ctx context.Context, kmsClient kmsAPI, currentKey, wantKey string) error {
+	if currentKey == "" {
+		return nil
+	}
+	if kmsClient == nil {
+		return fmt.Errorf("no KMS client to check key %s of the resource being adopted", currentKey)
+	}
+	out, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: &currentKey})
+	if err != nil {
+		return wrapAWSError(err, fmt.Sprintf("looking up key %s of the resource being adopted", currentKey))
+	}
+	arn := aws.ToString(out.KeyMetadata.Arn)
+	if out.KeyMetadata.KeyManager == types.KeyManagerTypeAws || (wantKey != "" && arn == wantKey) {
+		return nil
+	}
+	return &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("it is encrypted with KMS key %s, which this CR doesn't manage; declare that key under "+
+			"kms.resources with adopt: true and point encryption.kmsKeyRef at it", arn),
+		Reason: reasonAdoptionConflict,
+	}
+}
+
+// AdoptedKeyCheck returns CheckAdoptedKey bound to the key a spec wants, for
+// packages that check a resource's key only once they know it exists.
+func AdoptedKeyCheck(kmsClient kmsAPI, wantKey *string) func(ctx context.Context, currentKey string) error {
+	return func(ctx context.Context, currentKey string) error {
+		return CheckAdoptedKey(ctx, kmsClient, currentKey, aws.ToString(wantKey))
+	}
+}
+
 // Reasons for a key the operator won't use, and won't change on its own:
 // someone may have disabled it deliberately, during an incident for example.
 const (

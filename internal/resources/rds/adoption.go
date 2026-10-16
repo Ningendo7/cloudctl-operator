@@ -43,6 +43,7 @@ const reasonAdoptionConflict = "AdoptionConflict"
 func checkAdoptable(
 	ctx context.Context,
 	awsClient rdsAPI,
+	kmsClient cloudctlaws.KMSClient,
 	namespace, crName string,
 	r depsv1alpha1.RDSInstanceSpec,
 	ledger []depsv1alpha1.ManagedResource,
@@ -72,7 +73,14 @@ func checkAdoptable(
 		return nil
 	}
 
-	conflicts := adoptionConflicts(instance, r, ledger)
+	conflicts := adoptionConflicts(instance, r)
+	keyConflict, err := encryptionConflict(ctx, kmsClient, instance, r, ledger)
+	if err != nil {
+		return err
+	}
+	if keyConflict != "" {
+		conflicts = append(conflicts, keyConflict)
+	}
 	if len(conflicts) == 0 {
 		return nil
 	}
@@ -83,12 +91,56 @@ func checkAdoptable(
 	}
 }
 
+// encryptionConflict says how the instance's storage encryption differs from
+// what the spec asks for. RDS can't change either afterwards. An unset
+// encryption means AWS's own RDS key.
+func encryptionConflict(
+	ctx context.Context,
+	kmsClient cloudctlaws.KMSClient,
+	instance types.DBInstance,
+	r depsv1alpha1.RDSInstanceSpec,
+	ledger []depsv1alpha1.ManagedResource,
+) (string, error) {
+	have := aws.ToBool(instance.StorageEncrypted)
+	key := aws.ToString(instance.KmsKeyId)
+	e := r.Encryption
+	switch {
+	case e != nil && e.Enabled:
+		if have {
+			return "storage is encrypted with an existing key, but encryption.enabled asks for a new one, which RDS cannot switch to; point encryption.kmsKeyRef at the instance's key instead", nil
+		}
+		return "storage is not encrypted (spec: encryption.enabled), and RDS cannot encrypt an existing instance", nil
+	case e != nil && e.KMSKeyRef != "":
+		if !have {
+			return "storage is not encrypted (spec: encryption.kmsKeyRef), and RDS cannot encrypt an existing instance", nil
+		}
+		if want, ok := kms.SharedKeyARN(ledger, e.KMSKeyRef); ok && key != want {
+			return fmt.Sprintf("kms key is %s (spec: %s)", key, want), nil
+		}
+		return "", nil
+	case e != nil:
+		if have {
+			return "storage is encrypted (spec: encryption.enabled: false)", nil
+		}
+		return "", nil
+	}
+	if !have {
+		return "storage is not encrypted, and an unset encryption means AWS's RDS key; set encryption: {enabled: false} to adopt it unencrypted", nil
+	}
+	err := kms.CheckAdoptedKey(ctx, kmsClient, key, "")
+	var conflict *cloudctlaws.ReconcileError
+	if errors.As(err, &conflict) && conflict.Reason == reasonAdoptionConflict {
+		return conflict.Err.Error(), nil
+	}
+	return "", err
+}
+
 // adoptionConflicts lists the differences between an existing instance and
 // the spec that adoption must not paper over: settings that can't be changed
 // afterwards (engine, subnet group, encryption), public accessibility, and settings the operator
 // would otherwise change on its first reconcile (class, Multi-AZ, a higher
 // engine version or storage size than the instance has).
-func adoptionConflicts(instance types.DBInstance, r depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource) []string {
+func adoptionConflicts(instance types.DBInstance, r depsv1alpha1.RDSInstanceSpec) []string {
 	var conflicts []string
 	differs := func(field, actual, want string) {
 		conflicts = append(conflicts, fmt.Sprintf("%s is %s (spec: %s)", field, actual, want))
@@ -107,20 +159,6 @@ func adoptionConflicts(instance types.DBInstance, r depsv1alpha1.RDSInstanceSpec
 
 	if aws.ToBool(instance.PubliclyAccessible) {
 		conflicts = append(conflicts, "instance is publicly accessible (this operator only manages private instances)")
-	}
-
-	wantEncrypted := r.Encryption != nil && (r.Encryption.Enabled || r.Encryption.KMSKeyRef != "")
-	switch haveEncrypted := aws.ToBool(instance.StorageEncrypted); {
-	case wantEncrypted && !haveEncrypted:
-		conflicts = append(conflicts, "storage is not encrypted (spec: encryption requested, which cannot be enabled on an existing instance)")
-	case !wantEncrypted && haveEncrypted:
-		conflicts = append(conflicts, "storage is encrypted (spec: no encryption declared)")
-	case wantEncrypted && r.Encryption.KMSKeyRef != "":
-		// A dedicated key doesn't exist yet at adoption, so only a
-		// kmsKeyRef has a key to compare against.
-		if want, ok := kms.SharedKeyARN(ledger, r.Encryption.KMSKeyRef); ok && aws.ToString(instance.KmsKeyId) != want {
-			differs("kms key", aws.ToString(instance.KmsKeyId), want)
-		}
 	}
 
 	cur := effectiveAttributes(instance)
