@@ -110,11 +110,18 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+			relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
 			if relErr != nil {
 				if firstErr == nil {
 					firstErr = relErr
 				}
+				continue
+			}
+			if gone {
+				// Deleted by hand after being retained: forget it, so
+				// declaring it again creates a fresh table instead of
+				// tripping over an entry for one that no longer exists.
+				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 				continue
 			}
 			if relinquished && recordEvent != nil {
@@ -265,25 +272,25 @@ func tableNameFromARN(arn string) (string, error) {
 // relinquishIfStillTagged removes our ownership tag from a resource whose
 // deletionPolicy is Retain and is no longer declared. Idempotent — safe on
 // every reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, client dynamodbAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, client dynamodbAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
 	tags, tErr := listAllTags(ctx, client, entry.ARN)
 	if tErr != nil {
 		var notFound *types.ResourceNotFoundException
 		if errors.As(tErr, &notFound) {
-			return false, nil // already gone, nothing to relinquish
+			return false, true, nil // already gone, nothing to relinquish
 		}
-		return false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained table %q", entry.Name))
+		return false, false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained table %q", entry.Name))
 	}
 	currentTags := tagsToMap(tags)
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		return false, nil // already relinquished, or never verified as ours
+		return false, false, nil // already relinquished, or never verified as ours
 	}
 
 	if _, uErr := client.UntagResource(ctx, &dynamodb.UntagResourceInput{
 		ResourceArn: &entry.ARN,
 		TagKeys:     []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
 	}); uErr != nil {
-		return false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained table %q", entry.Name))
+		return false, false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained table %q", entry.Name))
 	}
-	return true, nil
+	return true, false, nil
 }

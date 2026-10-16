@@ -19,6 +19,7 @@ package dynamodb
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -952,5 +953,127 @@ func TestEnsure_RefusesToAdoptATableEncryptedWithAKeyItDoesNotManage(t *testing.
 	}
 	if cloudctlaws.IsOwnedBy(client.tables[tableName].tags, "default", "checkout-service", "uid-1") {
 		t.Error("a refused table must not be tagged as owned")
+	}
+}
+
+func sessionsSpec(adopt bool) *depsv1alpha1.DynamoDBSpec {
+	return &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Adopt: adopt},
+	}}
+}
+
+// verifiedSessionsTable creates the table and runs a second pass, which
+// confirms it and leaves a Verified ledger entry.
+func verifiedSessionsTable(t *testing.T, client *fakeDynamoDB) []depsv1alpha1.ManagedResource {
+	t.Helper()
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", sessionsSpec(false), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", sessionsSpec(false), ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if entry, _ := status.FindManagedResource(ledger, "dynamodb", "sessions"); entry.State != depsv1alpha1.ManagedResourceStateVerified {
+		t.Fatalf("setup: entry state = %s, want Verified", entry.State)
+	}
+	return ledger
+}
+
+func sessionsTableName() string {
+	return cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+}
+
+// A table the operator already created and that is now gone was deleted
+// outside it. Recreating it would hand the app an empty table, reported
+// Ready, and anything it writes there diverges from the backups of the old
+// one. Say so, and let the owner decide, as RDS instances do.
+func TestEnsure_RefusesToRecreateATableDeletedOutOfBand(t *testing.T) {
+	client := newFakeDynamoDB()
+	ledger := verifiedSessionsTable(t, client)
+	delete(client.tables, sessionsTableName())
+
+	var events []string
+	record := func(eventType, reason, _ string) { events = append(events, eventType+"/"+reason) }
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", sessionsSpec(false), ledger, nil, record)
+
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != "TableMissing" || reconcileErr.Retryable {
+		t.Fatalf("expected a non-retryable TableMissing error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "adopt: true") {
+		t.Errorf("the error should say how to restore it: %v", err)
+	}
+	if _, recreated := client.tables[sessionsTableName()]; recreated {
+		t.Error("an empty replacement table was created")
+	}
+	if !slices.Contains(events, "Warning/TableMissing") {
+		t.Errorf("expected a TableMissing warning, got %v", events)
+	}
+}
+
+// DynamoDB can answer "no such table" for a moment after CreateTable, so a
+// table the operator created seconds ago is waited for, not reported lost.
+func TestEnsure_ATableCreatedMomentsAgoThatIsNotVisibleYetIsRetried(t *testing.T) {
+	client := newFakeDynamoDB()
+	now := metav1.Now()
+	ledger := []depsv1alpha1.ManagedResource{{
+		Type: "dynamodb", Name: "sessions", ARN: "arn:aws:dynamodb:us-east-1:123456789012:table/" + sessionsTableName(),
+		State: depsv1alpha1.ManagedResourceStateCreating, CreatedAt: now,
+	}}
+	var events []string
+	record := func(_, reason, _ string) { events = append(events, reason) }
+
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", sessionsSpec(false), ledger, nil, record)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable || reconcileErr.Reason == "TableMissing" {
+		t.Fatalf("expected a retryable error that is not TableMissing, got %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("no warning while the table may just be slow to appear, got %v", events)
+	}
+}
+
+// The recovery the error describes: restore a backup under the same name
+// and adopt it. The ledger still holds the old entry, and the restored
+// table carries none of the operator's tags.
+func TestEnsure_ARestoredTableIsAdoptedWhenTheEntryStillExists(t *testing.T) {
+	client := newFakeDynamoDB()
+	ledger := verifiedSessionsTable(t, client)
+	delete(client.tables, sessionsTableName())
+	client.tables[sessionsTableName()] = &fakeTable{
+		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + sessionsTableName(),
+		status:       types.TableStatusActive,
+		tags:         map[string]string{},
+		partitionKey: "id",
+	}
+
+	// Ownership is re-checked once the entry's trust window has passed.
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	for i := range ledger {
+		ledger[i].LastVerifiedAt = &stale
+	}
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", sessionsSpec(true), ledger, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if !cloudctlaws.IsOwnedBy(client.tables[sessionsTableName()].tags, "default", "checkout-service", "uid-1") {
+		t.Error("expected the restored table to be tagged as owned after adoption")
+	}
+}
+
+func TestCleanup_AMissingTableIsDroppedFromTheLedgerOnceRemovedFromSpec(t *testing.T) {
+	client := newFakeDynamoDB()
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", sessionsSpec(false), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	delete(client.tables, sessionsTableName())
+
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if status.HasManagedResource(updated, "dynamodb", "sessions") {
+		t.Error("expected the entry of a table that no longer exists to be dropped, so the name can be used again")
 	}
 }

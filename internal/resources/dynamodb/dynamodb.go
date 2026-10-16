@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -189,6 +190,12 @@ func ensureTable(
 
 	var notFound *types.ResourceNotFoundException
 	if errors.As(err, &notFound) {
+		// Creation only ever happens for a table this CR has never had. One
+		// the ledger knows but DynamoDB no longer has was deleted out-of-band,
+		// and a replacement would be an empty table reported Ready.
+		if entry, found := status.FindManagedResource(ledger, resourceType, resourceName); found {
+			return ledger, tableMissingError(entry, tableName, recordEvent)
+		}
 		return createTable(ctx, awsClient, namespace, crName, crUID, tableName, resourceName, opts, ledger, recordEvent)
 	}
 	if err != nil {
@@ -573,5 +580,30 @@ func wrapAWSError(err error, errContext string) error {
 	return &cloudctlaws.ReconcileError{
 		Err:       fmt.Errorf("%s: %w", errContext, err),
 		Retryable: cloudctlaws.IsRetryable(err),
+	}
+}
+
+// creationVisibilityGrace is how long a just-created table may be missing
+// from DescribeTable before that is treated as it having been deleted:
+// DynamoDB can briefly answer "no such table" right after CreateTable.
+const creationVisibilityGrace = 5 * time.Minute
+
+const reasonTableMissing = "TableMissing"
+
+func tableMissingError(entry depsv1alpha1.ManagedResource, tableName string, recordEvent status.EventRecorder) error {
+	if entry.State == depsv1alpha1.ManagedResourceStateCreating && time.Since(entry.CreatedAt.Time) < creationVisibilityGrace {
+		return &cloudctlaws.ReconcileError{
+			Err:       fmt.Errorf("table %q was just created and is not visible yet", tableName),
+			Retryable: true,
+		}
+	}
+	if recordEvent != nil {
+		recordEvent("Warning", "TableMissing", fmt.Sprintf("DynamoDB table %s no longer exists in AWS and will not be recreated", entry.ARN))
+	}
+	return &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("DynamoDB table %q (%s) no longer exists in AWS: it was deleted out-of-band, and this operator will not create an empty "+
+			"replacement. Restore it under the same name from a backup and set adopt: true, "+
+			"or remove it from spec and add it again to start fresh", tableName, entry.ARN),
+		Reason: reasonTableMissing,
 	}
 }

@@ -93,6 +93,8 @@ spec:
 | `overrides.billingMode` | `PayPerRequest` (default) or `Provisioned`. A decision, not raw throughput config — `Provisioned` tables get AWS's own long-standing default capacity (5/5 RCU/WCU) rather than exposing tunable numbers. |
 | `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. |
 
+**A table deleted out-of-band** is not recreated: an empty replacement would be reported Ready. The CR gets a `TableMissing` warning and error. Restore it from a backup under the same name with `adopt: true` (adopted within one trust window, 10 minutes), or remove the entry from spec and add it again to start fresh.
+
 Table creation is **asynchronous** (`CreateTable` returns while the table is
 still `CREATING`), unlike SQS/SNS. A newly created table sits in a
 `Creating` ledger state until a later reconcile finds it `ACTIVE` — ownership
