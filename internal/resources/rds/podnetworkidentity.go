@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,10 +51,34 @@ const securityGroupPolicyFieldOwner = client.FieldOwner("cloudctl-operator-netwo
 // without needing to know the ledger key it's stored under.
 func PodNetworkIdentityARN(cr *depsv1alpha1.AppDependencies) (string, bool) {
 	entry, entryFound := status.FindManagedResource(cr.Status.ManagedResources, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if !entryFound {
+	if !entryFound || entry.PendingDeletionSince != nil {
+		// A group being released is no longer one to grant ingress to: its
+		// owner has to revoke the rule that names it before it can be deleted.
 		return "", false
 	}
 	return entry.ARN, true
+}
+
+// PodIdentityOption tunes EnsurePodNetworkIdentity.
+type PodIdentityOption func(*podIdentityOptions)
+
+type podIdentityOptions struct {
+	baseGroupIDs []string
+	recordEvent  status.EventRecorder
+}
+
+// WithBaseSecurityGroups lists the groups the consumer's pods keep next to
+// the database group. Security Groups for Pods replaces a pod's groups with
+// the ones in the policy, and a group with no ingress rules admits nothing,
+// so without the pod's normal groups its Service, load balancer and probe
+// traffic is cut off.
+func WithBaseSecurityGroups(ids []string) PodIdentityOption {
+	return func(o *podIdentityOptions) { o.baseGroupIDs = ids }
+}
+
+// WithEventRecorder reports a missing base group configuration.
+func WithEventRecorder(recordEvent status.EventRecorder) PodIdentityOption {
+	return func(o *podIdentityOptions) { o.recordEvent = recordEvent }
 }
 
 // EnsurePodNetworkIdentity creates and owns a security group dedicated to
@@ -73,7 +98,13 @@ func EnsurePodNetworkIdentity(
 	namespace, crName, crUID, serviceAccountName, region, accountID string,
 	consumes []depsv1alpha1.ConsumeRef,
 	ledger []depsv1alpha1.ManagedResource,
+	opts ...PodIdentityOption,
 ) ([]depsv1alpha1.ManagedResource, error) {
+	var options podIdentityOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	// Sticky VPC resolution: if a pod-identity security group already
 	// exists and at least one of today's consumes entries still resolves
 	// to its VPC, keep using that VPC rather than re-deriving one from
@@ -125,7 +156,12 @@ func EnsurePodNetworkIdentity(
 	if err := serviceaccount.EnsureNetworkIdentityLabel(ctx, k8sClient, namespace, serviceAccountName); err != nil {
 		return ledger, fmt.Errorf("labeling ServiceAccount %q for network identity: %w", serviceAccountName, err)
 	}
-	if err := ensureSecurityGroupPolicy(ctx, k8sClient, namespace, crName, serviceAccountName, groupID); err != nil {
+	if len(options.baseGroupIDs) == 0 && options.recordEvent != nil {
+		options.recordEvent("Warning", "PodBaseSecurityGroupsUnset", fmt.Sprintf(
+			"No base security groups are configured, so the pods of ServiceAccount %q lose their normal security groups and may stop receiving Service, load balancer and probe traffic; set the operator's pod base security groups",
+			serviceAccountName))
+	}
+	if err := ensureSecurityGroupPolicy(ctx, k8sClient, namespace, crName, serviceAccountName, podGroupIDs(options.baseGroupIDs, groupID)); err != nil {
 		return ledger, err
 	}
 
@@ -221,6 +257,18 @@ func anyConsumedVPCMatches(ctx context.Context, rdsClient rdsAPI, k8sClient clie
 	return false
 }
 
+// podGroupIDs is the base groups followed by the database group, without
+// repeats.
+func podGroupIDs(base []string, groupID string) []string {
+	ids := make([]string, 0, len(base)+1)
+	for _, id := range append(slices.Clone(base), groupID) {
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // securityGroupPolicyObject builds the bare (GVK + namespace/name)
 // SecurityGroupPolicy identity - shared by ensureSecurityGroupPolicy and
 // CleanupPodNetworkIdentity so the two can never compute different names
@@ -237,10 +285,10 @@ func securityGroupPolicyObject(namespace, crName string) *unstructured.Unstructu
 // ensureSecurityGroupPolicy creates (via server-side apply, so re-running
 // this is always idempotent) the vpcresources.k8s.aws/v1beta1
 // SecurityGroupPolicy object selecting serviceAccountName's own label and
-// attaching groupID - the two things EKS's Security Groups for Pods needs
+// attaching groupIDs - the two things EKS's Security Groups for Pods needs
 // to actually associate this CR's pods with the dedicated security group
 // above.
-func ensureSecurityGroupPolicy(ctx context.Context, k8sClient client.Client, namespace, crName, serviceAccountName, groupID string) error {
+func ensureSecurityGroupPolicy(ctx context.Context, k8sClient client.Client, namespace, crName, serviceAccountName string, groupIDs []string) error {
 	policy := securityGroupPolicyObject(namespace, crName)
 
 	if err := unstructured.SetNestedStringMap(policy.Object,
@@ -249,7 +297,7 @@ func ensureSecurityGroupPolicy(ctx context.Context, k8sClient client.Client, nam
 		return fmt.Errorf("building SecurityGroupPolicy spec: %w", err)
 	}
 	if err := unstructured.SetNestedStringSlice(policy.Object,
-		[]string{groupID}, "spec", "securityGroups", "groupIds"); err != nil {
+		groupIDs, "spec", "securityGroups", "groupIds"); err != nil {
 		return fmt.Errorf("building SecurityGroupPolicy spec: %w", err)
 	}
 
@@ -259,10 +307,20 @@ func ensureSecurityGroupPolicy(ctx context.Context, k8sClient client.Client, nam
 	return nil
 }
 
+// reasonWaitingForRuleRelease marks a pod group that can't be deleted yet
+// because another group's rule, or a running pod, still uses it.
+const reasonWaitingForRuleRelease = "WaitingForRuleRelease"
+
 // CleanupPodNetworkIdentity tears down everything EnsurePodNetworkIdentity
 // creates, once consumes is empty or the CR is being deleted. A no-op if
 // nothing was ever set up. Holds no data, so unlike the RDS instance
 // itself there's no deletion-safety guard needed here.
+//
+// The group can't be deleted while an owner's ingress rule names it, and an
+// owner only revokes that rule once the group stops reading as published. So
+// the entry is first marked as releasing and kept, the policy and label are
+// dropped so no new pod gets the group, and the delete is retried until the
+// rule and the pods using the group are gone.
 func CleanupPodNetworkIdentity(
 	ctx context.Context,
 	ec2Client cloudctlaws.EC2Client,
@@ -274,6 +332,19 @@ func CleanupPodNetworkIdentity(
 	if !entryFound {
 		return ledger, nil
 	}
+	if entry.PendingDeletionSince == nil {
+		now := metav1.Now()
+		entry.PendingDeletionSince = &now
+		status.UpsertManagedResource(&ledger, entry)
+	}
+
+	policy := securityGroupPolicyObject(namespace, crName)
+	if err := k8sClient.Delete(ctx, policy); err != nil && !apierrors.IsNotFound(err) {
+		return ledger, fmt.Errorf("deleting SecurityGroupPolicy: %w", err)
+	}
+	if err := serviceaccount.ReleaseNetworkIdentityLabel(ctx, k8sClient, namespace, serviceAccountName); err != nil {
+		return ledger, fmt.Errorf("releasing network identity label on ServiceAccount %q: %w", serviceAccountName, err)
+	}
 
 	groupID := SecurityGroupIDFromARN(entry.ARN)
 	owned, err := securityGroupOwnedBy(ctx, ec2Client, groupID, namespace, crName, crUID)
@@ -282,17 +353,8 @@ func CleanupPodNetworkIdentity(
 	}
 	if owned {
 		if _, err := ec2Client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: &groupID}); err != nil && !isGroupNotFound(err) {
-			return ledger, wrapEC2Error(err, "deleting pod network identity security group")
+			return ledger, deleteGroupError(err, "deleting pod network identity security group")
 		}
-	}
-
-	policy := securityGroupPolicyObject(namespace, crName)
-	if err := k8sClient.Delete(ctx, policy); err != nil && !apierrors.IsNotFound(err) {
-		return ledger, fmt.Errorf("deleting SecurityGroupPolicy: %w", err)
-	}
-
-	if err := serviceaccount.ReleaseNetworkIdentityLabel(ctx, k8sClient, namespace, serviceAccountName); err != nil {
-		return ledger, fmt.Errorf("releasing network identity label on ServiceAccount %q: %w", serviceAccountName, err)
 	}
 
 	status.RemoveManagedResource(&ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
@@ -314,6 +376,11 @@ func securityGroupOwnedBy(ctx context.Context, ec2Client cloudctlaws.EC2Client, 
 		return false, nil
 	}
 	return cloudctlaws.IsOwnedBy(ec2TagsToMap(out.SecurityGroups[0].Tags), namespace, crName, crUID), nil
+}
+
+func isDependencyViolation(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == errCodeDependencyViolation
 }
 
 func isGroupNotFound(err error) bool {

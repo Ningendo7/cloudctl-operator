@@ -60,6 +60,7 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 					ctx, r.AWSClients.RDS, r.AWSClients.EC2, r.Client,
 					cr.Namespace, cr.Name, string(cr.UID), rdsNetworkServiceAccountName(cr),
 					r.AWSClients.Region, r.AWSClients.AccountID, cr.Spec.RDS.Consumes, cr.Status.ManagedResources,
+					rds.WithBaseSecurityGroups(r.PodBaseSecurityGroupIDs), rds.WithEventRecorder(eventRecorderFor(r, cr)),
 				)
 				cr.Status.ManagedResources = ledger
 			} else {
@@ -76,9 +77,17 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			)
 			cr.Status.ManagedResources = ledger
 
+			ledger, groupErr := rds.CleanupInstanceSecurityGroups(
+				ctx, r.AWSClients.EC2, cr.Namespace, cr.Name, string(cr.UID), cr.Spec.RDS, cr.Status.ManagedResources, false,
+			)
+			cr.Status.ManagedResources = ledger
+
 			err := ensureErr
 			if err == nil {
 				err = networkErr
+			}
+			if err == nil {
+				err = groupErr
 			}
 			if err == nil {
 				err = cleanupErr
@@ -118,6 +127,13 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 			ledger, results, err := rds.Cleanup(
 				ctx, r.AWSClients.RDS, cr.Namespace, cr.Name, string(cr.UID),
 				cr.Spec.RDS, cr.Status.ManagedResources, true, eventRecorderFor(r, cr),
+			)
+			cr.Status.ManagedResources = ledger
+			if err != nil {
+				return false, nil, err
+			}
+			ledger, err = rds.CleanupInstanceSecurityGroups(
+				ctx, r.AWSClients.EC2, cr.Namespace, cr.Name, string(cr.UID), cr.Spec.RDS, cr.Status.ManagedResources, true,
 			)
 			cr.Status.ManagedResources = ledger
 			if err != nil {

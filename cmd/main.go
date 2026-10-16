@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -145,6 +147,7 @@ func main() {
 	var enableHTTP2 bool
 	var oidcProviderARN string
 	var oidcProviderURL string
+	var podBaseSecurityGroupIDs string
 	var maxConcurrentReconciles int
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -170,6 +173,11 @@ func main() {
 	flag.StringVar(&oidcProviderURL, "oidc-provider-url", "",
 		"URL (without https://) of this cluster's IAM OIDC identity provider, "+
 			"required for the IRSA trust policy on every IAM role this operator derives.")
+	flag.StringVar(&podBaseSecurityGroupIDs, "pod-base-security-group-ids", "",
+		"Comma-separated security group IDs that the pods of a CR using rds.consumes keep next to the "+
+			"database group, normally the EKS cluster security group. Security Groups for Pods replaces a "+
+			"pod's groups with the ones it is given, so without these the pods can lose Service, load "+
+			"balancer and probe traffic.")
 	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 5,
 		"Maximum number of AppDependencies CRs reconciled in parallel. AWS-side "+
 			"call volume is independently bounded by the per-service rate-limit "+
@@ -184,6 +192,12 @@ func main() {
 	if oidcProviderARN == "" || oidcProviderURL == "" {
 		setupLog.Info("Starting without --oidc-provider-arn/--oidc-provider-url set - " +
 			"any AppDependencies CR needing an IAM role will fail reconciliation until both are set")
+	}
+
+	baseSecurityGroups, err := parseSecurityGroupIDs(podBaseSecurityGroupIDs)
+	if err != nil {
+		setupLog.Error(err, "Invalid --pod-base-security-group-ids")
+		os.Exit(1)
 	}
 
 	ctx := ctrl.SetupSignalHandler()
@@ -321,6 +335,7 @@ func main() {
 				Recorder:                mgr.GetEventRecorder("appdependencies-controller"),
 				OIDCProviderARN:         oidcProviderARN,
 				OIDCProviderURL:         oidcProviderURL,
+				PodBaseSecurityGroupIDs: baseSecurityGroups,
 				MaxConcurrentReconciles: maxConcurrentReconciles,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("creating appdependencies controller: %w", err)
@@ -381,4 +396,25 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+var securityGroupIDPattern = regexp.MustCompile(`^sg-[0-9a-f]{8,17}$`)
+
+// parseSecurityGroupIDs splits a comma-separated list of security group IDs.
+// An empty string means none; anything that isn't a group ID is rejected at
+// startup, since a typo here would otherwise only surface as pods that
+// cannot start.
+func parseSecurityGroupIDs(value string) ([]string, error) {
+	var ids []string
+	for _, id := range strings.Split(value, ",") {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if !securityGroupIDPattern.MatchString(id) {
+			return nil, fmt.Errorf("%q is not a security group ID (want sg-<hex>)", id)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }

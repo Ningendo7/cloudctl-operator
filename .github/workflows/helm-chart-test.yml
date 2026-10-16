@@ -82,6 +82,12 @@ jobs:
           helm template ./charts/chart --set prometheus.enabled=true --set prometheus.rules.enabled=true | grep -q "kind: PrometheusRule"
           helm template ./charts/chart --set grafana.dashboard.enabled=true | grep -q 'grafana_dashboard: "1"'
 
+      - name: Pod base security groups reach the manager flag
+        run: |
+          helm template ./charts/chart --set manager.podBaseSecurityGroupIds='{sg-0123456789abcdef0,sg-0fedcba987654321}' \
+            | grep -q -- '--pod-base-security-group-ids=sg-0123456789abcdef0,sg-0fedcba987654321'
+          ! helm template ./charts/chart | grep -q -- '--pod-base-security-group-ids'
+
       - name: Everything enabled renders valid YAML
         run: |
           helm template ./charts/chart \

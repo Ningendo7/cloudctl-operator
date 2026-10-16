@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/smithy-go"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -85,11 +87,107 @@ func EnsureSecurityGroup(
 	}
 	arn := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, groupID)
 
-	if err := reconcileIngress(ctx, ec2Client, k8sClient, groupID, engine, sharedWith); err != nil {
+	if err := reconcileIngress(ctx, ec2Client, k8sClient, groupID, engine, namespace, crName, resourceName, sharedWith); err != nil {
 		return arn, err
 	}
 
 	return arn, nil
+}
+
+// instanceSecurityGroupSuffix keeps an instance's security group apart from
+// the pod identity entry in the ledger, whatever the instance is called.
+const instanceSecurityGroupSuffix = "#securitygroup"
+
+func instanceSecurityGroupLedgerName(instance string) string {
+	return instance + instanceSecurityGroupSuffix
+}
+
+// recordInstanceSecurityGroup remembers an instance's security group in the
+// ledger, so it can still be found and deleted after the instance is gone.
+func recordInstanceSecurityGroup(ledger []depsv1alpha1.ManagedResource, instance, arn string) []depsv1alpha1.ManagedResource {
+	now := metav1.Now()
+	createdAt := now
+	name := instanceSecurityGroupLedgerName(instance)
+	if existing, found := status.FindManagedResource(ledger, podNetworkIdentityResourceType, name); found {
+		createdAt = existing.CreatedAt
+	}
+	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{
+		Type:           podNetworkIdentityResourceType,
+		Name:           name,
+		ARN:            arn,
+		DeletionPolicy: depsv1alpha1.DeletionPolicyDelete,
+		State:          depsv1alpha1.ManagedResourceStateVerified,
+		CreatedAt:      createdAt,
+		LastVerifiedAt: &now,
+	})
+	return ledger
+}
+
+// CleanupInstanceSecurityGroups deletes the security group of every instance
+// that is no longer declared and no longer tracked, which means it is gone
+// from AWS: an instance is never deleted by the operator, only by hand. The
+// group would otherwise count against the VPC quota forever, and its ingress
+// rules, which name the consumers' groups, would keep those from being
+// deleted. A group of an instance that still exists, or is still declared,
+// is left alone.
+func CleanupInstanceSecurityGroups(
+	ctx context.Context,
+	ec2Client cloudctlaws.EC2Client,
+	namespace, crName, crUID string,
+	spec *depsv1alpha1.RDSSpec,
+	ledger []depsv1alpha1.ManagedResource,
+	deleting bool,
+) ([]depsv1alpha1.ManagedResource, error) {
+	declared := map[string]bool{}
+	if spec != nil && !deleting {
+		for _, r := range spec.Resources {
+			declared[r.Name] = true
+		}
+	}
+
+	updated := ledger
+	var firstErr error
+	for _, entry := range ledger {
+		instance, isInstanceGroup := strings.CutSuffix(entry.Name, instanceSecurityGroupSuffix)
+		if entry.Type != podNetworkIdentityResourceType || !isInstanceGroup {
+			continue
+		}
+		if declared[instance] || status.HasManagedResource(ledger, resourceType, instance) {
+			continue
+		}
+
+		groupID := SecurityGroupIDFromARN(entry.ARN)
+		owned, err := securityGroupOwnedBy(ctx, ec2Client, groupID, namespace, crName, crUID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if owned {
+			if _, err := ec2Client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: &groupID}); err != nil && !isGroupNotFound(err) {
+				if firstErr == nil {
+					firstErr = deleteGroupError(err, fmt.Sprintf("deleting the security group of removed instance %q", instance))
+				}
+				continue
+			}
+		}
+		status.RemoveManagedResource(&updated, podNetworkIdentityResourceType, entry.Name)
+	}
+	return updated, firstErr
+}
+
+// deleteGroupError classifies a failed DeleteSecurityGroup: a group another
+// group's rule or a network interface still uses is waited out, not failed.
+func deleteGroupError(err error, errContext string) error {
+	if isDependencyViolation(err) {
+		return &cloudctlaws.ReconcileError{
+			Err:       fmt.Errorf("%s: still in use by another group's rule or a network interface; retrying: %w", errContext, err),
+			Retryable: true,
+			Reason:    reasonWaitingForRuleRelease,
+		}
+	}
+	return wrapEC2Error(err, errContext)
 }
 
 // SecurityGroupIDFromARN extracts the bare group ID EC2 calls like
@@ -176,12 +274,19 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 // sharedWith as the complete desired state since this security group is
 // never shared (see EnsureSecurityGroup). Idempotent either way: Authorize
 // and Revoke both tolerate their own already-applied error.
-func reconcileIngress(ctx context.Context, ec2Client cloudctlaws.EC2Client, k8sClient client.Client, groupID, engine string, sharedWith []depsv1alpha1.SharedWithEntry) error {
+func reconcileIngress(
+	ctx context.Context,
+	ec2Client cloudctlaws.EC2Client,
+	k8sClient client.Client,
+	groupID, engine, ownerNamespace, ownerName, resourceName string,
+	sharedWith []depsv1alpha1.SharedWithEntry,
+) error {
 	port := enginePort(engine)
 	desired := map[string]bool{}
 	var firstErr error
 	for _, consumer := range sharedWith {
-		consumerGroupARN, ok := consumerPodSecurityGroupARN(ctx, k8sClient, consumer.Namespace, consumer.Name)
+		consumerGroupARN, ok := consumerPodSecurityGroupARN(ctx, k8sClient, consumer.Namespace, consumer.Name,
+			depsv1alpha1.ConsumeRef{Namespace: ownerNamespace, Name: ownerName, ResourceName: resourceName})
 		if !ok {
 			// Forward reference not resolved yet - self-resolves on a
 			// later pass, same tolerance as every other cross-CR
@@ -257,17 +362,20 @@ func revokeStaleIngress(ctx context.Context, ec2Client cloudctlaws.EC2Client, gr
 // the other side already published, never reach into its resources"
 // split IAM policy derivation already uses for reading a producer's ARN,
 // just inverted: here this instance (the producer) reads what a consumer
-// published about itself.
-func consumerPodSecurityGroupARN(ctx context.Context, k8sClient client.Client, namespace, crName string) (string, bool) {
+// published about itself. A consumer that is being deleted, or no longer
+// lists this instance in rds.consumes, is not asked for access, and its
+// group is not granted: it would only hold on to a group the consumer is
+// trying to delete, and a CR named in sharedWith that never asked for the
+// instance should not reach it.
+func consumerPodSecurityGroupARN(ctx context.Context, k8sClient client.Client, namespace, crName string, instance depsv1alpha1.ConsumeRef) (string, bool) {
 	var consumer depsv1alpha1.AppDependencies
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: crName}, &consumer); err != nil {
 		return "", false
 	}
-	entry, entryFound := status.FindManagedResource(consumer.Status.ManagedResources, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	if !entryFound {
+	if consumer.DeletionTimestamp != nil || consumer.Spec.RDS == nil || !slices.Contains(consumer.Spec.RDS.Consumes, instance) {
 		return "", false
 	}
-	return entry.ARN, true
+	return PodNetworkIdentityARN(&consumer)
 }
 
 func isDuplicatePermission(err error) bool {

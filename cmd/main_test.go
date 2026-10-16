@@ -198,3 +198,18 @@ func clientsReadyGauge(t *testing.T) float64 {
 	}
 	return m.GetGauge().GetValue()
 }
+
+func TestParseSecurityGroupIDs(t *testing.T) {
+	got, err := parseSecurityGroupIDs(" sg-0a1b2c3d4e5f60718 ,sg-12345678,, ")
+	if err != nil || len(got) != 2 || got[0] != "sg-0a1b2c3d4e5f60718" || got[1] != "sg-12345678" {
+		t.Errorf("got %v, %v; want the two IDs, trimmed, with blanks skipped", got, err)
+	}
+	if got, err := parseSecurityGroupIDs(""); err != nil || len(got) != 0 {
+		t.Errorf("empty value: got %v, %v; want none", got, err)
+	}
+	for _, bad := range []string{"sg-xyz", "vpc-12345678", "sg-1234", "12345678"} {
+		if _, err := parseSecurityGroupIDs(bad); err == nil {
+			t.Errorf("parseSecurityGroupIDs(%q) accepted a value that is not a security group ID", bad)
+		}
+	}
+}

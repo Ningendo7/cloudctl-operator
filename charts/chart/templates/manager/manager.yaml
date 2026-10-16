@@ -87,6 +87,9 @@ spec:
         {{- range .Values.manager.args }}
         - {{ . }}
         {{- end }}
+        {{- with .Values.manager.podBaseSecurityGroupIds }}
+        - --pod-base-security-group-ids={{ join "," . }}
+        {{- end }}
         command:
         - /manager
         image: "{{ .Values.manager.image.repository }}{{- if not (contains "@" .Values.manager.image.repository) }}:{{ .Values.manager.image.tag | default (printf "v%s" .Chart.AppVersion) }}{{- end }}"

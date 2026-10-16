@@ -19,6 +19,7 @@ package rds
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -696,5 +697,176 @@ func TestCleanupPodNetworkIdentity_DoesNotDeleteAGroupItNoLongerOwns(t *testing.
 	}
 	if len(ledger) != 0 {
 		t.Errorf("expected the ledger entry dropped even though the group was left alone, got %+v", ledger)
+	}
+}
+
+func podGroupID(t *testing.T, ledger []depsv1alpha1.ManagedResource) string {
+	t.Helper()
+	entry, found := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !found {
+		t.Fatal("expected a pod-network-identity ledger entry")
+	}
+	return SecurityGroupIDFromARN(entry.ARN)
+}
+
+// The owner's ingress rule names the consumer's group, and AWS refuses to
+// delete a group that a rule still names. The consumer therefore has to stop
+// being a valid grantee first (so the owner revokes), keep its entry while it
+// waits, and finish once the rule is gone. Deleting the group first, as
+// before, left both sides waiting on each other forever.
+func TestCleanupPodNetworkIdentity_ReleasesBeforeDeletingAndWaitsForTheOwnersRule(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	ledger := setUpPodNetworkIdentity(t, rdsClient, ec2Client, k8sClient)
+	groupID := podGroupID(t, ledger)
+	ec2Client.groups["sg-owner"] = &fakeSecurityGroup{
+		id: "sg-owner", name: "owner", vpcID: "vpc-prod-private-data-tier",
+		ingress: []fakeIngressRule{{sourceGroupID: groupID, fromPort: 5432, toPort: 5432}},
+	}
+	policyName := cloudctlaws.ResourceName("fulfillment", "fulfillment-service", "rds-pod-sg-policy", "network-identity", 255)
+
+	ledger, err := CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", ledger)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable || reconcileErr.Reason != "WaitingForRuleRelease" {
+		t.Fatalf("expected a retryable WaitingForRuleRelease error while the owner's rule remains, got %v", err)
+	}
+	entry, kept := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if !kept || entry.PendingDeletionSince == nil {
+		t.Fatalf("expected the entry kept and marked as releasing, got %+v", entry)
+	}
+	if _, published := PodNetworkIdentityARN(&depsv1alpha1.AppDependencies{Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: ledger}}); published {
+		t.Error("a releasing group must read as unpublished, or the owner never revokes its rule")
+	}
+	if securityGroupPolicyExists(context.Background(), k8sClient, "fulfillment", policyName) {
+		t.Error("expected the SecurityGroupPolicy gone, so new pods stop getting the group")
+	}
+
+	ec2Client.groups["sg-owner"].ingress = nil // the owner revoked
+	ledger, err = CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", ledger)
+	if err != nil {
+		t.Fatalf("second CleanupPodNetworkIdentity() error = %v", err)
+	}
+	if _, exists := ec2Client.groups[groupID]; exists {
+		t.Error("expected the group deleted once nothing references it")
+	}
+	if status.HasManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName) {
+		t.Error("expected the ledger entry removed")
+	}
+}
+
+func TestEnsurePodNetworkIdentity_ReappearingConsumesCancelsTheRelease(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	ledger := setUpPodNetworkIdentity(t, rdsClient, ec2Client, k8sClient)
+	groupID := podGroupID(t, ledger)
+	ec2Client.groups["sg-owner"] = &fakeSecurityGroup{
+		id: "sg-owner", name: "owner", vpcID: "vpc-prod-private-data-tier",
+		ingress: []fakeIngressRule{{sourceGroupID: groupID, fromPort: 5432, toPort: 5432}},
+	}
+	ledger, _ = CleanupPodNetworkIdentity(context.Background(), ec2Client, k8sClient, "fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", ledger)
+
+	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
+	ledger, err := EnsurePodNetworkIdentity(context.Background(), rdsClient, ec2Client, k8sClient,
+		"fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", testRegion, testAccountID, consumes, ledger)
+	if err != nil {
+		t.Fatalf("EnsurePodNetworkIdentity() error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if entry.PendingDeletionSince != nil {
+		t.Error("expected consuming again to clear the releasing marker")
+	}
+	if got := podGroupID(t, ledger); got != groupID {
+		t.Errorf("group = %s, want the existing %s reused", got, groupID)
+	}
+}
+
+func TestPodNetworkIdentityARN_ReleasingIsNotPublished(t *testing.T) {
+	releasing := metav1.Now()
+	cr := &depsv1alpha1.AppDependencies{Status: depsv1alpha1.AppDependenciesStatus{
+		ManagedResources: []depsv1alpha1.ManagedResource{
+			{Type: podNetworkIdentityResourceType, Name: podNetworkIdentityLedgerName, ARN: "arn:aws:ec2:us-east-1:123456789012:security-group/sg-abc", PendingDeletionSince: &releasing},
+		},
+	}}
+	if arn, ok := PodNetworkIdentityARN(cr); ok {
+		t.Errorf("got (%q, true), want unpublished while releasing", arn)
+	}
+}
+
+func policyGroupIDs(t *testing.T, k8sClient client.Client) []string {
+	t.Helper()
+	policyName := cloudctlaws.ResourceName("fulfillment", "fulfillment-service", "rds-pod-sg-policy", "network-identity", 255)
+	policy := getSecurityGroupPolicy(t, k8sClient, "fulfillment", policyName)
+	ids, _, err := unstructured.NestedStringSlice(policy.Object, "spec", "securityGroups", "groupIds")
+	if err != nil {
+		t.Fatalf("reading groupIds: %v", err)
+	}
+	return ids
+}
+
+func ensureWith(t *testing.T, k8sClient client.Client, opts ...PodIdentityOption) []depsv1alpha1.ManagedResource {
+	t.Helper()
+	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	_ = k8sClient.Create(context.Background(), producer)
+	_ = k8sClient.Create(context.Background(), sa)
+	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
+	ledger, err := EnsurePodNetworkIdentity(context.Background(), newFakeRDS(), newFakeEC2(), k8sClient,
+		"fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", testRegion, testAccountID, consumes, nil, opts...)
+	if err != nil {
+		t.Fatalf("EnsurePodNetworkIdentity() error = %v", err)
+	}
+	return ledger
+}
+
+// With Security Groups for Pods the groups in the policy replace the pod's
+// own, and a group with no ingress rules admits nothing: Service traffic,
+// load balancers and kubelet probes included. The pod's normal groups have
+// to stay attached next to the database group.
+func TestEnsurePodNetworkIdentity_KeepsThePodsBaseSecurityGroups(t *testing.T) {
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	ledger := ensureWith(t, k8sClient, WithBaseSecurityGroups([]string{"sg-cluster", "sg-extra"}))
+
+	got := policyGroupIDs(t, k8sClient)
+	want := []string{"sg-cluster", "sg-extra", podGroupID(t, ledger)}
+	if !slices.Equal(got, want) {
+		t.Errorf("SecurityGroupPolicy groupIds = %v, want %v", got, want)
+	}
+}
+
+func TestEnsurePodNetworkIdentity_WarnsWhenNoBaseSecurityGroupsAreConfigured(t *testing.T) {
+	var events []string
+	record := func(eventType, reason, _ string) { events = append(events, eventType+"/"+reason) }
+
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	ledger := ensureWith(t, k8sClient, WithEventRecorder(record))
+	if got := policyGroupIDs(t, k8sClient); !slices.Equal(got, []string{podGroupID(t, ledger)}) {
+		t.Errorf("groupIds = %v, want only the pod group when nothing is configured", got)
+	}
+	if !slices.Contains(events, "Warning/PodBaseSecurityGroupsUnset") {
+		t.Errorf("expected a PodBaseSecurityGroupsUnset warning, got %v", events)
+	}
+
+	events = nil
+	ensureWith(t, fake.NewClientBuilder().WithScheme(newScheme(t)).Build(),
+		WithEventRecorder(record), WithBaseSecurityGroups([]string{"sg-cluster"}))
+	if len(events) != 0 {
+		t.Errorf("expected no warning once base groups are configured, got %v", events)
+	}
+}
+
+func TestEnsurePodNetworkIdentity_ChangingTheBaseGroupsUpdatesThePolicy(t *testing.T) {
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	ledger := ensureWith(t, k8sClient, WithBaseSecurityGroups([]string{"sg-old"}))
+
+	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
+	if _, err := EnsurePodNetworkIdentity(context.Background(), newFakeRDS(), newFakeEC2(), k8sClient,
+		"fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", testRegion, testAccountID, consumes, ledger,
+		WithBaseSecurityGroups([]string{"sg-new"})); err != nil {
+		t.Fatalf("EnsurePodNetworkIdentity() error = %v", err)
+	}
+	if got := policyGroupIDs(t, k8sClient); slices.Contains(got, "sg-old") || !slices.Contains(got, "sg-new") {
+		t.Errorf("groupIds = %v, want sg-old replaced by sg-new", got)
 	}
 }
