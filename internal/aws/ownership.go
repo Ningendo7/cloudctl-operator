@@ -91,3 +91,24 @@ func MayTransferFrom(ctx context.Context, staleUID string) bool {
 	from, _ := ctx.Value(adoptFromUIDKey{}).(string)
 	return from != "" && from == staleUID
 }
+
+// CheckExistingOwnership decides what to do with a resource that exists but
+// isn't tagged for this incarnation of the CR. It returns nil when the
+// resource may be re-tagged, and transferred is true when that is a
+// takeover from a previous UID rather than an adoption. kind is the noun used
+// in the error ("queue", "bucket").
+func CheckExistingOwnership(ctx context.Context, kind, name string, tags map[string]string, namespace, crName, crUID string, adopt bool) (transferred bool, err error) {
+	if owner, ok := tags[OwnerTagKey]; ok && owner != OwnerTagValue(namespace, crName) {
+		return false, fmt.Errorf("%s %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", kind, name, owner)
+	}
+	if staleUID, stale := IsStaleUID(tags, namespace, crName, crUID); stale {
+		if !MayTransferFrom(ctx, staleUID) {
+			return false, fmt.Errorf("%s %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", kind, name, staleUID, AdoptFromUIDAnnotation, staleUID)
+		}
+		return true, nil
+	}
+	if !adopt {
+		return false, fmt.Errorf("%s %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", kind, name)
+	}
+	return false, nil
+}

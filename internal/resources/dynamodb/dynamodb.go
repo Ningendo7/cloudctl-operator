@@ -260,18 +260,9 @@ func ensureTable(
 	currentTags := tagsToMap(tags)
 
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return ledger, fmt.Errorf("table %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", tableName, existingOwner)
-		}
-		transferred := false
-		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
-			if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-				return ledger, fmt.Errorf("table %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", tableName, staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
-			}
-			transferred = true
-		}
-		if !transferred && !opts.adopt {
-			return ledger, fmt.Errorf("table %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", tableName)
+		transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "table", tableName, currentTags, namespace, crName, crUID, opts.adopt)
+		if ownErr != nil {
+			return ledger, ownErr
 		}
 
 		// Refuse the adoption outright on a key-schema mismatch, rather than

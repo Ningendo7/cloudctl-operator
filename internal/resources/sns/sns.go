@@ -201,18 +201,9 @@ func ensureTopic(
 	// Topic already exists — verify we actually own it before trusting it.
 	currentTags := tagsToMap(tagsOut.Tags)
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return ledger, fmt.Errorf("topic %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", topicName, existingOwner)
-		}
-		transferred := false
-		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
-			if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-				return ledger, fmt.Errorf("topic %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", topicName, staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
-			}
-			transferred = true
-		}
-		if !transferred && !t.Adopt {
-			return ledger, fmt.Errorf("topic %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", topicName)
+		transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "topic", topicName, currentTags, namespace, crName, crUID, t.Adopt)
+		if ownErr != nil {
+			return ledger, ownErr
 		}
 		attrsOut, aErr := awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
 		if aErr != nil {

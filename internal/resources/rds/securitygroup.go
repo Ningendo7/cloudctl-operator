@@ -244,7 +244,7 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 			return "", fmt.Errorf("security group %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", groupID, owner)
 		}
 		staleUID, stale := cloudctlaws.IsStaleUID(tags, namespace, crName, crUID)
-		if !adopt && !(stale && cloudctlaws.MayTransferFrom(ctx, staleUID)) {
+		if !adopt && (!stale || !cloudctlaws.MayTransferFrom(ctx, staleUID)) {
 			return "", fmt.Errorf("security group %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", groupID)
 		}
 		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{

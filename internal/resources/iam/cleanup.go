@@ -132,7 +132,7 @@ const ReasonRoleHasExternalAttachments = "RoleHasExternalAttachments"
 func roleInUseError(ctx context.Context, iamClient iamAPI, name string) error {
 	var found []string
 	if out, err := iamClient.ListAttachedRolePolicies(ctx, &iam.ListAttachedRolePoliciesInput{RoleName: &name}); err == nil {
-		var arns []string
+		arns := make([]string, 0, len(out.AttachedPolicies))
 		for _, p := range out.AttachedPolicies {
 			arns = append(arns, aws.ToString(p.PolicyArn))
 		}
@@ -141,7 +141,7 @@ func roleInUseError(ctx context.Context, iamClient iamAPI, name string) error {
 		}
 	}
 	if out, err := iamClient.ListInstanceProfilesForRole(ctx, &iam.ListInstanceProfilesForRoleInput{RoleName: &name}); err == nil {
-		var profiles []string
+		profiles := make([]string, 0, len(out.InstanceProfiles))
 		for _, p := range out.InstanceProfiles {
 			profiles = append(profiles, aws.ToString(p.InstanceProfileName))
 		}
