@@ -99,15 +99,26 @@ const DriftDetectionInterval = 5 * time.Minute
 const driftRequeueJitterFraction = 0.2
 
 func jitteredDriftRequeue() time.Duration {
-	span := float64(DriftDetectionInterval) * driftRequeueJitterFraction
-	return DriftDetectionInterval + time.Duration(rand.Float64()*2*span-span) //nolint:gosec // jitter, not a secret
+	return jittered(DriftDetectionInterval)
+}
+
+// jittered spreads d by up to driftRequeueJitterFraction either way.
+func jittered(d time.Duration) time.Duration {
+	span := float64(d) * driftRequeueJitterFraction
+	return d + time.Duration(rand.Float64()*2*span-span) //nolint:gosec // jitter, not a secret
 }
 
 // transientRequeueInterval is how soon a transient AWS error (throttling,
-// eventual consistency) gets retried - short, since the SDK's own retryer
-// has already been through its internal backoff before an error like this
-// ever reached us.
+// eventual consistency) is first retried - short, since the SDK's own
+// retryer has already been through its internal backoff before an error like
+// this ever reached us. Each further failure of the same CR waits twice as
+// long, up to transientMaxDelay.
 const transientRequeueInterval = 30 * time.Second
+
+// transientMaxDelay caps that backoff. It is well under the drift interval
+// so a waiting state (an instance still creating, a grant not there yet) is
+// never noticed more than a couple of minutes late.
+const transientMaxDelay = 2 * time.Minute
 
 // Resource-type tags shared across every section/ledger lookup in this
 // package - named constants rather than repeated literals so a typo can't

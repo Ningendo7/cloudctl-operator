@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -139,4 +140,25 @@ func controllerOptions(maxConcurrent int) controller.Options {
 		),
 		ReconciliationTimeout: reconcileTimeout,
 	}
+}
+
+func (r *AppDependenciesReconciler) transientBackoffLimiter() workqueue.TypedRateLimiter[reconcile.Request] {
+	r.transientBackoffOnce.Do(func() {
+		r.transientBackoff = workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](transientRequeueInterval, transientMaxDelay)
+	})
+	return r.transientBackoff
+}
+
+// transientDelay is how long to wait before retrying a CR after another
+// transient failure: transientRequeueInterval the first time, doubling each
+// consecutive failure up to transientMaxDelay, with jitter so CRs that failed
+// together don't come back together.
+func (r *AppDependenciesReconciler) transientDelay(key types.NamespacedName) time.Duration {
+	return jittered(r.transientBackoffLimiter().When(reconcile.Request{NamespacedName: key}))
+}
+
+// resetTransientBackoff forgets a CR's failures once it succeeds, fails
+// permanently, or is gone.
+func (r *AppDependenciesReconciler) resetTransientBackoff(key types.NamespacedName) {
+	r.transientBackoffLimiter().Forget(reconcile.Request{NamespacedName: key})
 }
