@@ -353,6 +353,7 @@ func reconcileBucketAttributes(ctx context.Context, awsClient s3API, bucket stri
 	// SSE-S3 key.
 	if opts.kmsKeyARN != nil {
 		currentKeyARN := ""
+		bucketKeyEnabled := false
 		encOut, encErr := awsClient.GetBucketEncryption(ctx, &s3sdk.GetBucketEncryptionInput{Bucket: &bucket})
 		if encErr != nil && !isServerSideEncryptionConfigurationNotFound(encErr) {
 			return fmt.Errorf("reading encryption configuration: %w", encErr)
@@ -361,11 +362,14 @@ func reconcileBucketAttributes(ctx context.Context, awsClient s3API, bucket stri
 			for _, rule := range encOut.ServerSideEncryptionConfiguration.Rules {
 				if rule.ApplyServerSideEncryptionByDefault != nil && rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID != nil {
 					currentKeyARN = *rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID
+					bucketKeyEnabled = aws.ToBool(rule.BucketKeyEnabled)
 					break
 				}
 			}
 		}
-		if currentKeyARN != *opts.kmsKeyARN {
+		// Without a Bucket Key, S3 calls KMS for every object read and write,
+		// which is billed and counts against the account's KMS rate quota.
+		if currentKeyARN != *opts.kmsKeyARN || !bucketKeyEnabled {
 			if _, err := awsClient.PutBucketEncryption(ctx, &s3sdk.PutBucketEncryptionInput{
 				Bucket: &bucket,
 				ServerSideEncryptionConfiguration: &types.ServerSideEncryptionConfiguration{
@@ -375,6 +379,7 @@ func reconcileBucketAttributes(ctx context.Context, awsClient s3API, bucket stri
 								SSEAlgorithm:   types.ServerSideEncryptionAwsKms,
 								KMSMasterKeyID: opts.kmsKeyARN,
 							},
+							BucketKeyEnabled: aws.Bool(true),
 						},
 					},
 				},
