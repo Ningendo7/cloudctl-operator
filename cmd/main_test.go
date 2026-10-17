@@ -19,6 +19,9 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime/debug"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -212,4 +215,79 @@ func TestParseSecurityGroupIDs(t *testing.T) {
 			t.Errorf("parseSecurityGroupIDs(%q) accepted a value that is not a security group ID", bad)
 		}
 	}
+}
+
+func writeCgroupFile(t *testing.T, root, name, content string) {
+	t.Helper()
+	path := filepath.Join(root, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCgroupMemoryLimit(t *testing.T) {
+	const mib = 1 << 20
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  int64
+	}{
+		{"cgroup v2 with a limit", map[string]string{cgroupV2MemoryFile: "134217728\n"}, 128 * mib},
+		{"cgroup v2 without a limit", map[string]string{cgroupV2MemoryFile: "max\n"}, 0},
+		{"cgroup v1 with a limit", map[string]string{cgroupV1MemoryFile: "268435456\n"}, 256 * mib},
+		{"cgroup v1 without a limit", map[string]string{cgroupV1MemoryFile: "9223372036854771712\n"}, 0},
+		{"no cgroup files", nil, 0},
+		{"unreadable value", map[string]string{cgroupV2MemoryFile: "lots"}, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for name, content := range tc.files {
+				writeCgroupFile(t, root, name, content)
+			}
+			if got := cgroupMemoryLimit(root); got != tc.want {
+				t.Errorf("cgroupMemoryLimit() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLimitMemoryFromCgroup(t *testing.T) {
+	previous := debug.SetMemoryLimit(-1)
+	t.Cleanup(func() { debug.SetMemoryLimit(previous) })
+
+	root := t.TempDir()
+	writeCgroupFile(t, root, cgroupV2MemoryFile, "134217728")
+
+	t.Run("sets 90% of the container limit", func(t *testing.T) {
+		t.Setenv("GOMEMLIMIT", "")
+		const want = 120795955 // 90% of 128 MiB, rounded down
+		if got := limitMemoryFromCgroup(root); got != want {
+			t.Fatalf("limitMemoryFromCgroup() = %d, want %d", got, want)
+		}
+		if got := debug.SetMemoryLimit(-1); got != want {
+			t.Errorf("runtime memory limit = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("leaves an explicit GOMEMLIMIT alone", func(t *testing.T) {
+		debug.SetMemoryLimit(1 << 40)
+		t.Setenv("GOMEMLIMIT", "64MiB")
+		if got := limitMemoryFromCgroup(root); got != 0 {
+			t.Errorf("limitMemoryFromCgroup() = %d, want 0 when GOMEMLIMIT is set", got)
+		}
+		if got := debug.SetMemoryLimit(-1); got != 1<<40 {
+			t.Errorf("runtime memory limit changed to %d", got)
+		}
+	})
+
+	t.Run("sets nothing without a container limit", func(t *testing.T) {
+		t.Setenv("GOMEMLIMIT", "")
+		if got := limitMemoryFromCgroup(t.TempDir()); got != 0 {
+			t.Errorf("limitMemoryFromCgroup() = %d, want 0", got)
+		}
+	})
 }

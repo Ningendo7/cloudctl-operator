@@ -133,7 +133,11 @@ helm install cloudctl-operator oci://ghcr.io/ningendo7/charts/cloudctl-operator 
 
 See the chart's [values.yaml](charts/chart/values.yaml) for every
 configurable field (replica count, resource limits, pod security context,
-and more).
+and more). With more than one replica the chart also adds a
+PodDisruptionBudget (`podDisruptionBudget.enabled`) and a soft pod
+anti-affinity across nodes, which any `manager.affinity` you set replaces;
+the kustomize bundle has neither. The manager keeps Go's memory use under 90%
+of its container's memory limit unless `GOMEMLIMIT` is set.
 
 ### Plain `kubectl` (kustomize-based bundle)
 

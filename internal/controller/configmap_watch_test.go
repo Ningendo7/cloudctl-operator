@@ -19,9 +19,11 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -32,6 +34,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -95,6 +98,7 @@ var _ = Describe("AppDependencies watches on its generated ConfigMap", Ordered, 
 			Cache: cache.Options{
 				DefaultNamespaces: map[string]cache.Config{testNS: {}},
 				ByObject:          ManagedObjectCache(),
+				DefaultTransform:  ManagedCacheDefaultTransform(),
 			},
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -271,6 +275,7 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 			Cache: cache.Options{
 				DefaultNamespaces: map[string]cache.Config{nsA: {}, nsB: {}},
 				ByObject:          ManagedObjectCache(),
+				DefaultTransform:  ManagedCacheDefaultTransform(),
 			},
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -726,4 +731,40 @@ func operatorHasSeen(c client.Client, key types.NamespacedName, ready func(*core
 		var cm corev1.ConfigMap
 		return c.Get(ctx, key, &cm) == nil && ready(&cm)
 	}, 30*time.Second, 50*time.Millisecond).Should(BeTrue(), "the operator's cache never saw the ConfigMap before it was tampered with")
+}
+
+// Skipping an apply that would change nothing relies on the cached object
+// still saying which field manager applied it; everything else in the cache
+// has no use for managedFields, which are large.
+func TestManagedCache_KeepsManagedFieldsOnlyWhereAppliesAreSkipped(t *testing.T) {
+	// transformFor is what the cache applies to obj: its own entry's
+	// transform if it has one, else the default.
+	transformFor := func(obj client.Object) toolscache.TransformFunc {
+		for key, cfg := range ManagedObjectCache() {
+			if fmt.Sprintf("%T", key) == fmt.Sprintf("%T", obj) && cfg.Transform != nil {
+				return cfg.Transform
+			}
+		}
+		return ManagedCacheDefaultTransform()
+	}
+	managedFieldsAfter := func(obj client.Object) int {
+		t.Helper()
+		obj.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: "cloudctl-operator-configmap", Operation: metav1.ManagedFieldsOperationApply}})
+		out, err := transformFor(obj)(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(out.(client.Object).GetManagedFields())
+	}
+
+	for _, obj := range []client.Object{&corev1.ConfigMap{}, &corev1.Secret{}, &corev1.ServiceAccount{}} {
+		if managedFieldsAfter(obj) == 0 {
+			t.Errorf("%T lost its managedFields in the cache", obj)
+		}
+	}
+	for _, obj := range []client.Object{&depsv1alpha1.AppDependencies{}, &corev1.Pod{}} {
+		if managedFieldsAfter(obj) != 0 {
+			t.Errorf("%T kept its managedFields in the cache", obj)
+		}
+	}
 }

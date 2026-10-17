@@ -25,6 +25,7 @@ import (
 	apierror "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -251,12 +252,31 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // one sitting at a name the operator wants) falls back to the API reader.
 // Shared by main and the envtest managers so the tests run the production
 // configuration.
+//
+// The three types that are written with server-side apply keep their
+// managedFields in the cache (see ManagedCacheDefaultTransform).
 func ManagedObjectCache() map[client.Object]cache.ByObject {
-	managed := cache.ByObject{Label: labels.SelectorFromSet(labels.Set{
-		depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue,
-	})}
-	return map[client.Object]cache.ByObject{
-		&corev1.Secret{}:    managed,
-		&corev1.ConfigMap{}: managed,
+	keepManagedFields := func(in any) (any, error) { return in, nil }
+	managed := cache.ByObject{
+		Label: labels.SelectorFromSet(labels.Set{
+			depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue,
+		}),
+		Transform: keepManagedFields,
 	}
+	return map[client.Object]cache.ByObject{
+		&corev1.Secret{}:         managed,
+		&corev1.ConfigMap{}:      managed,
+		&corev1.ServiceAccount{}: {Transform: keepManagedFields},
+	}
+}
+
+// ManagedCacheDefaultTransform drops managedFields from every cached object
+// that does not need them. For server-side-applied objects, managedFields
+// often outweigh the useful payload, and every AppDependencies carries them
+// along with its whole status ledger. The ConfigMap, Secret and
+// ServiceAccount entries of ManagedObjectCache opt out: skipping an apply
+// that would change nothing needs to know this operator applied the object
+// before, and that is only recorded there.
+func ManagedCacheDefaultTransform() toolscache.TransformFunc {
+	return cache.TransformStripManagedFields()
 }
