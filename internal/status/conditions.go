@@ -18,6 +18,7 @@ package status
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -43,6 +44,15 @@ const ConditionTypeDeletionBlocked = "DeletionBlocked"
 const MaxMessageLength = 4096
 
 const truncatedMarker = "… (truncated)"
+
+var awsRequestIDs = regexp.MustCompile(`,?\s*(?:RequestID|HostID): [^,\s]+`)
+
+// StripRequestIDs removes the RequestID and HostID AWS adds to SDK errors.
+// They differ on every call, so a condition message holding one changes on
+// every pass of a failing section and each change is a status write.
+func StripRequestIDs(msg string) string {
+	return strings.TrimPrefix(awsRequestIDs.ReplaceAllString(msg, ""), ", ")
+}
 
 // CapMessage shortens msg to MaxMessageLength bytes, on a character
 // boundary, saying that it was cut.

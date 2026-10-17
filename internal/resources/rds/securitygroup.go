@@ -267,6 +267,14 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 		}},
 	})
 	if err != nil {
+		if isDuplicateGroup(err) {
+			// The lookup above missed a group an earlier pass created: EC2
+			// reads lag its writes. The next pass finds it.
+			return "", nil, &cloudctlaws.ReconcileError{
+				Err:       fmt.Errorf("security group %q was created moments ago and is not visible yet: %w", groupName, err),
+				Retryable: true,
+			}
+		}
 		return "", nil, wrapEC2Error(err, "creating security group")
 	}
 	return *createOut.GroupId, nil, nil
@@ -389,6 +397,11 @@ func consumerPodSecurityGroupARN(ctx context.Context, k8sClient client.Client, n
 	}
 	arn, ok := PodNetworkIdentityARN(&consumer)
 	return arn, ok, nil
+}
+
+func isDuplicateGroup(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == errCodeInvalidGroupDuplicate
 }
 
 func isDuplicatePermission(err error) bool {

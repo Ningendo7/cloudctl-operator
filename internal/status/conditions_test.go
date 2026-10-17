@@ -153,3 +153,33 @@ func TestConditionsNeverExceedTheMessageLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestStripRequestIDs(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{
+			"SQS",
+			"operation error SQS: GetQueueUrl, https response error StatusCode: 403, RequestID: 8a5e0c66-1f3e-5c6b-9b0d-2d1f1c3a9e11, api error AccessDenied: not authorized",
+			"operation error SQS: GetQueueUrl, https response error StatusCode: 403, api error AccessDenied: not authorized",
+		},
+		{
+			"S3 adds a HostID",
+			"operation error S3: HeadBucket, https response error StatusCode: 403, RequestID: 7XYZ123, HostID: abc+/DEF=, api error Forbidden: Forbidden",
+			"operation error S3: HeadBucket, https response error StatusCode: 403, api error Forbidden: Forbidden",
+		},
+		{
+			"after retries",
+			"exceeded maximum number of attempts, 3, https response error StatusCode: 503, RequestID: 1234, api error ServiceUnavailable: try later",
+			"exceeded maximum number of attempts, 3, https response error StatusCode: 503, api error ServiceUnavailable: try later",
+		},
+		{"at the end", "operation error EC2: DescribeSecurityGroups, StatusCode: 500, RequestID: abc-123", "operation error EC2: DescribeSecurityGroups, StatusCode: 500"},
+		{"first", "RequestID: abc, then more", "then more"},
+		{"nothing to strip", "queue \"orders\" is already owned by a different CR", "queue \"orders\" is already owned by a different CR"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StripRequestIDs(tc.in); got != tc.want {
+				t.Errorf("StripRequestIDs() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

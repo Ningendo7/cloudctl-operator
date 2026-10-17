@@ -249,7 +249,7 @@ func ensureTable(
 		updated.Force = opts.force
 		status.UpsertManagedResource(&ledger, updated)
 
-		if err := reconcileTableAttributes(ctx, awsClient, tableName, opts); err != nil {
+		if err := reconcileTableAttributes(ctx, awsClient, tableName, table, opts); err != nil {
 			return ledger, wrapAWSError(err, "reconciling table attributes")
 		}
 		return ledger, nil
@@ -308,7 +308,7 @@ func ensureTable(
 		}
 	}
 
-	if err := reconcileTableAttributes(ctx, awsClient, tableName, opts); err != nil {
+	if err := reconcileTableAttributes(ctx, awsClient, tableName, table, opts); err != nil {
 		return ledger, wrapAWSError(err, "reconciling table attributes")
 	}
 
@@ -408,13 +408,8 @@ func createTable(
 // reconcileTableAttributes corrects drift on an already-ACTIVE table's
 // mutable configuration: BillingMode (driven by spec.overrides.billingMode,
 // defaulting to on-demand) and point-in-time recovery (driven by
-// spec.backup.enabled).
-func reconcileTableAttributes(ctx context.Context, awsClient dynamodbAPI, tableName string, opts tableOptions) error {
-	describeOut, err := awsClient.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
-	if err != nil {
-		return fmt.Errorf("reading current table config: %w", err)
-	}
-
+// spec.backup.enabled). table is the description the caller just read.
+func reconcileTableAttributes(ctx context.Context, awsClient dynamodbAPI, tableName string, table *types.TableDescription, opts tableOptions) error {
 	desiredMode := billingModeFor(opts.billingMode)
 	// A nil BillingModeSummary means this table predates the field's
 	// introduction — every table AWS ever created before PAY_PER_REQUEST
@@ -424,8 +419,8 @@ func reconcileTableAttributes(ctx context.Context, awsClient dynamodbAPI, tableN
 	// Provisioned mode fail this comparison and call UpdateTable every
 	// single reconcile even though nothing actually needs to change.
 	currentMode := types.BillingModeProvisioned
-	if describeOut.Table.BillingModeSummary != nil {
-		currentMode = describeOut.Table.BillingModeSummary.BillingMode
+	if table.BillingModeSummary != nil {
+		currentMode = table.BillingModeSummary.BillingMode
 	}
 
 	if currentMode != desiredMode {
@@ -450,8 +445,8 @@ func reconcileTableAttributes(ctx context.Context, awsClient dynamodbAPI, tableN
 	// already-encrypted table.
 	if opts.kmsKeyARN != nil {
 		currentKeyARN := ""
-		if describeOut.Table.SSEDescription != nil {
-			currentKeyARN = aws.ToString(describeOut.Table.SSEDescription.KMSMasterKeyArn)
+		if table.SSEDescription != nil {
+			currentKeyARN = aws.ToString(table.SSEDescription.KMSMasterKeyArn)
 		}
 		if currentKeyARN != *opts.kmsKeyARN {
 			if _, err := awsClient.UpdateTable(ctx, &dynamodb.UpdateTableInput{

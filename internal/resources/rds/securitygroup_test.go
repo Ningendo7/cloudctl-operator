@@ -343,6 +343,29 @@ func TestEnsureSecurityGroup_PropagatesCreateSecurityGroupFailure(t *testing.T) 
 	}
 }
 
+// EC2 reads lag its writes: a group created by an earlier pass can be missed
+// by the lookup, and creating it again is refused as a duplicate.
+func TestEnsureSecurityGroup_ADuplicateGroupIsRetriedNotRefused(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	ec2Client.createSecurityGroupErr = &fakeAWSError{code: errCodeInvalidGroupDuplicate, fault: smithy.FaultClient}
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	_, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
+
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable ReconcileError, got %v", err)
+	}
+
+	ec2Client.createSecurityGroupErr = nil
+	if _, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil); err != nil {
+		t.Fatalf("the next pass should succeed once the group is visible: %v", err)
+	}
+}
+
 func TestEnsureSecurityGroup_PropagatesAuthorizeIngressFailure_WhenNotDuplicate(t *testing.T) {
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()

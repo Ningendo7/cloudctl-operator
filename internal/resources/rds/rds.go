@@ -71,6 +71,7 @@ const (
 
 	errCodeDependencyViolation        = "DependencyViolation"
 	errCodeInvalidDBInstanceState     = "InvalidDBInstanceState"
+	errCodeInvalidGroupDuplicate      = "InvalidGroup.Duplicate"
 	errCodeInvalidGroupNotFound       = "InvalidGroup.NotFound"
 	errCodeInvalidPermissionNotFound  = "InvalidPermission.NotFound"
 	errCodeInvalidPermissionDuplicate = "InvalidPermission.Duplicate"
