@@ -235,12 +235,12 @@ func TestCgroupMemoryLimit(t *testing.T) {
 		files map[string]string
 		want  int64
 	}{
-		{"cgroup v2 with a limit", map[string]string{"memory.max": "134217728\n"}, 128 * mib},
-		{"cgroup v2 without a limit", map[string]string{"memory.max": "max\n"}, 0},
-		{"cgroup v1 with a limit", map[string]string{"memory/memory.limit_in_bytes": "268435456\n"}, 256 * mib},
-		{"cgroup v1 without a limit", map[string]string{"memory/memory.limit_in_bytes": "9223372036854771712\n"}, 0},
+		{"cgroup v2 with a limit", map[string]string{cgroupV2MemoryFile: "134217728\n"}, 128 * mib},
+		{"cgroup v2 without a limit", map[string]string{cgroupV2MemoryFile: "max\n"}, 0},
+		{"cgroup v1 with a limit", map[string]string{cgroupV1MemoryFile: "268435456\n"}, 256 * mib},
+		{"cgroup v1 without a limit", map[string]string{cgroupV1MemoryFile: "9223372036854771712\n"}, 0},
 		{"no cgroup files", nil, 0},
-		{"unreadable value", map[string]string{"memory.max": "lots"}, 0},
+		{"unreadable value", map[string]string{cgroupV2MemoryFile: "lots"}, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -260,7 +260,7 @@ func TestLimitMemoryFromCgroup(t *testing.T) {
 	t.Cleanup(func() { debug.SetMemoryLimit(previous) })
 
 	root := t.TempDir()
-	writeCgroupFile(t, root, "memory.max", "134217728")
+	writeCgroupFile(t, root, cgroupV2MemoryFile, "134217728")
 
 	t.Run("sets 90% of the container limit", func(t *testing.T) {
 		t.Setenv("GOMEMLIMIT", "")

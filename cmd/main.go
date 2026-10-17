@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"strconv"
@@ -452,11 +451,23 @@ func limitMemoryFromCgroup(root string) int64 {
 	return soft
 }
 
+// Files holding a cgroup's memory limit, relative to its mount point.
+const (
+	cgroupV2MemoryFile = "memory.max"
+	cgroupV1MemoryFile = "memory/memory.limit_in_bytes"
+)
+
 // cgroupMemoryLimit returns the memory limit in bytes of the cgroup mounted
 // at root, or 0 when it has none. It reads cgroup v2, then v1.
 func cgroupMemoryLimit(root string) int64 {
-	for _, file := range []string{"memory.max", "memory/memory.limit_in_bytes"} {
-		raw, err := os.ReadFile(filepath.Join(root, file))
+	cgroup, err := os.OpenRoot(root)
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = cgroup.Close() }()
+
+	for _, file := range []string{cgroupV2MemoryFile, cgroupV1MemoryFile} {
+		raw, err := cgroup.ReadFile(file)
 		if err != nil {
 			continue
 		}
