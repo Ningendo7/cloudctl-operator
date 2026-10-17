@@ -17,6 +17,7 @@ limitations under the License.
 package aws
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -349,5 +350,37 @@ func TestQueueOrTopicName(t *testing.T) {
 	fifo := QueueOrTopicName("default", "orders.v2", "sqs", true, 80, "orders")
 	if !strings.HasSuffix(fifo, ".fifo") || len(fifo) > 80 || !validFor(NameStyleWordChars, strings.TrimSuffix(fifo, ".fifo"), 80) {
 		t.Errorf("FIFO name %q must end in .fifo, fit 80 characters and be valid before the suffix", fifo)
+	}
+}
+
+func TestCheckFIFOUnchanged(t *testing.T) {
+	const std = "arn:aws:sqs:us-east-1:123456789012:default-app-orders-ab12cd34"
+	tests := []struct {
+		name, arn string
+		fifo      bool
+		wantErr   string
+	}{
+		{"standard stays standard", std, false, ""},
+		{"fifo stays fifo", std + ".fifo", true, ""},
+		{"standard becomes fifo", std, true, "is a standard queue but the spec now asks for a FIFO one"},
+		{"fifo becomes standard", std + ".fifo", false, "is a FIFO queue but the spec now asks for a standard one"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckFIFOUnchanged("queue", tc.arn, tc.fifo)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			var reconcileErr *ReconcileError
+			if !errors.As(err, &reconcileErr) || reconcileErr.Retryable || reconcileErr.Reason != ReasonFIFOChanged {
+				t.Fatalf("expected a permanent %s error, got %v", ReasonFIFOChanged, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)
+			}
+		})
 	}
 }

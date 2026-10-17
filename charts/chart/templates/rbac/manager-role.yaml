@@ -39,8 +39,6 @@ rules:
   resources:
   - appdependencies
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch

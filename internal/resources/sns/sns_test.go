@@ -662,3 +662,24 @@ func TestEnsure_TakesOverATopicFromTheUIDItWasTold(t *testing.T) {
 		})
 	}
 }
+
+func TestEnsure_RefusesAFlippedFIFOWhileTheOldTopicIsStillTracked(t *testing.T) {
+	client := newFakeSNS()
+	standard := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
+	ledger, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, standard, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	topics := len(client.topics)
+
+	flipped := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", FIFO: true}}}
+	_, err = Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, flipped, ledger, nil, nil)
+
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != cloudctlaws.ReasonFIFOChanged {
+		t.Fatalf("expected a %s error, got %v", cloudctlaws.ReasonFIFOChanged, err)
+	}
+	if len(client.topics) != topics {
+		t.Error("a refused flip must not create the other kind of topic")
+	}
+}

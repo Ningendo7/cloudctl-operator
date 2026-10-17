@@ -74,8 +74,8 @@ var actionSets = map[string]actionSet{
 		readWrite: []string{"sns:Publish"},
 	},
 	resourceTypeDynamoDB: {
-		baseline:  []string{"dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem"},
-		readWrite: []string{"dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"},
+		baseline:  []string{"dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem", "dynamodb:TransactGetItems"},
+		readWrite: []string{"dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:TransactWriteItems", "dynamodb:ConditionCheckItem"},
 	},
 	// kms grants are for a resource's own encryption key (dedicated or
 	// shared via kmsKeyRef), never a standalone kms.resources entry
@@ -99,7 +99,7 @@ var actionSets = map[string]actionSet{
 var (
 	s3BucketLevelActions = []string{"s3:ListBucket"}
 	s3ObjectBaseline     = []string{"s3:GetObject"}
-	s3ObjectReadWrite    = []string{"s3:PutObject", "s3:DeleteObject"}
+	s3ObjectReadWrite    = []string{"s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"}
 )
 
 // grantActions is actionsFor without the actions a consumer never gets.
@@ -448,11 +448,17 @@ func buildPolicyDocument(grants []grant) (string, error) {
 			)
 			continue
 		}
+		resources := []string{g.arn}
+		if g.resourceType == resourceTypeDynamoDB {
+			// Queries and scans of a secondary index are authorized on the
+			// index's ARN, not the table's.
+			resources = append(resources, g.arn+"/index/*")
+		}
 		doc.Statement = append(doc.Statement, policyStatement{
 			Sid:      fmt.Sprintf("%s%d", g.resourceType, i),
 			Effect:   effectAllow,
 			Action:   grantActions(g),
-			Resource: []string{g.arn},
+			Resource: resources,
 		})
 	}
 
