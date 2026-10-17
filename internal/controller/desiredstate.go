@@ -329,7 +329,10 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 		reason = reasonTransientError
 	}
 
+	// The log keeps the full error; the condition and event get it without
+	// AWS request IDs, which would make every pass look like a change.
 	logf.FromContext(ctx).Error(err, "Section failed to reconcile", "section", conditionType, "reason", reason)
+	message := status.StripRequestIDs(err.Error())
 
 	// A Warning event here, not just the condition below: status.conditions
 	// alone is invisible to the standard `kubectl describe`/`get events`
@@ -337,7 +340,7 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 	// deserves one, the same way every success path already reports a
 	// Normal event via this same recorder.
 	if recordEvent != nil {
-		recordEvent("Warning", conditionType+reason, fmt.Sprintf("%s: %s", conditionType, err.Error()))
+		recordEvent("Warning", conditionType+reason, fmt.Sprintf("%s: %s", conditionType, message))
 	}
 
 	status.SetSectionCondition(
@@ -345,7 +348,7 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 		conditionType,
 		metav1.ConditionFalse,
 		reason,
-		err.Error(),
+		message,
 		cr.Generation,
 		sectionTypes,
 	)

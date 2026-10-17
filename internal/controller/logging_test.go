@@ -19,11 +19,14 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/aws/smithy-go"
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -444,5 +447,32 @@ func TestReconcileDelete_RetryableError_LogsInfoNotError(t *testing.T) {
 	}
 	if sawTopLevelFailureLog {
 		t.Errorf("expected no top-level 'Deletion reconcile failed' log for a retryable failure, got %+v", *calls)
+	}
+}
+
+// A section failing for the same reason on every pass must not change its
+// condition: each change is a status write, during an incident most of all.
+func TestSetSectionCondition_RequestIDsDoNotChangeTheCondition(t *testing.T) {
+	failure := func(requestID string) error {
+		return fmt.Errorf("operation error SQS: GetQueueUrl, https response error StatusCode: 403, RequestID: %s, api error AccessDenied: not authorized", requestID)
+	}
+	logger, calls := newFakeLogger()
+	ctx := logf.IntoContext(context.Background(), logger)
+	cr := &depsv1alpha1.AppDependencies{}
+	var events []string
+	record := func(_, _, message string) { events = append(events, message) }
+
+	setSectionCondition(ctx, cr, "SQSReady", failure("aaaa-1111"), record)
+	first := slices.Clone(cr.Status.Conditions)
+	setSectionCondition(ctx, cr, "SQSReady", failure("bbbb-2222"), record)
+
+	if !equality.Semantic.DeepEqual(first, cr.Status.Conditions) {
+		t.Errorf("conditions changed between two passes failing identically:\n%+v\n%+v", first, cr.Status.Conditions)
+	}
+	if len(events) != 2 || events[0] != events[1] || strings.Contains(events[0], "RequestID") {
+		t.Errorf("expected two identical events without a request ID, got %q", events)
+	}
+	if got := (*calls)[1].err.Error(); !strings.Contains(got, "bbbb-2222") {
+		t.Errorf("the log must keep the full error, got %q", got)
 	}
 }

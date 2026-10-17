@@ -1120,3 +1120,24 @@ func TestEnsure_TakesOverATableFromTheUIDItWasTold(t *testing.T) {
 		})
 	}
 }
+
+func TestEnsure_DescribesTheTableOncePerPass(t *testing.T) {
+	client := newFakeDynamoDB()
+	ledger := verifiedSessionsTable(t, client)
+
+	// Inside the trust window, and then past it: both read the table once.
+	for _, name := range []string{"inside the trust window", "past the trust window"} {
+		if name == "past the trust window" {
+			stale := metav1.NewTime(time.Now().Add(-status.TrustWindow - time.Minute))
+			ledger[0].LastVerifiedAt = &stale
+		}
+		before := client.describeCalls
+		var err error
+		if ledger, err = Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", sessionsSpec(false), ledger, nil, nil); err != nil {
+			t.Fatalf("%s: Ensure() error = %v", name, err)
+		}
+		if got := client.describeCalls - before; got != 1 {
+			t.Errorf("%s: DescribeTable calls = %d, want 1", name, got)
+		}
+	}
+}

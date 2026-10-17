@@ -75,6 +75,7 @@ type fakeDynamoDB struct {
 
 	scanCalls     int
 	listTagsCalls int
+	describeCalls int
 }
 
 func newFakeDynamoDB() *fakeDynamoDB {
@@ -111,6 +112,7 @@ func (f *fakeDynamoDB) CreateTable(_ context.Context, in *dynamodb.CreateTableIn
 }
 
 func (f *fakeDynamoDB) DescribeTable(_ context.Context, in *dynamodb.DescribeTableInput, _ ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
+	f.describeCalls++
 	if f.describeTableErr != nil {
 		return nil, f.describeTableErr
 	}
