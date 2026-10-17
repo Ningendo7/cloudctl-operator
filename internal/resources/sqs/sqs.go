@@ -259,6 +259,10 @@ func ensureSingleQueue(
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, queueURL string, err error) {
+	if err := checkFIFOUnchanged(ledger, resourceName, opts.fifo); err != nil {
+		return ledger, "", err
+	}
+
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, resourceName); existingFound && !status.NeedsRevalidation(existing) {
 		// Still within the trust window - skip re-verifying ownership, but
 		// attribute drift correction is a different concern and must still
@@ -417,6 +421,16 @@ func ensureSingleQueue(
 		ledger,
 	)
 	return ledger, queueURL, err
+}
+
+// checkFIFOUnchanged refuses a queue entry whose type the spec has flipped,
+// except one that was let go, which no longer stands for a queue.
+func checkFIFOUnchanged(ledger []depsv1alpha1.ManagedResource, resourceName string, fifo bool) error {
+	existing, found := status.FindManagedResource(ledger, resourceType, resourceName)
+	if !found || existing.State == depsv1alpha1.ManagedResourceStateRelinquished {
+		return nil
+	}
+	return cloudctlaws.CheckFIFOUnchanged("queue", existing.ARN, fifo)
 }
 
 // desiredAttributes computes the mutable attributes this package manages

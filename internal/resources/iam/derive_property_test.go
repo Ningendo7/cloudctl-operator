@@ -153,6 +153,9 @@ func TestBuildPolicyDocument_EveryGrantARNIsCoveredExactlyOnce(t *testing.T) {
 			if g.resourceType == "s3" {
 				allowedResources[g.arn+"/*"] = true
 			}
+			if g.resourceType == "dynamodb" {
+				allowedResources[g.arn+"/index/*"] = true
+			}
 		}
 
 		seen := map[string]bool{}

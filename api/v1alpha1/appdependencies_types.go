@@ -91,7 +91,7 @@ type ConsumeRef struct {
 	// resourceName is the `name` of the specific resource entry within the
 	// owning CR's section (e.g. the queue name under its sqs.resources list).
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MaxLength=80
+	// +kubebuilder:validation:MaxLength=256
 	ResourceName string `json:"resourceName"`
 }
 
@@ -851,6 +851,7 @@ type AppDependenciesSpec struct {
 	// an identity it doesn't control, so there is no namespace field here.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 
 	// +optional
@@ -884,6 +885,7 @@ type AppDependenciesSpec struct {
 	// access, not every pod under the CR's main ServiceAccount).
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
 	NetworkServiceAccountName string `json:"networkServiceAccountName,omitempty"`
 }
 

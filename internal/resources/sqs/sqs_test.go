@@ -1113,3 +1113,35 @@ func TestEnsure_TakesOverAQueueFromTheUIDItWasTold(t *testing.T) {
 		})
 	}
 }
+
+// fifo can't be edited on an entry, but removing the entry and adding it back
+// with fifo flipped passes that rule while the old queue is still in the
+// ledger, and it would be reconciled as if it were the new one.
+func TestEnsure_RefusesAFlippedFIFOWhileTheOldQueueIsStillTracked(t *testing.T) {
+	client := newFakeSQS()
+	standard := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", standard, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	queues := len(client.queues)
+
+	flipped := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", FIFO: true}}}
+	_, err = Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", flipped, ledger, nil, nil)
+
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != cloudctlaws.ReasonFIFOChanged {
+		t.Fatalf("expected a %s error, got %v", cloudctlaws.ReasonFIFOChanged, err)
+	}
+	if len(client.queues) != queues {
+		t.Error("a refused flip must not create the other kind of queue")
+	}
+
+	t.Run("a relinquished entry no longer stands for the old queue", func(t *testing.T) {
+		released := slices.Clone(ledger)
+		released[0] = status.Relinquished(released[0])
+		if _, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", flipped, released, nil, nil); err != nil {
+			t.Fatalf("Ensure() error = %v, want the FIFO queue created", err)
+		}
+	})
+}

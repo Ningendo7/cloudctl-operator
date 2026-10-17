@@ -124,6 +124,10 @@ func ensureTopic(
 		}
 	}
 
+	if err := checkFIFOUnchanged(ledger, t.Name, t.FIFO); err != nil {
+		return ledger, err
+	}
+
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, t.Name); existingFound && !status.NeedsRevalidation(existing) {
 		// Still within the trust window - skip re-verifying ownership, but
 		// attribute drift correction is a different concern and must still
@@ -342,4 +346,14 @@ func wrapAWSError(err error, errContext string) error {
 		Err:       fmt.Errorf("%s: %w", errContext, err),
 		Retryable: cloudctlaws.IsRetryable(err),
 	}
+}
+
+// checkFIFOUnchanged refuses a topic entry whose type the spec has flipped,
+// except one that was let go, which no longer stands for a topic.
+func checkFIFOUnchanged(ledger []depsv1alpha1.ManagedResource, resourceName string, fifo bool) error {
+	existing, found := status.FindManagedResource(ledger, resourceType, resourceName)
+	if !found || existing.State == depsv1alpha1.ManagedResourceStateRelinquished {
+		return nil
+	}
+	return cloudctlaws.CheckFIFOUnchanged("topic", existing.ARN, fifo)
 }

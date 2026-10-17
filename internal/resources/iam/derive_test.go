@@ -767,3 +767,62 @@ func TestEnsureRole_TakesOverARoleFromTheUIDItWasTold(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildPolicyDocument_DynamoDBCoversIndexesAndTransactions(t *testing.T) {
+	const table = "arn:aws:dynamodb:us-east-1:123456789012:table/sessions"
+	statementFor := func(readWrite bool) policyStatement {
+		t.Helper()
+		doc, err := buildPolicyDocument([]grant{{resourceType: "dynamodb", arn: table, readWrite: readWrite}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parsed policyDocument
+		if err := json.Unmarshal([]byte(doc), &parsed); err != nil || len(parsed.Statement) != 1 {
+			t.Fatalf("expected one statement, got %v (%v)", parsed.Statement, err)
+		}
+		return parsed.Statement[0]
+	}
+
+	readOnly := statementFor(false)
+	if !slices.Equal(readOnly.Resource, []string{table, table + "/index/*"}) {
+		t.Errorf("Resource = %v, want the table and its indexes", readOnly.Resource)
+	}
+	if !containsAction(readOnly.Action, "dynamodb:TransactGetItems") {
+		t.Error("expected a read-only grant to allow TransactGetItems")
+	}
+	for _, write := range []string{"dynamodb:TransactWriteItems", "dynamodb:ConditionCheckItem"} {
+		if containsAction(readOnly.Action, write) {
+			t.Errorf("a read-only grant must not allow %s", write)
+		}
+		if !containsAction(statementFor(true).Action, write) {
+			t.Errorf("expected a ReadWrite grant to allow %s", write)
+		}
+	}
+}
+
+func TestBuildPolicyDocument_S3ReadWriteCanAbortItsMultipartUploads(t *testing.T) {
+	object := func(readWrite bool) policyStatement {
+		t.Helper()
+		doc, err := buildPolicyDocument([]grant{{resourceType: "s3", arn: "arn:aws:s3:::my-bucket", readWrite: readWrite}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parsed policyDocument
+		if err := json.Unmarshal([]byte(doc), &parsed); err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range parsed.Statement {
+			if slices.Contains(s.Resource, "arn:aws:s3:::my-bucket/*") {
+				return s
+			}
+		}
+		t.Fatal("no object-level statement")
+		return policyStatement{}
+	}
+	if !containsAction(object(true).Action, "s3:AbortMultipartUpload") {
+		t.Error("expected ReadWrite to allow AbortMultipartUpload")
+	}
+	if containsAction(object(false).Action, "s3:AbortMultipartUpload") {
+		t.Error("a read-only grant must not allow AbortMultipartUpload")
+	}
+}

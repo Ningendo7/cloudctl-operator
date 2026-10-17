@@ -81,7 +81,7 @@ spec:
                         description: |-
                           resourceName is the `name` of the specific resource entry within the
                           owning CR's section (e.g. the queue name under its sqs.resources list).
-                        maxLength: 80
+                        maxLength: 256
                         type: string
                     required:
                     - name
@@ -112,7 +112,7 @@ spec:
                           description: |-
                             resourceName is the `name` of the specific resource entry within the
                             owning CR's section (e.g. the queue name under its sqs.resources list).
-                          maxLength: 80
+                          maxLength: 256
                           type: string
                       required:
                       - name
@@ -315,6 +315,7 @@ spec:
                   diverges (e.g. only one component of a larger app needs database
                   access, not every pod under the CR's main ServiceAccount).
                 maxLength: 253
+                pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                 type: string
               rds:
                 description: RDSSpec is the rds section of an AppDependencies spec.
@@ -347,7 +348,7 @@ spec:
                           description: |-
                             resourceName is the `name` of the specific resource entry within the
                             owning CR's section (e.g. the queue name under its sqs.resources list).
-                          maxLength: 80
+                          maxLength: 256
                           type: string
                       required:
                       - name
@@ -615,7 +616,7 @@ spec:
                           description: |-
                             resourceName is the `name` of the specific resource entry within the
                             owning CR's section (e.g. the queue name under its sqs.resources list).
-                          maxLength: 80
+                          maxLength: 256
                           type: string
                       required:
                       - name
@@ -835,6 +836,7 @@ spec:
                   cross-namespace targeting would let a CR attach its IAM permissions to
                   an identity it doesn't control, so there is no namespace field here.
                 maxLength: 253
+                pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                 type: string
               sns:
                 properties:
@@ -859,7 +861,7 @@ spec:
                           description: |-
                             resourceName is the `name` of the specific resource entry within the
                             owning CR's section (e.g. the queue name under its sqs.resources list).
-                          maxLength: 80
+                          maxLength: 256
                           type: string
                       required:
                       - name
@@ -1011,7 +1013,7 @@ spec:
                           description: |-
                             resourceName is the `name` of the specific resource entry within the
                             owning CR's section (e.g. the queue name under its sqs.resources list).
-                          maxLength: 80
+                          maxLength: 256
                           type: string
                       required:
                       - name
@@ -1186,7 +1188,7 @@ spec:
                                 description: |-
                                   resourceName is the `name` of the specific resource entry within the
                                   owning CR's section (e.g. the queue name under its sqs.resources list).
-                                maxLength: 80
+                                maxLength: 256
                                 type: string
                             required:
                             - name

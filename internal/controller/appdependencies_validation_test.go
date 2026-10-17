@@ -591,6 +591,23 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			}
 		}
 
+		saCR := func(mutate func(*depsv1alpha1.AppDependencies)) *depsv1alpha1.AppDependencies {
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-invalid-sa-", Namespace: "default"},
+				Spec:       depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}},
+			}
+			mutate(cr)
+			return cr
+		}
+
+		It("accepts a ServiceAccount name with dots and hyphens, and a consumed resource name up to 256 characters", func() {
+			obj := saCR(func(c *depsv1alpha1.AppDependencies) {
+				c.Spec.ServiceAccountName = "team-a.worker-1"
+				c.Spec.SQS.Consumes = []depsv1alpha1.ConsumeRef{{Namespace: "team", Name: "producer", ResourceName: strings.Repeat("a", 256)}}
+			})
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+		})
+
 		DescribeTable("rejects",
 			func(obj *depsv1alpha1.AppDependencies, wantMessage string) {
 				err := k8sClient.Create(ctx, obj)
@@ -619,6 +636,10 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Entry("an SQS name over 80 characters", sqsCR(func(q *depsv1alpha1.SQSQueueSpec) { q.Name = strings.Repeat("a", 81) }), "Too long"),
 			Entry("an unknown deletion policy", sqsCR(func(q *depsv1alpha1.SQSQueueSpec) { q.DeletionPolicy = "Purge" }), "Unsupported value"),
 			Entry("an uppercase S3 bucket name", s3CR(func(b *depsv1alpha1.S3BucketSpec) { b.Name = "Receipts" }), "should match"),
+			Entry("an uppercase ServiceAccount name", saCR(func(c *depsv1alpha1.AppDependencies) { c.Spec.ServiceAccountName = "My-SA" }), "should match"),
+			Entry("a ServiceAccount name with an underscore", saCR(func(c *depsv1alpha1.AppDependencies) { c.Spec.ServiceAccountName = "team_sa" }), "should match"),
+			Entry("a ServiceAccount name ending in a hyphen", saCR(func(c *depsv1alpha1.AppDependencies) { c.Spec.ServiceAccountName = "team-" }), "should match"),
+			Entry("an uppercase network ServiceAccount name", saCR(func(c *depsv1alpha1.AppDependencies) { c.Spec.NetworkServiceAccountName = "DB-Client" }), "should match"),
 			Entry("S3 replication without a region", s3CR(func(b *depsv1alpha1.S3BucketSpec) {
 				b.Replication = &depsv1alpha1.S3ReplicationSpec{Enabled: true}
 			}), "region is required"),

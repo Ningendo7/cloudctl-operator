@@ -136,6 +136,31 @@ func QueueOrTopicName(namespace, crName, resourceType string, fifo bool, maxLen 
 	return name
 }
 
+// ReasonFIFOChanged is the reason of the error for an existing queue or topic
+// whose spec now asks for the other type.
+const ReasonFIFOChanged = "FIFOChanged"
+
+// CheckFIFOUnchanged refuses an entry whose queue or topic, named by arn, is
+// not the type the spec now asks for. fifo can't be edited on an entry, but
+// removing it and adding it back passes that rule while its old entry is
+// still in the ledger, and the old queue would then be reconciled as if it
+// were the new one. kind is "queue" or "topic".
+func CheckFIFOUnchanged(kind, arn string, fifo bool) error {
+	isFIFO := strings.HasSuffix(arn, ".fifo")
+	if isFIFO == fifo {
+		return nil
+	}
+	have, want := "standard", "FIFO"
+	if isFIFO {
+		have, want = "FIFO", "standard"
+	}
+	return &ReconcileError{
+		Err: fmt.Errorf("%s %q is a %s %s but the spec now asks for a %s one; the type can't change on an existing %s, so set fifo back, or remove the entry, wait for it to be deleted and add it again",
+			kind, arn[strings.LastIndex(arn, ":")+1:], have, kind, want, kind),
+		Reason: ReasonFIFOChanged,
+	}
+}
+
 // buildName cleans the prefix for the service, fits it to maxLen and puts
 // the hash after it. With NameStyleAny it only truncates.
 func buildName(style NameStyle, prefix, hash string, maxLen int) string {
