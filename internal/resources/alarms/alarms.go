@@ -110,10 +110,8 @@ type ownership struct {
 // or deleting as needed. k8sClient is only ever touched when
 // alarms.snsTopicRef is set.
 //
-// mayExist is the previous pass's answer (nil when unknown). When it is
-// false and no alarm is desired, nothing is listed: only this operator
-// creates these alarms, and it would have recorded doing so. The returned
-// value is the answer to record for the next pass.
+// mayExist is the previous pass's result (nil if unknown): when false and no
+// alarm is desired, nothing is listed. The result is for the next pass.
 func Ensure(
 	ctx context.Context,
 	cwClient cloudctlaws.CloudWatchClient,

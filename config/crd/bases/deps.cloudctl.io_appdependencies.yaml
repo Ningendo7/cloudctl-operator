@@ -1212,9 +1212,8 @@ spec:
             properties:
               alarmsMayExist:
                 description: |-
-                  alarmsMayExist is false once a pass has found no CloudWatch alarms
-                  owned by this CR, so a CR without alarms doesn't list them on every
-                  pass. Unset means not yet known.
+                  alarmsMayExist is false once a pass found no alarms owned by this CR,
+                  so they aren't listed every pass. Unset means unknown.
                 type: boolean
               conditions:
                 description: |-
@@ -1297,9 +1296,8 @@ spec:
                   properties:
                     appliedDigest:
                       description: |-
-                        appliedDigest is a digest of the last policy document confirmed on
-                        this resource (the IAM role's permissions policy), so an unchanged
-                        document isn't read back until the trust window expires.
+                        appliedDigest is a digest of the policy document last confirmed on this
+                        resource, so it isn't read back before the trust window expires.
                       type: string
                     arn:
                       description: arn of the underlying AWS resource.

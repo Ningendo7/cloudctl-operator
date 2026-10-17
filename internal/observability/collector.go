@@ -95,7 +95,8 @@ func (c *StateCollector) Collect(ch chan<- prometheus.Metric) {
 	defer cancel()
 
 	var list depsv1alpha1.AppDependenciesList
-	if err := c.reader.List(ctx, &list); err != nil {
+	// Read-only, so the cache needn't copy what it returns.
+	if err := c.reader.List(ctx, &list, client.UnsafeDisableDeepCopy); err != nil {
 		// Emit nothing rather than zeros: absent series read as "unknown",
 		// while zeros would read as "nothing is stuck".
 		logf.Log.WithName("metrics").Error(err, "Listing AppDependencies for the state collector failed; skipping this scrape's state metrics")

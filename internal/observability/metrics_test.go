@@ -264,3 +264,27 @@ func TestStateCollector_ListFailureEmitsNothing(t *testing.T) {
 		t.Errorf("expected no series when the list fails, got %v", got)
 	}
 }
+
+type noDeepCopyRecorder struct {
+	client.Reader
+	lists, noDeepCopy int
+}
+
+func (r *noDeepCopyRecorder) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	var applied client.ListOptions
+	applied.ApplyOptions(opts)
+	r.lists++
+	if applied.UnsafeDisableDeepCopy != nil && *applied.UnsafeDisableDeepCopy {
+		r.noDeepCopy++
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+// The collector lists every CR on every scrape and only reads them.
+func TestStateCollector_ListsWithoutDeepCopying(t *testing.T) {
+	recorder := &noDeepCopyRecorder{Reader: fake.NewClientBuilder().WithScheme(scheme(t)).Build()}
+	gather(t, NewStateCollector(recorder, nil))
+	if recorder.lists == 0 || recorder.noDeepCopy != recorder.lists {
+		t.Errorf("%d of %d lists opted out of the deep copy, want all of at least one", recorder.noDeepCopy, recorder.lists)
+	}
+}

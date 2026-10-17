@@ -252,9 +252,6 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // one sitting at a name the operator wants) falls back to the API reader.
 // Shared by main and the envtest managers so the tests run the production
 // configuration.
-//
-// The three types that are written with server-side apply keep their
-// managedFields in the cache (see ManagedCacheDefaultTransform).
 func ManagedObjectCache() map[client.Object]cache.ByObject {
 	keepManagedFields := func(in any) (any, error) { return in, nil }
 	managed := cache.ByObject{
@@ -270,13 +267,9 @@ func ManagedObjectCache() map[client.Object]cache.ByObject {
 	}
 }
 
-// ManagedCacheDefaultTransform drops managedFields from every cached object
-// that does not need them. For server-side-applied objects, managedFields
-// often outweigh the useful payload, and every AppDependencies carries them
-// along with its whole status ledger. The ConfigMap, Secret and
-// ServiceAccount entries of ManagedObjectCache opt out: skipping an apply
-// that would change nothing needs to know this operator applied the object
-// before, and that is only recorded there.
+// ManagedCacheDefaultTransform drops managedFields, which are large, from
+// cached objects. ManagedObjectCache keeps them on the three types whose
+// unchanged applies are skipped.
 func ManagedCacheDefaultTransform() toolscache.TransformFunc {
 	return cache.TransformStripManagedFields()
 }

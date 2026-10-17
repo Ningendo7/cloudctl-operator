@@ -33,16 +33,21 @@ func TestIndexConsumesFrom_CoversEverySection(t *testing.T) {
 		DynamoDB: &depsv1alpha1.DynamoDBSpec{Consumes: ref("b", "dynamo-producer")},
 		S3:       &depsv1alpha1.S3Spec{Consumes: ref("b", "s3-producer")},
 		RDS:      &depsv1alpha1.RDSSpec{Consumes: ref("c", "rds-producer")},
+		Alarms:   &depsv1alpha1.AlarmsSpec{SnsTopicRef: &depsv1alpha1.ConsumeRef{Namespace: "d", Name: "alarm-topic-producer", ResourceName: "r"}},
 	}}
+	cr.Spec.SQS.Resources = []depsv1alpha1.SQSQueueSpec{{Name: "orders", SubscribesTo: ref("e", "subscribed-topic-producer")}}
 
 	got := indexConsumesFrom(cr)
-	for _, want := range []string{"a/sqs-producer", "a/sns-producer", "b/dynamo-producer", "b/s3-producer", "c/rds-producer"} {
+	for _, want := range []string{
+		"a/sqs-producer", "a/sns-producer", "b/dynamo-producer", "b/s3-producer", "c/rds-producer",
+		"e/subscribed-topic-producer", "d/alarm-topic-producer",
+	} {
 		if !slices.Contains(got, want) {
 			t.Errorf("indexConsumesFrom() = %v, missing %q", got, want)
 		}
 	}
-	if len(got) != 5 {
-		t.Errorf("expected exactly 5 keys, got %v", got)
+	if len(got) != 7 {
+		t.Errorf("expected exactly 7 keys, got %v", got)
 	}
 }
 

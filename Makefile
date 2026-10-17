@@ -379,10 +379,8 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
   ## these the pods can lose Service, load balancer and probe traffic.\
   ##\
   podBaseSecurityGroupIds: []' charts/chart/values.yaml
-	@# Default pod anti-affinity: the plugin only emits an empty affinity, so
-	@# both replicas can land on, and be drained from, one node. Used only
-	@# when manager.affinity is unset and there is more than one replica;
-	@# any affinity set in values replaces it.
+	@# Default pod anti-affinity (the plugin emits an empty one), used only
+	@# when manager.affinity is unset and replicas > 1.
 	sed -i '/^      affinity: {{ toYaml \. | nindent 10 }}$$/a\
       {{- else }}\
       {{- if gt (int .Values.manager.replicas) 1 }}\

@@ -126,10 +126,8 @@ func Cleanup(
 			continue
 		}
 
-		// While a pending bucket is waiting out the quiet window or the
-		// empty-check backoff nothing is read: the gates that decide that
-		// need no AWS call, and the ownership re-check below runs before
-		// anything that changes the bucket.
+		// A pending bucket waiting out the quiet window or backoff reads nothing;
+		// ownership is re-checked below, before anything changes it.
 		if !entry.Force && !forceDeleteAll && entry.PendingDeletionSince != nil &&
 			(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
 			results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})

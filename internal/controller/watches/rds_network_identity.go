@@ -41,7 +41,8 @@ func ConsumerPodIdentityToRDSProducers(reader client.Reader) handler.MapFunc {
 		consumerNS, consumerName := consumer.GetNamespace(), consumer.GetName()
 
 		var producers depsv1alpha1.AppDependenciesList
-		if err := reader.List(ctx, &producers, client.MatchingFields{IndexRDSSharedWith: NamespacedKey(consumerNS, consumerName)}); err != nil {
+		// Read-only, so the cache needn't copy what it returns.
+		if err := reader.List(ctx, &producers, client.MatchingFields{IndexRDSSharedWith: NamespacedKey(consumerNS, consumerName)}, client.UnsafeDisableDeepCopy); err != nil {
 			return nil
 		}
 

@@ -107,9 +107,8 @@ func Ensure(
 		return ledger, "", err
 	}
 
-	// Inside the trust window the role's tags and its permissions policy
-	// are not read back. GetRole still runs every pass, so a deleted role
-	// or a changed trust policy is caught at once.
+	// Inside the trust window tags and policy aren't read back; GetRole still
+	// runs every pass.
 	entry, found := status.FindManagedResource(ledger, resourceType, roleLedgerName)
 	trusted := found && !status.NeedsRevalidation(entry)
 

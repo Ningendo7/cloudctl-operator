@@ -65,7 +65,8 @@ func ProducerToConsumers(reader client.Reader) handler.MapFunc {
 		producerNS, producerName := producer.GetNamespace(), producer.GetName()
 
 		var consumers depsv1alpha1.AppDependenciesList
-		if err := reader.List(ctx, &consumers, client.MatchingFields{IndexConsumesFrom: NamespacedKey(producerNS, producerName)}); err != nil {
+		// Read-only, so the cache needn't copy what it returns.
+		if err := reader.List(ctx, &consumers, client.MatchingFields{IndexConsumesFrom: NamespacedKey(producerNS, producerName)}, client.UnsafeDisableDeepCopy); err != nil {
 			return nil
 		}
 

@@ -302,10 +302,8 @@ func ensureSecurityGroupPolicy(ctx context.Context, k8sClient client.Client, nam
 		return fmt.Errorf("building SecurityGroupPolicy spec: %w", err)
 	}
 
-	// The policy isn't cached, so this is a read, but a read costs far less
-	// than a write that runs every admission webhook. Any error, such as
-	// the CRD not being installed, falls through to the apply and its
-	// message.
+	// Not cached, but a read is cheaper than a write through every admission
+	// webhook. Any error, like a missing CRD, falls through to the apply.
 	existing := securityGroupPolicyObject(namespace, crName)
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(existing), existing); err == nil &&
 		equality.Semantic.DeepEqual(existing.Object["spec"], policy.Object["spec"]) &&

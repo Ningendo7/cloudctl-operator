@@ -668,11 +668,8 @@ func TestEnsureDesiredState_UnchangedReconcile_SkipsRedundantCheckpoints(t *test
 		t.Fatal("expected the first reconcile (creating a new queue) to checkpoint at least once")
 	}
 
-	// Second reconcile: same CR, nothing in spec changed. Every section's
-	// ledger entry is stable (inside its trust window), so none produces a
-	// diff and none checkpoints. What remains is reconcileNormal's own
-	// trailing write, which is unconditional and not part of this
-	// optimization.
+	// Nothing changed, so no section checkpoints; only the unconditional
+	// trailing write remains.
 	patchCount = 0
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("second Reconcile() error = %v", err)

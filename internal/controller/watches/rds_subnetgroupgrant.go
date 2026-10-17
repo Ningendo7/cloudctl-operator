@@ -45,7 +45,8 @@ func SubnetGroupGrantToAffectedCRs(reader client.Reader) handler.MapFunc {
 		}
 
 		var affected depsv1alpha1.AppDependenciesList
-		if err := reader.List(ctx, &affected, client.MatchingFields{IndexRDSSubnetGroup: grant.Spec.DBSubnetGroupName}); err != nil {
+		// Read-only, so the cache needn't copy what it returns.
+		if err := reader.List(ctx, &affected, client.MatchingFields{IndexRDSSubnetGroup: grant.Spec.DBSubnetGroupName}, client.UnsafeDisableDeepCopy); err != nil {
 			return nil
 		}
 
