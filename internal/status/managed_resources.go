@@ -79,10 +79,8 @@ func RemoveManagedResource(resources *[]depsv1alpha1.ManagedResource, resourceTy
 	*resources = filtered
 }
 
-// Relinquished returns entry marked as no longer tagged as ours. A
-// re-declared resource then goes through the full ownership check, and so
-// needs adopt, at once rather than when its trust window would have
-// expired.
+// Relinquished marks entry as no longer tagged as ours, so declaring it
+// again needs adopt at once.
 func Relinquished(entry depsv1alpha1.ManagedResource) depsv1alpha1.ManagedResource {
 	entry.State = depsv1alpha1.ManagedResourceStateRelinquished
 	return entry

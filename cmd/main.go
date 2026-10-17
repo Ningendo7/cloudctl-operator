@@ -312,12 +312,9 @@ func main() {
 			ByObject:         controller.ManagedObjectCache(),
 			DefaultTransform: controller.ManagedCacheDefaultTransform(),
 		},
-		// Time for a reconcile in flight to finish after SIGTERM, inside
-		// the pod's terminationGracePeriodSeconds.
+		// Inside the pod's terminationGracePeriodSeconds.
 		GracefulShutdownTimeout: &gracefulShutdownTimeout,
-		// Hands the lease over on shutdown, so the standby takes over at
-		// once instead of after the lease expires. Safe because main exits
-		// as soon as mgr.Start returns.
+		// Lets the standby take over at once; main exits right after mgr.Start.
 		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
@@ -423,21 +420,15 @@ func parseSecurityGroupIDs(value string) ([]string, error) {
 	return ids, nil
 }
 
-// memoryLimitHeadroom is the share of the container's memory limit the Go
-// runtime is asked to stay under. The rest covers memory the runtime doesn't
-// count in its heap: goroutine stacks, the binary, and the kernel's own
-// accounting.
+// memoryLimitHeadroom leaves room for memory outside Go's accounting.
 const memoryLimitHeadroom = 0.9
 
 // cgroupRoot is where the container's own cgroup is mounted.
 const cgroupRoot = "/sys/fs/cgroup"
 
-// limitMemoryFromCgroup makes the garbage collector work harder as the heap
-// nears the container's memory limit, instead of letting it overshoot and
-// get the pod OOM-killed. Without a limit the collector only aims at twice
-// the live heap, so a cold start that lists every informer at once can
-// cross the limit before a collection runs. An explicit GOMEMLIMIT wins.
-// It returns the limit it set, or 0 if it set none.
+// limitMemoryFromCgroup keeps the heap under the container's memory limit;
+// by default Go only collects at twice the live heap, which can overshoot it.
+// An explicit GOMEMLIMIT wins. Returns the limit it set, or 0.
 func limitMemoryFromCgroup(root string) int64 {
 	if os.Getenv("GOMEMLIMIT") != "" {
 		return 0

@@ -272,13 +272,9 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 	return *createOut.GroupId, nil, nil
 }
 
-// reconcileIngress makes the group's ingress on the engine's port exactly the
-// currently-authorized consumers: it grants the ones missing and revokes the
-// ones no longer authorized. sharedWith is the complete desired state since
-// this security group is never shared (see EnsureSecurityGroup). current is
-// the rules the group's lookup already returned, so a pass with nothing to
-// change makes no call; granting a rule that already exists would be a
-// failing write on every pass, counted against EC2's mutating-call quota.
+// reconcileIngress grants the consumers missing from current, the rules the
+// group lookup already returned, and revokes the ones no longer authorized.
+// A grant that already exists would fail on every pass.
 func reconcileIngress(
 	ctx context.Context,
 	ec2Client cloudctlaws.EC2Client,

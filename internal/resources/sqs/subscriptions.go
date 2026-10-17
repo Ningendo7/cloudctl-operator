@@ -242,10 +242,8 @@ type subscriptionAllowStatement struct {
 	Condition map[string]map[string]string `json:"Condition"`
 }
 
-// subscriptionAllow grants one SNS topic sqs:SendMessage on the queue,
-// scoped by SourceArn: the delivery half of an SNS->SQS subscription. AWS
-// doesn't fail Subscribe if it is missing, it just silently drops every
-// message.
+// subscriptionAllow lets one topic send to the queue. Without it Subscribe
+// succeeds and AWS silently drops every message.
 func subscriptionAllow(sid, queueArn, topicArn string) subscriptionAllowStatement {
 	return subscriptionAllowStatement{
 		Sid:       sid,
@@ -257,11 +255,8 @@ func subscriptionAllow(sid, queueArn, topicArn string) subscriptionAllowStatemen
 	}
 }
 
-// ensureSubscriptionAllows merges allows into the queue's resource policy
-// by Sid, keeping every other statement, and writes only when one is
-// missing or differs. Every write is a read-modify-write of a document
-// people and other tools edit too, so fewer writes lose fewer of their
-// edits.
+// ensureSubscriptionAllows merges allows into the queue policy by Sid and
+// writes only when one is missing or differs, to lose fewer concurrent edits.
 func ensureSubscriptionAllows(ctx context.Context, sqsClient sqsAPI, queueURL string, allows []subscriptionAllowStatement) error {
 	if len(allows) == 0 {
 		return nil
@@ -300,10 +295,8 @@ func statementBySid(statements []json.RawMessage, sid string) (json.RawMessage, 
 	return nil, false
 }
 
-// statementsEquivalent compares two policy statements as JSON values,
-// treating a one-element list and its element as equal, since a stored
-// policy may come back with either. Anything else that differs counts as
-// a difference, which only costs a write.
+// statementsEquivalent compares statements as JSON, treating a one-element
+// list as its element, which a stored policy may return.
 func statementsEquivalent(a, b json.RawMessage) bool {
 	var av, bv any
 	if json.Unmarshal(a, &av) != nil || json.Unmarshal(b, &bv) != nil {

@@ -197,10 +197,8 @@ func TestEnsureSecurityGroup_SkipsIngressForNonexistentConsumerCR(t *testing.T) 
 	}
 }
 
-// TestEnsureSecurityGroup_ReassertingIngressMakesNoWrite proves a second
-// reconcile against an already-granted consumer doesn't write at all: a
-// grant that already exists would fail with InvalidPermission.Duplicate on
-// every pass, spending EC2's account-wide mutating-call quota each time.
+// A second pass against an already-granted consumer must not write: the
+// duplicate grant would fail every pass and spend EC2's mutating-call quota.
 func TestEnsureSecurityGroup_ReassertingIngressMakesNoWrite(t *testing.T) {
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()

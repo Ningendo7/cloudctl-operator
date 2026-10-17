@@ -898,9 +898,7 @@ const (
 	ManagedResourceStateVerified          ManagedResourceState = "Verified"
 	ManagedResourceStateNeedsVerification ManagedResourceState = "NeedsVerification"
 	// ManagedResourceStateRelinquished marks a retained resource whose
-	// ownership tags were removed. The entry stays while the CR exists, so
-	// the KMS key its data is encrypted with is kept, but AWS is no longer
-	// read for it.
+	// ownership tags were removed. The entry stays to keep its KMS key.
 	ManagedResourceStateRelinquished ManagedResourceState = "Relinquished"
 )
 
@@ -978,9 +976,8 @@ type ManagedResource struct {
 	// +optional
 	KMSKeyARN string `json:"kmsKeyARN,omitempty"`
 
-	// appliedDigest is a digest of the last policy document confirmed on
-	// this resource (the IAM role's permissions policy), so an unchanged
-	// document isn't read back until the trust window expires.
+	// appliedDigest is a digest of the policy document last confirmed on this
+	// resource, so it isn't read back before the trust window expires.
 	// +optional
 	AppliedDigest string `json:"appliedDigest,omitempty"`
 }
@@ -1018,9 +1015,8 @@ type AppDependenciesStatus struct {
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 
-	// alarmsMayExist is false once a pass has found no CloudWatch alarms
-	// owned by this CR, so a CR without alarms doesn't list them on every
-	// pass. Unset means not yet known.
+	// alarmsMayExist is false once a pass found no alarms owned by this CR,
+	// so they aren't listed every pass. Unset means unknown.
 	// +optional
 	AlarmsMayExist *bool `json:"alarmsMayExist,omitempty"`
 }

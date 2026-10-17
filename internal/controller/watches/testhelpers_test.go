@@ -17,9 +17,11 @@ limitations under the License.
 package watches
 
 import (
+	"context"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -66,4 +68,22 @@ func containsRequest(requests []reconcile.Request, namespace, name string) bool 
 		}
 	}
 	return false
+}
+
+// listRecorder counts the Lists made through it, and how many of them asked
+// the cache not to deep-copy what it returns. The fake client can't show
+// the difference, so the option itself is what the tests check.
+type listRecorder struct {
+	client.Reader
+	lists, noDeepCopy int
+}
+
+func (r *listRecorder) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	var applied client.ListOptions
+	applied.ApplyOptions(opts)
+	r.lists++
+	if applied.UnsafeDisableDeepCopy != nil && *applied.UnsafeDisableDeepCopy {
+		r.noDeepCopy++
+	}
+	return r.Reader.List(ctx, list, opts...)
 }

@@ -22,6 +22,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -141,5 +142,73 @@ func TestProducerToConsumers_ListFailure_ReturnsNilNotPanic(t *testing.T) {
 	requests := ProducerToConsumers(k8sClient)(context.Background(), producer)
 	if requests != nil {
 		t.Errorf("expected nil requests on a List failure, got %v", requests)
+	}
+}
+
+// A queue whose topic doesn't exist yet is skipped silently, and an alarm
+// whose topic isn't there yet only polls, so both must be woken the moment
+// the topic's producer changes.
+func TestProducerToConsumers_WakesSubscribersAndAlarmNotifiers(t *testing.T) {
+	producer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "platform-service"}}
+	topic := depsv1alpha1.ConsumeRef{Namespace: "default", Name: "platform-service", ResourceName: "events"}
+	subscriber := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "subscriber"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: "orders", SubscribesTo: []depsv1alpha1.ConsumeRef{topic}},
+		}}},
+	}
+	notifier := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "notifier"},
+		Spec:       depsv1alpha1.AppDependenciesSpec{Alarms: &depsv1alpha1.AlarmsSpec{Enabled: true, SnsTopicRef: &topic}},
+	}
+	unrelated := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "unrelated"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: "orders", SubscribesTo: []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "someone-else", ResourceName: "events"}}},
+		}}},
+	}
+	k8sClient := newIndexedClientBuilder(t).WithObjects(producer, subscriber, notifier, unrelated).Build()
+
+	requests := ProducerToConsumers(k8sClient)(context.Background(), producer)
+
+	for _, name := range []string{"subscriber", "notifier"} {
+		if !containsRequest(requests, "fulfillment", name) {
+			t.Errorf("expected a reconcile request for %s, got %v", name, requestedNames(requests))
+		}
+	}
+	if containsRequest(requests, "fulfillment", "unrelated") {
+		t.Errorf("did not expect a request for a CR subscribed to a different producer, got %v", requestedNames(requests))
+	}
+}
+
+// These lookups only read the namespace and name of what they find, so they
+// must not make the cache copy every matched CR with its whole ledger.
+func TestWatchMapFunctions_DoNotDeepCopyWhatTheyList(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{
+			{Name: "orders-db", DBSubnetGroupName: "prod-tier"},
+		}}},
+	}
+	grant := &depsv1alpha1.RDSSubnetGroupGrant{ObjectMeta: metav1.ObjectMeta{Name: "g"}, Spec: depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "prod-tier"}}
+
+	for name, call := range map[string]func(client.Reader){
+		"ProducerToConsumers": func(r client.Reader) {
+			ProducerToConsumers(r)(context.Background(), cr)
+		},
+		"ConsumerPodIdentityToRDSProducers": func(r client.Reader) {
+			ConsumerPodIdentityToRDSProducers(r)(context.Background(), cr)
+		},
+		"SubnetGroupGrantToAffectedCRs": func(r client.Reader) {
+			SubnetGroupGrantToAffectedCRs(r)(context.Background(), grant)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := &listRecorder{Reader: newIndexedClientBuilder(t).WithObjects(cr).Build()}
+			call(recorder)
+			if recorder.lists == 0 || recorder.noDeepCopy != recorder.lists {
+				t.Errorf("%d of %d lists opted out of the deep copy, want all of at least one", recorder.noDeepCopy, recorder.lists)
+			}
+		})
 	}
 }

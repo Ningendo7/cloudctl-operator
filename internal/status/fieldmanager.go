@@ -20,11 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// AppliedBy reports whether manager has applied obj before. Skipping an
-// apply whose values already match is only safe then: a later apply that
-// drops a field removes it only if this manager owns it. Without
-// managedFields (a cache that strips them) it reports false, so the caller
-// applies as usual.
+// AppliedBy reports whether manager has applied obj before. Only then is
+// skipping an unchanged apply safe: a later apply can only drop fields it owns.
 func AppliedBy(obj metav1.Object, manager string) bool {
 	for _, f := range obj.GetManagedFields() {
 		if f.Manager == manager && f.Operation == metav1.ManagedFieldsOperationApply {

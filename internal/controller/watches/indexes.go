@@ -28,7 +28,7 @@ import (
 // the CRs it needs instead of listing every CR on every event.
 const (
 	// IndexConsumesFrom holds "namespace/name" of every producer CR a CR
-	// consumes from, in any section.
+	// consumes from, subscribes to or notifies.
 	IndexConsumesFrom = "cloudctl.io/consumes-from"
 	// IndexRDSSubnetGroup holds the dbSubnetGroupName of each rds resource.
 	IndexRDSSubnetGroup = "cloudctl.io/rds-subnet-group"
@@ -73,6 +73,13 @@ func indexConsumesFrom(obj client.Object) []string {
 	}
 	if cr.Spec.SQS != nil {
 		add(cr.Spec.SQS.Consumes)
+		// Otherwise nothing wakes a queue whose topic doesn't exist yet.
+		for _, q := range cr.Spec.SQS.Resources {
+			add(q.SubscribesTo)
+		}
+	}
+	if cr.Spec.Alarms != nil && cr.Spec.Alarms.SnsTopicRef != nil {
+		add([]depsv1alpha1.ConsumeRef{*cr.Spec.Alarms.SnsTopicRef})
 	}
 	if cr.Spec.SNS != nil {
 		add(cr.Spec.SNS.Consumes)
