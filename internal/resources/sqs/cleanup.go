@@ -149,20 +149,33 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			relinquished, relErr := relinquishIfStillTagged(ctx, sqsClient, namespace, crName, crUID, entry)
-			if relErr != nil {
-				if firstErr == nil {
-					firstErr = relErr
+			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+				relinquished, relErr := relinquishIfStillTagged(ctx, sqsClient, namespace, crName, crUID, entry)
+				if relErr != nil {
+					if firstErr == nil {
+						firstErr = relErr
+					}
+					continue
 				}
-				continue
-			}
-			if relinquished && recordEvent != nil {
-				recordEvent("Normal", "QueueOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained queue %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				if relinquished && recordEvent != nil {
+					recordEvent("Normal", "QueueOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained queue %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				}
+				status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
 			}
 			results = append(results, CleanupResult{
 				Name:   entry.Name,
 				Reason: CleanupReasonRetained,
 			})
+			continue
+		}
+
+		// While a pending queue is waiting out the quiet window or the
+		// empty-check backoff nothing is read: the gates that decide that
+		// need no AWS call, and the ownership re-check below runs before
+		// anything that changes the queue.
+		if !entry.Force && !forceDeleteAll && entry.PendingDeletionSince != nil &&
+			(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
+			results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
 			continue
 		}
 
@@ -230,18 +243,6 @@ func Cleanup(
 				continue
 			}
 
-			if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
-				// Still inside the quiet window — the deny is already in
-				// place from the first pass, nothing to do but keep waiting.
-				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-				continue
-			}
-
-			if !status.NeedsEmptyCheck(entry) {
-				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-				continue
-			}
-
 			attrs, aErr := sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 				QueueUrl: urlOut.QueueUrl,
 				AttributeNames: []types.QueueAttributeName{
@@ -304,6 +305,11 @@ func Cleanup(
 		}
 		queueName, nameErr := queueNameFromARN(entry.ARN)
 		if nameErr != nil {
+			continue
+		}
+		// Without a tracked subscription there is nothing to tear down, and
+		// the queue's URL is only needed to do that.
+		if !hasSubscriptionEntries(updatedLedger, queueName) {
 			continue
 		}
 		urlOut, uErr := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})

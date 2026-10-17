@@ -38,6 +38,7 @@ type fakeCloudWatch struct {
 
 	putCalls      int
 	listTagsCalls int
+	describeCalls int
 }
 
 func newFakeCloudWatch() *fakeCloudWatch {
@@ -45,6 +46,7 @@ func newFakeCloudWatch() *fakeCloudWatch {
 }
 
 func (f *fakeCloudWatch) DescribeAlarms(_ context.Context, in *cloudwatch.DescribeAlarmsInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.DescribeAlarmsOutput, error) {
+	f.describeCalls++
 	prefix := aws.ToString(in.AlarmNamePrefix)
 	out := &cloudwatch.DescribeAlarmsOutput{}
 	for name, a := range f.alarms {

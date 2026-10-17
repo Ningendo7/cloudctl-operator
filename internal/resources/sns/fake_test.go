@@ -50,6 +50,7 @@ type fakeSNS struct {
 	// unlike fakeTopic's own listSubsCallCount, resetting this one doesn't
 	// also reset the simulated pagination behavior above.
 	listSubscriptionsByTopicCalls int
+	listTagsCalls                 int
 }
 
 // fakeAWSError is a minimal smithy.APIError implementation for injecting
@@ -113,6 +114,7 @@ func (f *fakeSNS) SetTopicAttributes(_ context.Context, in *sns.SetTopicAttribut
 }
 
 func (f *fakeSNS) ListTagsForResource(_ context.Context, in *sns.ListTagsForResourceInput, _ ...func(*sns.Options)) (*sns.ListTagsForResourceOutput, error) {
+	f.listTagsCalls++
 	if f.listTagsForResourceErr != nil {
 		return nil, f.listTagsForResourceErr
 	}

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -485,7 +486,6 @@ type fakeEC2 struct {
 
 	createSecurityGroupErr           error
 	describeSecurityGroupsErr        error
-	describeSecurityGroupsByIDErr    error // scoped to the GroupIds-based lookup reconcileIngress's revoke check uses
 	authorizeSecurityGroupIngressErr error
 	revokeSecurityGroupIngressErr    error
 
@@ -539,9 +539,6 @@ func (f *fakeEC2) DescribeSecurityGroups(_ context.Context, in *ec2.DescribeSecu
 
 	var g *fakeSecurityGroup
 	if len(in.GroupIds) > 0 {
-		if f.describeSecurityGroupsByIDErr != nil {
-			return nil, f.describeSecurityGroupsByIDErr
-		}
 		g = f.groups[in.GroupIds[0]]
 	} else {
 		var name, vpcID string
@@ -586,16 +583,19 @@ func (f *fakeEC2) AuthorizeSecurityGroupIngress(_ context.Context, in *ec2.Autho
 	if !ok {
 		return nil, &fakeAWSError{code: "InvalidGroup.NotFound", fault: smithy.FaultClient}
 	}
+	// As in AWS, one duplicate, against an existing rule or within the
+	// request itself, rejects the whole call and applies none of it.
+	var added []fakeIngressRule
 	for _, perm := range in.IpPermissions {
 		for _, pair := range perm.UserIdGroupPairs {
-			for _, existing := range g.ingress {
-				if existing.sourceGroupID == *pair.GroupId && existing.fromPort == *perm.FromPort && existing.toPort == *perm.ToPort {
-					return nil, &fakeAWSError{code: "InvalidPermission.Duplicate", fault: smithy.FaultClient}
-				}
+			rule := fakeIngressRule{sourceGroupID: *pair.GroupId, fromPort: *perm.FromPort, toPort: *perm.ToPort}
+			if slices.Contains(g.ingress, rule) || slices.Contains(added, rule) {
+				return nil, &fakeAWSError{code: errCodeInvalidPermissionDuplicate, fault: smithy.FaultClient}
 			}
-			g.ingress = append(g.ingress, fakeIngressRule{sourceGroupID: *pair.GroupId, fromPort: *perm.FromPort, toPort: *perm.ToPort})
+			added = append(added, rule)
 		}
 	}
+	g.ingress = append(g.ingress, added...)
 	return &ec2.AuthorizeSecurityGroupIngressOutput{}, nil
 }
 

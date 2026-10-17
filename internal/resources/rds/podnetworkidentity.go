@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -147,7 +148,7 @@ func EnsurePodNetworkIdentity(
 	}
 
 	groupName := cloudctlaws.ResourceName(namespace, crName, "rds-pod-sg", "network-identity", 255)
-	groupID, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, false)
+	groupID, _, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, false)
 	if err != nil {
 		return ledger, err
 	}
@@ -299,6 +300,17 @@ func ensureSecurityGroupPolicy(ctx context.Context, k8sClient client.Client, nam
 	if err := unstructured.SetNestedStringSlice(policy.Object,
 		groupIDs, "spec", "securityGroups", "groupIds"); err != nil {
 		return fmt.Errorf("building SecurityGroupPolicy spec: %w", err)
+	}
+
+	// The policy isn't cached, so this is a read, but a read costs far less
+	// than a write that runs every admission webhook. Any error, such as
+	// the CRD not being installed, falls through to the apply and its
+	// message.
+	existing := securityGroupPolicyObject(namespace, crName)
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(existing), existing); err == nil &&
+		equality.Semantic.DeepEqual(existing.Object["spec"], policy.Object["spec"]) &&
+		status.AppliedBy(existing, string(securityGroupPolicyFieldOwner)) {
+		return nil
 	}
 
 	if err := k8sClient.Apply(ctx, client.ApplyConfigurationFromUnstructured(policy), securityGroupPolicyFieldOwner, client.ForceOwnership); err != nil {

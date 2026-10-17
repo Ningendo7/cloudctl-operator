@@ -26,6 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -46,11 +47,93 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+// ensureAlarms runs Ensure as a first pass would, without a recorded answer
+// on whether alarms may exist.
+func ensureAlarms(
+	ctx context.Context,
+	cwClient cloudctlaws.CloudWatchClient,
+	k8sClient ctrlclient.Client,
+	namespace, crName, crUID, region, accountID string,
+	alarmsSpec *depsv1alpha1.AlarmsSpec,
+	sqsSpec *depsv1alpha1.SQSSpec,
+	snsSpec *depsv1alpha1.SNSSpec,
+	dynamodbSpec *depsv1alpha1.DynamoDBSpec,
+) error {
+	_, err := Ensure(ctx, cwClient, k8sClient, namespace, crName, crUID, region, accountID, alarmsSpec, sqsSpec, snsSpec, dynamodbSpec, nil)
+	return err
+}
+
+func TestEnsure_ListsAlarmsOnlyWhileSomeMayExist(t *testing.T) {
+	cw := newFakeCloudWatch()
+	enabled := &depsv1alpha1.AlarmsSpec{Enabled: true}
+	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	var mayExist *bool
+	pass := func(alarmsSpec *depsv1alpha1.AlarmsSpec) {
+		t.Helper()
+		got, err := Ensure(context.Background(), cw, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+			alarmsSpec, sqsSpec, nil, nil, mayExist)
+		if err != nil {
+			t.Fatalf("Ensure() error = %v", err)
+		}
+		mayExist = &got
+	}
+
+	pass(nil)
+	if cw.describeCalls != 1 || *mayExist {
+		t.Fatalf("first pass: describeCalls = %d, mayExist = %v; want one list, then false", cw.describeCalls, *mayExist)
+	}
+	pass(nil)
+	if cw.describeCalls != 1 {
+		t.Fatalf("describeCalls = %d after a pass with no alarms known or declared, want still 1", cw.describeCalls)
+	}
+
+	pass(enabled)
+	if cw.describeCalls != 2 || !*mayExist || len(cw.alarms) == 0 {
+		t.Fatalf("enabling alarms: describeCalls = %d, mayExist = %v, alarms = %d", cw.describeCalls, *mayExist, len(cw.alarms))
+	}
+
+	// Disabling must still list once, to delete what was created.
+	pass(nil)
+	if cw.describeCalls != 3 || *mayExist || len(cw.alarms) != 0 {
+		t.Fatalf("disabling alarms: describeCalls = %d, mayExist = %v, alarms left = %d", cw.describeCalls, *mayExist, len(cw.alarms))
+	}
+	pass(nil)
+	if cw.describeCalls != 3 {
+		t.Errorf("describeCalls = %d after the alarms were deleted, want still 3", cw.describeCalls)
+	}
+}
+
+func TestEnsure_AFailedPassAssumesAlarmsMayExist(t *testing.T) {
+	cw := newFakeCloudWatch()
+	enabled := &depsv1alpha1.AlarmsSpec{Enabled: true}
+	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	if err := ensureAlarms(context.Background(), cw, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+		enabled, sqsSpec, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	// An alarm that has drifted and lost its tags can't be deleted, so it
+	// may still exist after the pass.
+	for _, a := range cw.alarms {
+		a.tags = map[string]string{}
+		a.input.Threshold = aws.Float64(12345)
+	}
+	known := false
+	got, err := Ensure(context.Background(), cw, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+		enabled, sqsSpec, nil, nil, &known)
+	if err == nil {
+		t.Fatal("expected the untagged alarm to be refused")
+	}
+	if !got {
+		t.Error("a failed pass must report that alarms may exist")
+	}
+}
+
 func TestEnsure_DisabledCreatesNoAlarms(t *testing.T) {
 	client := newFakeCloudWatch()
 	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
-	err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: false}, sqsSpec, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
@@ -64,7 +147,7 @@ func TestEnsure_CreatesSQSAgeAlarm(t *testing.T) {
 	client := newFakeCloudWatch()
 	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
-	err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
@@ -90,7 +173,7 @@ func TestEnsure_FIFOQueueUsesFIFODimensionValue(t *testing.T) {
 	client := newFakeCloudWatch()
 	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", FIFO: true}}}
 
-	if err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -108,7 +191,7 @@ func TestEnsure_DLQGetsBacklogAlarmSharingParentFIFOness(t *testing.T) {
 	client := newFakeCloudWatch()
 	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DLQ: true, FIFO: true}}}
 
-	if err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -134,7 +217,7 @@ func TestEnsure_AlarmsWatchTheRealNamesOfQueuesAndTopicsOfADottedCR(t *testing.T
 	client := newFakeCloudWatch()
 	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DLQ: true}}}
 	snsSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
-	if err := Ensure(context.Background(), client, nil, "default", "orders.v2", "uid-1", testRegion, testAccountID,
+	if err := ensureAlarms(context.Background(), client, nil, "default", "orders.v2", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, snsSpec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -154,7 +237,7 @@ func TestEnsure_CreatesSNSDeliveryFailedAlarm(t *testing.T) {
 	client := newFakeCloudWatch()
 	snsSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
 
-	if err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, nil, snsSpec, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -172,7 +255,7 @@ func TestEnsure_CreatesDynamoDBThrottleAlarms(t *testing.T) {
 	client := newFakeCloudWatch()
 	ddbSpec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id"}}}
 
-	if err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, nil, nil, ddbSpec); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -190,7 +273,7 @@ func TestEnsure_IsIdempotentAndPreservesOwnerTags(t *testing.T) {
 	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
 	run := func() error {
-		return Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+		return ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 			&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, nil, nil)
 	}
 	if err := run(); err != nil {
@@ -213,7 +296,7 @@ func TestEnsure_RemovesAlarmForResourceNoLongerDeclared(t *testing.T) {
 	client := newFakeCloudWatch()
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}, {Name: "shipments"}}}
 
-	if err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, spec, nil, nil); err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
@@ -222,7 +305,7 @@ func TestEnsure_RemovesAlarmForResourceNoLongerDeclared(t *testing.T) {
 	}
 
 	spec.Resources = spec.Resources[:1] // "shipments" removed from spec
-	if err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, spec, nil, nil); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -239,11 +322,11 @@ func TestEnsure_DisablingAlarmsRemovesAllOfThem(t *testing.T) {
 	client := newFakeCloudWatch()
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
-	if err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, spec, nil, nil); err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
-	if err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: false}, spec, nil, nil); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -263,7 +346,7 @@ func TestEnsure_RefusesToOverwriteUnownedAlarm(t *testing.T) {
 	}
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
-	err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, spec, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error refusing to overwrite an unowned alarm")
@@ -275,7 +358,7 @@ func TestEnsure_SnsTopicRefRetriesWhenNotYetAuthorized(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
-	err := Ensure(context.Background(), client, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	err := ensureAlarms(context.Background(), client, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true, SnsTopicRef: &depsv1alpha1.ConsumeRef{
 			Namespace: "platform", Name: "platform-alerts", ResourceName: "pagerduty-bridge",
 		}}, spec, nil, nil)
@@ -311,7 +394,7 @@ func TestEnsure_SnsTopicRefWiresAlarmActionsWhenAuthorized(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer).Build()
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
-	err := Ensure(context.Background(), client, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	err := ensureAlarms(context.Background(), client, k8sClient, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true, SnsTopicRef: &depsv1alpha1.ConsumeRef{
 			Namespace: "platform", Name: "platform-alerts", ResourceName: "pagerduty-bridge",
 		}}, spec, nil, nil)
@@ -336,7 +419,7 @@ func TestCleanup_RemovesEveryOwnedAlarmForThisCR(t *testing.T) {
 	client := newFakeCloudWatch()
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
-	if err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, spec, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -364,7 +447,7 @@ func TestEnsure_UnchangedAlarm_CostsNoTagReadOrWrite(t *testing.T) {
 	client := newFakeCloudWatch()
 	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 	run := func() error {
-		return Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+		return ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 			&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, nil, nil)
 	}
 	if err := run(); err != nil {
@@ -384,7 +467,7 @@ func TestEnsure_DriftedAlarm_IsCorrected(t *testing.T) {
 	client := newFakeCloudWatch()
 	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 	run := func() error {
-		return Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+		return ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 			&depsv1alpha1.AlarmsSpec{Enabled: true}, sqsSpec, nil, nil)
 	}
 	if err := run(); err != nil {
@@ -441,7 +524,7 @@ func TestEnsure_TakesOverAnAlarmFromTheUIDItWasTold(t *testing.T) {
 			spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 
 			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
-			err := Ensure(ctx, client, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID,
+			err := ensureAlarms(ctx, client, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID,
 				&depsv1alpha1.AlarmsSpec{Enabled: true}, spec, nil, nil)
 
 			tags := client.alarms[alarmName].tags

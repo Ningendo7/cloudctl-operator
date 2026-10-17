@@ -109,17 +109,30 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
-			if relErr != nil {
-				if firstErr == nil {
-					firstErr = relErr
+			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+				relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+				if relErr != nil {
+					if firstErr == nil {
+						firstErr = relErr
+					}
+					continue
 				}
-				continue
-			}
-			if relinquished && recordEvent != nil {
-				recordEvent("Normal", "BucketOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained bucket %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				if relinquished && recordEvent != nil {
+					recordEvent("Normal", "BucketOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained bucket %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				}
+				status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
 			}
 			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
+			continue
+		}
+
+		// While a pending bucket is waiting out the quiet window or the
+		// empty-check backoff nothing is read: the gates that decide that
+		// need no AWS call, and the ownership re-check below runs before
+		// anything that changes the bucket.
+		if !entry.Force && !forceDeleteAll && entry.PendingDeletionSince != nil &&
+			(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
+			results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
 			continue
 		}
 
@@ -178,16 +191,6 @@ func Cleanup(
 				}
 				continue
 			}
-			if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
-				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-				continue
-			}
-
-			if !status.NeedsEmptyCheck(entry) {
-				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-				continue
-			}
-
 			empty, emptyErr := bucketIsEmpty(ctx, client, bucket)
 			if emptyErr != nil {
 				if firstErr == nil {

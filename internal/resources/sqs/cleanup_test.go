@@ -978,3 +978,38 @@ func TestCleanup_StillDeclaredQueue_PrunesSubscriptionWhoseAuthorizationWasRevok
 		t.Error("expected the subscription ledger entry to be removed")
 	}
 }
+
+// A pending queue waiting out the quiet window or the empty-check backoff
+// costs no AWS call at all: the ownership re-check only matters ahead of
+// something that changes it.
+func TestCleanup_PendingDeletion_ReadsNothingWhileWaiting(t *testing.T) {
+	client := newFakeSQS()
+	ledger := setupQueue(t, client, "default", "checkout-service", "orders", depsv1alpha1.DeletionPolicyDelete, false)
+	client.queues[cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)].approxMessages = "5"
+	cleanup := func() ([]depsv1alpha1.ManagedResource, []CleanupResult) {
+		t.Helper()
+		updated, results, err := Cleanup(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+		if err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+		return updated, results
+	}
+
+	ledger, _ = cleanup()
+	reads := client.getQueueUrlCalls
+	for _, phase := range []string{"quiet window", "backoff"} {
+		if phase == "backoff" {
+			advancePastEmptyCheckBackoffStart(t, ledger, "orders")
+			ledger, _ = cleanup() // the real check, which stamps LastEmptyCheckAt
+			reads = client.getQueueUrlCalls
+		}
+		var results []CleanupResult
+		ledger, results = cleanup()
+		if got := client.getQueueUrlCalls; got != reads {
+			t.Errorf("%s: %d reads while waiting, want none", phase, got-reads)
+		}
+		if r := findResult(results, "orders"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+			t.Errorf("%s: expected PendingDeletion, got %+v", phase, results)
+		}
+	}
+}

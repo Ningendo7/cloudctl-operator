@@ -35,7 +35,7 @@ current state and a deleted CR's series disappear with it.
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `cloudctl_managed_resources` | `type`, `state` | Ledger entries by resource type and state (`Creating`, `TagPending`, `Verified`, `NeedsVerification`). |
+| `cloudctl_managed_resources` | `type`, `state` | Ledger entries by resource type and state (`Creating`, `TagPending`, `Verified`, `NeedsVerification`, `Relinquished`). |
 | `cloudctl_pending_deletion_resources` | `type`, `stuck` | Resources removed from spec and awaiting deletion. `stuck="true"` once past that type's grace period: one hour for RDS, seven days for the rest. |
 | `cloudctl_rds_instances` | `status` | RDS instances by the status AWS last reported (`available`, `modifying`, ...). |
 | `cloudctl_app_ready` | `namespace`, `name` | 1 if the CR's aggregate `Ready` condition is True. One series per CR. |

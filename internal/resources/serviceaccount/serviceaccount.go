@@ -37,6 +37,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 // RoleARNAnnotation is EKS's own well-known annotation: the AWS SDK inside
@@ -155,7 +156,10 @@ func EnsureNetworkIdentityLabel(ctx context.Context, k8sClient client.Client, na
 		if err := claimError(existing, namespace, crName, crUID); err != nil {
 			return err
 		}
-		if owner := metav1.GetControllerOf(existing); owner != nil && string(owner.UID) == crUID {
+		if existing.Labels[NetworkIdentityLabelKey] == name && status.AppliedBy(existing, string(networkIdentityFieldOwner(crUID))) {
+			return nil
+		}
+		if ownedBy(existing, crUID) {
 			apply = apply.WithOwnerReferences(ownerReference(crName, crUID))
 		}
 	}
@@ -226,14 +230,19 @@ func Ensure(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDe
 	}
 
 	isOwnedByUs := exists && cloudctlaws.IsOwnedBy(existing.Annotations, cr.Namespace, cr.Name, string(cr.UID))
+	wantOwnerRef := defaultedName && (!exists || isOwnedByUs)
+	annotations := map[string]string{
+		RoleARNAnnotation:          roleARN,
+		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(cr.Namespace, cr.Name),
+		cloudctlaws.OwnerUIDTagKey: string(cr.UID),
+	}
+	if exists && hasAnnotations(existing, annotations) && wantOwnerRef == ownedBy(existing, string(cr.UID)) &&
+		status.AppliedBy(existing, string(fieldOwner)) {
+		return target, nil
+	}
 
-	apply := applycorev1.ServiceAccount(target, cr.Namespace).
-		WithAnnotations(map[string]string{
-			RoleARNAnnotation:          roleARN,
-			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(cr.Namespace, cr.Name),
-			cloudctlaws.OwnerUIDTagKey: string(cr.UID),
-		})
-	if defaultedName && (!exists || isOwnedByUs) {
+	apply := applycorev1.ServiceAccount(target, cr.Namespace).WithAnnotations(annotations)
+	if wantOwnerRef {
 		gvk, err := apiutil.GVKForObject(cr, k8sClient.Scheme())
 		if err != nil {
 			return cr.Status.ServiceAccountName, err
@@ -251,6 +260,21 @@ func Ensure(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDe
 		return cr.Status.ServiceAccountName, err
 	}
 	return target, nil
+}
+
+// ownedBy reports whether crUID is the controller owner of sa.
+func ownedBy(sa *corev1.ServiceAccount, crUID string) bool {
+	owner := metav1.GetControllerOf(sa)
+	return owner != nil && string(owner.UID) == crUID
+}
+
+func hasAnnotations(sa *corev1.ServiceAccount, want map[string]string) bool {
+	for k, v := range want {
+		if sa.Annotations[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func getServiceAccount(ctx context.Context, k8sClient client.Client, namespace, name string) (sa *corev1.ServiceAccount, exists bool, err error) {

@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/smithy-go"
 
@@ -486,4 +487,62 @@ func TestEnsure_ReportsSkippedConsumesButStillCreatesRoleForResolvedGrants(t *te
 	if !strings.Contains(err.Error(), "nonexistent-producer") {
 		t.Errorf("expected the error to name the unresolved reference, got %v", err)
 	}
+}
+
+func TestEnsure_ReadsTagsAndPolicyOnlyOncePerTrustWindow(t *testing.T) {
+	client := newFakeIAM()
+	cr := ownedCR("checkout-service")
+	var ledger []depsv1alpha1.ManagedResource
+	pass := func() {
+		t.Helper()
+		var err error
+		if ledger, _, err = Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, ledger); err != nil {
+			t.Fatalf("Ensure() error = %v", err)
+		}
+	}
+	reads := func() (int, int) { return client.listRoleTagsCalls, client.getRolePolicyCalls }
+
+	pass()
+	tags, policies := reads()
+	firstVerified := ledger[0].LastVerifiedAt.Time
+
+	pass()
+	if gotTags, gotPolicies := reads(); gotTags != tags || gotPolicies != policies {
+		t.Fatalf("inside the trust window: %d tag reads and %d policy reads, want none", gotTags-tags, gotPolicies-policies)
+	}
+	if !ledger[0].LastVerifiedAt.Time.Equal(firstVerified) {
+		t.Error("a pass that didn't read the tags must not extend the trust window")
+	}
+
+	t.Run("a changed policy is written at once", func(t *testing.T) {
+		cr.Spec.SQS.Resources = append(cr.Spec.SQS.Resources, depsv1alpha1.SQSQueueSpec{Name: "payments"})
+		cr.Status.ManagedResources = append(cr.Status.ManagedResources, depsv1alpha1.ManagedResource{
+			Type: "sqs", Name: "payments", ARN: "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-payments"})
+		puts := client.putRolePolicyCalls
+		pass()
+		if client.putRolePolicyCalls != puts+1 {
+			t.Errorf("PutRolePolicy calls = %d, want %d", client.putRolePolicyCalls, puts+1)
+		}
+	})
+
+	t.Run("a role deleted by hand gets its policy back", func(t *testing.T) {
+		delete(client.roles, roleName("default", "checkout-service"))
+		pass()
+		if len(client.roles[roleName("default", "checkout-service")].policies) == 0 {
+			t.Error("the recreated role has no permissions policy")
+		}
+	})
+
+	t.Run("once the window expires both are read again", func(t *testing.T) {
+		expired := metav1.NewTime(time.Now().Add(-status.TrustWindow - time.Minute))
+		ledger[0].LastVerifiedAt = &expired
+		tags, policies := reads()
+		pass()
+		if gotTags, gotPolicies := reads(); gotTags == tags || gotPolicies == policies {
+			t.Errorf("after the trust window: %d tag reads and %d policy reads, want both", gotTags-tags, gotPolicies-policies)
+		}
+		if !ledger[0].LastVerifiedAt.After(expired.Time) {
+			t.Error("a pass that read the tags must restart the trust window")
+		}
+	})
 }

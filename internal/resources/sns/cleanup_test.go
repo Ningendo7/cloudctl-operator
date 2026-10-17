@@ -671,3 +671,38 @@ func TestCleanup_DeletingTopic_EmitsDeletedEvent(t *testing.T) {
 		t.Errorf("expected exactly one TopicDeleted event, got %+v", *events)
 	}
 }
+
+// A pending topic waiting out the quiet window or the empty-check backoff
+// costs no AWS call at all: the ownership re-check only matters ahead of
+// something that changes it.
+func TestCleanup_PendingDeletion_ReadsNothingWhileWaiting(t *testing.T) {
+	client := newFakeSNS()
+	ledger := setupTopic(t, client, "default", "checkout-service", "events", depsv1alpha1.DeletionPolicyDelete, false)
+	client.topics[cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))].subscriptions = 1
+	cleanup := func() ([]depsv1alpha1.ManagedResource, []CleanupResult) {
+		t.Helper()
+		updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, false, nil)
+		if err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+		return updated, results
+	}
+
+	ledger, _ = cleanup()
+	reads := client.listTagsCalls
+	for _, phase := range []string{"quiet window", "backoff"} {
+		if phase == "backoff" {
+			advancePastEmptyCheckBackoffStart(t, ledger, "events")
+			ledger, _ = cleanup() // the real check, which stamps LastEmptyCheckAt
+			reads = client.listTagsCalls
+		}
+		var results []CleanupResult
+		ledger, results = cleanup()
+		if got := client.listTagsCalls; got != reads {
+			t.Errorf("%s: %d reads while waiting, want none", phase, got-reads)
+		}
+		if r := findResult(results, "events"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+			t.Errorf("%s: expected PendingDeletion, got %+v", phase, results)
+		}
+	}
+}

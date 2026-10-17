@@ -63,12 +63,14 @@ func alarmsSection(r *AppDependenciesReconciler) section {
 			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, "alarm", alarmEligibleResourceCount(cr))
 			defer cancel()
 
-			err := alarms.Ensure(
+			mayExist, err := alarms.Ensure(
 				ctx, r.AWSClients.CloudWatch, r.Client,
 				cr.Namespace, cr.Name, string(cr.UID),
 				r.AWSClients.Region, r.AWSClients.AccountID,
 				cr.Spec.Alarms, cr.Spec.SQS, cr.Spec.SNS, cr.Spec.DynamoDB,
+				cr.Status.AlarmsMayExist,
 			)
+			cr.Status.AlarmsMayExist = &mayExist
 			setSectionCondition(ctx, cr, conditionTypeAlarmsReady, err, eventRecorderFor(r, cr))
 			return err
 		},

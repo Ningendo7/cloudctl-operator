@@ -111,17 +111,30 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
-			if relErr != nil {
-				if firstErr == nil {
-					firstErr = relErr
+			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+				relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+				if relErr != nil {
+					if firstErr == nil {
+						firstErr = relErr
+					}
+					continue
 				}
-				continue
-			}
-			if relinquished && recordEvent != nil {
-				recordEvent("Normal", "TopicOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained topic %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				if relinquished && recordEvent != nil {
+					recordEvent("Normal", "TopicOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained topic %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				}
+				status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
 			}
 			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
+			continue
+		}
+
+		// While a pending topic is waiting out the quiet window or the
+		// empty-check backoff nothing is read: the gates that decide that
+		// need no AWS call, and the ownership re-check below runs before
+		// anything that changes the topic.
+		if !entry.Force && !forceDeleteAll && entry.PendingDeletionSince != nil &&
+			(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
+			results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
 			continue
 		}
 
@@ -162,18 +175,6 @@ func Cleanup(
 				if recordEvent != nil {
 					recordEvent("Warning", "TopicDeletionPending", fmt.Sprintf("Topic %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
 				}
-				continue
-			}
-
-			if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
-				// Still inside the quiet window — the deny is already in
-				// place from the first pass, nothing to do but keep waiting.
-				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-				continue
-			}
-
-			if !status.NeedsEmptyCheck(entry) {
-				results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
 				continue
 			}
 

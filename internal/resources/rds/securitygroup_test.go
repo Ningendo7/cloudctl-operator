@@ -19,6 +19,7 @@ package rds
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -196,11 +197,11 @@ func TestEnsureSecurityGroup_SkipsIngressForNonexistentConsumerCR(t *testing.T) 
 	}
 }
 
-// TestEnsureSecurityGroup_ReassertingIngressIsIdempotent proves a second
-// reconcile against an already-granted consumer doesn't surface
-// InvalidPermission.Duplicate as an error - AuthorizeSecurityGroupIngress
-// is expected to be called every pass, not tracked separately.
-func TestEnsureSecurityGroup_ReassertingIngressIsIdempotent(t *testing.T) {
+// TestEnsureSecurityGroup_ReassertingIngressMakesNoWrite proves a second
+// reconcile against an already-granted consumer doesn't write at all: a
+// grant that already exists would fail with InvalidPermission.Duplicate on
+// every pass, spending EC2's account-wide mutating-call quota each time.
+func TestEnsureSecurityGroup_ReassertingIngressMakesNoWrite(t *testing.T) {
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()
 	consumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
@@ -218,13 +219,70 @@ func TestEnsureSecurityGroup_ReassertingIngressIsIdempotent(t *testing.T) {
 	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
 		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith)
 	if err != nil {
-		t.Fatalf("second EnsureSecurityGroup() error = %v (duplicate-permission errors must be swallowed, not surfaced)", err)
+		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
 	}
-	if ec2Client.authorizeSecurityGroupIngressCalls != 2 {
-		t.Errorf("expected Authorize to be called again (and hit the duplicate case) on the second pass, got %d total calls", ec2Client.authorizeSecurityGroupIngressCalls)
+	if ec2Client.authorizeSecurityGroupIngressCalls != 1 || ec2Client.revokeSecurityGroupIngressCalls != 0 {
+		t.Errorf("a pass with every rule in place made %d Authorize and %d Revoke calls in total, want 1 and 0",
+			ec2Client.authorizeSecurityGroupIngressCalls, ec2Client.revokeSecurityGroupIngressCalls)
 	}
 	if len(ec2Client.groups[SecurityGroupIDFromARN(arn)].ingress) != 1 {
 		t.Error("expected still exactly one ingress rule, not a duplicate entry")
+	}
+}
+
+func TestEnsureSecurityGroup_GrantsEveryMissingConsumerInOneCall(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	first := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+	second := newConsumerWithPodIdentity("billing", "billing-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer2")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(first, second).Build()
+	sharedWith := []depsv1alpha1.SharedWithEntry{
+		{Namespace: "fulfillment", Name: "fulfillment-service"},
+		{Namespace: "billing", Name: "billing-service"},
+	}
+	ensure := func() string {
+		t.Helper()
+		arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+			"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, sharedWith)
+		if err != nil {
+			t.Fatalf("EnsureSecurityGroup() error = %v", err)
+		}
+		return arn
+	}
+
+	arn := ensure()
+	if ec2Client.authorizeSecurityGroupIngressCalls != 1 || len(ec2Client.groups[SecurityGroupIDFromARN(arn)].ingress) != 2 {
+		t.Fatalf("first pass: %d Authorize calls and %d rules, want one call granting both",
+			ec2Client.authorizeSecurityGroupIngressCalls, len(ec2Client.groups[SecurityGroupIDFromARN(arn)].ingress))
+	}
+
+	// One rule removed by hand: only that one is granted again.
+	group := ec2Client.groups[SecurityGroupIDFromARN(arn)]
+	group.ingress = group.ingress[:1]
+	missing := "sg-consumer2"
+	if group.ingress[0].sourceGroupID == "sg-consumer2" {
+		missing = "sg-consumer1"
+	}
+	ensure()
+	if ec2Client.authorizeSecurityGroupIngressCalls != 2 || len(group.ingress) != 2 {
+		t.Errorf("after a rule was removed by hand: %d Authorize calls and %d rules, want 2 and 2", ec2Client.authorizeSecurityGroupIngressCalls, len(group.ingress))
+	}
+	if !slices.ContainsFunc(group.ingress, func(r fakeIngressRule) bool { return r.sourceGroupID == missing }) {
+		t.Errorf("expected %s granted again, got %+v", missing, group.ingress)
+	}
+}
+
+func TestEnsureSecurityGroup_ADuplicateGrantFromARaceIsNotAnError(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	ec2Client.authorizeSecurityGroupIngressErr = &fakeAWSError{code: errCodeInvalidPermissionDuplicate, fault: smithy.FaultClient}
+	consumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
+
+	if _, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false,
+		[]depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}); err != nil {
+		t.Fatalf("EnsureSecurityGroup() error = %v", err)
 	}
 }
 
@@ -497,25 +555,6 @@ func TestEnsureSecurityGroup_PropagatesRevokeFailure_WhenNotNotFound(t *testing.
 		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
 	if err == nil {
 		t.Fatal("expected a real (non-NotFound) Revoke failure to surface as an error")
-	}
-}
-
-func TestEnsureSecurityGroup_PropagatesDescribeFailureDuringRevokeCheck(t *testing.T) {
-	rdsClient := newFakeRDS()
-	ec2Client := newFakeEC2()
-	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
-
-	_, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
-	if err != nil {
-		t.Fatalf("first EnsureSecurityGroup() error = %v", err)
-	}
-
-	ec2Client.describeSecurityGroupsByIDErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultClient}
-	_, err = EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
-		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
-	if err == nil {
-		t.Fatal("expected the Describe failure (needed to check current rules before revoking) to propagate")
 	}
 }
 
@@ -890,7 +929,7 @@ func TestFindOrCreateSecurityGroup_TakesOverAGroupFromTheUIDItWasTold(t *testing
 			}
 
 			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
-			id, err := findOrCreateSecurityGroup(ctx, ec2Client, "default", "checkout-service", "new-uid", "shared-name", "vpc-a", false)
+			id, _, err := findOrCreateSecurityGroup(ctx, ec2Client, "default", "checkout-service", "new-uid", "shared-name", "vpc-a", false)
 			tags := ec2Client.groups[*created.GroupId].tags
 			if !tc.transferred {
 				if err == nil || tags[cloudctlaws.OwnerUIDTagKey] != "old-uid" {
@@ -905,5 +944,25 @@ func TestFindOrCreateSecurityGroup_TakesOverAGroupFromTheUIDItWasTold(t *testing
 				t.Errorf("expected the group re-tagged, got %v", tags)
 			}
 		})
+	}
+}
+
+// AWS rejects a whole grant if the same pair appears twice in it, so a
+// consumer listed twice must still be granted.
+func TestEnsureSecurityGroup_AConsumerListedTwiceIsStillGranted(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	consumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
+	entry := depsv1alpha1.SharedWithEntry{Namespace: "fulfillment", Name: "fulfillment-service"}
+
+	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false,
+		[]depsv1alpha1.SharedWithEntry{entry, entry})
+	if err != nil {
+		t.Fatalf("EnsureSecurityGroup() error = %v", err)
+	}
+	if got := len(ec2Client.groups[SecurityGroupIDFromARN(arn)].ingress); got != 1 {
+		t.Errorf("rules = %d, want the consumer granted once", got)
 	}
 }

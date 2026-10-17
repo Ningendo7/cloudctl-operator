@@ -79,6 +79,15 @@ func RemoveManagedResource(resources *[]depsv1alpha1.ManagedResource, resourceTy
 	*resources = filtered
 }
 
+// Relinquished returns entry marked as no longer tagged as ours. A
+// re-declared resource then goes through the full ownership check, and so
+// needs adopt, at once rather than when its trust window would have
+// expired.
+func Relinquished(entry depsv1alpha1.ManagedResource) depsv1alpha1.ManagedResource {
+	entry.State = depsv1alpha1.ManagedResourceStateRelinquished
+	return entry
+}
+
 // NeedsRevalidation reports whether a ledger entry's trust window has
 // expired (or it was never verified, or it isn't Verified in the first
 // place) and must be re-checked against the AWS-side ownership tag before

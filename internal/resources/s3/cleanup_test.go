@@ -751,3 +751,38 @@ func TestCleanup_DeletingBucket_EmitsDeletedEvent(t *testing.T) {
 		t.Errorf("expected exactly one BucketDeleted event, got %+v", *events)
 	}
 }
+
+// A pending bucket waiting out the quiet window or the empty-check backoff
+// costs no AWS call at all: the ownership re-check only matters ahead of
+// something that changes it.
+func TestCleanup_PendingDeletion_ReadsNothingWhileWaiting(t *testing.T) {
+	client := newFakeS3()
+	ledger := setupBucket(t, client, "default", "checkout-service", "receipts", depsv1alpha1.DeletionPolicyDelete, false)
+	client.buckets[bucketName("default", "checkout-service", "receipts", testAccountID)].versions = []fakeObjectVersion{{key: "file.txt", versionID: "v1"}}
+	cleanup := func() ([]depsv1alpha1.ManagedResource, []CleanupResult) {
+		t.Helper()
+		updated, results, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil)
+		if err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+		return updated, results
+	}
+
+	ledger, _ = cleanup()
+	reads := client.getBucketTaggingCalls
+	for _, phase := range []string{"quiet window", "backoff"} {
+		if phase == "backoff" {
+			advancePastEmptyCheckBackoffStart(t, ledger, "receipts")
+			ledger, _ = cleanup() // the real check, which stamps LastEmptyCheckAt
+			reads = client.getBucketTaggingCalls
+		}
+		var results []CleanupResult
+		ledger, results = cleanup()
+		if got := client.getBucketTaggingCalls; got != reads {
+			t.Errorf("%s: %d reads while waiting, want none", phase, got-reads)
+		}
+		if r := findResult(results, "receipts"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+			t.Errorf("%s: expected PendingDeletion, got %+v", phase, results)
+		}
+	}
+}

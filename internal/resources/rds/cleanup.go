@@ -119,22 +119,25 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			relinquished, gone, relErr := relinquishIfStillTagged(ctx, awsClient, namespace, crName, crUID, entry)
-			if relErr != nil {
-				if firstErr == nil {
-					firstErr = relErr
+			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+				relinquished, gone, relErr := relinquishIfStillTagged(ctx, awsClient, namespace, crName, crUID, entry)
+				if relErr != nil {
+					if firstErr == nil {
+						firstErr = relErr
+					}
+					continue
 				}
-				continue
-			}
-			if gone {
-				// Deleted by hand after being retained: forget it, so
-				// declaring it again creates a fresh instance instead of
-				// tripping over a ledger entry for one that no longer exists.
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				continue
-			}
-			if relinquished && recordEvent != nil {
-				recordEvent("Normal", "InstanceOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained RDS instance %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				if gone {
+					// Deleted by hand after being retained: forget it, so
+					// declaring it again creates a fresh instance instead of
+					// tripping over a ledger entry for one that no longer exists.
+					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
+					continue
+				}
+				if relinquished && recordEvent != nil {
+					recordEvent("Normal", "InstanceOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained RDS instance %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+				}
+				status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
 			}
 			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
 			continue
