@@ -130,6 +130,55 @@ func TestEnsure_CorrectsKMSKeyDriftOnExistingBucket(t *testing.T) {
 	}
 }
 
+func TestEnsure_EnablesTheBucketKeyOnNewAndExistingEncryptedBuckets(t *testing.T) {
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+	}}
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	ensure := func(client *fakeS3, kmsClient cloudctlaws.KMSClient, ledger []depsv1alpha1.ManagedResource) []depsv1alpha1.ManagedResource {
+		t.Helper()
+		ledger, err := Ensure(context.Background(), client, kmsClient, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, ledger, nil, nil)
+		if err != nil {
+			t.Fatalf("Ensure() error = %v", err)
+		}
+		return ledger
+	}
+
+	t.Run("a new bucket", func(t *testing.T) {
+		client := newFakeS3()
+		ensure(client, kmstest.NewFakeKMSClient(), nil)
+		if !client.buckets[bucket].bucketKeyEnabled {
+			t.Error("expected the new bucket to use a Bucket Key")
+		}
+	})
+
+	t.Run("an existing bucket already on the right key", func(t *testing.T) {
+		client := newFakeS3()
+		kmsClient := kmstest.NewFakeKMSClient()
+		ledger := ensure(client, kmsClient, nil)
+		client.buckets[bucket].bucketKeyEnabled = false // as it was before this was managed
+
+		puts := client.putBucketEncryptionCalls
+		ensure(client, kmsClient, ledger)
+		if !client.buckets[bucket].bucketKeyEnabled || client.putBucketEncryptionCalls != puts+1 {
+			t.Errorf("bucketKeyEnabled = %v after %d more writes, want it enabled by exactly one",
+				client.buckets[bucket].bucketKeyEnabled, client.putBucketEncryptionCalls-puts)
+		}
+	})
+
+	t.Run("a bucket that is already correct is not rewritten", func(t *testing.T) {
+		client := newFakeS3()
+		kmsClient := kmstest.NewFakeKMSClient()
+		ledger := ensure(client, kmsClient, nil)
+
+		puts := client.putBucketEncryptionCalls
+		ensure(client, kmsClient, ledger)
+		if client.putBucketEncryptionCalls != puts {
+			t.Errorf("PutBucketEncryption calls on an unchanged bucket = %d, want none", client.putBucketEncryptionCalls-puts)
+		}
+	})
+}
+
 func TestEnsure_KMSKeyRefRetriesWhenKeyNotYetCreated(t *testing.T) {
 	client := newFakeS3()
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{

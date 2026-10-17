@@ -86,6 +86,8 @@ type fakeBucket struct {
 	// same "not found" state a real, never-explicitly-configured bucket
 	// reports despite already using default SSE-S3 encryption.
 	kmsKeyARN string
+	// bucketKeyEnabled backs the same response's BucketKeyEnabled.
+	bucketKeyEnabled bool
 	// policy backs GetBucketPolicy's response - empty means no
 	// PutBucketPolicy call has ever been made, matching a real bucket's
 	// NoSuchBucketPolicy response.
@@ -116,9 +118,10 @@ type fakeS3 struct {
 	// getBucketTaggingCalls/putBucketTaggingCalls let tests assert that the
 	// atomic-tag-on-create path never triggers the separate tagging round
 	// trip that only adopting a pre-existing bucket still needs.
-	getBucketTaggingCalls   int
-	putBucketTaggingCalls   int
-	listObjectVersionsCalls int
+	getBucketTaggingCalls    int
+	putBucketTaggingCalls    int
+	putBucketEncryptionCalls int
+	listObjectVersionsCalls  int
 	// failToDeleteKey, if set, makes DeleteObjects report that one key
 	// failed (via Errors) while leaving it in place, simulating S3's
 	// documented partial-failure behavior within an otherwise-successful call.
@@ -246,8 +249,10 @@ func (f *fakeS3) PutBucketEncryption(_ context.Context, in *s3sdk.PutBucketEncry
 	for _, rule := range in.ServerSideEncryptionConfiguration.Rules {
 		if rule.ApplyServerSideEncryptionByDefault != nil && rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID != nil {
 			b.kmsKeyARN = *rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID
+			b.bucketKeyEnabled = aws.ToBool(rule.BucketKeyEnabled)
 		}
 	}
+	f.putBucketEncryptionCalls++
 	return &s3sdk.PutBucketEncryptionOutput{}, nil
 }
 
@@ -266,7 +271,7 @@ func (f *fakeS3) GetBucketEncryption(_ context.Context, in *s3sdk.GetBucketEncry
 				{ApplyServerSideEncryptionByDefault: &types.ServerSideEncryptionByDefault{
 					SSEAlgorithm:   types.ServerSideEncryptionAwsKms,
 					KMSMasterKeyID: &keyARN,
-				}},
+				}, BucketKeyEnabled: aws.Bool(b.bucketKeyEnabled)},
 			},
 		},
 	}, nil

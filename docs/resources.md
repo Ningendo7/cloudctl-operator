@@ -290,7 +290,7 @@ the key's own policy was `Delete`).
 The CR's IAM role gets `kms:Decrypt` and `kms:GenerateDataKey` on every key
 the CR declares or provisions.
 
-A consumer of an encrypted queue, topic or bucket gets the key permissions it needs too. A key that is disabled or unavailable fails `KMSReady` (`KeyDisabled`, `KeyUnavailable`) and is never re-enabled by the operator. Keys also let SNS and CloudWatch use them, so SNS can deliver into an encrypted queue and alarms can publish to an encrypted topic.
+A consumer of an encrypted queue, topic or bucket gets the key permissions it needs too. A key that is disabled or unavailable fails `KMSReady` (`KeyDisabled`, `KeyUnavailable`) and is never re-enabled by the operator. Keys also let SNS and CloudWatch use them, so SNS can deliver into an encrypted queue and alarms can publish to an encrypted topic. Encrypted S3 buckets use an S3 Bucket Key, which cuts KMS requests; KMS then sees the bucket ARN as the encryption context instead of each object's.
 
 **Upgrading from v0.2.0.** v0.3.0 removed the cross-CR `encryption.kmsKeyRef` object and `kms.resources[].sharedWith` / `kms.consumes`. Go straight to v0.3.1 or later, since v0.3.0 cannot decode a CR that still has the object form; from v0.3.1 such a CR fails `KMSReady` with `LegacyKMSKeyRef` until it is edited.
 
