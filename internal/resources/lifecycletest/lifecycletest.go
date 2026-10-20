@@ -107,6 +107,10 @@ type Subject interface {
 	// (message count, subscriptions, bucket objects, table rows), or
 	// returns ErrUnsupported if this resource type has no such concept.
 	SetNonEmpty(name string, nonEmpty bool) error
+
+	// DeleteOutOfBand removes the resource from the fake AWS backend, as if
+	// someone had deleted it by hand.
+	DeleteOutOfBand(name string) error
 }
 
 func findResult(results []CleanupResult, name string) *CleanupResult {
@@ -237,6 +241,70 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		}
 		if entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "kept"); entry.State != depsv1alpha1.ManagedResourceStateVerified {
 			t.Errorf("expected the adopted entry to be Verified, got %s", entry.State)
+		}
+	})
+
+	t.Run("RelinquishedEntryIsDroppedOnceItsResourceIsGone", func(t *testing.T) {
+		s := newSubject(t)
+		ctx := context.Background()
+		ledger, err := s.EnsureOne(ctx, nil, "vanishing", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+		if err != nil {
+			t.Fatalf("EnsureOne() error = %v", err)
+		}
+		cleanup := func() {
+			t.Helper()
+			if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+				t.Fatalf("Cleanup() error = %v", err)
+			}
+		}
+		backdate := func() {
+			t.Helper()
+			entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "vanishing")
+			old := metav1.NewTime(time.Now().Add(-status.RelinquishedRecheckInterval - time.Hour))
+			entry.LastVerifiedAt = &old
+			status.UpsertManagedResource(&ledger, entry)
+		}
+		tracked := func() bool { return status.HasManagedResource(ledger, s.ResourceType(), "vanishing") }
+
+		cleanup() // relinquishes
+		if err := s.DeleteOutOfBand("vanishing"); err != nil {
+			t.Fatalf("DeleteOutOfBand() error = %v", err)
+		}
+		cleanup()
+		if !tracked() {
+			t.Fatal("a relinquished entry must not be read again within the recheck interval")
+		}
+		backdate()
+		cleanup()
+		if tracked() {
+			t.Error("expected the entry dropped once its resource is gone and the recheck is due")
+		}
+	})
+
+	t.Run("RelinquishedEntryStaysWhileItsResourceExists", func(t *testing.T) {
+		s := newSubject(t)
+		ctx := context.Background()
+		ledger, err := s.EnsureOne(ctx, nil, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+		if err != nil {
+			t.Fatalf("EnsureOne() error = %v", err)
+		}
+		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+		entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "kept")
+		old := metav1.NewTime(time.Now().Add(-status.RelinquishedRecheckInterval - time.Hour))
+		entry.LastVerifiedAt = &old
+		status.UpsertManagedResource(&ledger, entry)
+
+		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+		entry, found := status.FindManagedResource(ledger, s.ResourceType(), "kept")
+		if !found || entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+			t.Fatalf("expected the entry kept as Relinquished, got %+v (found=%v)", entry, found)
+		}
+		if time.Since(entry.LastVerifiedAt.Time) > time.Minute {
+			t.Error("expected the recheck to restart the interval")
 		}
 	})
 

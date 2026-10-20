@@ -351,41 +351,18 @@ func ensureInstanceObserving(
 	// problem was never going to resolve on its own.
 	needsOwnershipCheck := !existingBeforeCheckFound || status.NeedsRevalidation(existingBeforeCheck)
 	if needsOwnershipCheck {
-		tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &instanceARN})
-		if tErr != nil {
-			return ledger, wrapAWSError(tErr, "reading instance tags")
+		if err := ensureInstanceOwnership(ctx, awsClient, namespace, crName, crUID, instanceID, instanceARN, opts.adopt, recordEvent); err != nil {
+			return ledger, err
 		}
-		currentTags := tagsToMap(tagsOut.TagList)
+	}
 
-		if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-			if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-				return ledger, fmt.Errorf("instance %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", instanceID, existingOwner)
-			}
-			transferred := false
-			if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
-				if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-					return ledger, fmt.Errorf("instance %q is tagged with this CR's name but a different UID (%s) - likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", instanceID, staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
-				}
-				transferred = true
-			}
-			if !transferred && !opts.adopt {
-				return ledger, fmt.Errorf("instance %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", instanceID)
-			}
-
-			merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
-			if _, tagErr := awsClient.AddTagsToResource(ctx, &rds.AddTagsToResourceInput{
-				ResourceName: &instanceARN,
-				Tags:         mapToTags(merged),
-			}); tagErr != nil {
-				return ledger, wrapAWSError(tagErr, "adopting instance (tagging)")
-			}
-			if recordEvent != nil {
-				if transferred {
-					recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over RDS instance %s from a previous incarnation of this CR", instanceARN))
-				} else {
-					recordEvent("Normal", "InstanceAdopted", fmt.Sprintf("Adopted existing RDS instance %s under management", instanceARN))
-				}
-			}
+	// The CRD forbids editing an instance's engine, subnet group or
+	// encryption, but removing a Delete-policy entry and adding it back
+	// passes that rule while the instance is still tracked, since it is never
+	// deleted.
+	if existingBeforeCheckFound && existingBeforeCheck.State != depsv1alpha1.ManagedResourceStateRelinquished {
+		if err := checkImmutableSettings(instance, instanceID, opts); err != nil {
+			return ledger, err
 		}
 	}
 
@@ -526,8 +503,12 @@ func reconcileInstanceAttributes(ctx context.Context, awsClient rdsAPI, instance
 	case cur.backupRetention > 0 && !opts.backupEnabled && recordEvent != nil:
 		recordEvent("Warning", "BackupsLeftEnabled", fmt.Sprintf("RDS instance %s has automated backups but its spec disables them; not turning them off, since that deletes the existing backups - disable them in AWS if intended", instanceARN))
 	}
-	// AWS rejects a decrease outright, and the CEL rule on the field
-	// already keeps spec from requesting one - only growth is ever sent.
+	// AWS rejects a decrease outright, so only growth is ever sent. A smaller
+	// spec still gets here, when the instance has grown on its own or the
+	// entry was removed and added back, and is reported.
+	if opts.allocatedStorage < cur.allocatedStorage && recordEvent != nil {
+		recordEvent("Warning", "StorageLargerThanSpec", fmt.Sprintf("RDS instance %s has %d GiB but its spec says %d; the operator never shrinks storage - raise the spec to match", instanceARN, cur.allocatedStorage, opts.allocatedStorage))
+	}
 	if opts.allocatedStorage > cur.allocatedStorage {
 		modify.AllocatedStorage = &opts.allocatedStorage
 		// Provisioned-IOPS volumes require Iops alongside a storage change.
@@ -791,4 +772,77 @@ func isInTransitionError(err error) bool {
 func trackedInstance(ledger []depsv1alpha1.ManagedResource, resourceName string) (depsv1alpha1.ManagedResource, bool) {
 	entry, found := status.FindManagedResource(ledger, resourceType, resourceName)
 	return entry, found && entry.State != depsv1alpha1.ManagedResourceStateRelinquished
+}
+
+// ensureInstanceOwnership refuses an instance tagged for another CR, or for
+// an earlier UID this CR wasn't told to take over, and tags an untagged one
+// when adopt is set.
+func ensureInstanceOwnership(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID, instanceID, instanceARN string, adopt bool, recordEvent status.EventRecorder) error {
+	tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &instanceARN})
+	if tErr != nil {
+		return wrapAWSError(tErr, "reading instance tags")
+	}
+	currentTags := tagsToMap(tagsOut.TagList)
+
+	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
+		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
+			return fmt.Errorf("instance %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", instanceID, existingOwner)
+		}
+		transferred := false
+		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
+			if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
+				return fmt.Errorf("instance %q is tagged with this CR's name but a different UID (%s) - likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", instanceID, staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
+			}
+			transferred = true
+		}
+		if !transferred && !adopt {
+			return fmt.Errorf("instance %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", instanceID)
+		}
+
+		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
+		if _, tagErr := awsClient.AddTagsToResource(ctx, &rds.AddTagsToResourceInput{
+			ResourceName: &instanceARN,
+			Tags:         mapToTags(merged),
+		}); tagErr != nil {
+			return wrapAWSError(tagErr, "adopting instance (tagging)")
+		}
+		if recordEvent != nil {
+			if transferred {
+				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over RDS instance %s from a previous incarnation of this CR", instanceARN))
+			} else {
+				recordEvent("Normal", "InstanceAdopted", fmt.Sprintf("Adopted existing RDS instance %s under management", instanceARN))
+			}
+		}
+	}
+	return nil
+}
+
+// reasonImmutableSettingChanged marks a tracked instance whose spec asks for
+// an engine, subnet group or storage encryption it can't have.
+const reasonImmutableSettingChanged = "ImmutableSettingChanged"
+
+func checkImmutableSettings(instance types.DBInstance, instanceID string, opts instanceOptions) error {
+	actualSubnetGroup := ""
+	if instance.DBSubnetGroup != nil {
+		actualSubnetGroup = aws.ToString(instance.DBSubnetGroup.DBSubnetGroupName)
+	}
+	var changed []string
+	if actual := aws.ToString(instance.Engine); actual != opts.engine {
+		changed = append(changed, fmt.Sprintf("engine is %s (spec: %s)", actual, opts.engine))
+	}
+	if actualSubnetGroup != opts.dbSubnetGroupName {
+		changed = append(changed, fmt.Sprintf("dbSubnetGroupName is %s (spec: %s)", orNone(actualSubnetGroup), opts.dbSubnetGroupName))
+	}
+	if encrypted := aws.ToBool(instance.StorageEncrypted); encrypted == opts.encryptionOff {
+		changed = append(changed, fmt.Sprintf("storage encryption is %v (spec: %v)", encrypted, !opts.encryptionOff))
+	} else if actual := aws.ToString(instance.KmsKeyId); opts.kmsKeyARN != nil && encrypted && actual != *opts.kmsKeyARN {
+		changed = append(changed, fmt.Sprintf("its storage is encrypted with KMS key %s (spec: %s)", actual, *opts.kmsKeyARN))
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	return &cloudctlaws.ReconcileError{
+		Err:    fmt.Errorf("instance %q can't change: %s; set them back, or move the data to a new entry", instanceID, strings.Join(changed, "; ")),
+		Reason: reasonImmutableSettingChanged,
+	}
 }

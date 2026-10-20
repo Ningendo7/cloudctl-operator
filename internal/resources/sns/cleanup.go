@@ -111,12 +111,16 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
-				relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
+				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
 				if relErr != nil {
 					if firstErr == nil {
 						firstErr = relErr
 					}
+					continue
+				}
+				if gone {
+					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 					continue
 				}
 				if relinquished && recordEvent != nil {
@@ -256,7 +260,7 @@ func markPendingDeletion(ledger []depsv1alpha1.ManagedResource, results []Cleanu
 // relinquishIfStillTagged removes our ownership tag (and any leftover
 // pending-deletion deny statement) from a resource whose deletionPolicy is
 // Retain and is no longer declared. Idempotent — safe on every reconcile.
-func relinquishIfStillTagged(ctx context.Context, client snsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, client snsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
 	tagsOut, tErr := client.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{
 		ResourceArn: &entry.ARN,
 	})
@@ -265,24 +269,24 @@ func relinquishIfStillTagged(ctx context.Context, client snsAPI, namespace, crNa
 		// plain NotFoundException other topic operations use.
 		var notFound *types.ResourceNotFoundException
 		if errors.As(tErr, &notFound) {
-			return false, nil // already gone, nothing to relinquish
+			return false, true, nil // already gone, nothing to relinquish
 		}
-		return false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained topic %q", entry.Name))
+		return false, false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained topic %q", entry.Name))
 	}
 	currentTags := tagsToMap(tagsOut.Tags)
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		return false, nil // already relinquished, or never verified as ours
+		return false, false, nil // already relinquished, or never verified as ours
 	}
 
 	if _, uErr := client.UntagResource(ctx, &sns.UntagResourceInput{
 		ResourceArn: &entry.ARN,
 		TagKeys:     []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
 	}); uErr != nil {
-		return false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained topic %q", entry.Name))
+		return false, false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained topic %q", entry.Name))
 	}
 
 	if err := removePendingDeletionDeny(ctx, client, entry.ARN); err != nil {
-		return false, err
+		return false, false, err
 	}
-	return true, nil
+	return true, false, nil
 }

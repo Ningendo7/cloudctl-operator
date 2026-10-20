@@ -193,7 +193,7 @@ spec:
 | `deletionPolicy`, `adopt`, `sharedWith` | See below. |
 | `replication` | Not implemented; setting it is a permanent error. |
 
-**Credentials.** The operator never sets or generates a password. RDS creates and rotates the master user's password in Secrets Manager, and the operator mirrors it into a Secret named `<cr>-rds-credentials` in the *owning* CR's namespace only. Rotation reaches the Secret within one drift-detection interval, but never a running pod's environment. The master user can do anything in the database, so consumers never receive it: the owner creates per-app database users and hands the credentials to each team.
+**Credentials.** The operator never sets or generates a password. RDS creates and rotates the master user's password in Secrets Manager, and the operator mirrors it into a Secret named `<cr>-rds-credentials` in the *owning* CR's namespace only. Rotation reaches the Secret within one drift-detection interval, but never a running pod's environment. For credentials that must follow rotation, read the RDS-managed secret directly with External Secrets or the Secrets Store CSI driver. The master user can do anything in the database, so consumers never receive it: the owner creates per-app database users and hands the credentials to each team.
 
 **Connection info.** The owner's and each consumer's connection ConfigMap carries `RDS_<NAME>_HOST`, `_PORT`, `_ENGINE` and `_DB_INSTANCE_IDENTIFIER` (consumers' keys also include the producer's namespace and CR name).
 

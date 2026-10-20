@@ -232,6 +232,15 @@ func ensureTable(
 	// own copy since Go scopes the if-statement's own existing to that block.
 	existingBeforeCheck, existingBeforeCheckFound := status.FindManagedResource(ledger, resourceType, resourceName)
 
+	// The CRD forbids editing the keys of an entry, but removing it and
+	// adding it back with other keys passes that rule while the old table is
+	// still tracked. A relinquished entry is checked at adoption instead.
+	if existingBeforeCheckFound && existingBeforeCheck.State != depsv1alpha1.ManagedResourceStateRelinquished {
+		if err := checkKeySchema(table, tableName, opts); err != nil {
+			return ledger, err
+		}
+	}
+
 	if existingBeforeCheckFound && !status.NeedsRevalidation(existingBeforeCheck) {
 		// Still within the trust window - skip re-verifying ownership via
 		// tags (a paginated ListTagsOfResource call), but attribute drift
@@ -266,20 +275,10 @@ func ensureTable(
 		if ownErr != nil {
 			return ledger, ownErr
 		}
-
-		// Refuse the adoption outright on a key-schema mismatch, rather than
-		// adopting anyway and only failing later, opaquely, at the first
-		// PutItem/Query the workload makes. AWS never allows changing a
-		// table's key schema after creation, and the CRD's own CEL rules
-		// already block editing partitionKey/sortKey on an already-
-		// reconciled CR — so the only way this can happen is adopting a
-		// pre-existing table that happens to sit at this CR's deterministic
-		// name with a different schema.
-		if actualPartitionKey, actualSortKey := tableKeySchema(table.KeySchema); actualPartitionKey != opts.partitionKey || actualSortKey != opts.sortKey {
-			return ledger, fmt.Errorf(
-				"table %q exists with key schema (partitionKey=%q, sortKey=%q) that doesn't match this CR's declared (partitionKey=%q, sortKey=%q) — AWS doesn't support changing a table's key schema, so it can't be adopted with mismatched keys",
-				tableName, actualPartitionKey, actualSortKey, opts.partitionKey, opts.sortKey,
-			)
+		// Refuse here rather than adopt and fail later, opaquely, at the
+		// workload's first PutItem or Query.
+		if err := checkKeySchema(table, tableName, opts); err != nil {
+			return ledger, err
 		}
 
 		if opts.checkAdoptedKey != nil {
@@ -317,6 +316,19 @@ func ensureTable(
 	}
 
 	return recordVerified(ledger, resourceName, tableArn, opts.deletionPolicy, opts.force), nil
+}
+
+// checkKeySchema refuses a table whose keys are not the declared ones: AWS
+// never changes a table's key schema after creation.
+func checkKeySchema(table *types.TableDescription, tableName string, opts tableOptions) error {
+	actualPartitionKey, actualSortKey := tableKeySchema(table.KeySchema)
+	if actualPartitionKey == opts.partitionKey && actualSortKey == opts.sortKey {
+		return nil
+	}
+	return fmt.Errorf(
+		"table %q has key schema (partitionKey=%q, sortKey=%q) that doesn't match this CR's declared (partitionKey=%q, sortKey=%q); AWS can't change a table's key schema, so set the keys back, or remove the entry, wait for the table to be deleted and add it again",
+		tableName, actualPartitionKey, actualSortKey, opts.partitionKey, opts.sortKey,
+	)
 }
 
 // tableKeySchema extracts the partition (HASH) and sort (RANGE) key

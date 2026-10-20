@@ -110,7 +110,7 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
 				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
 				if relErr != nil {
 					if firstErr == nil {

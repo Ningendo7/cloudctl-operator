@@ -1088,3 +1088,36 @@ func TestCleanup_ARetainedInstanceIsRelinquishedOnceAndKeptInTheLedger(t *testin
 		t.Errorf("tag reads on a relinquished instance = %d, want none", client.listTagsForResourceCalls-reads)
 	}
 }
+
+// A relinquished instance is not read on every pass, so one deleted by hand
+// would keep its entry, and with it its key and its security group, unless it
+// is looked at now and then.
+func TestCleanup_ARelinquishedInstanceDeletedByHandIsForgottenAtTheNextRecheck(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyRetain)
+	cleanup := func() {
+		t.Helper()
+		var err error
+		if ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+	}
+	tracked := func() bool { return status.HasManagedResource(ledger, resourceType, "orders-db") }
+
+	cleanup() // relinquishes
+	delete(client.instances, cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, "default", "checkout-service", resourceType, "orders-db", 63))
+
+	cleanup()
+	if !tracked() {
+		t.Fatal("a relinquished entry must not be read again within the recheck interval")
+	}
+	entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
+	old := metav1.NewTime(time.Now().Add(-status.RelinquishedRecheckInterval - time.Hour))
+	entry.LastVerifiedAt = &old
+	status.UpsertManagedResource(&ledger, entry)
+
+	cleanup()
+	if tracked() {
+		t.Error("expected the entry dropped once the instance is gone and the recheck is due")
+	}
+}

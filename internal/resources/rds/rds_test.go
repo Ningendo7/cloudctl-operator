@@ -2131,3 +2131,145 @@ func TestEnsure_TakesOverAnInstanceFromTheUIDItWasTold(t *testing.T) {
 		})
 	}
 }
+
+// The CRD forbids editing an instance's engine or subnet group, but removing
+// the entry and adding it back with other values passes that rule. The
+// instance was retained, so it is adopted again, and must be compared with
+// the spec like any other untagged one.
+func TestEnsure_ARelinquishedInstanceIsComparedWithTheSpecWhenDeclaredAgain(t *testing.T) {
+	client := newFakeRDS()
+	ec2Client := newFakeEC2()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ensure := func(spec depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+		return Ensure(context.Background(), client, kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012",
+			&depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, ledger, nil, nil)
+	}
+
+	spec := baseInstanceSpec("orders-db")
+	spec.DeletionPolicy = depsv1alpha1.DeletionPolicyRetain
+	ledger, err := ensure(spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	// Available, as a real instance is after a while.
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].status = "available"
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db"); entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+		t.Fatalf("test setup: entry state = %s, want Relinquished", entry.State)
+	}
+	modifies := client.modifyDBInstanceCalls
+
+	other := spec
+	other.Adopt = true
+	other.Engine = "mysql"
+	_, err = ensure(other, ledger)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonAdoptionConflict {
+		t.Fatalf("expected an AdoptionConflict for another engine, got %v", err)
+	}
+	if client.modifyDBInstanceCalls != modifies {
+		t.Error("a refused re-adoption must not modify the instance")
+	}
+
+	same := spec
+	same.Adopt = true
+	if _, err := ensure(same, ledger); err != nil {
+		t.Fatalf("declaring it again with the same settings should be accepted: %v", err)
+	}
+}
+
+// A Delete-policy instance removed from spec is never deleted by the
+// operator, so it stays tracked, pending. Adding the entry back with another
+// engine passes the CRD's rule, and must be refused rather than reconciled.
+func TestEnsure_ATrackedInstanceRefusesAnotherEngineOrSubnetGroup(t *testing.T) {
+	client := newFakeRDS()
+	ec2Client := newFakeEC2()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	other := newAuthorizedSubnetGroupGrant("other-tier", "default")
+	other.Name = "other-grant"
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant, other).Build()
+	ensure := func(spec depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+		return Ensure(context.Background(), client, kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012",
+			&depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, ledger, nil, nil)
+	}
+
+	spec := baseInstanceSpec("orders-db")
+	spec.DeletionPolicy = depsv1alpha1.DeletionPolicyDelete
+	ledger, err := ensure(spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].status = "available"
+	if ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	for name, mutate := range map[string]func(*depsv1alpha1.RDSInstanceSpec){
+		"engine":       func(s *depsv1alpha1.RDSInstanceSpec) { s.Engine = "mysql" },
+		"subnet group": func(s *depsv1alpha1.RDSInstanceSpec) { s.DBSubnetGroupName = "other-tier" },
+		"encryption turned off": func(s *depsv1alpha1.RDSInstanceSpec) {
+			s.Encryption = &depsv1alpha1.EncryptionSpec{Enabled: false}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := spec
+			mutate(&changed)
+			modifies := client.modifyDBInstanceCalls
+			_, err := ensure(changed, ledger)
+			var reconcileErr *cloudctlaws.ReconcileError
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonImmutableSettingChanged || reconcileErr.Retryable {
+				t.Fatalf("expected a permanent %s error, got %v", reasonImmutableSettingChanged, err)
+			}
+			if client.modifyDBInstanceCalls != modifies {
+				t.Error("a refused change must not modify the instance")
+			}
+		})
+	}
+
+	if _, err := ensure(spec, ledger); err != nil {
+		t.Fatalf("declaring it again unchanged should be accepted: %v", err)
+	}
+}
+
+func TestEnsure_ASmallerStorageSpecIsReportedNotIgnoredSilently(t *testing.T) {
+	client := newFakeRDS()
+	ec2Client := newFakeEC2()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	spec := baseInstanceSpec("orders-db")
+	var events []string
+	record := func(eventType, reason, _ string) { events = append(events, eventType+"/"+reason) }
+	ensure := func(ledger []depsv1alpha1.ManagedResource) []depsv1alpha1.ManagedResource {
+		t.Helper()
+		ledger, err := Ensure(context.Background(), client, kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012",
+			&depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, ledger, nil, record)
+		if err != nil {
+			t.Fatalf("Ensure() error = %v", err)
+		}
+		return ledger
+	}
+
+	ledger := ensure(nil)
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].status = "available"
+	ensure(ledger)
+	if slices.Contains(events, "Warning/StorageLargerThanSpec") {
+		t.Fatal("no warning expected while the instance matches the spec")
+	}
+
+	client.instances[instanceID].allocatedStorage = spec.AllocatedStorage + 50 // grew on its own
+	modifies := client.modifyDBInstanceCalls
+	ensure(ledger)
+	if !slices.Contains(events, "Warning/StorageLargerThanSpec") {
+		t.Errorf("expected a StorageLargerThanSpec warning, got %v", events)
+	}
+	if client.modifyDBInstanceCalls != modifies {
+		t.Error("storage must never be shrunk")
+	}
+}

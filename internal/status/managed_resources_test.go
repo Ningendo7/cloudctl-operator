@@ -184,3 +184,27 @@ func TestUpsertManagedResource_KeepsTheRecordedKMSKeyARN(t *testing.T) {
 		t.Errorf("an explicit new key ARN should replace the old one: %+v", ledger[0])
 	}
 }
+
+func TestNeedsRelinquishedRecheck(t *testing.T) {
+	at := func(age time.Duration) *metav1.Time {
+		ts := metav1.NewTime(time.Now().Add(-age))
+		return &ts
+	}
+	tests := []struct {
+		name  string
+		entry depsv1alpha1.ManagedResource
+		want  bool
+	}{
+		{"just relinquished", depsv1alpha1.ManagedResource{State: depsv1alpha1.ManagedResourceStateRelinquished, LastVerifiedAt: at(time.Minute)}, false},
+		{"due", depsv1alpha1.ManagedResource{State: depsv1alpha1.ManagedResourceStateRelinquished, LastVerifiedAt: at(RelinquishedRecheckInterval + time.Minute)}, true},
+		{"never looked at", depsv1alpha1.ManagedResource{State: depsv1alpha1.ManagedResourceStateRelinquished}, true},
+		{"not relinquished", depsv1alpha1.ManagedResource{State: depsv1alpha1.ManagedResourceStateVerified, LastVerifiedAt: at(48 * time.Hour)}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NeedsRelinquishedRecheck(tc.entry); got != tc.want {
+				t.Errorf("NeedsRelinquishedRecheck() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
