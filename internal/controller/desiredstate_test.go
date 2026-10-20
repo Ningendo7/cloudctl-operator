@@ -859,7 +859,7 @@ func TestReconcile_AnRDSInstanceSettlesAcrossTwoPasses(t *testing.T) {
 		}
 	}
 	var updated depsv1alpha1.AppDependencies
-	if err := r.Client.Get(context.Background(), req.NamespacedName, &updated); err != nil {
+	if err := r.Get(context.Background(), req.NamespacedName, &updated); err != nil {
 		t.Fatal(err)
 	}
 	entry, found := status.FindManagedResource(updated.Status.ManagedResources, resourceTypeRDS, "orders-db")
