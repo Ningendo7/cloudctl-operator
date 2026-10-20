@@ -506,9 +506,7 @@ func reconcileInstanceAttributes(ctx context.Context, awsClient rdsAPI, instance
 	// AWS rejects a decrease outright, so only growth is ever sent. A smaller
 	// spec still gets here, when the instance has grown on its own or the
 	// entry was removed and added back, and is reported.
-	if opts.allocatedStorage < cur.allocatedStorage && recordEvent != nil {
-		recordEvent("Warning", "StorageLargerThanSpec", fmt.Sprintf("RDS instance %s has %d GiB but its spec says %d; the operator never shrinks storage - raise the spec to match", instanceARN, cur.allocatedStorage, opts.allocatedStorage))
-	}
+	reportStorageLargerThanSpec(instanceARN, cur.allocatedStorage, opts.allocatedStorage, recordEvent)
 	if opts.allocatedStorage > cur.allocatedStorage {
 		modify.AllocatedStorage = &opts.allocatedStorage
 		// Provisioned-IOPS volumes require Iops alongside a storage change.
@@ -845,4 +843,11 @@ func checkImmutableSettings(instance types.DBInstance, instanceID string, opts i
 		Err:    fmt.Errorf("instance %q can't change: %s; set them back, or move the data to a new entry", instanceID, strings.Join(changed, "; ")),
 		Reason: reasonImmutableSettingChanged,
 	}
+}
+
+func reportStorageLargerThanSpec(instanceARN string, actual, want int32, recordEvent status.EventRecorder) {
+	if want >= actual || recordEvent == nil {
+		return
+	}
+	recordEvent("Warning", "StorageLargerThanSpec", fmt.Sprintf("RDS instance %s has %d GiB but its spec says %d; the operator never shrinks storage - raise the spec to match", instanceARN, actual, want))
 }
