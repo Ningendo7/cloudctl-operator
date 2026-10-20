@@ -224,3 +224,40 @@ func TestLive_AlarmReachesAnEncryptedTopic(t *testing.T) {
 	}
 	t.Fatal("the alarm notification never reached the queue: CloudWatch could not publish to the encrypted topic")
 }
+
+// TestLive_Ensure_TakesOverAnAlarmFromAPreviousUID checks a restored CR
+// takes over an unchanged alarm tagged with its old UID when told which.
+func TestLive_Ensure_TakesOverAnAlarmFromAPreviousUID(t *testing.T) {
+	client, accountID := newLiveClient(t)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	region := "us-east-1"
+	t.Cleanup(func() {
+		if err := Cleanup(context.Background(), client, namespace, crName, "uid-2", region, accountID); err != nil {
+			t.Logf("alarm cleanup warning: %v", err)
+		}
+	})
+	alarmsSpec := &depsv1alpha1.AlarmsSpec{Enabled: true}
+	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+
+	if err := ensureAlarms(ctx, client, nil, namespace, crName, "uid-1", region, accountID, alarmsSpec, sqsSpec, nil, nil); err != nil {
+		t.Fatalf("Ensure() (create) error = %v", err)
+	}
+	takeover := cloudctlaws.WithAdoptFromUID(ctx, "uid-1")
+	if err := ensureAlarms(takeover, client, nil, namespace, crName, "uid-2", region, accountID, alarmsSpec, sqsSpec, nil, nil); err != nil {
+		t.Fatalf("Ensure() (takeover) error = %v", err)
+	}
+	alarmName := cloudctlaws.ResourceName(namespace, crName, "sqs", cloudctlaws.DerivedKey("orders", sqsAgeAlarmSuffix), alarmNameMaxLen)
+	arn := alarmARN(region, accountID, alarmName)
+	tagsOut, err := client.ListTagsForResource(ctx, &cloudwatch.ListTagsForResourceInput{ResourceARN: &arn})
+	if err != nil {
+		t.Fatalf("ListTagsForResource() error = %v", err)
+	}
+	tags := make(map[string]string, len(tagsOut.Tags))
+	for _, tag := range tagsOut.Tags {
+		tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+	}
+	if !cloudctlaws.IsOwnedBy(tags, namespace, crName, "uid-2") {
+		t.Errorf("expected the alarm to be tagged with the new UID, got %+v", tags)
+	}
+}

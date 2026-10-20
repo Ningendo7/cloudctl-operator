@@ -813,3 +813,41 @@ func TestLive_Ensure_ClassifiesRealInvalidParameterAsNotRetryable(t *testing.T) 
 		t.Errorf("expected a real InvalidParameterValue-shaped error to classify as non-retryable, got retryable: %v", err)
 	}
 }
+
+// TestLive_FindOrCreateSecurityGroup_TakesOverFromAPreviousUID checks a
+// restored CR is refused a security group tagged with its old UID, and takes
+// it over when told which.
+func TestLive_FindOrCreateSecurityGroup_TakesOverFromAPreviousUID(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	subnetGroup := liveSubnetGroupName(t)
+	ctx := context.Background()
+	rdsClient := rds.NewFromConfig(cfg)
+	ec2Client := ec2.NewFromConfig(cfg)
+	namespace, crName := "live", liveUniqueSuffix(t)
+	groupName := cloudctlaws.ResourceName(namespace, crName, "rds-sg", "primary", 255)
+	vpcID, err := resolveVPCID(ctx, rdsClient, subnetGroup)
+	if err != nil {
+		t.Fatalf("resolveVPCID() error = %v", err)
+	}
+
+	groupID, _, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, "uid-1", groupName, vpcID, false)
+	if err != nil {
+		t.Fatalf("findOrCreateSecurityGroup() (create) error = %v", err)
+	}
+	t.Cleanup(func() { deleteSecurityGroupWithRetry(t, ec2Client, groupID) })
+
+	if _, _, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, "uid-2", groupName, vpcID, false); err == nil {
+		t.Fatal("expected a new UID to be refused without adopt-from-uid")
+	}
+	takeover := cloudctlaws.WithAdoptFromUID(ctx, "uid-1")
+	if _, _, err := findOrCreateSecurityGroup(takeover, ec2Client, namespace, crName, "uid-2", groupName, vpcID, false); err != nil {
+		t.Fatalf("findOrCreateSecurityGroup() (takeover) error = %v", err)
+	}
+	out, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: []string{groupID}})
+	if err != nil || len(out.SecurityGroups) != 1 {
+		t.Fatalf("DescribeSecurityGroups() groups=%d error = %v", len(out.SecurityGroups), err)
+	}
+	if !cloudctlaws.IsOwnedBy(ec2TagsToMap(out.SecurityGroups[0].Tags), namespace, crName, "uid-2") {
+		t.Errorf("expected the group to be tagged with the new UID, got %+v", out.SecurityGroups[0].Tags)
+	}
+}

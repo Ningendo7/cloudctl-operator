@@ -193,3 +193,42 @@ func TestLive_Ensure_AdoptsRealUntaggedKeyWhenRequested(t *testing.T) {
 		t.Errorf("expected the real key to be tagged as owned after adoption, got: %+v", tags)
 	}
 }
+
+// TestLive_Ensure_TakesOverAKeyFromAPreviousUID moves the shared live-test
+// key to another UID and back, so no key is created for it. The key is put
+// back even if an assertion fails.
+func TestLive_Ensure_TakesOverAKeyFromAPreviousUID(t *testing.T) {
+	client := newLiveClient(t)
+	ctx := context.Background()
+	const namespace, crName, sharedUID = "live", "shared-key", "live-shared-key"
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
+		{Name: "shared", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true},
+	}}
+	ledger, err := Ensure(ctx, client, namespace, crName, sharedUID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() (shared key) error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, resourceType, "shared")
+	t.Cleanup(func() {
+		back := cloudctlaws.WithAdoptFromUID(context.Background(), "uid-2")
+		if _, err := Ensure(back, client, namespace, crName, sharedUID, spec, nil, nil, nil); err != nil {
+			t.Logf("could not give the shared key back to its UID, run the KMS Ensure with adopt-from-uid=uid-2: %v", err)
+		}
+	})
+
+	strict := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "shared", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}}}
+	if _, err := Ensure(ctx, client, namespace, crName, "uid-2", strict, nil, nil, nil); err == nil {
+		t.Fatal("expected a new UID to be refused without adopt-from-uid")
+	}
+	takeover := cloudctlaws.WithAdoptFromUID(ctx, sharedUID)
+	if _, err := Ensure(takeover, client, namespace, crName, "uid-2", strict, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() (takeover) error = %v", err)
+	}
+	tags, err := listAllResourceTags(ctx, client, entry.ARN)
+	if err != nil {
+		t.Fatalf("listAllResourceTags() error = %v", err)
+	}
+	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, "uid-2") {
+		t.Errorf("expected the key to be tagged with the new UID, got %+v", tags)
+	}
+}

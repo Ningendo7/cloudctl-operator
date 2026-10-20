@@ -84,6 +84,13 @@ func WithAdoptFromUID(ctx context.Context, uid string) context.Context {
 	return context.WithValue(ctx, adoptFromUIDKey{}, uid)
 }
 
+// TakingOver reports whether the CR was told to take resources over from a
+// previous UID.
+func TakingOver(ctx context.Context) bool {
+	from, _ := ctx.Value(adoptFromUIDKey{}).(string)
+	return from != ""
+}
+
 // MayTransferFrom reports whether the CR was told to take over from exactly
 // this UID. Callers pass the stale UID IsStaleUID found on a resource that
 // already carries this CR's own name.

@@ -698,3 +698,36 @@ func TestLive_Cleanup_RetainedEncryptedQueueKeepsItsEntryUntilDeletedByHand(t *t
 		t.Error("expected the entry of the deleted queue to be dropped on the recheck")
 	}
 }
+
+// TestLive_Ensure_TakesOverAQueueFromAPreviousUID checks a restored CR is
+// refused a queue tagged with its old UID, and takes it over when told which.
+func TestLive_Ensure_TakesOverAQueueFromAPreviousUID(t *testing.T) {
+	client := newLiveClient(t)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true}}}
+
+	if _, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() (create) error = %v", err)
+	}
+	if _, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-2", spec, nil, nil, nil); err == nil {
+		t.Fatal("expected a new UID to be refused without adopt-from-uid")
+	}
+	takeover := cloudctlaws.WithAdoptFromUID(ctx, "uid-1")
+	if _, err := Ensure(takeover, client, nil, nil, nil, namespace, crName, "uid-2", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() (takeover) error = %v", err)
+	}
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
+	urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("GetQueueUrl() error = %v", err)
+	}
+	tagsOut, err := client.ListQueueTags(ctx, &sqs.ListQueueTagsInput{QueueUrl: urlOut.QueueUrl})
+	if err != nil {
+		t.Fatalf("ListQueueTags() error = %v", err)
+	}
+	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, "uid-2") {
+		t.Errorf("expected the queue to be tagged with the new UID, got %+v", tagsOut.Tags)
+	}
+}

@@ -310,3 +310,34 @@ func TestLive_Cleanup_RetainedTopicIsLetGoAndAMissingOneIsGone(t *testing.T) {
 		t.Errorf("relinquishIfStillTagged() on a missing topic gone=%v err=%v, want gone", gone, err)
 	}
 }
+
+// TestLive_Ensure_TakesOverATopicFromAPreviousUID checks a restored CR is
+// refused a topic tagged with its old UID, and takes it over when told which.
+func TestLive_Ensure_TakesOverATopicFromAPreviousUID(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := sns.NewFromConfig(cfg)
+	region, accountID := liveRegionAndAccount(t, cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	topicARN := cloudctlaws.TopicARN(region, accountID, cloudctlaws.ResourceName(namespace, crName, "sns", "events", 256))
+	t.Cleanup(func() { deleteTopicIfExists(t, client, topicARN) })
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true}}}
+
+	if _, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() (create) error = %v", err)
+	}
+	if _, err := Ensure(ctx, client, nil, namespace, crName, "uid-2", region, accountID, spec, nil, nil, nil); err == nil {
+		t.Fatal("expected a new UID to be refused without adopt-from-uid")
+	}
+	takeover := cloudctlaws.WithAdoptFromUID(ctx, "uid-1")
+	if _, err := Ensure(takeover, client, nil, namespace, crName, "uid-2", region, accountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() (takeover) error = %v", err)
+	}
+	tagsOut, err := client.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{ResourceArn: &topicARN})
+	if err != nil {
+		t.Fatalf("ListTagsForResource() error = %v", err)
+	}
+	if !cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.Tags), namespace, crName, "uid-2") {
+		t.Errorf("expected the topic to be tagged with the new UID, got %+v", tagsOut.Tags)
+	}
+}

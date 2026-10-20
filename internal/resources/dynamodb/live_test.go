@@ -575,3 +575,47 @@ func TestLive_Cleanup_RetainedTableIsLetGoAndAMissingOneIsGone(t *testing.T) {
 		t.Errorf("relinquishIfStillTagged() on a missing table gone=%v err=%v, want gone", gone, err)
 	}
 }
+
+// TestLive_Ensure_TakesOverATableFromAPreviousUID checks a restored CR is
+// refused a table tagged with its old UID, and takes it over when told which.
+func TestLive_Ensure_TakesOverATableFromAPreviousUID(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := dynamodb.NewFromConfig(cfg)
+	region, accountID := liveRegionAndAccount(t, cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, "sessions", 255)
+	tableARN := "arn:aws:dynamodb:" + region + ":" + accountID + ":table/" + tableName
+	t.Cleanup(func() { deleteTableIfExists(t, client, tableName) })
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+
+	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil); err != nil {
+		var reconcileErr *cloudctlaws.ReconcileError
+		if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+			t.Fatalf("Ensure() (create) error = %v", err)
+		}
+	}
+	waitForTableActive(t, client, tableName, 3*time.Minute)
+	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-2", spec, nil, nil, nil); err == nil {
+		t.Fatal("expected a new UID to be refused without adopt-from-uid")
+	}
+	takeover := cloudctlaws.WithAdoptFromUID(ctx, "uid-1")
+	if _, err := Ensure(takeover, client, nil, nil, namespace, crName, "uid-2", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() (takeover) error = %v", err)
+	}
+	// Tag changes can take a few seconds to show.
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(3 * time.Second) {
+		tags, err := listAllTags(ctx, client, tableARN)
+		if err != nil {
+			t.Fatalf("listAllTags() error = %v", err)
+		}
+		if cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, "uid-2") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the table never got the new UID's tags")
+		}
+	}
+}

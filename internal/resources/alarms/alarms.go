@@ -345,7 +345,10 @@ func reconcileAlarms(
 		desiredByName[d.name] = struct{}{}
 
 		current, exists := existingByName[d.name]
-		if exists && alarmMatches(current, d, alarmActions) {
+		matches := exists && alarmMatches(current, d, alarmActions)
+		// An unchanged alarm is not read, except while taking over: its tags
+		// may still carry the previous UID.
+		if matches && !cloudctlaws.TakingOver(ctx) {
 			continue
 		}
 		if exists {
@@ -358,6 +361,9 @@ func reconcileAlarms(
 			}
 			switch {
 			case owner.ours:
+				if matches {
+					continue
+				}
 			case owner.transferable:
 				// CloudWatch tags an alarm only when it is created, so an
 				// alarm left by a previous incarnation of this CR is

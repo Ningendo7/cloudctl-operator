@@ -543,3 +543,30 @@ func TestEnsure_TakesOverAnAlarmFromTheUIDItWasTold(t *testing.T) {
 		})
 	}
 }
+
+func TestEnsure_TakesOverAnUnchangedAlarmWhenToldTo(t *testing.T) {
+	client := newFakeCloudWatch()
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	enabled := &depsv1alpha1.AlarmsSpec{Enabled: true}
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "old-uid", testRegion, testAccountID, enabled, spec, nil, nil); err != nil {
+		t.Fatalf("Ensure() (create) error = %v", err)
+	}
+
+	ctx := cloudctlaws.WithAdoptFromUID(context.Background(), "old-uid")
+	if err := ensureAlarms(ctx, client, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID, enabled, spec, nil, nil); err != nil {
+		t.Fatalf("Ensure() (takeover) error = %v", err)
+	}
+	for name, alarm := range client.alarms {
+		if alarm.tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" {
+			t.Errorf("alarm %s still carries %v", name, alarm.tags)
+		}
+	}
+
+	puts := client.putCalls
+	if err := ensureAlarms(ctx, client, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID, enabled, spec, nil, nil); err != nil {
+		t.Fatalf("Ensure() (again) error = %v", err)
+	}
+	if client.putCalls != puts {
+		t.Errorf("alarms already owned and unchanged were written again: %d calls", client.putCalls-puts)
+	}
+}

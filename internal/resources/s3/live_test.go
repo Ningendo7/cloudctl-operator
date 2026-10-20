@@ -569,3 +569,34 @@ func TestLive_Cleanup_DenyPolicyActuallyBlocksPutObjectThenClearingRestoresIt(t 
 		t.Errorf("real PutObject() after removing the deny policy error = %v — expected it to succeed again", err)
 	}
 }
+
+// TestLive_Ensure_TakesOverABucketFromAPreviousUID checks a restored CR is
+// refused a bucket tagged with its old UID, and takes it over when told which.
+func TestLive_Ensure_TakesOverABucketFromAPreviousUID(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := s3sdk.NewFromConfig(cfg)
+	region, accountID := liveRegionAndAccount(t, cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	bucket := bucketName(namespace, crName, "receipts", accountID)
+	t.Cleanup(func() { deleteBucketIfExists(t, client, bucket) })
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true}}}
+
+	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() (create) error = %v", err)
+	}
+	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-2", region, accountID, spec, nil, nil, nil); err == nil {
+		t.Fatal("expected a new UID to be refused without adopt-from-uid")
+	}
+	takeover := cloudctlaws.WithAdoptFromUID(ctx, "uid-1")
+	if _, err := Ensure(takeover, client, nil, nil, namespace, crName, "uid-2", region, accountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() (takeover) error = %v", err)
+	}
+	tagsOut, err := client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
+	if err != nil {
+		t.Fatalf("GetBucketTagging() error = %v", err)
+	}
+	if !cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.TagSet), namespace, crName, "uid-2") {
+		t.Errorf("expected the bucket to be tagged with the new UID, got %+v", tagsOut.TagSet)
+	}
+}
