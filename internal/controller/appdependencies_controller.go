@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -150,6 +151,9 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	if err != nil {
 		if isRetryable(err) {
 			delay := r.transientDelay(key)
+			if errors.As(err, &waitingError{}) {
+				delay = max(delay, jitteredDriftRequeue())
+			}
 			log.Info("Reconcile hit a transient error, requeuing", "error", err.Error(), "requeueAfter", delay, "failures", r.transientBackoffLimiter().NumRequeues(reconcile.Request{NamespacedName: key}), "duration", time.Since(start))
 			return ctrl.Result{RequeueAfter: delay}, nil
 		}

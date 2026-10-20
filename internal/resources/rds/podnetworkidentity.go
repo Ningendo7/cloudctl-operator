@@ -30,6 +30,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -124,7 +125,8 @@ func EnsurePodNetworkIdentity(
 	// invariant that's already settled the vast majority of passes.
 	existingEntry, existingEntryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
 	freshlyVerified := false
-	vpcID, stickyOK := existingPodIdentityVPCID(ctx, ec2Client, ledger)
+	recordedGroup, stickyOK := existingPodIdentityGroup(ctx, ec2Client, ledger, namespace, crName, crUID)
+	vpcID := aws.ToString(recordedGroup.VpcId)
 	if stickyOK && existingEntryFound && !status.NeedsRevalidation(existingEntry) {
 		// Within the trust window - trust the existing VPC as-is.
 	} else if stickyOK {
@@ -147,10 +149,16 @@ func EnsurePodNetworkIdentity(
 		freshlyVerified = true
 	}
 
-	groupName := cloudctlaws.ResourceName(namespace, crName, "rds-pod-sg", "network-identity", 255)
-	groupID, _, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, false)
-	if err != nil {
-		return ledger, err
+	// The group just described for the sticky VPC is the one wanted, if that
+	// VPC is still kept.
+	groupID := aws.ToString(recordedGroup.GroupId)
+	if !stickyOK {
+		groupName := cloudctlaws.ResourceName(namespace, crName, "rds-pod-sg", "network-identity", 255)
+		var err error
+		groupID, _, err = findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, false)
+		if err != nil {
+			return ledger, err
+		}
 	}
 	arn := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, groupID)
 
@@ -218,22 +226,15 @@ func firstConsumedSubnetGroupName(ctx context.Context, k8sClient client.Client, 
 	return "", false
 }
 
-// existingPodIdentityVPCID returns the VPC a CR's already-published
-// pod-identity security group currently lives in, read from EC2 directly
-// rather than trusting anything cached - the ledger only stores an ARN,
-// never the VPC itself. False if nothing's published yet, or the group
-// it points at is already gone.
-func existingPodIdentityVPCID(ctx context.Context, ec2Client cloudctlaws.EC2Client, ledger []depsv1alpha1.ManagedResource) (string, bool) {
+// existingPodIdentityGroup returns a CR's already-published pod security
+// group, if it still exists and is tagged as ours. Its VPC is the one to keep
+// using; see EnsurePodNetworkIdentity.
+func existingPodIdentityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Client, ledger []depsv1alpha1.ManagedResource, namespace, crName, crUID string) (types.SecurityGroup, bool) {
 	entry, entryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
 	if !entryFound {
-		return "", false
+		return types.SecurityGroup{}, false
 	}
-	groupID := SecurityGroupIDFromARN(entry.ARN)
-	out, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: []string{groupID}})
-	if err != nil || len(out.SecurityGroups) == 0 {
-		return "", false
-	}
-	return aws.ToString(out.SecurityGroups[0].VpcId), true
+	return describeOwnedGroup(ctx, ec2Client, entry.ARN, namespace, crName, crUID)
 }
 
 // anyConsumedVPCMatches reports whether at least one of today's consumes

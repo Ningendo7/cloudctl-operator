@@ -166,7 +166,8 @@ func Ensure(
 				firstErr = &cloudctlaws.ReconcileError{
 					Err: fmt.Errorf("instance %q: namespace %q is not authorized to use DB subnet group %q - "+
 						"a platform admin must create an RDSSubnetGroupGrant covering it", r.Name, namespace, r.DBSubnetGroupName),
-					Retryable: true,
+					Retryable:     true,
+					WakesOnChange: true,
 				}
 			}
 			continue
@@ -179,7 +180,8 @@ func Ensure(
 			continue
 		}
 
-		sgARN, sgErr := EnsureSecurityGroup(ctx, awsClient, ec2Client, k8sClient, namespace, crName, crUID, r.Name, r.DBSubnetGroupName, r.Engine, region, accountID, r.Adopt, r.SharedWith)
+		recordedSG, _ := status.FindManagedResource(ledger, podNetworkIdentityResourceType, instanceSecurityGroupLedgerName(r.Name))
+		sgARN, sgErr := ensureInstanceSecurityGroup(ctx, awsClient, ec2Client, k8sClient, namespace, crName, crUID, r.Name, r.DBSubnetGroupName, r.Engine, region, accountID, r.Adopt, r.SharedWith, recordedSG.ARN)
 		if sgErr != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("instance %q: security group: %w", r.Name, sgErr)

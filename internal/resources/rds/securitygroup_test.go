@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -986,4 +987,55 @@ func TestEnsureSecurityGroup_AConsumerListedTwiceIsStillGranted(t *testing.T) {
 	if got := len(ec2Client.groups[SecurityGroupIDFromARN(arn)].ingress); got != 1 {
 		t.Errorf("rules = %d, want the consumer granted once", got)
 	}
+}
+
+func TestEnsureInstanceSecurityGroup_ARecordedOwnedGroupCostsOneDescribe(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	ensure := func(recorded string) string {
+		t.Helper()
+		arn, err := ensureInstanceSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+			"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil, recorded)
+		if err != nil {
+			t.Fatalf("ensureInstanceSecurityGroup() error = %v", err)
+		}
+		return arn
+	}
+
+	arn := ensure("")
+	subnetLookups, describes := rdsClient.describeDBSubnetGroupsCalls, ec2Client.describeSecurityGroupsCalls
+
+	if again := ensure(arn); again != arn {
+		t.Fatalf("ARN = %q, want the same group %q", again, arn)
+	}
+	if got := rdsClient.describeDBSubnetGroupsCalls - subnetLookups; got != 0 {
+		t.Errorf("DescribeDBSubnetGroups calls = %d, want none for a recorded group", got)
+	}
+	if got := ec2Client.describeSecurityGroupsCalls - describes; got != 1 {
+		t.Errorf("DescribeSecurityGroups calls = %d, want 1", got)
+	}
+	if len(ec2Client.groups) != 1 {
+		t.Errorf("groups = %d, want the recorded one reused", len(ec2Client.groups))
+	}
+
+	recreated := arn
+	t.Run("a recorded group deleted by hand is looked up and created again", func(t *testing.T) {
+		delete(ec2Client.groups, SecurityGroupIDFromARN(arn))
+		recreated = ensure(arn)
+		if recreated == arn || len(ec2Client.groups) != 1 {
+			t.Fatalf("expected a new group, got %q (was %q) and %d groups", recreated, arn, len(ec2Client.groups))
+		}
+	})
+
+	t.Run("a recorded group that lost its ownership tags is not trusted", func(t *testing.T) {
+		for _, g := range ec2Client.groups {
+			g.tags = map[string]string{}
+		}
+		_, err := ensureInstanceSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+			"default", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil, recreated)
+		if err == nil || !strings.Contains(err.Error(), "set adopt:true") {
+			t.Fatalf("expected the untagged group to be refused without adopt, got %v", err)
+		}
+	})
 }

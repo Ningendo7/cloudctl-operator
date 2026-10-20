@@ -395,3 +395,42 @@ func TestReconcile_ARestoredCRTakesOverItsResourcesWhenAnnotated(t *testing.T) {
 		})
 	}
 }
+
+// A CR waiting for a grant or a producer's topic is woken by the watch on it,
+// so it needn't be polled at the fast transient pace.
+func TestReconcile_AWaitAWatchEndsIsRetriedAtTheDriftPace(t *testing.T) {
+	cr := transientCR()
+	cr.Spec.Alarms = &depsv1alpha1.AlarmsSpec{
+		Enabled:     true,
+		SnsTopicRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform", ResourceName: "events"},
+	}
+	r, _ := throttledReconciler(t, cr)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+	res, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want a requeue", err)
+	}
+	if !withinJitter(res.RequeueAfter, DriftDetectionInterval) {
+		t.Errorf("RequeueAfter = %v, want about %v", res.RequeueAfter, DriftDetectionInterval)
+	}
+
+	t.Run("another section failing transiently is not held back by it", func(t *testing.T) {
+		cr := transientCR()
+		cr.Spec.Alarms = &depsv1alpha1.AlarmsSpec{
+			Enabled:     true,
+			SnsTopicRef: &depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform", ResourceName: "events"},
+		}
+		r, sqsFake := throttledReconciler(t, cr)
+		sqsFake.getQueueUrlErr = &smithy.GenericAPIError{Code: "ThrottlingException"}
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+		res, err := r.Reconcile(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v, want a requeue", err)
+		}
+		if !withinJitter(res.RequeueAfter, transientRequeueInterval) {
+			t.Errorf("RequeueAfter = %v, want about %v", res.RequeueAfter, transientRequeueInterval)
+		}
+	})
+}

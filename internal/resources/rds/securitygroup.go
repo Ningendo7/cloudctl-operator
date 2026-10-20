@@ -77,15 +77,38 @@ func EnsureSecurityGroup(
 	adopt bool,
 	sharedWith []depsv1alpha1.SharedWithEntry,
 ) (securityGroupARN string, err error) {
-	vpcID, err := resolveVPCID(ctx, rdsClient, dbSubnetGroupName)
-	if err != nil {
-		return "", err
-	}
+	return ensureInstanceSecurityGroup(ctx, rdsClient, ec2Client, k8sClient, namespace, crName, crUID, resourceName, dbSubnetGroupName, engine, region, accountID, adopt, sharedWith, "")
+}
 
-	groupName := cloudctlaws.ResourceName(namespace, crName, "rds-sg", resourceName, 255)
-	groupID, currentIngress, err := findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, adopt)
-	if err != nil {
-		return "", err
+// ensureInstanceSecurityGroup is EnsureSecurityGroup given the ARN of the
+// group the ledger already records for this instance, if any. A recorded
+// group that still exists and is tagged as ours is used as it is: the
+// instance's subnet group can't change and a subnet group's VPC is
+// immutable, so there is no need to look either up again.
+func ensureInstanceSecurityGroup(
+	ctx context.Context,
+	rdsClient rdsAPI,
+	ec2Client cloudctlaws.EC2Client,
+	k8sClient client.Client,
+	namespace, crName, crUID, resourceName, dbSubnetGroupName, engine, region, accountID string,
+	adopt bool,
+	sharedWith []depsv1alpha1.SharedWithEntry,
+	recordedARN string,
+) (securityGroupARN string, err error) {
+	var groupID string
+	var currentIngress []types.IpPermission
+	if known, ok := describeOwnedGroup(ctx, ec2Client, recordedARN, namespace, crName, crUID); ok {
+		groupID, currentIngress = aws.ToString(known.GroupId), known.IpPermissions
+	} else {
+		vpcID, err := resolveVPCID(ctx, rdsClient, dbSubnetGroupName)
+		if err != nil {
+			return "", err
+		}
+		groupName := cloudctlaws.ResourceName(namespace, crName, "rds-sg", resourceName, 255)
+		groupID, currentIngress, err = findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, adopt)
+		if err != nil {
+			return "", err
+		}
 	}
 	arn := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, groupID)
 
@@ -216,6 +239,24 @@ func resolveVPCID(ctx context.Context, rdsClient rdsAPI, dbSubnetGroupName strin
 		return "", fmt.Errorf("DB subnet group %q did not report a VPC ID", dbSubnetGroupName)
 	}
 	return *out.DBSubnetGroups[0].VpcId, nil
+}
+
+// describeOwnedGroup returns the group arn names if it still exists and is
+// tagged as this CR's. Anything else, an error included, is false, and the
+// caller does the full lookup, which reports it properly.
+func describeOwnedGroup(ctx context.Context, ec2Client cloudctlaws.EC2Client, arn, namespace, crName, crUID string) (types.SecurityGroup, bool) {
+	if arn == "" {
+		return types.SecurityGroup{}, false
+	}
+	out, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: []string{SecurityGroupIDFromARN(arn)}})
+	if err != nil || len(out.SecurityGroups) == 0 {
+		return types.SecurityGroup{}, false
+	}
+	group := out.SecurityGroups[0]
+	if !cloudctlaws.IsOwnedBy(ec2TagsToMap(group.Tags), namespace, crName, crUID) {
+		return types.SecurityGroup{}, false
+	}
+	return group, true
 }
 
 // findOrCreateSecurityGroup returns the group named groupName in vpcID,

@@ -894,3 +894,31 @@ func TestEnsureSecurityGroupPolicy_AppliesOnlyWhenTheSpecChanges(t *testing.T) {
 		t.Errorf("applies = %d after the ServiceAccount changed, want 3", *applies)
 	}
 }
+
+func TestEnsurePodNetworkIdentity_AnExistingGroupIsDescribedOnce(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, sa).Build()
+	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
+	ensure := func(ledger []depsv1alpha1.ManagedResource) []depsv1alpha1.ManagedResource {
+		t.Helper()
+		ledger, err := EnsurePodNetworkIdentity(context.Background(), rdsClient, ec2Client, k8sClient,
+			"fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", testRegion, testAccountID, consumes, ledger)
+		if err != nil {
+			t.Fatalf("EnsurePodNetworkIdentity() error = %v", err)
+		}
+		return ledger
+	}
+
+	ledger := ensure(nil)
+	before := ec2Client.describeSecurityGroupsCalls
+	ensure(ledger)
+	if got := ec2Client.describeSecurityGroupsCalls - before; got != 1 {
+		t.Errorf("DescribeSecurityGroups calls on a steady-state pass = %d, want 1", got)
+	}
+	if len(ec2Client.groups) != 1 {
+		t.Errorf("groups = %d, want the existing one reused", len(ec2Client.groups))
+	}
+}
