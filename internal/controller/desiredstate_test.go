@@ -892,7 +892,7 @@ func TestWarnIfLedgerLarge(t *testing.T) {
 }
 
 func TestStatusNeedsPatch(t *testing.T) {
-	status := depsv1alpha1.AppDependenciesStatus{IAMRoleARN: "arn:aws:iam::123456789012:role/r"}
+	base := depsv1alpha1.AppDependenciesStatus{IAMRoleARN: "arn:aws:iam::123456789012:role/r"}
 	other := depsv1alpha1.AppDependenciesStatus{IAMRoleARN: "arn:aws:iam::123456789012:role/other"}
 	cr := func(version string, s depsv1alpha1.AppDependenciesStatus) *depsv1alpha1.AppDependencies {
 		return &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{ResourceVersion: version}, Status: s}
@@ -902,13 +902,13 @@ func TestStatusNeedsPatch(t *testing.T) {
 		got  *depsv1alpha1.AppDependencies
 		want bool
 	}{
-		{"nothing changed", cr("7", status), false},
+		{"nothing changed", cr("7", base), false},
 		{"status changed", cr("7", other), true},
-		{"a checkpoint wrote and the status ended where it began", cr("8", status), true},
+		{"a checkpoint wrote and the status ended where it began", cr("8", base), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := statusNeedsPatch("7", cr("7", status), tc.got); got != tc.want {
+			if got := statusNeedsPatch("7", cr("7", base), tc.got); got != tc.want {
 				t.Errorf("statusNeedsPatch() = %v, want %v", got, tc.want)
 			}
 		})

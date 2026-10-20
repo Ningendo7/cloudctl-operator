@@ -760,8 +760,9 @@ func TestManagedCache_KeepsManagedFieldsOnlyWhereAppliesAreSkipped(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var managers []string
-		for _, entry := range out.(client.Object).GetManagedFields() {
+		fields := out.(client.Object).GetManagedFields()
+		managers := make([]string, 0, len(fields))
+		for _, entry := range fields {
 			managers = append(managers, entry.Manager)
 		}
 		return managers

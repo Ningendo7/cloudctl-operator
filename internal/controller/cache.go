@@ -20,7 +20,6 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	toolscache "k8s.io/client-go/tools/cache"
@@ -67,8 +66,8 @@ const operatorManagerPrefix = "cloudctl-"
 // operator's own, the only ones the skipped applies read. A ServiceAccount is
 // written by many tools, so this is where it saves memory.
 func keepOperatorsManagedFields(in any) (any, error) {
-	obj, err := meta.Accessor(in)
-	if err != nil || len(obj.GetManagedFields()) == 0 {
+	obj, ok := in.(metav1.Object)
+	if !ok || len(obj.GetManagedFields()) == 0 {
 		return in, nil
 	}
 	var kept []metav1.ManagedFieldsEntry

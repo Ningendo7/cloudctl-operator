@@ -119,27 +119,15 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, awsClient, namespace, crName, crUID, entry)
-				if relErr != nil {
-					if firstErr == nil {
-						firstErr = relErr
-					}
-					continue
-				}
-				if gone {
-					// Deleted by hand after being retained: forget it, so
-					// declaring it again creates a fresh instance instead of
-					// tripping over a ledger entry for one that no longer exists.
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-					continue
-				}
-				if relinquished && recordEvent != nil {
-					recordEvent("Normal", "InstanceOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained RDS instance %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
-				}
-				status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
+			var retained bool
+			var retainErr error
+			updatedLedger, retained, retainErr = retainEntry(ctx, awsClient, namespace, crName, crUID, entry, updatedLedger, recordEvent)
+			if retainErr != nil && firstErr == nil {
+				firstErr = retainErr
 			}
-			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
+			if retained {
+				results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
+			}
 			continue
 		}
 
@@ -196,6 +184,35 @@ func Cleanup(
 	}
 
 	return updatedLedger, results, firstErr
+}
+
+// retainEntry lets go of a retained instance, and rechecks a relinquished one
+// about daily. retained is false when the check failed or the instance is gone,
+// whose entry is dropped so declaring it again creates a fresh one.
+func retainEntry(
+	ctx context.Context,
+	awsClient rdsAPI,
+	namespace, crName, crUID string,
+	entry depsv1alpha1.ManagedResource,
+	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
+) (updated []depsv1alpha1.ManagedResource, retained bool, err error) {
+	if entry.State == depsv1alpha1.ManagedResourceStateRelinquished && !status.NeedsRelinquishedRecheck(entry) {
+		return ledger, true, nil
+	}
+	relinquished, gone, err := relinquishIfStillTagged(ctx, awsClient, namespace, crName, crUID, entry)
+	if err != nil {
+		return ledger, false, err
+	}
+	if gone {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, false, nil
+	}
+	if relinquished && recordEvent != nil {
+		recordEvent("Normal", "InstanceOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained RDS instance %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+	}
+	status.UpsertManagedResource(&ledger, status.Relinquished(entry))
+	return ledger, true, nil
 }
 
 // checkOrphanedSnapshots drops, about once a day, the entry of a final
