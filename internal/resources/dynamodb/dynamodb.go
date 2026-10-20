@@ -139,8 +139,9 @@ func Ensure(
 				if !ok {
 					if firstErr == nil {
 						firstErr = &cloudctlaws.ReconcileError{
-							Err:       fmt.Errorf("table %q: encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources", t.Name, t.Encryption.KMSKeyRef),
-							Retryable: true,
+							Err:           fmt.Errorf("table %q: encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources", t.Name, t.Encryption.KMSKeyRef),
+							Retryable:     true,
+							WakesOnChange: true,
 						}
 					}
 					continue

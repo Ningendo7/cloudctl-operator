@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	equality "k8s.io/apimachinery/pkg/api/equality"
@@ -68,6 +69,10 @@ func statusPatch(original, cr *depsv1alpha1.AppDependencies) client.Patch {
 	from := original.DeepCopy()
 	from.ResourceVersion = cr.ResourceVersion
 	return client.MergeFrom(from)
+}
+
+func statusNeedsPatch(versionBefore string, original, cr *depsv1alpha1.AppDependencies) bool {
+	return cr.ResourceVersion != versionBefore || !equality.Semantic.DeepEqual(original.Status, cr.Status)
 }
 
 // eventRecorderFor adapts r.Recorder into a status.EventRecorder bound to
@@ -120,6 +125,11 @@ const transientRequeueInterval = 30 * time.Second
 // never noticed more than a couple of minutes late.
 const transientMaxDelay = 2 * time.Minute
 
+// transientLongAfter is the number of consecutive failures (about 17 minutes
+// of them) after which a CR is retried at the drift pace: a wait that long
+// is no blip, and polling it every couple of minutes only spends calls.
+const transientLongAfter = 10
+
 // Resource-type tags shared across every section/ledger lookup in this
 // package - named constants rather than repeated literals so a typo can't
 // diverge between, say, a section's own sectionContext call and its
@@ -144,6 +154,7 @@ const (
 	reasonError                        = "Error"
 	reasonTransientError               = "TransientError"
 	reasonLegacyKMSKeyRef              = "LegacyKMSKeyRef"
+	reasonRegionChanged                = "RegionChanged"
 	reasonInstanceStuckPendingDeletion = "InstanceStuckPendingDeletion"
 )
 
@@ -247,6 +258,7 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 			lastCheckpointed = cr.Status.DeepCopy()
 		}
 	}
+	warnIfLedgerLarge(cr, eventRecorderFor(r, cr))
 	checkSharedWithReferences(ctx, r.Client, cr)
 	checkConsumeReferences(ctx, r.Client, cr)
 
@@ -380,4 +392,66 @@ func isRetryable(err error) bool {
 		return reconcileErr.Retryable
 	}
 	return cloudctlaws.IsRetryable(err)
+}
+
+// largeLedgerEntries is when a ledger is reported as large. Status stops
+// accepting writes at about 4,500 entries.
+const largeLedgerEntries = 300
+
+func warnIfLedgerLarge(cr *depsv1alpha1.AppDependencies, recordEvent status.EventRecorder) {
+	n := len(cr.Status.ManagedResources)
+	if n <= largeLedgerEntries || recordEvent == nil {
+		return
+	}
+	recordEvent("Warning", "LedgerLarge", fmt.Sprintf("This CR tracks %d resources. Entries for retained encrypted resources and RDS instances stay until the CR is deleted, so a CR that keeps replacing them grows without limit; use a new CR for new resources", n))
+}
+
+// arnRegion returns the region of an ARN, or "" for one without a region
+// (S3, IAM) and for anything that is not an ARN, such as a snapshot ID.
+func arnRegion(arn string) string {
+	parts := strings.Split(arn, ":")
+	if len(parts) < 6 || parts[0] != "arn" {
+		return ""
+	}
+	return parts[3]
+}
+
+// sectionForEntryType is the condition a ledger entry's refusal is shown on.
+func sectionForEntryType(entryType string) string {
+	switch {
+	case strings.HasPrefix(entryType, "sqs"):
+		return conditionTypeSQSReady
+	case strings.HasPrefix(entryType, "sns"):
+		return conditionTypeSNSReady
+	case strings.HasPrefix(entryType, "s3"):
+		return conditionTypeS3Ready
+	case strings.HasPrefix(entryType, "dynamodb"):
+		return conditionTypeDynamoDBReady
+	case strings.HasPrefix(entryType, "iam"):
+		return conditionTypeIAMReady
+	case strings.HasPrefix(entryType, "rds"), strings.HasPrefix(entryType, "ec2"):
+		return conditionTypeRDSReady
+	}
+	return conditionTypeKMSReady
+}
+
+// refuseOtherRegion refuses a CR whose ledger names a resource in another
+// region than this operator's. Resources do not move between regions, and
+// looking for them here would find some missing and recreate or forget them.
+func refuseOtherRegion(ctx context.Context, r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) (bool, error) {
+	region := r.AWSClients.Region
+	if region == "" {
+		return false, nil
+	}
+	for _, entry := range cr.Status.ManagedResources {
+		if other := arnRegion(entry.ARN); other != "" && other != region {
+			setSectionCondition(ctx, cr, sectionForEntryType(entry.Type), &cloudctlaws.ReconcileError{
+				Err: fmt.Errorf("%s %q is in %s but this operator works in %s; resources do not move between regions, so this CR needs an operator in %s. Nothing is reconciled meanwhile",
+					entry.Type, entry.Name, other, region, other),
+				Reason: reasonRegionChanged,
+			}, eventRecorderFor(r, cr))
+			return true, r.Status().Patch(ctx, cr, statusPatch(original, cr))
+		}
+	}
+	return false, nil
 }

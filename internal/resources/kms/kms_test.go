@@ -920,3 +920,26 @@ func TestEnsure_TakesOverAKnownKeyWhoseTagsCarryThePreviousUID(t *testing.T) {
 		t.Errorf("expected the key re-tagged, got %v", client.keys[arn].tags)
 	}
 }
+
+func TestPinsAKey(t *testing.T) {
+	dedicated := depsv1alpha1.ManagedResource{Type: resourceType, Name: DedicatedKeyLedgerName("sqs", "orders")}
+	tests := []struct {
+		name   string
+		ledger []depsv1alpha1.ManagedResource
+		entry  depsv1alpha1.ManagedResource
+		want   bool
+	}{
+		{"a key stamped on the entry", nil, depsv1alpha1.ManagedResource{Type: "sqs", Name: "orders", KMSKeyARN: "arn:aws:kms:us-east-1:123456789012:key/k"}, true},
+		{"an older entry whose dedicated key is in the ledger", []depsv1alpha1.ManagedResource{dedicated}, depsv1alpha1.ManagedResource{Type: "sqs", Name: "orders"}, true},
+		{"a derived queue, through its parent's dedicated key", []depsv1alpha1.ManagedResource{dedicated}, depsv1alpha1.ManagedResource{Type: "sqs", Name: "orders#dlq"}, true},
+		{"an unencrypted resource", nil, depsv1alpha1.ManagedResource{Type: "sqs", Name: "orders"}, false},
+		{"another type's dedicated key does not count", []depsv1alpha1.ManagedResource{dedicated}, depsv1alpha1.ManagedResource{Type: "s3", Name: "orders"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PinsAKey(tc.ledger, tc.entry.Type, tc.entry); got != tc.want {
+				t.Errorf("PinsAKey() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

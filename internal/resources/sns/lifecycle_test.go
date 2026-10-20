@@ -108,3 +108,5 @@ func (s *snsLifecycleSubject) DeleteOutOfBand(name string) error {
 	delete(s.client.topics, s.topicArn(name))
 	return nil
 }
+
+func (s *snsLifecycleSubject) KeepsRelinquishedEntries() bool { return false }

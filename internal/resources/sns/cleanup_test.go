@@ -88,8 +88,8 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	if r := findResult(results, "events"); r == nil || r.Reason != CleanupReasonRetained {
 		t.Errorf("expected events to be reported Retained, got %+v", results)
 	}
-	if !status.HasManagedResource(updated, "sns", "events") {
-		t.Error("expected retained entry to stay in the ledger")
+	if status.HasManagedResource(updated, "sns", "events") {
+		t.Error("expected a retained entry that pins no key to leave the ledger")
 	}
 	topicArn := cloudctlaws.TopicARN(testRegion, testAccountID, cloudctlaws.ResourceName("default", "checkout-service", "sns", "events", 256))
 	if _, stillExists := client.topics[topicArn]; !stillExists {
@@ -133,8 +133,8 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 	if _, stillExists := client.topics[topicArn]; !stillExists {
 		t.Error("expected the topic to survive - an unset DeletionPolicy must never be treated as Delete")
 	}
-	if !status.HasManagedResource(updated, "sns", "events") {
-		t.Error("expected the retained entry to stay in the ledger")
+	if status.HasManagedResource(updated, "sns", "events") {
+		t.Error("expected a retained entry that pins no key to leave the ledger")
 	}
 }
 

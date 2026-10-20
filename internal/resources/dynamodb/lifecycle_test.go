@@ -128,3 +128,5 @@ func (s *dynamodbLifecycleSubject) DeleteOutOfBand(name string) error {
 	delete(s.client.tables, s.tableName(name))
 	return nil
 }
+
+func (s *dynamodbLifecycleSubject) KeepsRelinquishedEntries() bool { return false }

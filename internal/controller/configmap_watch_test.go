@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +34,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
@@ -467,7 +469,7 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), &got); err != nil {
 					return nil
 				}
-				if got.Labels[depsv1alpha1.ManagedByLabelKey] != depsv1alpha1.ManagedByLabelValue || len(got.OwnerReferences) != 1 {
+				if got.Labels[depsv1alpha1.ManagedLabelKey] != depsv1alpha1.ManagedLabelValue || len(got.OwnerReferences) != 1 {
 					return nil
 				}
 				return got.Data
@@ -480,7 +482,7 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 			return types.NamespacedName{Namespace: nsA, Name: configmap.ConfigMapName(crName)}
 		}
 
-		It("gets its managed-by label back after the label is stripped", func() {
+		It("gets its managed label back after the label is stripped", func() {
 			Expect(k8sClient.Create(ctx, queueCR(nsA, "cm-label", nil))).To(Succeed())
 			Eventually(func() int {
 				var cm corev1.ConfigMap
@@ -489,7 +491,7 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 			}, timeout, poll).Should(BeNumerically(">", 0))
 
 			operatorHasSeen(seenByOperator, cmKey("cm-label"), func(cm *corev1.ConfigMap) bool {
-				return cm.Labels[depsv1alpha1.ManagedByLabelKey] == depsv1alpha1.ManagedByLabelValue
+				return cm.Labels[depsv1alpha1.ManagedLabelKey] == depsv1alpha1.ManagedLabelValue
 			})
 
 			// Without the label the object drops out of the operator's
@@ -497,14 +499,14 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 			// be found through the API reader.
 			var cm corev1.ConfigMap
 			Expect(k8sClient.Get(ctx, cmKey("cm-label"), &cm)).To(Succeed())
-			delete(cm.Labels, depsv1alpha1.ManagedByLabelKey)
+			delete(cm.Labels, depsv1alpha1.ManagedLabelKey)
 			Expect(k8sClient.Update(ctx, &cm)).To(Succeed())
 
 			Eventually(func() string {
 				var got corev1.ConfigMap
 				_ = k8sClient.Get(ctx, cmKey("cm-label"), &got)
-				return got.Labels[depsv1alpha1.ManagedByLabelKey]
-			}, timeout, poll).Should(Equal(depsv1alpha1.ManagedByLabelValue))
+				return got.Labels[depsv1alpha1.ManagedLabelKey]
+			}, timeout, poll).Should(Equal(depsv1alpha1.ManagedLabelValue))
 		})
 
 		It("is treated as foreign once its owner reference is stripped, and the operator backs off instead of overwriting it", func() {
@@ -747,24 +749,60 @@ func TestManagedCache_KeepsManagedFieldsOnlyWhereAppliesAreSkipped(t *testing.T)
 		}
 		return ManagedCacheDefaultTransform()
 	}
-	managedFieldsAfter := func(obj client.Object) int {
+	managersAfter := func(obj client.Object) []string {
 		t.Helper()
-		obj.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: "cloudctl-operator-configmap", Operation: metav1.ManagedFieldsOperationApply}})
+		obj.SetManagedFields([]metav1.ManagedFieldsEntry{
+			{Manager: "kube-controller-manager", Operation: metav1.ManagedFieldsOperationUpdate},
+			{Manager: "cloudctl-operator-configmap", Operation: metav1.ManagedFieldsOperationApply},
+			{Manager: "helm", Operation: metav1.ManagedFieldsOperationUpdate},
+		})
 		out, err := transformFor(obj)(obj)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(out.(client.Object).GetManagedFields())
+		fields := out.(client.Object).GetManagedFields()
+		managers := make([]string, 0, len(fields))
+		for _, entry := range fields {
+			managers = append(managers, entry.Manager)
+		}
+		return managers
 	}
 
 	for _, obj := range []client.Object{&corev1.ConfigMap{}, &corev1.Secret{}, &corev1.ServiceAccount{}} {
-		if managedFieldsAfter(obj) == 0 {
-			t.Errorf("%T lost its managedFields in the cache", obj)
+		if got := managersAfter(obj); !slices.Equal(got, []string{"cloudctl-operator-configmap"}) {
+			t.Errorf("%T kept managedFields of %v in the cache, want only the operator's", obj, got)
 		}
 	}
 	for _, obj := range []client.Object{&depsv1alpha1.AppDependencies{}, &corev1.Pod{}} {
-		if managedFieldsAfter(obj) != 0 {
-			t.Errorf("%T kept its managedFields in the cache", obj)
+		if got := managersAfter(obj); len(got) != 0 {
+			t.Errorf("%T kept managedFields of %v in the cache", obj, got)
+		}
+	}
+}
+
+// A policy that rewrites the standard managed-by label must not hide the
+// operator's objects from its cache, and an object carrying only that label
+// (written by an earlier version) is found through the API reader instead.
+func TestManagedObjectCache_FiltersOnTheOperatorsOwnLabel(t *testing.T) {
+	ours := labels.Set{depsv1alpha1.ManagedLabelKey: depsv1alpha1.ManagedLabelValue}
+	rewritten := labels.Set{depsv1alpha1.ManagedLabelKey: depsv1alpha1.ManagedLabelValue, depsv1alpha1.ManagedByLabelKey: "Helm"}
+	onlyOld := labels.Set{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue}
+
+	for _, obj := range []client.Object{&corev1.ConfigMap{}, &corev1.Secret{}} {
+		var selector labels.Selector
+		for key, cfg := range ManagedObjectCache() {
+			if fmt.Sprintf("%T", key) == fmt.Sprintf("%T", obj) {
+				selector = cfg.Label
+			}
+		}
+		if selector == nil {
+			t.Fatalf("%T has no label filter", obj)
+		}
+		if !selector.Matches(ours) || !selector.Matches(rewritten) {
+			t.Errorf("%T: the filter must keep objects that carry the operator's label, even with managed-by rewritten", obj)
+		}
+		if selector.Matches(onlyOld) {
+			t.Errorf("%T: the filter must not depend on the standard managed-by label", obj)
 		}
 	}
 }

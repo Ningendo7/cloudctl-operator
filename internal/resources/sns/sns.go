@@ -108,8 +108,9 @@ func ensureTopic(
 			arn, ok := kms.SharedKeyARN(ledger, t.Encryption.KMSKeyRef)
 			if !ok {
 				return ledger, &cloudctlaws.ReconcileError{
-					Err:       fmt.Errorf("encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources", t.Encryption.KMSKeyRef),
-					Retryable: true,
+					Err:           fmt.Errorf("encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources", t.Encryption.KMSKeyRef),
+					Retryable:     true,
+					WakesOnChange: true,
 				}
 			}
 			kmsKeyARN = &arn

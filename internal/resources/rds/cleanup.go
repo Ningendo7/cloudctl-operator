@@ -119,27 +119,15 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, awsClient, namespace, crName, crUID, entry)
-				if relErr != nil {
-					if firstErr == nil {
-						firstErr = relErr
-					}
-					continue
-				}
-				if gone {
-					// Deleted by hand after being retained: forget it, so
-					// declaring it again creates a fresh instance instead of
-					// tripping over a ledger entry for one that no longer exists.
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-					continue
-				}
-				if relinquished && recordEvent != nil {
-					recordEvent("Normal", "InstanceOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained RDS instance %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
-				}
-				status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
+			var retained bool
+			var retainErr error
+			updatedLedger, retained, retainErr = retainEntry(ctx, awsClient, namespace, crName, crUID, entry, updatedLedger, recordEvent)
+			if retainErr != nil && firstErr == nil {
+				firstErr = retainErr
 			}
-			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
+			if retained {
+				results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
+			}
 			continue
 		}
 
@@ -189,7 +177,75 @@ func Cleanup(
 		}
 	}
 
+	var snapshotErr error
+	updatedLedger, snapshotErr = checkOrphanedSnapshots(ctx, awsClient, updatedLedger)
+	if snapshotErr != nil && firstErr == nil {
+		firstErr = snapshotErr
+	}
+
 	return updatedLedger, results, firstErr
+}
+
+// retainEntry lets go of a retained instance, and rechecks a relinquished one
+// about daily. retained is false when the check failed or the instance is gone,
+// whose entry is dropped so declaring it again creates a fresh one.
+func retainEntry(
+	ctx context.Context,
+	awsClient rdsAPI,
+	namespace, crName, crUID string,
+	entry depsv1alpha1.ManagedResource,
+	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
+) (updated []depsv1alpha1.ManagedResource, retained bool, err error) {
+	if entry.State == depsv1alpha1.ManagedResourceStateRelinquished && !status.NeedsRelinquishedRecheck(entry) {
+		return ledger, true, nil
+	}
+	relinquished, gone, err := relinquishIfStillTagged(ctx, awsClient, namespace, crName, crUID, entry)
+	if err != nil {
+		return ledger, false, err
+	}
+	if gone {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, false, nil
+	}
+	if relinquished && recordEvent != nil {
+		recordEvent("Normal", "InstanceOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained RDS instance %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+	}
+	status.UpsertManagedResource(&ledger, status.Relinquished(entry))
+	return ledger, true, nil
+}
+
+// checkOrphanedSnapshots drops, about once a day, the entry of a final
+// snapshot whose instance is gone and which has been deleted too. The entry
+// keeps the snapshot's key alive.
+func checkOrphanedSnapshots(ctx context.Context, awsClient rdsAPI, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	var firstErr error
+	for _, entry := range ledger {
+		if entry.Type != snapshotResourceType || status.HasManagedResource(ledger, resourceType, entry.Name) {
+			continue
+		}
+		due := entry.State != depsv1alpha1.ManagedResourceStateVerified || entry.LastVerifiedAt == nil ||
+			time.Since(entry.LastVerifiedAt.Time) > status.RelinquishedRecheckInterval
+		if !due {
+			continue
+		}
+		out, err := awsClient.DescribeDBSnapshots(ctx, &rds.DescribeDBSnapshotsInput{DBSnapshotIdentifier: &entry.ARN})
+		var notFound *types.DBSnapshotNotFoundFault
+		switch {
+		case errors.As(err, &notFound), err == nil && len(out.DBSnapshots) == 0:
+			status.RemoveManagedResource(&ledger, snapshotResourceType, entry.Name)
+		case err != nil:
+			if firstErr == nil {
+				firstErr = wrapAWSError(err, fmt.Sprintf("checking final snapshot %q of a removed instance", entry.ARN))
+			}
+		case aws.ToString(out.DBSnapshots[0].Status) == statusAvailable:
+			now := metav1.Now()
+			entry.State = depsv1alpha1.ManagedResourceStateVerified
+			entry.LastVerifiedAt = &now
+			status.UpsertManagedResource(&ledger, entry)
+		}
+	}
+	return ledger, firstErr
 }
 
 func pendingDeletionReason(since time.Time) CleanupReason {
@@ -305,7 +361,8 @@ func ensureFinalSnapshot(
 // longer needed (superseded, or the instance is back in use) and drops
 // its ledger entry. A no-op if nothing is tracked. One still mid-creation
 // is left tracked and rechecked next pass rather than deleted early -
-// DeleteDBSnapshot only works on an available (or failed) snapshot.
+// DeleteDBSnapshot only works on an available snapshot, so a failed one is
+// just forgotten.
 func retireFinalSnapshot(
 	ctx context.Context,
 	awsClient rdsAPI,

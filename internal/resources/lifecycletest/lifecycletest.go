@@ -111,6 +111,23 @@ type Subject interface {
 	// DeleteOutOfBand removes the resource from the fake AWS backend, as if
 	// someone had deleted it by hand.
 	DeleteOutOfBand(name string) error
+
+	// KeepsRelinquishedEntries is true for a resource type whose ledger entry
+	// stays after the resource is let go even when it pins no key (KMS keys
+	// themselves); the others drop it.
+	KeepsRelinquishedEntries() bool
+}
+
+// pinned stamps the named entry with a key, as the controller does for an
+// encrypted resource, so it stays in the ledger after being relinquished.
+func pinned(ledger []depsv1alpha1.ManagedResource, resourceType, name string) []depsv1alpha1.ManagedResource {
+	entry, found := status.FindManagedResource(ledger, resourceType, name)
+	if !found {
+		return ledger
+	}
+	entry.KMSKeyARN = "arn:aws:kms:us-east-1:123456789012:key/pinned-by-the-scenario"
+	status.UpsertManagedResource(&ledger, entry)
+	return ledger
 }
 
 func findResult(results []CleanupResult, name string) *CleanupResult {
@@ -208,6 +225,56 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		}
 	})
 
+	t.Run("RetainedEntryThatPinsNoKeyLeavesTheLedgerButStillNeedsAdopt", func(t *testing.T) {
+		s := newSubject(t)
+		if s.KeepsRelinquishedEntries() {
+			t.Skip("this resource type keeps its entry after it is let go")
+		}
+		ctx := context.Background()
+		ledger, err := s.EnsureOne(ctx, nil, "unpinned", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+		if err != nil {
+			t.Fatalf("EnsureOne() error = %v", err)
+		}
+		var results []CleanupResult
+		if ledger, results, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+		if r := findResult(results, "unpinned"); r == nil || r.Reason != CleanupReasonRetained {
+			t.Fatalf("expected a Retained result, got %+v", results)
+		}
+		if status.HasManagedResource(ledger, s.ResourceType(), "unpinned") {
+			t.Fatal("expected an entry that pins no key to leave the ledger once the resource is let go")
+		}
+
+		// With no entry the resource is found untagged, which needs adopt, as
+		// a relinquished entry did.
+		if _, err := s.EnsureOne(ctx, ledger, "unpinned", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}); err == nil {
+			t.Fatal("expected re-declaring a retained resource without adopt to be refused")
+		}
+		ledger, err = s.EnsureOne(ctx, ledger, "unpinned", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true})
+		if err != nil {
+			t.Fatalf("EnsureOne() with adopt error = %v", err)
+		}
+		if entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "unpinned"); entry.State != depsv1alpha1.ManagedResourceStateVerified {
+			t.Errorf("expected the adopted entry to be Verified, got %s", entry.State)
+		}
+
+		t.Run("an entry relinquished by an earlier version goes without a read", func(t *testing.T) {
+			ledger, err := s.EnsureOne(ctx, nil, "older", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+			if err != nil {
+				t.Fatalf("EnsureOne() error = %v", err)
+			}
+			entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "older")
+			status.UpsertManagedResource(&ledger, status.Relinquished(entry))
+			if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+				t.Fatalf("Cleanup() error = %v", err)
+			}
+			if status.HasManagedResource(ledger, s.ResourceType(), "older") {
+				t.Error("expected the old relinquished entry to be dropped")
+			}
+		})
+	})
+
 	t.Run("RelinquishedEntryIsKeptAndNeedsAdoptToComeBack", func(t *testing.T) {
 		s := newSubject(t)
 		ctx := context.Background()
@@ -215,6 +282,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("EnsureOne() error = %v", err)
 		}
+		ledger = pinned(ledger, s.ResourceType(), "kept") // as an encrypted resource is
 		for range 2 {
 			var results []CleanupResult
 			if ledger, results, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
@@ -251,6 +319,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("EnsureOne() error = %v", err)
 		}
+		ledger = pinned(ledger, s.ResourceType(), "vanishing") // as an encrypted resource is
 		cleanup := func() {
 			t.Helper()
 			if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
@@ -288,6 +357,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("EnsureOne() error = %v", err)
 		}
+		ledger = pinned(ledger, s.ResourceType(), "kept") // as an encrypted resource is
 		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
 			t.Fatalf("Cleanup() error = %v", err)
 		}

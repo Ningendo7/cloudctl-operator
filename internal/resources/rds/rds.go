@@ -219,7 +219,8 @@ func Ensure(
 						firstErr = &cloudctlaws.ReconcileError{
 							Err: fmt.Errorf("instance %q: encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources",
 								r.Name, r.Encryption.KMSKeyRef),
-							Retryable: true,
+							Retryable:     true,
+							WakesOnChange: true,
 						}
 					}
 					continue

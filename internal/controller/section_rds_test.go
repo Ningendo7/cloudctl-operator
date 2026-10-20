@@ -383,6 +383,7 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 
 		var s corev1.Secret
 		Expect(k8sClient.Get(ctx, secretKey(nsA, "mirror"), &s)).To(Succeed())
+		Expect(s.Labels).To(HaveKeyWithValue(depsv1alpha1.ManagedLabelKey, depsv1alpha1.ManagedLabelValue))
 		Expect(s.Labels).To(HaveKeyWithValue(depsv1alpha1.ManagedByLabelKey, depsv1alpha1.ManagedByLabelValue))
 		Expect(s.OwnerReferences).To(HaveLen(1))
 		Expect(s.OwnerReferences[0].Name).To(Equal(cr.Name))
@@ -390,7 +391,7 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 		Expect(string(s.Data[credentialsDataKey("USERNAME")])).To(Equal("cloudctl_admin"))
 	})
 
-	It("restores the Secret after it is deleted, corrupted, or loses its managed-by label", func() {
+	It("restores the Secret after it is deleted, corrupted, or loses its managed label", func() {
 		cr := dbCR(nsA, "tamper")
 		Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 		Eventually(func() string { return password(nsA, "tamper") }, timeout, poll).Should(Equal("pw-1"))
@@ -402,15 +403,15 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 		Expect(k8sClient.Update(ctx, &s)).To(Succeed())
 		Eventually(func() string { return password(nsA, "tamper") }, timeout, poll).Should(Equal("pw-1"))
 
-		By("stripping the managed-by label, which also drops it out of the operator's cache")
+		By("stripping the managed label, which also drops it out of the operator's cache")
 		Expect(k8sClient.Get(ctx, secretKey(nsA, "tamper"), &s)).To(Succeed())
-		delete(s.Labels, depsv1alpha1.ManagedByLabelKey)
+		delete(s.Labels, depsv1alpha1.ManagedLabelKey)
 		Expect(k8sClient.Update(ctx, &s)).To(Succeed())
 		Eventually(func() string {
 			var got corev1.Secret
 			_ = k8sClient.Get(ctx, secretKey(nsA, "tamper"), &got)
-			return got.Labels[depsv1alpha1.ManagedByLabelKey]
-		}, timeout, poll).Should(Equal(depsv1alpha1.ManagedByLabelValue))
+			return got.Labels[depsv1alpha1.ManagedLabelKey]
+		}, timeout, poll).Should(Equal(depsv1alpha1.ManagedLabelValue))
 		Expect(password(nsA, "tamper")).To(Equal("pw-1"))
 
 		By("deleting it outright")

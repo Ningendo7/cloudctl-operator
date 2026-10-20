@@ -24,6 +24,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsarn "github.com/aws/aws-sdk-go-v2/aws/arn"
@@ -110,6 +111,19 @@ func Ensure(
 // this package's own callers.
 func DedicatedKeyLedgerName(ownerType, resourceName string) string {
 	return cloudctlaws.DedicatedKeyLedgerName(ownerType, resourceName)
+}
+
+// PinsAKey reports whether an entry needs a KMS key kept: the key stamped on
+// it, or for older entries the dedicated key derived from its type and name.
+func PinsAKey(ledger []depsv1alpha1.ManagedResource, ownerType string, entry depsv1alpha1.ManagedResource) bool {
+	if entry.KMSKeyARN != "" {
+		return true
+	}
+	name := entry.Name
+	if base, _, derived := strings.Cut(name, "#"); derived {
+		name = base
+	}
+	return status.HasManagedResource(ledger, resourceType, DedicatedKeyLedgerName(ownerType, name))
 }
 
 // EnsureDedicatedKey ensures a dedicated, operator-owned KMS key exists

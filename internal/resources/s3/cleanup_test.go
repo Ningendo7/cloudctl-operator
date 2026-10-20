@@ -105,8 +105,8 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	if _, stillExists := client.buckets[bucket]; !stillExists {
 		t.Error("expected Retain policy to leave the AWS bucket in place")
 	}
-	if !status.HasManagedResource(updated, "s3", "receipts") {
-		t.Error("expected retained entry to stay in the ledger")
+	if status.HasManagedResource(updated, "s3", "receipts") {
+		t.Error("expected a retained entry that pins no key to leave the ledger")
 	}
 }
 
@@ -131,8 +131,8 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 	if _, stillExists := client.buckets[bucket]; !stillExists {
 		t.Error("expected the bucket to survive - an unset DeletionPolicy must never be treated as Delete")
 	}
-	if !status.HasManagedResource(updated, "s3", "receipts") {
-		t.Error("expected the retained entry to stay in the ledger")
+	if status.HasManagedResource(updated, "s3", "receipts") {
+		t.Error("expected a retained entry that pins no key to leave the ledger")
 	}
 }
 

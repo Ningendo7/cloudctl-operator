@@ -458,8 +458,13 @@ func TestEnsure_LabelsConfigMapAsManaged(t *testing.T) {
 		t.Fatalf("Ensure: %v", err)
 	}
 	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
-	if got := cm.Labels[depsv1alpha1.ManagedByLabelKey]; got != depsv1alpha1.ManagedByLabelValue {
-		t.Errorf("label %s = %q, want %q", depsv1alpha1.ManagedByLabelKey, got, depsv1alpha1.ManagedByLabelValue)
+	for key, want := range map[string]string{
+		depsv1alpha1.ManagedLabelKey:   depsv1alpha1.ManagedLabelValue,
+		depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue,
+	} {
+		if got := cm.Labels[key]; got != want {
+			t.Errorf("label %s = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -722,7 +727,7 @@ func TestEnsure_AppliesWhenMatchingDataWasWrittenByAnotherManager(t *testing.T) 
 	restored := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "team-a", Name: ConfigMapName("checkout-service"),
-			Labels: map[string]string{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue},
+			Labels: map[string]string{depsv1alpha1.ManagedLabelKey: depsv1alpha1.ManagedLabelValue},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: depsv1alpha1.GroupVersion.String(), Kind: "AppDependencies",
 				Name: "checkout-service", UID: "uid-1", Controller: &isController,
@@ -736,5 +741,72 @@ func TestEnsure_AppliesWhenMatchingDataWasWrittenByAnotherManager(t *testing.T) 
 	}
 	if *applies != 1 {
 		t.Errorf("applies = %d, want 1", *applies)
+	}
+}
+
+func connectionCR() *depsv1alpha1.AppDependencies {
+	return &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
+		},
+		Status: depsv1alpha1.AppDependenciesStatus{
+			ManagedResources: []depsv1alpha1.ManagedResource{
+				{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-east-1:123456789012:team-a-checkout-service-orders"},
+			},
+		},
+	}
+}
+
+// Admission policies rewrite the standard managed-by label. That must neither
+// hide the ConfigMap from the cache nor make the operator apply it again on
+// every pass, because only its own label counts.
+func TestEnsure_ARewrittenManagedByLabelIsNotRepairedOverAndOver(t *testing.T) {
+	c, applies := countingApplies(t)
+	cr := connectionCR()
+	ensure := func() {
+		t.Helper()
+		if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+	}
+	ensure()
+
+	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
+	cm.Labels[depsv1alpha1.ManagedByLabelKey] = "Helm"
+	if err := c.Update(context.Background(), cm); err != nil {
+		t.Fatal(err)
+	}
+	before := *applies
+	ensure()
+	if *applies != before {
+		t.Errorf("applies = %d after the managed-by label was rewritten, want none", *applies-before)
+	}
+}
+
+// A ConfigMap written before the operator's own label existed carries only
+// the standard one, so the cache can no longer see it; the next pass finds it
+// through the API reader and puts the new label on.
+func TestEnsure_AConfigMapWithOnlyTheOldLabelGetsTheNewOne(t *testing.T) {
+	c, applies := countingApplies(t)
+	cr := connectionCR()
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
+	delete(cm.Labels, depsv1alpha1.ManagedLabelKey)
+	if err := c.Update(context.Background(), cm); err != nil {
+		t.Fatal(err)
+	}
+	before := *applies
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if *applies != before+1 {
+		t.Errorf("applies = %d, want exactly one", *applies-before)
+	}
+	if got := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service")).Labels[depsv1alpha1.ManagedLabelKey]; got != depsv1alpha1.ManagedLabelValue {
+		t.Errorf("label %s = %q, want %q", depsv1alpha1.ManagedLabelKey, got, depsv1alpha1.ManagedLabelValue)
 	}
 }

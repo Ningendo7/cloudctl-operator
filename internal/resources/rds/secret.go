@@ -110,7 +110,7 @@ func EnsureCredentialsSecret(
 	}
 	// Ownership was checked above; skip an apply that would change nothing.
 	if exists && maps.EqualFunc(existing.Data, byteData, bytes.Equal) &&
-		existing.Labels[depsv1alpha1.ManagedByLabelKey] == depsv1alpha1.ManagedByLabelValue &&
+		existing.Labels[depsv1alpha1.ManagedLabelKey] == depsv1alpha1.ManagedLabelValue &&
 		status.AppliedBy(existing, string(secretFieldOwner)) {
 		return nil
 	}
@@ -121,7 +121,10 @@ func EnsureCredentialsSecret(
 	}
 
 	apply := applycorev1.Secret(name, cr.Namespace).
-		WithLabels(map[string]string{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue}).
+		WithLabels(map[string]string{
+			depsv1alpha1.ManagedLabelKey:   depsv1alpha1.ManagedLabelValue,
+			depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue,
+		}).
 		WithType(corev1.SecretTypeOpaque).
 		WithData(byteData).
 		WithOwnerReferences(applymetav1.OwnerReference().
