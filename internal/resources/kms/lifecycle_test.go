@@ -96,3 +96,10 @@ func (s *kmsLifecycleSubject) SeedForeign(name string, owner *lifecycletest.Owne
 func (s *kmsLifecycleSubject) SetNonEmpty(name string, nonEmpty bool) error {
 	return fmt.Errorf("kms keys have no emptiness concept: %w", lifecycletest.ErrUnsupported)
 }
+
+func (s *kmsLifecycleSubject) DeleteOutOfBand(name string) error {
+	alias := aliasName(s.namespace, s.crName, name, keyOptions{})
+	delete(s.client.keys, s.client.aliases[alias])
+	delete(s.client.aliases, alias)
+	return nil
+}

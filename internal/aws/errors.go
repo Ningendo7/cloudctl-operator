@@ -155,10 +155,15 @@ func IsRetryable(err error) bool {
 // Error classification, so a caller can alert on this exact Reason
 // without it being confused with (or masked by) an ordinary transient
 // failure of the same section.
+//
+// WakesOnChange marks a wait that ends when something this operator watches
+// changes (a grant created, a producer's topic published), so polling is only
+// a fallback and can be slow.
 type ReconcileError struct {
-	Err       error
-	Retryable bool
-	Reason    string
+	Err           error
+	Retryable     bool
+	Reason        string
+	WakesOnChange bool
 }
 
 func (e *ReconcileError) Error() string { return e.Err.Error() }

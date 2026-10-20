@@ -1141,3 +1141,35 @@ func TestEnsure_DescribesTheTableOncePerPass(t *testing.T) {
 		}
 	}
 }
+
+// The CRD forbids editing a table's keys, but removing the entry and adding it
+// back with other keys passes that rule while the old table is still tracked.
+func TestEnsure_RefusesOtherKeysOnATableTheCRStillTracks(t *testing.T) {
+	client := newFakeDynamoDB()
+	ledger := verifiedSessionsTable(t, client)
+	otherKeys := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "accountId"},
+	}}
+
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", otherKeys, ledger, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "key schema") {
+		t.Fatalf("expected a key schema refusal, got %v", err)
+	}
+
+	t.Run("a relinquished entry is checked at adoption instead", func(t *testing.T) {
+		released := slices.Clone(ledger)
+		released[0] = status.Relinquished(released[0])
+		client.tables[sessionsTableName()].tags = map[string]string{} // as after relinquishing
+
+		_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", otherKeys, released, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "adopt") {
+			t.Fatalf("expected the untagged table to need adopt:true, got %v", err)
+		}
+		adopting := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+			{Name: "sessions", PartitionKey: "accountId", Adopt: true},
+		}}
+		if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", adopting, released, nil, nil); err == nil || !strings.Contains(err.Error(), "key schema") {
+			t.Fatalf("expected adopt:true to still refuse other keys, got %v", err)
+		}
+	})
+}

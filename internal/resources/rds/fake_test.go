@@ -491,6 +491,7 @@ type fakeEC2 struct {
 
 	deleteSecurityGroupErr error
 
+	describeSecurityGroupsCalls        int
 	authorizeSecurityGroupIngressCalls int
 	revokeSecurityGroupIngressCalls    int
 	deleteSecurityGroupCalls           int
@@ -533,6 +534,7 @@ func (f *fakeEC2) CreateSecurityGroup(_ context.Context, in *ec2.CreateSecurityG
 }
 
 func (f *fakeEC2) DescribeSecurityGroups(_ context.Context, in *ec2.DescribeSecurityGroupsInput, _ ...func(*ec2.Options)) (*ec2.DescribeSecurityGroupsOutput, error) {
+	f.describeSecurityGroupsCalls++
 	if f.describeSecurityGroupsErr != nil {
 		return nil, f.describeSecurityGroupsErr
 	}

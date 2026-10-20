@@ -53,6 +53,11 @@ type Clients struct {
 	EC2            EC2Client
 	SecretsManager SecretsManagerClient
 
+	// STS is built from the same config as every other client, so it shares
+	// their credentials. The periodic credential check uses it, to test the
+	// credentials the reconciles actually use.
+	STS STSClient
+
 	// AccountID and Region identify this controller's own AWS account,
 	// resolved once at startup. Needed anywhere a resource's name/ARN must
 	// be constructed deterministically ourselves rather than looked up by
@@ -203,6 +208,7 @@ func NewClients(ctx context.Context) (*Clients, error) {
 			o.APIOptions = withObservability(o.APIOptions, serviceNameSecretsManager, limiters[serviceNameSecretsManager])
 			o.TracerProvider = tracerProvider()
 		}),
+		STS:          stsClient,
 		AccountID:    *identity.Account,
 		Region:       cfg.Region,
 		RateLimiters: limiters,

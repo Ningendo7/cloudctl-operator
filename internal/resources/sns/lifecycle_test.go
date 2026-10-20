@@ -103,3 +103,8 @@ func (s *snsLifecycleSubject) SetNonEmpty(name string, nonEmpty bool) error {
 	}
 	return nil
 }
+
+func (s *snsLifecycleSubject) DeleteOutOfBand(name string) error {
+	delete(s.client.topics, s.topicArn(name))
+	return nil
+}

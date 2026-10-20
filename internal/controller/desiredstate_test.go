@@ -832,3 +832,38 @@ func TestCheckpointFor_LaterCheckpointSurvivesAConcurrentSpecEdit(t *testing.T) 
 		t.Fatalf("second checkpoint() rejected by a spec edit made after the first: %v", err)
 	}
 }
+
+// A second pass over an RDS instance the operator just created compares it
+// with the spec, so the fake has to report what a real instance does.
+func TestReconcile_AnRDSInstanceSettlesAcrossTwoPasses(t *testing.T) {
+	grant := &depsv1alpha1.RDSSubnetGroupGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: "rds-grant"},
+		Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "happy-path-subnet-group", AllowedNamespaces: []string{"default"}},
+	}
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "rds-cr", UID: "uid-1", Finalizers: []string{finalizerName}},
+		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
+			Name: "orders-db", DBSubnetGroupName: "happy-path-subnet-group",
+			Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
+		}}}},
+	}
+	patches := 0
+	r := newCountingReconciler(t, &patches, cr, grant)
+	r.AWSClients.RDS = newFakeRDSClient()
+	r.AWSClients.EC2 = newFakeEC2Client()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+	for pass := 1; pass <= 2; pass++ {
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("pass %d: Reconcile() error = %v", pass, err)
+		}
+	}
+	var updated depsv1alpha1.AppDependencies
+	if err := r.Get(context.Background(), req.NamespacedName, &updated); err != nil {
+		t.Fatal(err)
+	}
+	entry, found := status.FindManagedResource(updated.Status.ManagedResources, resourceTypeRDS, "orders-db")
+	if !found || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+		t.Errorf("expected a Verified instance entry after two passes, got %+v (found=%v)", entry, found)
+	}
+}

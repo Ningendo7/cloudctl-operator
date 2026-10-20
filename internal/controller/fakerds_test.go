@@ -47,6 +47,8 @@ type fakeRDSInstance struct {
 	instanceClass                  string
 	multiAZ                        bool
 	backupRetentionPeriod          int32
+	storageEncrypted               bool
+	kmsKeyID                       string
 }
 
 type fakeRDSSnapshot struct {
@@ -111,6 +113,8 @@ func (f *fakeRDSClient) CreateDBInstance(_ context.Context, in *rds.CreateDBInst
 		instanceClass:         aws.ToString(in.DBInstanceClass),
 		multiAZ:               aws.ToBool(in.MultiAZ),
 		backupRetentionPeriod: aws.ToInt32(in.BackupRetentionPeriod),
+		storageEncrypted:      aws.ToBool(in.StorageEncrypted),
+		kmsKeyID:              aws.ToString(in.KmsKeyId),
 	}
 	f.instances[id] = i
 	return &rds.CreateDBInstanceOutput{
@@ -156,6 +160,8 @@ func (f *fakeRDSClient) DescribeDBInstances(_ context.Context, in *rds.DescribeD
 		DBInstanceClass:       &i.instanceClass,
 		MultiAZ:               &i.multiAZ,
 		BackupRetentionPeriod: &i.backupRetentionPeriod,
+		StorageEncrypted:      &i.storageEncrypted,
+		KmsKeyId:              aws.String(i.kmsKeyID),
 		Endpoint:              &types.Endpoint{Address: &i.endpointAddress, Port: &i.endpointPort},
 		MasterUserSecret:      f.masterUserSecretFor(id),
 	}}}, nil

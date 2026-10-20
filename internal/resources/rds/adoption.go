@@ -40,6 +40,9 @@ const reasonAdoptionConflict = "AdoptionConflict"
 // is created or modified for the instance, so a refusal leaves no security
 // group, key, tag or modify call behind. Instances that are already ours,
 // or owned by someone else, are left to ensureInstance's ownership checks.
+// The CRD forbids editing the engine or subnet group of an entry, but a
+// retained instance that is removed and declared again is adopted like a
+// foreign one, so the same differences are caught.
 func checkAdoptable(
 	ctx context.Context,
 	awsClient rdsAPI,
@@ -48,7 +51,12 @@ func checkAdoptable(
 	r depsv1alpha1.RDSInstanceSpec,
 	ledger []depsv1alpha1.ManagedResource,
 ) error {
-	if !r.Adopt || status.HasManagedResource(ledger, resourceType, r.Name) {
+	if !r.Adopt {
+		return nil
+	}
+	// A relinquished instance is no longer ours, so it is compared like any
+	// other untagged one.
+	if entry, tracked := status.FindManagedResource(ledger, resourceType, r.Name); tracked && entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
 		return nil
 	}
 	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, namespace, crName, resourceType, r.Name, 63)

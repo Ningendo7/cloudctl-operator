@@ -110,3 +110,8 @@ func (s *sqsLifecycleSubject) SetNonEmpty(name string, nonEmpty bool) error {
 	}
 	return nil
 }
+
+func (s *sqsLifecycleSubject) DeleteOutOfBand(name string) error {
+	delete(s.client.queues, s.queueName(name))
+	return nil
+}

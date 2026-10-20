@@ -149,12 +149,16 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
-				relinquished, relErr := relinquishIfStillTagged(ctx, sqsClient, namespace, crName, crUID, entry)
+			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
+				relinquished, gone, relErr := relinquishIfStillTagged(ctx, sqsClient, namespace, crName, crUID, entry)
 				if relErr != nil {
 					if firstErr == nil {
 						firstErr = relErr
 					}
+					continue
+				}
+				if gone {
+					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 					continue
 				}
 				if relinquished && recordEvent != nil {
@@ -389,39 +393,39 @@ func clearPendingDeletion(ctx context.Context, sqsClient sqsAPI, entry depsv1alp
 // manage it, so the AWS-side tag shouldn't keep claiming otherwise. The
 // ledger keeps the entry for visibility; only the AWS-side ownership claim
 // is relinquished. Idempotent — safe on every reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, sqsClient sqsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, sqsClient sqsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
 	queueName, nameErr := queueNameFromARN(entry.ARN)
 	if nameErr != nil {
-		return false, nameErr
+		return false, false, nameErr
 	}
 	urlOut, err := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
 	if err != nil {
 		var notFound *types.QueueDoesNotExist
 		if errors.As(err, &notFound) {
-			return false, nil // already gone, nothing to relinquish
+			return false, true, nil // already gone, nothing to relinquish
 		}
-		return false, wrapAWSError(err, fmt.Sprintf("looking up retained queue %q", entry.Name))
+		return false, false, wrapAWSError(err, fmt.Sprintf("looking up retained queue %q", entry.Name))
 	}
 
 	tagsOut, tErr := sqsClient.ListQueueTags(ctx, &sqs.ListQueueTagsInput{
 		QueueUrl: urlOut.QueueUrl,
 	})
 	if tErr != nil {
-		return false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained queue %q", entry.Name))
+		return false, false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained queue %q", entry.Name))
 	}
 	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, crUID) {
-		return false, nil // already relinquished, or never verified as ours - don't touch it
+		return false, false, nil // already relinquished, or never verified as ours - don't touch it
 	}
 
 	if _, uErr := sqsClient.UntagQueue(ctx, &sqs.UntagQueueInput{
 		QueueUrl: urlOut.QueueUrl,
 		TagKeys:  []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
 	}); uErr != nil {
-		return false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained queue %q", entry.Name))
+		return false, false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained queue %q", entry.Name))
 	}
 
 	if err := removePendingDeletionDeny(ctx, sqsClient, *urlOut.QueueUrl); err != nil {
-		return false, err
+		return false, false, err
 	}
-	return true, nil
+	return true, false, nil
 }

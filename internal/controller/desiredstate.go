@@ -221,19 +221,29 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 	checkpoint := checkpointFor(r, cr, original)
 	lastCheckpointed := cr.Status.DeepCopy()
 	var firstErr error
+	// Whether every failure of this pass is a wait that a watch will end.
+	onlyWaits := true
+	record := func(err error) {
+		if err == nil {
+			return
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		var reconcileErr *cloudctlaws.ReconcileError
+		if !errors.As(err, &reconcileErr) || !reconcileErr.WakesOnChange {
+			onlyWaits = false
+		}
+	}
 	for _, s := range allSections(r, original) {
 		sectionStart := time.Now()
 		sectionCtx, endSection := startSectionSpan(ctx, s.name, "reconcile")
 		err := s.reconcile(sectionCtx, cr)
 		endSection(err)
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
+		record(err)
 		observeSectionDuration(s.name, sectionStart)
 		if !equality.Semantic.DeepEqual(cr.Status, *lastCheckpointed) {
-			if err := checkpoint(ctx, cr.Status.ManagedResources); err != nil && firstErr == nil {
-				firstErr = err
-			}
+			record(checkpoint(ctx, cr.Status.ManagedResources))
 			lastCheckpointed = cr.Status.DeepCopy()
 		}
 	}
@@ -256,8 +266,9 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 	}
 	endConn(connErr)
 	setSectionCondition(ctx, cr, conditionTypeConnectionInfoReady, connErr, eventRecorderFor(r, cr))
-	if firstErr == nil {
-		firstErr = connErr
+	record(connErr)
+	if firstErr != nil && onlyWaits {
+		return waitingError{firstErr}
 	}
 	return firstErr
 }
@@ -353,6 +364,12 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 		sectionTypes,
 	)
 }
+
+// waitingError is a pass's error when every failure was a wait that a watch
+// will end, so the CR needn't be retried at the fast transient pace.
+type waitingError struct{ error }
+
+func (e waitingError) Unwrap() error { return e.error }
 
 // isRetryable trusts a ReconcileError's own verdict, and otherwise
 // classifies whatever AWS or network error is in the chain, so an error

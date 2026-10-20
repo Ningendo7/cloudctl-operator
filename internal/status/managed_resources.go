@@ -19,6 +19,8 @@ package status
 import (
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 )
 
@@ -80,10 +82,28 @@ func RemoveManagedResource(resources *[]depsv1alpha1.ManagedResource, resourceTy
 }
 
 // Relinquished marks entry as no longer tagged as ours, so declaring it
-// again needs adopt at once.
+// again needs adopt at once. LastVerifiedAt becomes the time it was last
+// looked at, which NeedsRelinquishedRecheck counts from.
 func Relinquished(entry depsv1alpha1.ManagedResource) depsv1alpha1.ManagedResource {
+	now := metav1.Now()
 	entry.State = depsv1alpha1.ManagedResourceStateRelinquished
+	entry.LastVerifiedAt = &now
 	return entry
+}
+
+// RelinquishedRecheckInterval is how often a relinquished entry is checked
+// for its resource still existing. Nothing else reads such a resource, and an
+// entry for one deleted by hand would keep its encryption key and its
+// security group alive.
+const RelinquishedRecheckInterval = 24 * time.Hour
+
+// NeedsRelinquishedRecheck reports whether a relinquished entry is due its
+// check that the resource still exists.
+func NeedsRelinquishedRecheck(entry depsv1alpha1.ManagedResource) bool {
+	if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+		return false
+	}
+	return entry.LastVerifiedAt == nil || time.Since(entry.LastVerifiedAt.Time) > RelinquishedRecheckInterval
 }
 
 // NeedsRevalidation reports whether a ledger entry's trust window has

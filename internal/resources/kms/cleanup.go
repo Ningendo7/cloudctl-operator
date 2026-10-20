@@ -151,12 +151,16 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
-				relinquished, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
+				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
 				if relErr != nil {
 					if firstErr == nil {
 						firstErr = relErr
 					}
+					continue
+				}
+				if gone {
+					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 					continue
 				}
 				if relinquished && recordEvent != nil {
@@ -293,32 +297,32 @@ func markPendingDeletion(
 // claiming otherwise. The ledger keeps the entry for visibility; only the
 // AWS-side ownership claim is relinquished. Idempotent — safe on every
 // reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, client kmsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, client kmsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
 	describeOut, err := client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: &entry.ARN})
 	if err != nil {
 		var notFound *types.NotFoundException
 		if errors.As(err, &notFound) {
-			return false, nil // already gone, nothing to relinquish
+			return false, true, nil // already gone, nothing to relinquish
 		}
-		return false, wrapAWSError(err, fmt.Sprintf("checking state of retained key %q", entry.Name))
+		return false, false, wrapAWSError(err, fmt.Sprintf("checking state of retained key %q", entry.Name))
 	}
 	if describeOut.KeyMetadata.KeyState == types.KeyStatePendingDeletion {
-		return false, nil // already being deleted (out-of-band, or a previous pass), nothing to relinquish
+		return false, false, nil // already being deleted (out-of-band, or a previous pass), nothing to relinquish
 	}
 
 	tags, tErr := listAllResourceTags(ctx, client, entry.ARN)
 	if tErr != nil {
-		return false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained KMS key %q", entry.Name))
+		return false, false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained KMS key %q", entry.Name))
 	}
 	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, crUID) {
-		return false, nil // already relinquished, or never verified as ours — don't touch it
+		return false, false, nil // already relinquished, or never verified as ours — don't touch it
 	}
 
 	if _, uErr := client.UntagResource(ctx, &kms.UntagResourceInput{
 		KeyId:   &entry.ARN,
 		TagKeys: []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
 	}); uErr != nil {
-		return false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained KMS key %q", entry.Name))
+		return false, false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained KMS key %q", entry.Name))
 	}
-	return true, nil
+	return true, false, nil
 }

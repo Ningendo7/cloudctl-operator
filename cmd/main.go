@@ -48,9 +48,6 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
-
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/controller"
@@ -343,11 +340,7 @@ func main() {
 			}
 			// +kubebuilder:scaffold:builder
 
-			stsCfg, err := awsconfig.LoadDefaultConfig(ctx)
-			if err != nil {
-				return fmt.Errorf("loading AWS config for periodic credential check: %w", err)
-			}
-			go cloudctlaws.RunPeriodicCheck(ctx, sts.NewFromConfig(stsCfg), credentialRecheckInterval, credHealth)
+			go cloudctlaws.RunPeriodicCheck(ctx, awsClients.STS, credentialRecheckInterval, credHealth)
 
 			go func() {
 				select {
