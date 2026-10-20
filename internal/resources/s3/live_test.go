@@ -40,7 +40,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/kms"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -48,6 +47,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/livetest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -269,7 +269,7 @@ func TestLive_Ensure_AdoptingBucketPreservesPreExistingTagsViaMergeWrite(t *test
 	}
 }
 
-// TestLive_Ensure_ServerSideEncryptionNotFoundThenDedicatedKeyApplies
+// TestLive_Ensure_ServerSideEncryptionNotFoundThenSharedKeyApplies
 // guards reconcileBucketAttributes' encryption-drift comparison against a
 // real bucket's actual starting state. Contrary to
 // isServerSideEncryptionConfigurationNotFound's own doc comment (accurate
@@ -282,10 +282,9 @@ func TestLive_Ensure_AdoptingBucketPreservesPreExistingTagsViaMergeWrite(t *test
 // proven against real AWS via sqs's own live tier, sharing the same kms
 // package code with a different resourceType) applies correctly through
 // S3's own GetBucketEncryption/PutBucketEncryption calls specifically.
-func TestLive_Ensure_ServerSideEncryptionNotFoundThenDedicatedKeyApplies(t *testing.T) {
+func TestLive_Ensure_ServerSideEncryptionNotFoundThenSharedKeyApplies(t *testing.T) {
 	cfg := skipUnlessLiveAWSCredentials(t)
 	client := s3sdk.NewFromConfig(cfg)
-	kmsClient := kms.NewFromConfig(cfg)
 	region, accountID := liveRegionAndAccount(t, cfg)
 	ctx := context.Background()
 	namespace, crName := "live", liveUniqueSuffix(t)
@@ -303,47 +302,103 @@ func TestLive_Ensure_ServerSideEncryptionNotFoundThenDedicatedKeyApplies(t *test
 		}
 	}
 
+	keyEntry := livetest.SharedKey(t, cfg)
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
-		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Adopt: true, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+		{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Adopt: true, Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: livetest.SharedKeyName}},
 	}}
-	ledger, err := Ensure(ctx, client, kmsClient, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", region, accountID, spec, []depsv1alpha1.ManagedResource{keyEntry}, nil, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 	t.Cleanup(func() {
 		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, true, false, nil); err != nil {
-			t.Logf("key cleanup warning: %v", err)
-		}
-		// Cleanup only tears down "s3"-type ledger entries, and the kms
-		// package's own Cleanup won't schedule deletion within a single
-		// pass (it only starts a quiet window) - delete the real key
-		// directly instead of leaving it dangling.
-		if keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "receipts")); keyEntryFound {
-			windowDays := int32(7)
-			if _, err := kmsClient.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{KeyId: &keyEntry.ARN, PendingWindowInDays: &windowDays}); err != nil {
-				t.Logf("key cleanup warning: %v", err)
-			}
+			t.Logf("cleanup warning: %v", err)
 		}
 	})
-
-	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "receipts"))
-	if !keyEntryFound {
-		t.Fatal("expected a dedicated KMS key ledger entry for the encrypted bucket")
-	}
 
 	encOut, err := client.GetBucketEncryption(ctx, &s3sdk.GetBucketEncryptionInput{Bucket: &bucket})
 	if err != nil {
 		t.Fatalf("real GetBucketEncryption() error = %v", err)
 	}
 	var gotKeyARN string
+	var bucketKey bool
 	for _, rule := range encOut.ServerSideEncryptionConfiguration.Rules {
 		if rule.ApplyServerSideEncryptionByDefault != nil && rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID != nil {
 			gotKeyARN = *rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID
+			bucketKey = aws.ToBool(rule.BucketKeyEnabled)
 		}
 	}
 	if gotKeyARN != keyEntry.ARN {
-		t.Errorf("real bucket's SSE-KMS key = %q, want the dedicated key's real ARN %q", gotKeyARN, keyEntry.ARN)
+		t.Errorf("real bucket's SSE-KMS key = %q, want the shared key %q", gotKeyARN, keyEntry.ARN)
 	}
+	if !bucketKey {
+		t.Error("expected the bucket's encryption rule to have Bucket Keys on")
+	}
+
+	// A write and a read prove the key policy lets S3 use the key with a
+	// Bucket Key, whose encryption context is the bucket ARN.
+	object := "live-probe"
+	if _, err := client.PutObject(ctx, &s3sdk.PutObjectInput{Bucket: &bucket, Key: &object, Body: strings.NewReader("hello")}); err != nil {
+		t.Fatalf("real PutObject() into the encrypted bucket error = %v", err)
+	}
+	got, err := client.GetObject(ctx, &s3sdk.GetObjectInput{Bucket: &bucket, Key: &object})
+	if err != nil {
+		t.Fatalf("real GetObject() from the encrypted bucket error = %v", err)
+	}
+	_ = got.Body.Close()
+	if got.ServerSideEncryption != types.ServerSideEncryptionAwsKms || aws.ToString(got.SSEKMSKeyId) != keyEntry.ARN {
+		t.Errorf("object encrypted with %q / %q, want aws:kms under %q", got.ServerSideEncryption, aws.ToString(got.SSEKMSKeyId), keyEntry.ARN)
+	}
+}
+
+// TestLive_RelinquishIfStillTagged_TellsGoneFromUntaggedFromOwned checks that
+// NoSuchBucket means gone, NoSuchTagSet means exists, and an empty tag set
+// clears the last tag.
+func TestLive_RelinquishIfStillTagged_TellsGoneFromUntaggedFromOwned(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := s3sdk.NewFromConfig(cfg)
+	region, accountID := liveRegionAndAccount(t, cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	entryFor := func(name string) depsv1alpha1.ManagedResource {
+		return depsv1alpha1.ManagedResource{Type: resourceType, Name: name, ARN: "arn:aws:s3:::" + bucketName(namespace, crName, name, accountID)}
+	}
+
+	t.Run("missing bucket is gone", func(t *testing.T) {
+		_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", entryFor("missing"))
+		if err != nil || !gone {
+			t.Errorf("relinquishIfStillTagged() gone=%v err=%v, want gone", gone, err)
+		}
+	})
+
+	t.Run("bucket without a tag set exists", func(t *testing.T) {
+		bucket := bucketName(namespace, crName, "untagged", accountID)
+		t.Cleanup(func() { deleteBucketIfExists(t, client, bucket) })
+		createRealBucket(t, client, bucket, region)
+		relinquished, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", entryFor("untagged"))
+		if err != nil || gone || relinquished {
+			t.Errorf("relinquishIfStillTagged() relinquished=%v gone=%v err=%v, want none of them", relinquished, gone, err)
+		}
+	})
+
+	t.Run("owned bucket gives up its last tag", func(t *testing.T) {
+		bucket := bucketName(namespace, crName, "owned", accountID)
+		t.Cleanup(func() { deleteBucketIfExists(t, client, bucket) })
+		createRealBucket(t, client, bucket, region)
+		if _, err := client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
+			Bucket:  &bucket,
+			Tagging: &types.Tagging{TagSet: mapToTags(ownerTags(namespace, crName, "uid-1"))},
+		}); err != nil {
+			t.Fatalf("real PutBucketTagging() (setup) error = %v", err)
+		}
+		relinquished, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", entryFor("owned"))
+		if err != nil || gone || !relinquished {
+			t.Fatalf("relinquishIfStillTagged() relinquished=%v gone=%v err=%v, want relinquished", relinquished, gone, err)
+		}
+		if _, tagErr := client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket}); !isNoSuchTagSet(tagErr) {
+			t.Errorf("expected no tag set after relinquishing, got %v", tagErr)
+		}
+	})
 }
 
 // TestLive_Ensure_VersioningSuspendedNotDisabledOnceEnabled guards a

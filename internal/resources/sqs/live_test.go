@@ -47,6 +47,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/livetest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -587,4 +588,113 @@ func waitForApproxMessageCount(t *testing.T, client *sqs.Client, queueURL, want 
 		time.Sleep(3 * time.Second)
 	}
 	t.Fatalf("real ApproximateNumberOfMessages never reached %q within %s", want, timeout)
+}
+
+// TestLive_Cleanup_RetainedQueueIsLetGoAndAMissingOneIsGone checks against
+// real SQS that letting go removes the ownership tags and drops the ledger
+// entry, and that a queue that doesn't exist is recognized as gone.
+func TestLive_Cleanup_RetainedQueueIsLetGoAndAMissingOneIsGone(t *testing.T) {
+	client := newLiveClient(t)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
+
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}}}
+	ledger, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	ledger, results, err := Cleanup(ctx, client, nil, nil, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if len(results) != 1 || results[0].Reason != CleanupReasonRetained {
+		t.Errorf("expected one Retained result, got %+v", results)
+	}
+	if status.HasManagedResource(ledger, resourceType, "orders") {
+		t.Error("expected the retained queue to leave the ledger")
+	}
+
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
+	urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("the retained queue should still exist: %v", err)
+	}
+	tagsOut, err := client.ListQueueTags(ctx, &sqs.ListQueueTagsInput{QueueUrl: urlOut.QueueUrl})
+	if err != nil {
+		t.Fatalf("real ListQueueTags() error = %v", err)
+	}
+	if _, owned := tagsOut.Tags[cloudctlaws.OwnerTagKey]; owned {
+		t.Errorf("expected the ownership tag to be gone, tags: %+v", tagsOut.Tags)
+	}
+
+	missing := depsv1alpha1.ManagedResource{Type: resourceType, Name: "never-created", ARN: "arn:aws:sqs:us-east-1:123456789012:" + cloudctlaws.ResourceName(namespace, crName, "sqs", "never-created", 80)}
+	_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", missing)
+	if err != nil || !gone {
+		t.Errorf("relinquishIfStillTagged() on a missing queue gone=%v err=%v, want gone", gone, err)
+	}
+}
+
+// TestLive_Cleanup_RetainedEncryptedQueueKeepsItsEntryUntilDeletedByHand
+// checks that a retained queue pinning a key stays as Relinquished until it
+// is deleted by hand and the daily recheck runs.
+func TestLive_Cleanup_RetainedEncryptedQueueKeepsItsEntryUntilDeletedByHand(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := sqs.NewFromConfig(cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	key := livetest.SharedKey(t, cfg)
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: livetest.SharedKeyName}},
+	}}
+	t.Cleanup(func() { deleteQueueIfExists(t, client, namespace, crName, "orders") })
+	ledger, err := Ensure(ctx, client, nil, nil, nil, namespace, crName, "uid-1", spec, []depsv1alpha1.ManagedResource{key}, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	// The controller stamps the key on the entry of a resource using it.
+	queue, _ := status.FindManagedResource(ledger, resourceType, "orders")
+	queue.KMSKeyARN = key.ARN
+	status.UpsertManagedResource(&ledger, queue)
+
+	ledger, _, err = Cleanup(ctx, client, nil, nil, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() (retain) error = %v", err)
+	}
+	entry, found := status.FindManagedResource(ledger, resourceType, "orders")
+	if !found || entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+		t.Fatalf("expected a Relinquished entry for the queue that pins a key, got %+v (found=%v)", entry, found)
+	}
+
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
+	urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("GetQueueUrl() error = %v", err)
+	}
+	if _, err := client.DeleteQueue(ctx, &sqs.DeleteQueueInput{QueueUrl: urlOut.QueueUrl}); err != nil {
+		t.Fatalf("DeleteQueue() error = %v", err)
+	}
+	// SQS keeps answering for a queue for up to a minute after deleting it.
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		var notFound *types.QueueDoesNotExist
+		if _, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName}); errors.As(err, &notFound) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the deleted queue never stopped being found")
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	due := metav1.NewTime(time.Now().Add(-(status.RelinquishedRecheckInterval + time.Hour)))
+	entry.LastVerifiedAt = &due
+	status.UpsertManagedResource(&ledger, entry)
+	ledger, _, err = Cleanup(ctx, client, nil, nil, namespace, crName, "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() (recheck) error = %v", err)
+	}
+	if status.HasManagedResource(ledger, resourceType, "orders") {
+		t.Error("expected the entry of the deleted queue to be dropped on the recheck")
+	}
 }

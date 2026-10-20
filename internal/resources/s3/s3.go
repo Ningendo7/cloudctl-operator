@@ -617,6 +617,11 @@ func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn strin
 // cause, so a typed exception isn't always what comes back - both forms
 // have to be handled.
 func isNotFoundError(err error) bool {
+	// An untagged bucket answers GetBucketTagging with NoSuchTagSet and a
+	// 404, which the status check below would take for a missing bucket.
+	if isNoSuchTagSet(err) {
+		return false
+	}
 	// HeadBucket returns NotFound; GetBucketTagging, DeleteBucket,
 	// ListObjectVersions, ListMultipartUploads, and DeleteBucketLifecycle
 	// all return NoSuchBucket instead for the identical condition (a

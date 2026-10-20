@@ -267,3 +267,46 @@ func TestLive_Ensure_RefusesTopicOwnedByADifferentRealCR(t *testing.T) {
 		t.Error("expected Ensure to refuse a real topic already owned by a different CR's UID, even with adopt:true")
 	}
 }
+
+// TestLive_Cleanup_RetainedTopicIsLetGoAndAMissingOneIsGone checks that
+// letting go removes the tags and the entry, and that a missing topic is
+// recognized as gone.
+func TestLive_Cleanup_RetainedTopicIsLetGoAndAMissingOneIsGone(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := sns.NewFromConfig(cfg)
+	region, accountID := liveRegionAndAccount(t, cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	topicARN := cloudctlaws.TopicARN(region, accountID, cloudctlaws.ResourceName(namespace, crName, "sns", "events", 256))
+	t.Cleanup(func() { deleteTopicIfExists(t, client, topicARN) })
+
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}}}
+	ledger, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	ledger, results, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if len(results) != 1 || results[0].Reason != CleanupReasonRetained {
+		t.Errorf("expected one Retained result, got %+v", results)
+	}
+	if findEntry(ledger, "events") != nil {
+		t.Error("expected the retained topic to leave the ledger")
+	}
+
+	tagsOut, err := client.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{ResourceArn: &topicARN})
+	if err != nil {
+		t.Fatalf("the retained topic should still exist: %v", err)
+	}
+	if cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.Tags), namespace, crName, "uid-1") {
+		t.Errorf("expected the ownership tags to be gone, tags: %+v", tagsOut.Tags)
+	}
+
+	missing := depsv1alpha1.ManagedResource{Type: resourceType, Name: "never-created", ARN: cloudctlaws.TopicARN(region, accountID, cloudctlaws.ResourceName(namespace, crName, "sns", "never-created", 256))}
+	_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", missing)
+	if err != nil || !gone {
+		t.Errorf("relinquishIfStillTagged() on a missing topic gone=%v err=%v, want gone", gone, err)
+	}
+}

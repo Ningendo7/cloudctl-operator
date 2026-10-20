@@ -28,8 +28,8 @@ limitations under the License.
 //
 // RDS_LIVE_TEST_KMS_KEY_ARN is optional: the ARN of an existing, enabled
 // KMS key to encrypt the instance with, which also exercises the shared-key
-// path. The test never changes that key's state. Without it the instance is
-// created unencrypted.
+// path. The test never changes that key's state. Without it the instance
+// is encrypted with the aws/rds key, the default.
 //
 // Run explicitly with whatever already authenticates your AWS CLI:
 //
@@ -242,11 +242,11 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 	if !entryFound {
 		t.Fatal("expected a ledger entry after the first Ensure() call")
 	}
-	var consumerGroupID string
+	var consumerGroupID, secondGroupID string
 	t.Cleanup(func() {
 		spec.Resources[0].DeletionPolicy = depsv1alpha1.DeletionPolicyRetain // keep Cleanup from re-entering the snapshot dance during teardown
 		deleteInstanceWithRetry(t, rdsClient, instanceID)
-		deleteSecurityGroupsAfterInstanceGone(t, rdsClient, ec2Client, instanceID, cloudctlaws.ResourceName(namespace, crName, "rds-sg", resourceName, 255), consumerGroupID)
+		deleteSecurityGroupsAfterInstanceGone(t, rdsClient, ec2Client, instanceID, cloudctlaws.ResourceName(namespace, crName, "rds-sg", resourceName, 255), consumerGroupID, secondGroupID)
 	})
 
 	instance := waitForInstanceStatus(t, rdsClient, instanceID, []string{"available"}, false, 20*time.Minute)
@@ -273,8 +273,14 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		if !cloudctlaws.IsOwnedBy(tags, namespace, crName, "uid-1") {
 			t.Errorf("real instance tags don't satisfy IsOwnedBy: %+v", tags)
 		}
-		if keyARN != "" && !aws.ToBool(instance.StorageEncrypted) {
-			t.Error("expected the real instance to be encrypted")
+		if !aws.ToBool(instance.StorageEncrypted) {
+			t.Error("expected the real instance to be encrypted by default")
+		}
+		if !aws.ToBool(instance.DeletionProtection) {
+			t.Error("expected the real instance to have deletion protection on")
+		}
+		if aws.ToString(instance.KmsKeyId) == "" {
+			t.Error("expected the real instance to report the KMS key it is encrypted with")
 		}
 		if gotKeyID := aws.ToString(instance.KmsKeyId); keyARN != "" && gotKeyID != keyARN {
 			t.Errorf("expected the instance to be encrypted under the shared key %q, got %q", keyARN, gotKeyID)
@@ -313,6 +319,16 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		}
 		if len(ledger) != before {
 			t.Errorf("expected no new ledger entries from an unchanged reconcile, got %d want %d", len(ledger), before)
+		}
+	})
+
+	t.Run("a changed engine is refused against the real instance", func(t *testing.T) {
+		spec.Resources[0].Engine = "mysql"
+		_, err := Ensure(ctx, rdsClient, kmsClient, ec2Client, k8sClient, namespace, crName, "uid-1", region, accountID, spec, ledger, nil, nil)
+		spec.Resources[0].Engine = "postgres"
+		var reconcileErr *cloudctlaws.ReconcileError
+		if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonImmutableSettingChanged {
+			t.Errorf("expected %s, got %v", reasonImmutableSettingChanged, err)
 		}
 	})
 
@@ -360,32 +376,54 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		consumerGroupID = aws.ToString(consumerOut.GroupId)
 		consumerGroupARN := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, consumerGroupID)
 
-		consumer := &depsv1alpha1.AppDependencies{
-			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName + "-consumer"},
-			Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
-				{Type: podNetworkIdentityResourceType, Name: podNetworkIdentityLedgerName, ARN: consumerGroupARN},
-			}},
+		secondOut, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
+			GroupName: aws.String(crName + "-consumer2"), VpcId: &vpcID,
+			Description: aws.String("cloudctl-operator live test throwaway second consumer identity"),
+		})
+		if err != nil {
+			t.Fatalf("CreateSecurityGroup() (second consumer) error = %v", err)
 		}
-		if err := k8sClient.Create(ctx, consumer); err != nil {
-			t.Fatalf("creating fake consumer CR: %v", err)
+		secondGroupID = aws.ToString(secondOut.GroupId)
+		secondGroupARN := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, secondGroupID)
+
+		var shared []depsv1alpha1.SharedWithEntry
+		for i, identity := range []struct{ arn string }{{consumerGroupARN}, {secondGroupARN}} {
+			consumer := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: fmt.Sprintf("%s-consumer%d", crName, i+1)},
+				// Only a consumer that asks for the instance is granted access.
+				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+					{Namespace: namespace, Name: crName, ResourceName: resourceName},
+				}}},
+				Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
+					{Type: podNetworkIdentityResourceType, Name: podNetworkIdentityLedgerName, ARN: identity.arn},
+				}},
+			}
+			if err := k8sClient.Create(ctx, consumer); err != nil {
+				t.Fatalf("creating fake consumer CR: %v", err)
+			}
+			shared = append(shared, depsv1alpha1.SharedWithEntry{Namespace: namespace, Name: consumer.Name})
 		}
 
 		dedicatedGroupID := SecurityGroupIDFromARN(mustSecurityGroupARN(t, ec2Client, ctx, namespace, crName, resourceName, subnetGroup))
 
-		spec.Resources[0].SharedWith = []depsv1alpha1.SharedWithEntry{{Namespace: namespace, Name: consumer.Name}}
+		spec.Resources[0].SharedWith = shared
 		if ledger, err = Ensure(ctx, rdsClient, kmsClient, ec2Client, k8sClient, namespace, crName, "uid-1", region, accountID, spec, ledger, nil, nil); err != nil {
 			t.Fatalf("Ensure() (grant) error = %v", err)
 		}
-		if !hasIngressFrom(t, ec2Client, dedicatedGroupID, consumerGroupID) {
-			t.Error("expected a real ingress rule authorizing the consumer's security group")
+		for _, id := range []string{consumerGroupID, secondGroupID} {
+			if !hasIngressFrom(t, ec2Client, dedicatedGroupID, id) {
+				t.Errorf("expected a real ingress rule authorizing consumer group %s", id)
+			}
 		}
 
 		spec.Resources[0].SharedWith = nil
 		if ledger, err = Ensure(ctx, rdsClient, kmsClient, ec2Client, k8sClient, namespace, crName, "uid-1", region, accountID, spec, ledger, nil, nil); err != nil {
 			t.Fatalf("Ensure() (revoke) error = %v", err)
 		}
-		if hasIngressFrom(t, ec2Client, dedicatedGroupID, consumerGroupID) {
-			t.Error("expected the real ingress rule to be revoked once sharedWith was cleared")
+		for _, id := range []string{consumerGroupID, secondGroupID} {
+			if hasIngressFrom(t, ec2Client, dedicatedGroupID, id) {
+				t.Errorf("expected the real ingress rule for %s to be revoked once sharedWith was cleared", id)
+			}
 		}
 	})
 
@@ -534,13 +572,102 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 			time.Sleep(10 * time.Second)
 		}
 	})
+
+	t.Run("a retained instance deleted by hand is forgotten with its security group", func(t *testing.T) {
+		retained, retainedFound := status.FindManagedResource(ledger, resourceType, resourceName)
+		if !retainedFound {
+			t.Fatal("expected the instance to still be in the ledger")
+		}
+		sgName := instanceSecurityGroupLedgerName(resourceName)
+		if !status.HasManagedResource(ledger, podNetworkIdentityResourceType, sgName) {
+			t.Fatalf("expected a ledger entry %q for the instance's security group", sgName)
+		}
+		retained.DeletionPolicy = depsv1alpha1.DeletionPolicyRetain
+		retained.PendingDeletionSince = nil
+		status.UpsertManagedResource(&ledger, retained)
+
+		ledger, _, err = Cleanup(ctx, rdsClient, namespace, crName, "uid-1", nil, ledger, false, nil)
+		if err != nil {
+			t.Fatalf("Cleanup() (retain) error = %v", err)
+		}
+		relinquished, _ := status.FindManagedResource(ledger, resourceType, resourceName)
+		if relinquished.State != depsv1alpha1.ManagedResourceStateRelinquished {
+			t.Fatalf("expected a Relinquished entry, got %+v", relinquished)
+		}
+		tagsOut, err := rdsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &entry.ARN})
+		if err != nil {
+			t.Fatalf("ListTagsForResource() error = %v", err)
+		}
+		for _, tg := range tagsOut.TagList {
+			if aws.ToString(tg.Key) == cloudctlaws.OwnerTagKey {
+				t.Error("expected the ownership tag to be gone from the retained instance")
+			}
+		}
+
+		deleteInstanceWithRetry(t, rdsClient, instanceID)
+		waitForInstanceGone(t, rdsClient, instanceID, 30*time.Minute)
+
+		due := metav1.NewTime(time.Now().Add(-(status.RelinquishedRecheckInterval + time.Hour)))
+		relinquished.LastVerifiedAt = &due
+		status.UpsertManagedResource(&ledger, relinquished)
+		ledger, _, err = Cleanup(ctx, rdsClient, namespace, crName, "uid-1", nil, ledger, false, nil)
+		if err != nil {
+			t.Fatalf("Cleanup() (recheck) error = %v", err)
+		}
+		if status.HasManagedResource(ledger, resourceType, resourceName) {
+			t.Error("expected the entry of the deleted instance to be dropped on the recheck")
+		}
+
+		deadline := time.Now().Add(10 * time.Minute)
+		for {
+			ledger, err = CleanupInstanceSecurityGroups(ctx, ec2Client, namespace, crName, "uid-1", nil, ledger, false)
+			if err == nil || time.Now().After(deadline) {
+				break
+			}
+			t.Logf("security group not deletable yet: %v", err)
+			time.Sleep(20 * time.Second)
+		}
+		if err != nil {
+			t.Fatalf("CleanupInstanceSecurityGroups() error = %v", err)
+		}
+		if status.HasManagedResource(ledger, podNetworkIdentityResourceType, sgName) {
+			t.Error("expected the security group entry to be dropped")
+		}
+		groups, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+			Filters: []ec2types.Filter{{Name: aws.String("group-name"), Values: []string{cloudctlaws.ResourceName(namespace, crName, "rds-sg", resourceName, 255)}}},
+		})
+		if err != nil {
+			t.Fatalf("DescribeSecurityGroups() error = %v", err)
+		}
+		if len(groups.SecurityGroups) != 0 {
+			t.Error("expected the instance's security group to be deleted in AWS")
+		}
+	})
+}
+
+// waitForInstanceGone polls until DescribeDBInstances reports the instance
+// as not found.
+func waitForInstanceGone(t *testing.T, client *rds.Client, instanceID string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		_, err := client.DescribeDBInstances(context.Background(), &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
+		var notFound *types.DBInstanceNotFoundFault
+		if errors.As(err, &notFound) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("instance %q still exists after %s", instanceID, timeout)
+		}
+		time.Sleep(30 * time.Second)
+	}
 }
 
 // deleteSecurityGroupsAfterInstanceGone removes the instance's dedicated
 // security group and the throwaway consumer group. The instance has to be
 // fully gone first, and the dedicated group before the consumer group,
 // since its ingress rule references the consumer group.
-func deleteSecurityGroupsAfterInstanceGone(t *testing.T, rdsClient *rds.Client, ec2Client *ec2.Client, instanceID, dedicatedGroupName, consumerGroupID string) {
+func deleteSecurityGroupsAfterInstanceGone(t *testing.T, rdsClient *rds.Client, ec2Client *ec2.Client, instanceID, dedicatedGroupName string, consumerGroupIDs ...string) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Minute)
 	for {
@@ -550,7 +677,7 @@ func deleteSecurityGroupsAfterInstanceGone(t *testing.T, rdsClient *rds.Client, 
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Errorf("instance %q still exists, delete security groups %q and %q manually afterwards", instanceID, dedicatedGroupName, consumerGroupID)
+			t.Errorf("instance %q still exists, delete security groups %q and %v manually afterwards", instanceID, dedicatedGroupName, consumerGroupIDs)
 			return
 		}
 		time.Sleep(30 * time.Second)
@@ -561,8 +688,10 @@ func deleteSecurityGroupsAfterInstanceGone(t *testing.T, rdsClient *rds.Client, 
 	}); err == nil && len(out.SecurityGroups) > 0 {
 		deleteSecurityGroupWithRetry(t, ec2Client, aws.ToString(out.SecurityGroups[0].GroupId))
 	}
-	if consumerGroupID != "" {
-		deleteSecurityGroupWithRetry(t, ec2Client, consumerGroupID)
+	for _, id := range consumerGroupIDs {
+		if id != "" {
+			deleteSecurityGroupWithRetry(t, ec2Client, id)
+		}
 	}
 }
 

@@ -19,14 +19,17 @@ package s3
 import (
 	"context"
 	"errors"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -970,5 +973,28 @@ func TestEnsure_TakesOverABucketFromTheUIDItWasTold(t *testing.T) {
 				t.Errorf("expected OwnershipTransferred and no adoption event, got %v", events)
 			}
 		})
+	}
+}
+
+func TestIsNotFoundError_AnUntaggedBucketsNoSuchTagSetIsNotAMissingBucket(t *testing.T) {
+	if isNotFoundError(noSuchTagSetError()) {
+		t.Error("a 404 NoSuchTagSet means the bucket exists without tags, not that it is gone")
+	}
+	bare404 := &awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{
+		Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusNotFound}},
+		Err:      errors.New("not found"),
+	}}
+	if !isNotFoundError(bare404) {
+		t.Error("a bare 404 is still a missing bucket")
+	}
+}
+
+func TestRelinquishIfStillTagged_AnUntaggedBucketIsNotGone(t *testing.T) {
+	client := newFakeS3()
+	client.getBucketTaggingErr = noSuchTagSetError()
+	entry := depsv1alpha1.ManagedResource{Type: resourceType, Name: "receipts", ARN: "arn:aws:s3:::some-bucket"}
+	relinquished, gone, err := relinquishIfStillTagged(context.Background(), client, "default", "svc", "uid-1", entry)
+	if err != nil || gone || relinquished {
+		t.Errorf("relinquishIfStillTagged() relinquished=%v gone=%v err=%v, want none of them", relinquished, gone, err)
 	}
 }

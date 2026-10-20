@@ -30,12 +30,13 @@ package sqs
 
 import (
 	"context"
+	"fmt"
+	"hash/fnv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -44,6 +45,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/livetest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -66,13 +68,21 @@ type liveSubscriptionFixture struct {
 	ref                           depsv1alpha1.ConsumeRef
 }
 
+// shortLiveName fits SQS's 80 character limit, which the test name alone can
+// exceed.
+func shortLiveName(t *testing.T, kind string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(t.Name()))
+	return fmt.Sprintf("live-%08x-%s-%s", h.Sum32(), time.Now().UTC().Format("150405"), kind)
+}
+
 func setupLiveSubscriptionFixture(t *testing.T) liveSubscriptionFixture {
 	t.Helper()
 	ctx := context.Background()
 	sqsClient := newLiveClient(t)
 	snsClient := newLiveSNSClient(t)
 
-	queueName := "live-" + liveUniqueSuffix(t) + "-orders"
+	queueName := shortLiveName(t, "orders")
 	createQueueOut, err := sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: &queueName})
 	if err != nil {
 		t.Fatalf("real CreateQueue() (setup) error = %v", err)
@@ -89,7 +99,7 @@ func setupLiveSubscriptionFixture(t *testing.T) liveSubscriptionFixture {
 	}
 	queueARN := attrsOut.Attributes[string(types.QueueAttributeNameQueueArn)]
 
-	topicName := "live-" + liveUniqueSuffix(t) + "-events"
+	topicName := shortLiveName(t, "events")
 	createTopicOut, err := snsClient.CreateTopic(ctx, &sns.CreateTopicInput{Name: &topicName})
 	if err != nil {
 		t.Fatalf("real CreateTopic() (setup) error = %v", err)
@@ -159,25 +169,17 @@ func TestLive_EnsureSubscriptions_RealSubscribeAndQueuePolicyGrant(t *testing.T)
 // SNS isn't an IAM identity in the account, so delivery into a queue
 // encrypted with an operator-managed key works only if the key's own policy
 // lets SNS use it. Only real AWS enforces key policies.
-func TestLive_EnsureSubscriptions_DeliversIntoAQueueEncryptedWithItsDedicatedKey(t *testing.T) {
+func TestLive_EnsureSubscriptions_DeliversIntoAQueueEncryptedWithTheSharedKey(t *testing.T) {
 	ctx := context.Background()
 	f := setupLiveSubscriptionFixture(t)
-	kmsClient := kms.NewFromConfig(skipUnlessLiveAWSCredentials(t))
+	key := livetest.SharedKey(t, skipUnlessLiveAWSCredentials(t))
 	namespace, crName := "live", liveUniqueSuffix(t)
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
-		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: livetest.SharedKeyName}},
 	}}
 
-	ledger, err := Ensure(ctx, f.sqsClient, kmsClient, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
-	t.Cleanup(func() {
-		deleteQueueIfExists(t, f.sqsClient, namespace, crName, "orders")
-		if keyEntry, ok := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "orders")); ok {
-			windowDays := int32(7)
-			if _, err := kmsClient.ScheduleKeyDeletion(context.Background(), &kms.ScheduleKeyDeletionInput{KeyId: &keyEntry.ARN, PendingWindowInDays: &windowDays}); err != nil {
-				t.Logf("key cleanup warning: %v", err)
-			}
-		}
-	})
+	_, err := Ensure(ctx, f.sqsClient, nil, nil, nil, namespace, crName, "uid-1", spec, []depsv1alpha1.ManagedResource{key}, nil, nil)
+	t.Cleanup(func() { deleteQueueIfExists(t, f.sqsClient, namespace, crName, "orders") })
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}

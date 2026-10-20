@@ -32,16 +32,25 @@ package alarms
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	snssdk "github.com/aws/aws-sdk-go-v2/service/sns"
+	sqssdk "github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/livetest"
+	snspkg "github.com/Ningendo7/cloudctl-operator/internal/resources/sns"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 // skipUnlessLiveAWSCredentials skips the calling test unless the standard
@@ -127,4 +136,91 @@ func TestLive_Ensure_CreatesRealAlarmWithTagsAndCleansUp(t *testing.T) {
 	if len(existing) != 0 {
 		t.Errorf("expected Cleanup to delete the real alarm, got %d still present", len(existing))
 	}
+}
+
+// TestLive_AlarmReachesAnEncryptedTopic forces an alarm into ALARM and reads
+// the notification from a queue subscribed to a topic encrypted with the
+// shared key, which needs the CloudWatch key policy statement.
+func TestLive_AlarmReachesAnEncryptedTopic(t *testing.T) {
+	cfg, accountID := skipUnlessLiveAWSCredentials(t)
+	ctx := context.Background()
+	cwClient := cloudwatch.NewFromConfig(cfg)
+	snsClient := snssdk.NewFromConfig(cfg)
+	sqsClient := sqssdk.NewFromConfig(cfg)
+	region := cfg.Region
+	namespace, crName := "live", liveUniqueSuffix(t)
+
+	key := livetest.SharedKey(t, cfg)
+	snsSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
+		{Name: "alerts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: livetest.SharedKeyName}},
+	}}
+	ledger, err := snspkg.Ensure(ctx, snsClient, nil, namespace, crName, "uid-1", region, accountID, snsSpec, []depsv1alpha1.ManagedResource{key}, nil, nil)
+	if err != nil {
+		t.Fatalf("sns Ensure() error = %v", err)
+	}
+	topic, topicFound := status.FindManagedResource(ledger, "sns", "alerts")
+	if !topicFound {
+		t.Fatal("expected a ledger entry for the topic")
+	}
+	t.Cleanup(func() {
+		_, _ = snsClient.DeleteTopic(context.Background(), &snssdk.DeleteTopicInput{TopicArn: &topic.ARN})
+	})
+
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "inbox", 80)
+	queueOut, err := sqsClient.CreateQueue(ctx, &sqssdk.CreateQueueInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("CreateQueue() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = sqsClient.DeleteQueue(context.Background(), &sqssdk.DeleteQueueInput{QueueUrl: queueOut.QueueUrl})
+	})
+	attrs, err := sqsClient.GetQueueAttributes(ctx, &sqssdk.GetQueueAttributesInput{
+		QueueUrl: queueOut.QueueUrl, AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		t.Fatalf("GetQueueAttributes() error = %v", err)
+	}
+	queueARN := attrs.Attributes[string(sqstypes.QueueAttributeNameQueueArn)]
+	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"sns.amazonaws.com"},"Action":"sqs:SendMessage","Resource":%q,"Condition":{"ArnEquals":{"aws:SourceArn":%q}}}]}`, queueARN, topic.ARN)
+	if _, err := sqsClient.SetQueueAttributes(ctx, &sqssdk.SetQueueAttributesInput{
+		QueueUrl: queueOut.QueueUrl, Attributes: map[string]string{"Policy": policy},
+	}); err != nil {
+		t.Fatalf("SetQueueAttributes() error = %v", err)
+	}
+	if _, err := snsClient.Subscribe(ctx, &snssdk.SubscribeInput{TopicArn: &topic.ARN, Protocol: aws.String("sqs"), Endpoint: &queueARN}); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+
+	own := ownership{namespace: namespace, crName: crName, crUID: "uid-1", region: region, accountID: accountID}
+	desired := desiredAlarms(namespace, crName, &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}, nil, nil)
+	if len(desired) == 0 {
+		t.Fatal("expected at least one desired alarm")
+	}
+	t.Cleanup(func() {
+		if err := Cleanup(context.Background(), cwClient, namespace, crName, "uid-1", region, accountID); err != nil {
+			t.Logf("alarm cleanup warning: %v", err)
+		}
+	})
+	if err := reconcileAlarms(ctx, cwClient, own, desired[:1], []string{topic.ARN}); err != nil {
+		t.Fatalf("reconcileAlarms() error = %v", err)
+	}
+	if _, err := cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
+		AlarmName: aws.String(desired[0].name), StateValue: cwtypes.StateValueAlarm, StateReason: aws.String("cloudctl live test"),
+	}); err != nil {
+		t.Fatalf("SetAlarmState() error = %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		out, err := sqsClient.ReceiveMessage(ctx, &sqssdk.ReceiveMessageInput{QueueUrl: queueOut.QueueUrl, WaitTimeSeconds: 10, MaxNumberOfMessages: 10})
+		if err != nil {
+			t.Fatalf("ReceiveMessage() error = %v", err)
+		}
+		for _, m := range out.Messages {
+			if strings.Contains(aws.ToString(m.Body), desired[0].name) {
+				return
+			}
+		}
+	}
+	t.Fatal("the alarm notification never reached the queue: CloudWatch could not publish to the encrypted topic")
 }

@@ -176,7 +176,7 @@ func (f *fakeS3) GetBucketTagging(_ context.Context, in *s3sdk.GetBucketTaggingI
 		return nil, &types.NoSuchBucket{}
 	}
 	if len(b.tags) == 0 {
-		return nil, &fakeAWSError{code: "NoSuchTagSet"}
+		return nil, noSuchTagSetError()
 	}
 	return &s3sdk.GetBucketTaggingOutput{TagSet: mapToTags(b.tags)}, nil
 }
@@ -434,4 +434,13 @@ func versionOf(v *string) string {
 		return ""
 	}
 	return *v
+}
+
+// noSuchTagSetError is how S3 answers GetBucketTagging for a bucket without
+// tags: the error code with a 404 status.
+func noSuchTagSetError() error {
+	return &awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{
+		Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusNotFound}},
+		Err:      &smithy.GenericAPIError{Code: "NoSuchTagSet"},
+	}}
 }

@@ -44,12 +44,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/livetest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -362,62 +362,40 @@ func TestLive_Ensure_PITRRetentionDaysActuallyAppliesAndReportsBack(t *testing.T
 	}
 }
 
-// TestLive_Ensure_DedicatedKMSKeyEncryptsRealTable confirms the
-// dedicated-KMS-key path (already proven against real AWS via sqs's own
-// live tier, sharing the same kms package code with a different
-// resourceType) applies correctly through DynamoDB's own
-// SSESpecification/SSEDescription shape specifically.
-func TestLive_Ensure_DedicatedKMSKeyEncryptsRealTable(t *testing.T) {
+// TestLive_Ensure_SharedKMSKeyEncryptsRealTable confirms a KMS key applies
+// correctly through DynamoDB's own SSESpecification/SSEDescription shape. The
+// key is the shared live-test key; the dedicated-key path is proven by sqs.
+func TestLive_Ensure_SharedKMSKeyEncryptsRealTable(t *testing.T) {
 	cfg := skipUnlessLiveAWSCredentials(t)
 	client := dynamodb.NewFromConfig(cfg)
-	kmsClient := kms.NewFromConfig(cfg)
 	ctx := context.Background()
 	namespace, crName := "live", liveUniqueSuffix(t)
 	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, "sessions", 255)
 	t.Cleanup(func() { deleteTableIfExists(t, client, tableName) })
+	key := livetest.SharedKey(t, cfg)
 
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
-		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: livetest.SharedKeyName}},
 	}}
-	ledger, err := Ensure(ctx, client, kmsClient, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, []depsv1alpha1.ManagedResource{key}, nil, nil)
 	if err != nil {
 		var reconcileErr *cloudctlaws.ReconcileError
 		if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
 			t.Fatalf("first Ensure() error = %v, want a retryable CREATING error", err)
 		}
 	}
-	t.Cleanup(func() {
-		if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, true, false, nil); err != nil {
-			t.Logf("key cleanup warning: %v", err)
-		}
-		// Cleanup only tears down "dynamodb"-type ledger entries, and the
-		// kms package's own Cleanup won't schedule deletion within a single
-		// pass (it only starts a quiet window) - delete the real key
-		// directly instead of leaving it dangling.
-		if keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "sessions")); keyEntryFound {
-			windowDays := int32(7)
-			if _, err := kmsClient.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{KeyId: &keyEntry.ARN, PendingWindowInDays: &windowDays}); err != nil {
-				t.Logf("key cleanup warning: %v", err)
-			}
-		}
-	})
 
 	waitForTableActive(t, client, tableName, 3*time.Minute)
-	ledger, err = Ensure(ctx, client, kmsClient, nil, namespace, crName, "uid-1", spec, ledger, nil, nil)
-	if err != nil {
+	if _, err = Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil); err != nil {
 		t.Fatalf("second Ensure() (once ACTIVE) error = %v", err)
 	}
 
-	keyEntry, keyEntryFound := status.FindManagedResource(ledger, "kms", cloudctlaws.DedicatedKeyLedgerName(resourceType, "sessions"))
-	if !keyEntryFound {
-		t.Fatal("expected a dedicated KMS key ledger entry for the encrypted table")
-	}
 	describeOut, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
 	if err != nil {
 		t.Fatalf("real DescribeTable() error = %v", err)
 	}
-	if describeOut.Table.SSEDescription == nil || aws.ToString(describeOut.Table.SSEDescription.KMSMasterKeyArn) != keyEntry.ARN {
-		t.Errorf("real table's SSE key = %v, want the dedicated key's real ARN %q", describeOut.Table.SSEDescription, keyEntry.ARN)
+	if describeOut.Table.SSEDescription == nil || aws.ToString(describeOut.Table.SSEDescription.KMSMasterKeyArn) != key.ARN {
+		t.Errorf("real table's SSE key = %v, want the shared key %q", describeOut.Table.SSEDescription, key.ARN)
 	}
 }
 
@@ -535,5 +513,65 @@ func TestLive_Ensure_RefusesTableOwnedByADifferentRealCR(t *testing.T) {
 	}}
 	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "intruder-uid", intruderSpec, nil, nil, nil); err == nil {
 		t.Error("expected Ensure to refuse a real table already owned by a different CR's UID, even with adopt:true")
+	}
+}
+
+// TestLive_Cleanup_RetainedTableIsLetGoAndAMissingOneIsGone checks that
+// letting go removes the tags and the entry, and that a missing table is
+// recognized as gone.
+func TestLive_Cleanup_RetainedTableIsLetGoAndAMissingOneIsGone(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := dynamodb.NewFromConfig(cfg)
+	region, accountID := liveRegionAndAccount(t, cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, "sessions", 255)
+	t.Cleanup(func() { deleteTableIfExists(t, client, tableName) })
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
+	}}
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		var reconcileErr *cloudctlaws.ReconcileError
+		if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+			t.Fatalf("first Ensure() error = %v", err)
+		}
+	}
+	waitForTableActive(t, client, tableName, 3*time.Minute)
+	if ledger, err = Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+
+	ledger, results, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if len(results) != 1 || results[0].Reason != CleanupReasonRetained {
+		t.Errorf("expected one Retained result, got %+v", results)
+	}
+	if findEntry(ledger, "sessions") != nil {
+		t.Error("expected the retained table to leave the ledger")
+	}
+
+	tableARN := "arn:aws:dynamodb:" + region + ":" + accountID + ":table/" + tableName
+	// Tag changes can take a few seconds to show.
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(3 * time.Second) {
+		tags, err := listAllTags(ctx, client, tableARN)
+		if err != nil {
+			t.Fatalf("the retained table should still exist: %v", err)
+		}
+		if !cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, "uid-1") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the ownership tags are still on the retained table after a minute")
+		}
+	}
+
+	missing := depsv1alpha1.ManagedResource{Type: resourceType, Name: "never-created", ARN: "arn:aws:dynamodb:" + region + ":" + accountID + ":table/" + cloudctlaws.ResourceName(namespace, crName, resourceType, "never-created", 255)}
+	_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", missing)
+	if err != nil || !gone {
+		t.Errorf("relinquishIfStillTagged() on a missing table gone=%v err=%v, want gone", gone, err)
 	}
 }
