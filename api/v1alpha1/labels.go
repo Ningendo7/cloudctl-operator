@@ -16,9 +16,14 @@ limitations under the License.
 
 package v1alpha1
 
-// ManagedByLabelKey/Value mark the ConfigMaps and Secrets this operator
-// generates; the manager's cache only watches objects with this label.
+// ManagedLabelKey/Value mark the ConfigMaps and Secrets this operator
+// generates; the cache only watches objects with it. It is the operator's own
+// key because policies rewrite the standard managed-by label, which is set
+// alongside for people and never relied on.
 const (
+	ManagedLabelKey   = "cloudctl.io/managed"
+	ManagedLabelValue = "true"
+
 	ManagedByLabelKey   = "app.kubernetes.io/managed-by"
 	ManagedByLabelValue = "cloudctl-operator"
 )

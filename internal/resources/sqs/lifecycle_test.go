@@ -115,3 +115,5 @@ func (s *sqsLifecycleSubject) DeleteOutOfBand(name string) error {
 	delete(s.client.queues, s.queueName(name))
 	return nil
 }
+
+func (s *sqsLifecycleSubject) KeepsRelinquishedEntries() bool { return false }

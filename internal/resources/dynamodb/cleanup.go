@@ -30,6 +30,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -110,7 +111,11 @@ func Cleanup(
 		}
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
+			pinsKey := kms.PinsAKey(updatedLedger, resourceType, entry)
+			if entry.State == depsv1alpha1.ManagedResourceStateRelinquished && !pinsKey {
+				// Let go earlier and pins no key: nothing to remember.
+				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
+			} else if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
 				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
 				if relErr != nil {
 					if firstErr == nil {
@@ -128,7 +133,11 @@ func Cleanup(
 				if relinquished && recordEvent != nil {
 					recordEvent("Normal", "TableOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained table %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
 				}
-				status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
+				if pinsKey {
+					status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
+				} else {
+					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
+				}
 			}
 			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
 			continue

@@ -189,7 +189,46 @@ func Cleanup(
 		}
 	}
 
+	var snapshotErr error
+	updatedLedger, snapshotErr = checkOrphanedSnapshots(ctx, awsClient, updatedLedger)
+	if snapshotErr != nil && firstErr == nil {
+		firstErr = snapshotErr
+	}
+
 	return updatedLedger, results, firstErr
+}
+
+// checkOrphanedSnapshots drops, about once a day, the entry of a final
+// snapshot whose instance is gone and which has been deleted too. The entry
+// keeps the snapshot's key alive.
+func checkOrphanedSnapshots(ctx context.Context, awsClient rdsAPI, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	var firstErr error
+	for _, entry := range ledger {
+		if entry.Type != snapshotResourceType || status.HasManagedResource(ledger, resourceType, entry.Name) {
+			continue
+		}
+		due := entry.State != depsv1alpha1.ManagedResourceStateVerified || entry.LastVerifiedAt == nil ||
+			time.Since(entry.LastVerifiedAt.Time) > status.RelinquishedRecheckInterval
+		if !due {
+			continue
+		}
+		out, err := awsClient.DescribeDBSnapshots(ctx, &rds.DescribeDBSnapshotsInput{DBSnapshotIdentifier: &entry.ARN})
+		var notFound *types.DBSnapshotNotFoundFault
+		switch {
+		case errors.As(err, &notFound), err == nil && len(out.DBSnapshots) == 0:
+			status.RemoveManagedResource(&ledger, snapshotResourceType, entry.Name)
+		case err != nil:
+			if firstErr == nil {
+				firstErr = wrapAWSError(err, fmt.Sprintf("checking final snapshot %q of a removed instance", entry.ARN))
+			}
+		case aws.ToString(out.DBSnapshots[0].Status) == statusAvailable:
+			now := metav1.Now()
+			entry.State = depsv1alpha1.ManagedResourceStateVerified
+			entry.LastVerifiedAt = &now
+			status.UpsertManagedResource(&ledger, entry)
+		}
+	}
+	return ledger, firstErr
 }
 
 func pendingDeletionReason(since time.Time) CleanupReason {
@@ -305,7 +344,8 @@ func ensureFinalSnapshot(
 // longer needed (superseded, or the instance is back in use) and drops
 // its ledger entry. A no-op if nothing is tracked. One still mid-creation
 // is left tracked and rechecked next pass rather than deleted early -
-// DeleteDBSnapshot only works on an available (or failed) snapshot.
+// DeleteDBSnapshot only works on an available snapshot, so a failed one is
+// just forgotten.
 func retireFinalSnapshot(
 	ctx context.Context,
 	awsClient rdsAPI,

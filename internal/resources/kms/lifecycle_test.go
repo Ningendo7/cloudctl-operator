@@ -103,3 +103,5 @@ func (s *kmsLifecycleSubject) DeleteOutOfBand(name string) error {
 	delete(s.client.aliases, alias)
 	return nil
 }
+
+func (s *kmsLifecycleSubject) KeepsRelinquishedEntries() bool { return true }

@@ -196,7 +196,12 @@ func skippedToError(skipped []string) error {
 	if len(skipped) == 0 {
 		return nil
 	}
-	return fmt.Errorf("some consumed resources could not be granted yet (self-resolves once available): %s", status.JoinCapped(skipped, "; "))
+	return &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("some consumed resources could not be granted yet (self-resolves once available): %s", status.JoinCapped(skipped, "; ")),
+		// Not retried on a timer: the producer's change wakes the CR. It also
+		// follows another section's wait, which must not look like a failure.
+		WakesOnChange: true,
+	}
 }
 
 // ensureRole creates the role if it doesn't exist, or verifies ownership

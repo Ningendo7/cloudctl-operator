@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -668,15 +670,14 @@ func TestEnsureDesiredState_UnchangedReconcile_SkipsRedundantCheckpoints(t *test
 		t.Fatal("expected the first reconcile (creating a new queue) to checkpoint at least once")
 	}
 
-	// Nothing changed, so no section checkpoints; only the unconditional
-	// trailing write remains.
+	// Nothing changed, so nothing is written.
 	patchCount = 0
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("second Reconcile() error = %v", err)
 	}
 
-	if patchCount != 1 {
-		t.Errorf("expected exactly 1 status Patch call on a no-op reconcile (the trailing write), got %d", patchCount)
+	if patchCount != 0 {
+		t.Errorf("expected no status Patch call on a no-op reconcile, got %d", patchCount)
 	}
 }
 
@@ -865,5 +866,117 @@ func TestReconcile_AnRDSInstanceSettlesAcrossTwoPasses(t *testing.T) {
 	entry, found := status.FindManagedResource(updated.Status.ManagedResources, resourceTypeRDS, "orders-db")
 	if !found || entry.State != depsv1alpha1.ManagedResourceStateVerified {
 		t.Errorf("expected a Verified instance entry after two passes, got %+v (found=%v)", entry, found)
+	}
+}
+
+func TestWarnIfLedgerLarge(t *testing.T) {
+	ledgerOf := func(n int) *depsv1alpha1.AppDependencies {
+		cr := &depsv1alpha1.AppDependencies{}
+		for i := range n {
+			cr.Status.ManagedResources = append(cr.Status.ManagedResources, depsv1alpha1.ManagedResource{Type: "sqs", Name: fmt.Sprintf("q%d", i)})
+		}
+		return cr
+	}
+	var reasons []string
+	record := func(eventType, reason, _ string) { reasons = append(reasons, eventType+"/"+reason) }
+
+	warnIfLedgerLarge(ledgerOf(largeLedgerEntries), record)
+	if len(reasons) != 0 {
+		t.Fatalf("no warning expected at the threshold, got %v", reasons)
+	}
+	warnIfLedgerLarge(ledgerOf(largeLedgerEntries+1), record)
+	if len(reasons) != 1 || reasons[0] != "Warning/LedgerLarge" {
+		t.Errorf("expected one Warning/LedgerLarge past the threshold, got %v", reasons)
+	}
+	warnIfLedgerLarge(ledgerOf(largeLedgerEntries+1), nil) // no recorder wired: must not panic
+}
+
+func TestStatusNeedsPatch(t *testing.T) {
+	status := depsv1alpha1.AppDependenciesStatus{IAMRoleARN: "arn:aws:iam::123456789012:role/r"}
+	other := depsv1alpha1.AppDependenciesStatus{IAMRoleARN: "arn:aws:iam::123456789012:role/other"}
+	cr := func(version string, s depsv1alpha1.AppDependenciesStatus) *depsv1alpha1.AppDependencies {
+		return &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{ResourceVersion: version}, Status: s}
+	}
+	tests := []struct {
+		name string
+		got  *depsv1alpha1.AppDependencies
+		want bool
+	}{
+		{"nothing changed", cr("7", status), false},
+		{"status changed", cr("7", other), true},
+		{"a checkpoint wrote and the status ended where it began", cr("8", status), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := statusNeedsPatch("7", cr("7", status), tc.got); got != tc.want {
+				t.Errorf("statusNeedsPatch() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestArnRegion(t *testing.T) {
+	tests := map[string]string{
+		"arn:aws:sqs:us-east-1:123456789012:orders":                            "us-east-1",
+		"arn:aws:dynamodb:eu-west-1:123456789012:table/sessions":               "eu-west-1",
+		"arn:aws:sns:us-west-2:123456789012:events:1a2b3c4d-0000-1111-2222-33": "us-west-2",
+		"arn:aws:s3:::receipts":                                                "",
+		"arn:aws:iam::123456789012:role/checkout":                              "",
+		"checkout-service-final-snapshot-1700000000":                           "",
+		"": "",
+	}
+	for arn, want := range tests {
+		if got := arnRegion(arn); got != want {
+			t.Errorf("arnRegion(%q) = %q, want %q", arn, got, want)
+		}
+	}
+}
+
+// Resources do not move between regions. An operator in another region would
+// find queues missing and recreate them empty, or drop the ledger of a CR
+// being deleted, so it refuses and touches nothing.
+func TestReconcile_ACRWithResourcesInAnotherRegionIsRefused(t *testing.T) {
+	inOtherRegion := []depsv1alpha1.ManagedResource{
+		{Type: "sqs", Name: "orders", ARN: "arn:aws:sqs:us-west-2:123456789012:default-checkout-service-orders-1a2b3c4d"},
+		{Type: "s3", Name: "receipts", ARN: "arn:aws:s3:::receipts"},
+	}
+	newCR := func(deleting bool) *depsv1alpha1.AppDependencies {
+		cr := transientCR()
+		cr.Status.ManagedResources = slices.Clone(inOtherRegion)
+		if deleting {
+			now := metav1.Now()
+			cr.DeletionTimestamp = &now
+		}
+		return cr
+	}
+
+	for name, deleting := range map[string]bool{"a normal pass": false, "a deletion": true} {
+		t.Run(name, func(t *testing.T) {
+			cr := newCR(deleting)
+			r, sqsFake := throttledReconciler(t, cr)
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+			res, err := r.Reconcile(context.Background(), req)
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v, want a refusal recorded on the CR", err)
+			}
+			if !withinJitter(res.RequeueAfter, DriftDetectionInterval) {
+				t.Errorf("RequeueAfter = %v, want about %v", res.RequeueAfter, DriftDetectionInterval)
+			}
+			if len(sqsFake.queues) != 0 || sqsFake.getQueueUrlCalls != 0 {
+				t.Error("a refused CR must not be looked up or recreated in this region")
+			}
+			var updated depsv1alpha1.AppDependencies
+			if err := r.Get(context.Background(), req.NamespacedName, &updated); err != nil {
+				t.Fatal(err)
+			}
+			cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionTypeSQSReady)
+			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonRegionChanged {
+				t.Errorf("SQSReady = %+v, want False with reason %s", cond, reasonRegionChanged)
+			}
+			if len(updated.Status.ManagedResources) != len(inOtherRegion) {
+				t.Errorf("the ledger must be left alone, has %d entries", len(updated.Status.ManagedResources))
+			}
+		})
 	}
 }

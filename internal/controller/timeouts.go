@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -152,13 +153,32 @@ func (r *AppDependenciesReconciler) transientBackoffLimiter() workqueue.TypedRat
 // transientDelay is how long to wait before retrying a CR after another
 // transient failure: transientRequeueInterval the first time, doubling each
 // consecutive failure up to transientMaxDelay, with jitter so CRs that failed
-// together don't come back together.
+// together don't come back together. After transientLongAfter failures in a
+// row it is the drift pace.
 func (r *AppDependenciesReconciler) transientDelay(key types.NamespacedName) time.Duration {
-	return jittered(r.transientBackoffLimiter().When(reconcile.Request{NamespacedName: key}))
+	limiter := r.transientBackoffLimiter()
+	req := reconcile.Request{NamespacedName: key}
+	long := limiter.NumRequeues(req) >= transientLongAfter
+	delay := jittered(limiter.When(req))
+	if long {
+		return jitteredDriftRequeue()
+	}
+	return delay
 }
 
 // resetTransientBackoff forgets a CR's failures once it succeeds, fails
 // permanently, or is gone.
 func (r *AppDependenciesReconciler) resetTransientBackoff(key types.NamespacedName) {
 	r.transientBackoffLimiter().Forget(reconcile.Request{NamespacedName: key})
+}
+
+// retryDelay is how long to wait before retrying a CR whose pass failed with a
+// retryable error. A pass whose every failure is a wait that a watch ends is
+// not polled faster than the drift pace.
+func (r *AppDependenciesReconciler) retryDelay(key types.NamespacedName, err error) time.Duration {
+	delay := r.transientDelay(key)
+	if errors.As(err, &waitingError{}) {
+		delay = max(delay, jitteredDriftRequeue())
+	}
+	return delay
 }

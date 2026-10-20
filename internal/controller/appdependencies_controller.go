@@ -18,20 +18,16 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierror "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -120,6 +116,9 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	if refused, err := refuseLegacyKMSKeyRef(ctx, r, cr, original); refused || err != nil {
 		return ctrl.Result{}, err
 	}
+	if refused, err := refuseOtherRegion(ctx, r, cr, original); refused || err != nil {
+		return ctrl.Result{RequeueAfter: jitteredDriftRequeue()}, err
+	}
 
 	finalizerCtx, endFinalizer := startSpan(ctx, "ensure finalizer")
 	finalizerErr := ensureFinalizer(finalizerCtx, r.Client, cr)
@@ -133,13 +132,20 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	// this same pass (rather than returning) or a freshly created CR would
 	// never actually get reconciled until some later spec change.
 
+	versionBefore := cr.ResourceVersion
 	err := ensureDesiredState(ctx, r, cr, original)
 
-	patchCtx, endPatch := startSpan(ctx, "patch status")
-	patchCtx, cancelPatch := statusWriteContext(patchCtx)
-	statusErr := r.Status().Patch(patchCtx, cr, statusPatch(original, cr))
-	cancelPatch()
-	endPatch(statusErr)
+	// A pass that changed nothing writes nothing: an empty patch still costs a
+	// request and an audit entry. A checkpoint moves the version, so a pass
+	// that wrote and ended where it began is still patched.
+	var statusErr error
+	if statusNeedsPatch(versionBefore, original, cr) {
+		patchCtx, endPatch := startSpan(ctx, "patch status")
+		patchCtx, cancelPatch := statusWriteContext(patchCtx)
+		statusErr = r.Status().Patch(patchCtx, cr, statusPatch(original, cr))
+		cancelPatch()
+		endPatch(statusErr)
+	}
 	if statusErr != nil {
 		log.Error(statusErr, "failed to update status")
 		if err == nil {
@@ -150,10 +156,7 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	key := client.ObjectKeyFromObject(cr)
 	if err != nil {
 		if isRetryable(err) {
-			delay := r.transientDelay(key)
-			if errors.As(err, &waitingError{}) {
-				delay = max(delay, jitteredDriftRequeue())
-			}
+			delay := r.retryDelay(key, err)
 			log.Info("Reconcile hit a transient error, requeuing", "error", err.Error(), "requeueAfter", delay, "failures", r.transientBackoffLimiter().NumRequeues(reconcile.Request{NamespacedName: key}), "duration", time.Since(start))
 			return ctrl.Result{RequeueAfter: delay}, nil
 		}
@@ -178,6 +181,9 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 	log.Info("Starting deletion reconcile")
 	original := cr.DeepCopy()
 
+	if refused, err := refuseOtherRegion(ctx, r, cr, original); refused || err != nil {
+		return ctrl.Result{RequeueAfter: jitteredDriftRequeue()}, err
+	}
 	done, err := finalizeDesiredState(ctx, r, cr)
 
 	patchCtx, cancelPatch := statusWriteContext(ctx)
@@ -247,33 +253,4 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WithOptions(controllerOptions(maxConcurrent)).
 		Named("appdependencies").
 		Complete(r)
-}
-
-// ManagedObjectCache limits the manager's Secret and ConfigMap cache to
-// the objects this operator created, so it doesn't hold every Secret in the
-// cluster in memory. An object without the label is invisible to cached
-// reads, which is why the code that must notice such an object (a foreign
-// one sitting at a name the operator wants) falls back to the API reader.
-// Shared by main and the envtest managers so the tests run the production
-// configuration.
-func ManagedObjectCache() map[client.Object]cache.ByObject {
-	keepManagedFields := func(in any) (any, error) { return in, nil }
-	managed := cache.ByObject{
-		Label: labels.SelectorFromSet(labels.Set{
-			depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue,
-		}),
-		Transform: keepManagedFields,
-	}
-	return map[client.Object]cache.ByObject{
-		&corev1.Secret{}:         managed,
-		&corev1.ConfigMap{}:      managed,
-		&corev1.ServiceAccount{}: {Transform: keepManagedFields},
-	}
-}
-
-// ManagedCacheDefaultTransform drops managedFields, which are large, from
-// cached objects. ManagedObjectCache keeps them on the three types whose
-// unchanged applies are skipped.
-func ManagedCacheDefaultTransform() toolscache.TransformFunc {
-	return cache.TransformStripManagedFields()
 }

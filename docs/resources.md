@@ -438,6 +438,8 @@ A recreated CR gets a new UID, and its resources still carry the old one, so eve
 
 Never run two operators against the same resources: after the transfer, the old operator fails its own ownership check and stops touching them, but until then they would fight.
 
+A move to another **region** is not supported: an operator refuses a CR whose resources are in a different region (`RegionChanged`) and touches nothing, so run an operator in the CR's own region.
+
 ## Shared behavior
 
 - **Ownership tagging, adoption, and the trust window** — see

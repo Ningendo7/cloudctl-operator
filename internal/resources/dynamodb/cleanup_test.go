@@ -103,8 +103,8 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	if r := findResult(results, "sessions"); r == nil || r.Reason != CleanupReasonRetained {
 		t.Errorf("expected sessions to be reported Retained, got %+v", results)
 	}
-	if !status.HasManagedResource(updated, "dynamodb", "sessions") {
-		t.Error("expected retained entry to stay in the ledger")
+	if status.HasManagedResource(updated, "dynamodb", "sessions") {
+		t.Error("expected a retained entry that pins no key to leave the ledger")
 	}
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	if _, stillExists := client.tables[tableName]; !stillExists {
@@ -149,8 +149,8 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 	if _, stillExists := client.tables[tableName]; !stillExists {
 		t.Error("expected the table to survive - an unset DeletionPolicy must never be treated as Delete")
 	}
-	if !status.HasManagedResource(updated, "dynamodb", "sessions") {
-		t.Error("expected the retained entry to stay in the ledger")
+	if status.HasManagedResource(updated, "dynamodb", "sessions") {
+		t.Error("expected a retained entry that pins no key to leave the ledger")
 	}
 }
 
@@ -541,9 +541,13 @@ func TestCleanup_DeletingTable_EmitsDeletedEvent(t *testing.T) {
 	}
 }
 
-func TestCleanup_ARetainedTableIsRelinquishedOnceAndKeptInTheLedger(t *testing.T) {
+func TestCleanup_ARetainedEncryptedTableIsRelinquishedOnceAndKeptInTheLedger(t *testing.T) {
 	client := newFakeDynamoDB()
 	ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyRetain, false)
+	// As the controller stamps an encrypted table: its key must outlive it.
+	pinnedEntry, _ := status.FindManagedResource(ledger, resourceType, "sessions")
+	pinnedEntry.KMSKeyARN = "arn:aws:kms:us-east-1:123456789012:key/sessions-key"
+	status.UpsertManagedResource(&ledger, pinnedEntry)
 	ctx := context.Background()
 	cleanup := func() {
 		t.Helper()

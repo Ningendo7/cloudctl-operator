@@ -65,8 +65,8 @@ func TestCleanup_RetainsByDefaultWhenRemovedFromSpec(t *testing.T) {
 	if r := findResult(results, "orders"); r == nil || r.Reason != CleanupReasonRetained {
 		t.Errorf("expected orders to be reported Retained, got %+v", results)
 	}
-	if !status.HasManagedResource(updated, "sqs", "orders") {
-		t.Error("expected retained entry to stay in the ledger")
+	if status.HasManagedResource(updated, "sqs", "orders") {
+		t.Error("expected a retained entry that pins no key to leave the ledger")
 	}
 	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
 	if _, stillExists := client.queues[queueName]; !stillExists {
@@ -132,8 +132,8 @@ func TestCleanup_TreatsUnsetDeletionPolicyAsRetain(t *testing.T) {
 	if _, stillExists := client.queues[queueName]; !stillExists {
 		t.Error("expected the queue to survive - an unset DeletionPolicy must never be treated as Delete")
 	}
-	if !status.HasManagedResource(updated, "sqs", "orders") {
-		t.Error("expected the retained entry to stay in the ledger")
+	if status.HasManagedResource(updated, "sqs", "orders") {
+		t.Error("expected a retained entry that pins no key to leave the ledger")
 	}
 }
 

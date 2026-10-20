@@ -115,7 +115,7 @@ func Ensure(ctx context.Context, k8sClient client.Client, apiReader client.Reade
 	// Ownership was checked above. An apply that changes nothing still runs
 	// every admission webhook in the cluster and writes an audit entry.
 	if exists && maps.Equal(existing.Data, data) &&
-		existing.Labels[depsv1alpha1.ManagedByLabelKey] == depsv1alpha1.ManagedByLabelValue &&
+		existing.Labels[depsv1alpha1.ManagedLabelKey] == depsv1alpha1.ManagedLabelValue &&
 		status.AppliedBy(existing, string(fieldOwner)) {
 		return nil
 	}
@@ -126,7 +126,10 @@ func Ensure(ctx context.Context, k8sClient client.Client, apiReader client.Reade
 	}
 
 	apply := applycorev1.ConfigMap(name, cr.Namespace).
-		WithLabels(map[string]string{depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue}).
+		WithLabels(map[string]string{
+			depsv1alpha1.ManagedLabelKey:   depsv1alpha1.ManagedLabelValue,
+			depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue,
+		}).
 		WithData(data).
 		WithOwnerReferences(applymetav1.OwnerReference().
 			WithAPIVersion(gvk.GroupVersion().String()).

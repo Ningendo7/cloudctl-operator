@@ -108,3 +108,5 @@ func (s *s3LifecycleSubject) DeleteOutOfBand(name string) error {
 	delete(s.client.buckets, s.bucketName(name))
 	return nil
 }
+
+func (s *s3LifecycleSubject) KeepsRelinquishedEntries() bool { return false }

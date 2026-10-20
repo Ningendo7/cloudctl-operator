@@ -50,6 +50,8 @@ type fakeSQSClient struct {
 	createQueueErr error
 	getQueueUrlErr error
 
+	getQueueUrlCalls int
+
 	// createQueueSpan is the span context CreateQueue was called under, so
 	// a test can tell the section's span reached the AWS call.
 	createQueueSpan trace.SpanContext
@@ -78,6 +80,7 @@ func (f *fakeSQSClient) CreateQueue(ctx context.Context, in *sqs.CreateQueueInpu
 }
 
 func (f *fakeSQSClient) GetQueueUrl(_ context.Context, in *sqs.GetQueueUrlInput, _ ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error) {
+	f.getQueueUrlCalls++
 	if f.getQueueUrlErr != nil {
 		return nil, f.getQueueUrlErr
 	}

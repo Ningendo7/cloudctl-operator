@@ -434,3 +434,62 @@ func TestReconcile_AWaitAWatchEndsIsRetriedAtTheDriftPace(t *testing.T) {
 		}
 	})
 }
+
+// A wait that outlasts any blip (an index building for hours, an instance
+// that never comes up) is polled at the drift pace after a while, not every
+// couple of minutes forever; the first stretch stays quick.
+func TestReconcile_ALongWaitIsRetriedAtTheDriftPace(t *testing.T) {
+	cr := transientCR()
+	r, sqsFake := throttledReconciler(t, cr)
+	sqsFake.getQueueUrlErr = &smithy.GenericAPIError{Code: "ThrottlingException"}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+	var last ctrl.Result
+	for pass := 1; pass <= transientLongAfter; pass++ {
+		var err error
+		if last, err = r.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("pass %d: Reconcile() error = %v", pass, err)
+		}
+	}
+	if !withinJitter(last.RequeueAfter, transientMaxDelay) {
+		t.Fatalf("pass %d: RequeueAfter = %v, want still about %v", transientLongAfter, last.RequeueAfter, transientMaxDelay)
+	}
+
+	res, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !withinJitter(res.RequeueAfter, DriftDetectionInterval) {
+		t.Errorf("RequeueAfter = %v after %d failures, want about %v", res.RequeueAfter, transientLongAfter, DriftDetectionInterval)
+	}
+
+	sqsFake.getQueueUrlErr = nil
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	sqsFake.getQueueUrlErr = &smithy.GenericAPIError{Code: "ThrottlingException"}
+	res, err = r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !withinJitter(res.RequeueAfter, transientRequeueInterval) {
+		t.Errorf("RequeueAfter = %v after a success, want the quick pace again (about %v)", res.RequeueAfter, transientRequeueInterval)
+	}
+}
+
+// A queue encrypted with a key nobody declared waits for the user to edit
+// the spec, which wakes the CR at once, so polling it is pointless.
+func TestReconcile_AnUndeclaredKMSKeyRefIsRetriedAtTheDriftPace(t *testing.T) {
+	cr := transientCR()
+	cr.Spec.SQS.Resources[0].Encryption = &depsv1alpha1.EncryptionSpec{KMSKeyRef: "shared"}
+	r, _ := throttledReconciler(t, cr)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+	res, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want a requeue", err)
+	}
+	if !withinJitter(res.RequeueAfter, DriftDetectionInterval) {
+		t.Errorf("RequeueAfter = %v, want about %v", res.RequeueAfter, DriftDetectionInterval)
+	}
+}

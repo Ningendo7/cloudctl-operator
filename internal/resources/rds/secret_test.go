@@ -208,8 +208,13 @@ func TestEnsureCredentialsSecret_LabelsSecretAsManaged(t *testing.T) {
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: CredentialsSecretName("checkout-service")}, &secret); err != nil {
 		t.Fatalf("get Secret: %v", err)
 	}
-	if got := secret.Labels[depsv1alpha1.ManagedByLabelKey]; got != depsv1alpha1.ManagedByLabelValue {
-		t.Errorf("label %s = %q, want %q", depsv1alpha1.ManagedByLabelKey, got, depsv1alpha1.ManagedByLabelValue)
+	for key, want := range map[string]string{
+		depsv1alpha1.ManagedLabelKey:   depsv1alpha1.ManagedLabelValue,
+		depsv1alpha1.ManagedByLabelKey: depsv1alpha1.ManagedByLabelValue,
+	} {
+		if got := secret.Labels[key]; got != want {
+			t.Errorf("label %s = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -552,5 +557,44 @@ func TestEnsureCredentialsSecret_AppliesOnlyWhenTheCredentialsChange(t *testing.
 	}
 	if string(secret.Data["RDS_ORDERS_DB_PASSWORD"]) != "rotated" {
 		t.Errorf("password = %q, want the rotated one", secret.Data["RDS_ORDERS_DB_PASSWORD"])
+	}
+}
+
+func TestEnsureCredentialsSecret_LabelsDecideWhetherItIsApplied(t *testing.T) {
+	rdsClient := newFakeRDS()
+	smClient := newFakeSecretsManager()
+	cr := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
+	k8sClient, applies := countingApplies(t, cr)
+	key := client.ObjectKey{Namespace: "default", Name: CredentialsSecretName("checkout-service")}
+	ensure := func() {
+		t.Helper()
+		if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
+			t.Fatalf("EnsureCredentialsSecret() error = %v", err)
+		}
+	}
+	relabel := func(mutate func(map[string]string)) {
+		t.Helper()
+		var secret corev1.Secret
+		if err := k8sClient.Get(context.Background(), key, &secret); err != nil {
+			t.Fatal(err)
+		}
+		mutate(secret.Labels)
+		if err := k8sClient.Update(context.Background(), &secret); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ensure()
+	relabel(func(l map[string]string) { l[depsv1alpha1.ManagedByLabelKey] = "Helm" })
+	before := *applies
+	ensure()
+	if *applies != before {
+		t.Errorf("applies = %d after the managed-by label was rewritten, want none", *applies-before)
+	}
+
+	relabel(func(l map[string]string) { delete(l, depsv1alpha1.ManagedLabelKey) })
+	ensure()
+	if *applies != before+1 {
+		t.Errorf("applies = %d after the managed label was removed, want exactly one", *applies-before)
 	}
 }

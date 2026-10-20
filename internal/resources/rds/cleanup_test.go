@@ -1121,3 +1121,50 @@ func TestCleanup_ARelinquishedInstanceDeletedByHandIsForgottenAtTheNextRecheck(t
 		t.Error("expected the entry dropped once the instance is gone and the recheck is due")
 	}
 }
+
+// Once someone deletes a stuck instance, nothing else notices its final
+// snapshot being deleted too, and its entry would keep the snapshot's key.
+func TestCleanup_AFinalSnapshotEntryGoesOnceItsInstanceAndSnapshotAreGone(t *testing.T) {
+	client := newFakeRDS()
+	client.snapshotStatus = "available"
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyDelete)
+	ledger = setMarked(t, client, ledger, "orders-db")
+	ledger = backdatePendingDeletion(ledger, "orders-db", PendingDeletionGracePeriod+time.Hour)
+	cleanup := func() {
+		t.Helper()
+		var err error
+		if ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+	}
+	cleanup() // takes the snapshot
+	cleanup() // sees it available
+	snapshot, found := status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	if !found || snapshot.State != depsv1alpha1.ManagedResourceStateVerified {
+		t.Fatalf("test setup: snapshot entry %+v (found=%v), want Verified", snapshot, found)
+	}
+
+	delete(client.instances, cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, "default", "checkout-service", resourceType, "orders-db", 63))
+	cleanup() // the instance entry goes
+	if status.HasManagedResource(ledger, resourceType, "orders-db") {
+		t.Fatal("test setup: the instance entry should be gone")
+	}
+	if !status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
+		t.Fatal("the snapshot is still there, so its entry must stay")
+	}
+
+	delete(client.snapshots, snapshot.ARN)
+	cleanup()
+	if !status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
+		t.Fatal("a snapshot entry must not be read again within the recheck interval")
+	}
+	snapshot, _ = status.FindManagedResource(ledger, snapshotResourceType, "orders-db")
+	old := metav1.NewTime(time.Now().Add(-status.RelinquishedRecheckInterval - time.Hour))
+	snapshot.LastVerifiedAt = &old
+	status.UpsertManagedResource(&ledger, snapshot)
+
+	cleanup()
+	if status.HasManagedResource(ledger, snapshotResourceType, "orders-db") {
+		t.Error("expected the entry dropped once the instance and the snapshot are both gone")
+	}
+}
