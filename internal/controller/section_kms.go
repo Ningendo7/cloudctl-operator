@@ -24,6 +24,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
@@ -254,7 +255,7 @@ func kmsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 				if missing := undeclaredKMSKeyRefs(cr); len(missing) > 0 {
 					conditionErr = &cloudctlaws.ReconcileError{
 						Err:    fmt.Errorf("encryption.kmsKeyRef names %s, not declared under kms.resources", strings.Join(missing, ", ")),
-						Reason: "KMSKeyRefNotDeclared",
+						Reason: reasons.KMSKeyRefNotDeclared,
 					}
 				}
 			}
@@ -307,7 +308,7 @@ func refuseLegacyKMSKeyRef(ctx context.Context, r *AppDependenciesReconciler, cr
 	setSectionCondition(ctx, cr, conditionTypeKMSReady, &cloudctlaws.ReconcileError{
 		Err: fmt.Errorf("%s uses the cross-CR form of encryption.kmsKeyRef that v0.3.0 removed; set it to the name of a key under this CR's kms.resources, "+
 			"or use encryption.enabled for a dedicated key. Nothing is reconciled until it is fixed", where),
-		Reason: reasonLegacyKMSKeyRef,
+		Reason: reasons.LegacyKMSKeyRef,
 	}, eventRecorderFor(r, cr))
 	// A spec edit bumps the generation and triggers the next reconcile.
 	return true, r.Status().Patch(ctx, cr, statusPatch(original, cr))

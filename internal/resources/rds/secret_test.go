@@ -32,6 +32,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 // ownedCRWithCredentials builds a CR owning one RDS instance whose fake
@@ -475,8 +476,8 @@ func TestKeyedData_RefusesASecondSourceForAKey(t *testing.T) {
 	}
 	err := d.Put("RDS_ORDERS_HOST", "b", "instance Orders")
 	var reconcileErr *cloudctlaws.ReconcileError
-	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != ReasonKeyCollision || reconcileErr.Retryable {
-		t.Fatalf("expected a non-retryable %s error, got %v", ReasonKeyCollision, err)
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.ConnectionKeyCollision || reconcileErr.Retryable {
+		t.Fatalf("expected a non-retryable %s error, got %v", reasons.ConnectionKeyCollision, err)
 	}
 	for _, name := range []string{"instance orders", "instance Orders", "RDS_ORDERS_HOST"} {
 		if !strings.Contains(err.Error(), name) {
@@ -502,8 +503,8 @@ func TestEnsureCredentialsSecret_RefusesInstancesWhoseKeysCollide(t *testing.T) 
 
 	err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, first)
 	var reconcileErr *cloudctlaws.ReconcileError
-	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != ReasonKeyCollision {
-		t.Fatalf("expected %s, got %v", ReasonKeyCollision, err)
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.ConnectionKeyCollision {
+		t.Fatalf("expected %s, got %v", reasons.ConnectionKeyCollision, err)
 	}
 	var secret corev1.Secret
 	if getErr := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: CredentialsSecretName("checkout-service")}, &secret); getErr == nil {

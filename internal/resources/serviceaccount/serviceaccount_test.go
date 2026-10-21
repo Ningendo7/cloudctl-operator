@@ -33,6 +33,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 func newScheme(t *testing.T) *runtime.Scheme {
@@ -113,7 +114,7 @@ func TestEnsure_ExplicitNameThatDoesNotExist_IsReportedNotCreated(t *testing.T) 
 	cr := newCR("ns", "checkout", "custom-sa")
 
 	_, err := Ensure(context.Background(), c, cr, "arn:aws:iam::123456789012:role/ns-checkout-role")
-	assertReason(t, err, ReasonServiceAccountNotFound)
+	assertReason(t, err, reasons.ServiceAccountNotFound)
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "custom-sa"}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
 		t.Errorf("expected the ServiceAccount not to be created, got %v", err)
 	}
@@ -475,7 +476,7 @@ func TestEnsure_RefusesToReplaceARoleSetOutsideTheOperator(t *testing.T) {
 				}
 				return
 			}
-			assertReason(t, err, ReasonServiceAccountNotClaimable)
+			assertReason(t, err, reasons.ServiceAccountNotClaimable)
 			if !strings.Contains(err.Error(), AllowClaimAnnotation) {
 				t.Errorf("the error should say how to consent: %v", err)
 			}
@@ -501,7 +502,7 @@ func TestEnsure_ARefusedRetargetKeepsThePreviousServiceAccount(t *testing.T) {
 
 	cr.Spec.ServiceAccountName = "payments-api"
 	_, err = Ensure(context.Background(), c, cr, role)
-	assertReason(t, err, ReasonServiceAccountNotClaimable)
+	assertReason(t, err, reasons.ServiceAccountNotClaimable)
 	if getSA(t, c, "ns", "checkout-sa").Annotations[RoleARNAnnotation] != role {
 		t.Error("the previous ServiceAccount lost its role although the retarget was refused")
 	}
@@ -515,8 +516,8 @@ func TestEnsureNetworkIdentityLabel_OnlyLabelsServiceAccountsItMay(t *testing.T)
 		saName     string
 		wantReason string
 	}{
-		"a named ServiceAccount that doesn't exist":    {nil, "payments-api", ReasonServiceAccountNotFound},
-		"one carrying a role set outside the operator": {[]client.Object{saWithRole("payments-api", nil)}, "payments-api", ReasonServiceAccountNotClaimable},
+		"a named ServiceAccount that doesn't exist":    {nil, "payments-api", reasons.ServiceAccountNotFound},
+		"one carrying a role set outside the operator": {[]client.Object{saWithRole("payments-api", nil)}, "payments-api", reasons.ServiceAccountNotClaimable},
 		"the same, consenting":                         {[]client.Object{saWithRole("payments-api", map[string]string{AllowClaimAnnotation: "checkout"})}, "payments-api", ""},
 		"a plain ServiceAccount":                       {[]client.Object{&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "app"}}}, "app", ""},
 	}

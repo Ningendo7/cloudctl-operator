@@ -28,11 +28,10 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
-
-const reasonAdoptionConflict = "AdoptionConflict"
 
 // checkAdoptable refuses to adopt an existing, untagged instance whose
 // settings differ from the spec. Adoption must not change an instance, and
@@ -95,7 +94,7 @@ func checkAdoptable(
 	return &cloudctlaws.ReconcileError{
 		Err: fmt.Errorf("instance %q exists but cannot be adopted as declared: %s - adoption never changes an instance, "+
 			"so make the spec match what exists, adopt, and then change the spec", instanceID, strings.Join(conflicts, "; ")),
-		Reason: reasonAdoptionConflict,
+		Reason: reasons.AdoptionConflict,
 	}
 }
 
@@ -137,7 +136,7 @@ func encryptionConflict(
 	}
 	err := kms.CheckAdoptedKey(ctx, kmsClient, key, "")
 	var conflict *cloudctlaws.ReconcileError
-	if errors.As(err, &conflict) && conflict.Reason == reasonAdoptionConflict {
+	if errors.As(err, &conflict) && conflict.Reason == reasons.AdoptionConflict {
 		return conflict.Err.Error(), nil
 	}
 	return "", err

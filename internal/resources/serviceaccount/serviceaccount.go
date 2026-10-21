@@ -37,6 +37,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -82,13 +83,6 @@ func networkIdentityFieldOwner(crUID string) client.FieldOwner {
 // who may lack that access.
 const AllowClaimAnnotation = "cloudctl.io/allow-claim"
 
-// Reasons a ServiceAccount can't be used.
-const (
-	ReasonServiceAccountNotFound     = "ServiceAccountNotFound"
-	ReasonServiceAccountNotClaimable = "ServiceAccountNotClaimable"
-	ReasonServiceAccountInUse        = "ServiceAccountInUse"
-)
-
 // claimError says why the CR may not modify an existing ServiceAccount, or
 // nil. One already claimed by another CR is refused, and so is one carrying
 // an IAM role set outside this operator, unless it consents through
@@ -101,14 +95,14 @@ func claimError(sa *corev1.ServiceAccount, namespace, crName, crUID string) erro
 	if owner := sa.Annotations[cloudctlaws.OwnerTagKey]; owner != "" {
 		return &cloudctlaws.ReconcileError{
 			Err:    fmt.Errorf("ServiceAccount %q is already claimed by a different AppDependencies CR (%s)", sa.Name, owner),
-			Reason: ReasonServiceAccountInUse,
+			Reason: reasons.ServiceAccountInUse,
 		}
 	}
 	if role := sa.Annotations[RoleARNAnnotation]; role != "" && sa.Annotations[AllowClaimAnnotation] != crName {
 		return &cloudctlaws.ReconcileError{
 			Err: fmt.Errorf("ServiceAccount %q already has IAM role %s, set outside this operator; to hand it to this CR, annotate it with %s=%s",
 				sa.Name, role, AllowClaimAnnotation, crName),
-			Reason: ReasonServiceAccountNotClaimable,
+			Reason: reasons.ServiceAccountNotClaimable,
 		}
 	}
 	return nil
@@ -118,7 +112,7 @@ func notFoundError(name string) error {
 	return &cloudctlaws.ReconcileError{
 		Err:       fmt.Errorf("ServiceAccount %q does not exist; create it, or leave the name unset to have one created for this CR", name),
 		Retryable: true,
-		Reason:    ReasonServiceAccountNotFound,
+		Reason:    reasons.ServiceAccountNotFound,
 	}
 }
 

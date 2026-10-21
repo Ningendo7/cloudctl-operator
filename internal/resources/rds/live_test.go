@@ -62,6 +62,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -327,8 +328,8 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		_, err := Ensure(ctx, rdsClient, kmsClient, ec2Client, k8sClient, namespace, crName, "uid-1", region, accountID, spec, ledger, nil, nil)
 		spec.Resources[0].Engine = "postgres"
 		var reconcileErr *cloudctlaws.ReconcileError
-		if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonImmutableSettingChanged {
-			t.Errorf("expected %s, got %v", reasonImmutableSettingChanged, err)
+		if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.ImmutableSettingChanged {
+			t.Errorf("expected %s, got %v", reasons.ImmutableSettingChanged, err)
 		}
 	})
 

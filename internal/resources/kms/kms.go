@@ -34,6 +34,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -341,7 +342,7 @@ func resumeKey(
 	if tagMap := tagsToMap(tags); !cloudctlaws.IsOwnedBy(tagMap, namespace, crName, crUID) {
 		staleUID, stale := cloudctlaws.IsStaleUID(tagMap, namespace, crName, crUID)
 		if !stale || !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-			return ledger, fmt.Errorf("KMS key %q is no longer tagged as owned by this CR - refusing to manage it further", entry.Name)
+			return ledger, cloudctlaws.OwnershipLostError("KMS key", entry.Name, "manage it further")
 		}
 		if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
 			KeyId: &entry.ARN,
@@ -405,17 +406,17 @@ func adoptKey(
 		return recordKey(ledger, resourceName, arn, opts.deletionPolicy, depsv1alpha1.ManagedResourceStateVerified), nil
 	}
 	if existingOwner, ok := tagMap[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-		return ledger, fmt.Errorf("KMS alias %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", alias, existingOwner)
+		return ledger, cloudctlaws.OwnedByAnotherCRError("KMS alias", alias, existingOwner)
 	}
 	transferred := false
 	if staleUID, stale := cloudctlaws.IsStaleUID(tagMap, namespace, crName, crUID); stale {
 		if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-			return ledger, fmt.Errorf("KMS alias %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", alias, staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
+			return ledger, cloudctlaws.PreviousIncarnationError("KMS alias", alias, staleUID)
 		}
 		transferred = true
 	}
 	if !transferred && !opts.adopt {
-		return ledger, fmt.Errorf("KMS alias %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", alias)
+		return ledger, cloudctlaws.AdoptRequiredError("KMS alias", alias)
 	}
 
 	merged := cloudctlaws.MergeTags(tagMap, ownerTags(namespace, crName, crUID))
@@ -564,9 +565,6 @@ func ensureKeyPolicy(ctx context.Context, kmsClient kmsAPI, arn string) error {
 	return err
 }
 
-// reasonAdoptionConflict is the reason RDS gives for the same kind of refusal.
-const reasonAdoptionConflict = "AdoptionConflict"
-
 // CheckAdoptedKey decides whether a resource found encrypted with currentKey
 // (a key ID, ARN or alias; empty for none or a key AWS owns) can be adopted
 // by a spec that wants wantKey (an ARN, empty for none). A key AWS manages
@@ -592,7 +590,7 @@ func CheckAdoptedKey(ctx context.Context, kmsClient kmsAPI, currentKey, wantKey 
 	return &cloudctlaws.ReconcileError{
 		Err: fmt.Errorf("it is encrypted with KMS key %s, which this CR doesn't manage; declare that key under "+
 			"kms.resources with adopt: true and point encryption.kmsKeyRef at it", arn),
-		Reason: reasonAdoptionConflict,
+		Reason: reasons.AdoptionConflict,
 	}
 }
 
@@ -604,25 +602,18 @@ func AdoptedKeyCheck(kmsClient kmsAPI, wantKey *string) func(ctx context.Context
 	}
 }
 
-// Reasons for a key the operator won't use, and won't change on its own:
-// someone may have disabled it deliberately, during an incident for example.
-const (
-	reasonKeyDisabled    = "KeyDisabled"
-	reasonKeyUnavailable = "KeyUnavailable"
-)
-
 // keyStateError reports a key that can't encrypt or decrypt, since every
 // resource encrypted under it then fails for the app. PendingDeletion is
 // handled by its callers.
 func keyStateError(arn string, state types.KeyState, recordEvent status.EventRecorder) error {
-	reason := reasonKeyUnavailable
+	reason := reasons.KeyUnavailable
 	switch state {
 	case types.KeyStateEnabled, types.KeyStatePendingDeletion:
 		return nil
 	case types.KeyStateCreating, types.KeyStateUpdating:
 		return &cloudctlaws.ReconcileError{Err: fmt.Errorf("KMS key %s is %s", arn, state), Retryable: true}
 	case types.KeyStateDisabled:
-		reason = reasonKeyDisabled
+		reason = reasons.KeyDisabled
 	}
 	msg := fmt.Sprintf("KMS key %s is %s, so nothing encrypted with it can be read or written; the operator does not re-enable it", arn, state)
 	if recordEvent != nil {

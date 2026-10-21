@@ -24,15 +24,13 @@ import (
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 // ConditionTypeReady is the aggregate condition computed from every
 // currently-required per-section condition (e.g. SQSReady, S3Ready).
 const ConditionTypeReady = "Ready"
-
-// reasonSectionsNotReady is Ready's reason for a section that has no
-// condition of its own yet, or has not run for the current generation.
-const reasonSectionsNotReady = "SectionsNotReady"
 
 // ConditionTypeDeletionBlocked reports a CR stuck mid-deletion because at
 // least one owned resource is still waiting on its non-empty guard (or, for
@@ -116,7 +114,7 @@ func SetSectionCondition(conditions *[]metav1.Condition, conditionType string, s
 
 func recomputeReady(conditions *[]metav1.Condition, sectionTypes []string, observedGeneration int64) {
 	readyStatus := metav1.ConditionTrue
-	reason := "AllSectionsReady"
+	reason := reasons.AllSectionsReady
 	message := "all declared sections are ready"
 
 	var alsoNotReady []string
@@ -127,7 +125,7 @@ func recomputeReady(conditions *[]metav1.Condition, sectionTypes []string, obser
 		case c == nil || c.Status != metav1.ConditionTrue:
 			// Ready reports why the first section is not ready, in that
 			// section's own words, so kubectl get shows the cause.
-			sectionReason, sectionMessage = reasonSectionsNotReady, t+" is not ready"
+			sectionReason, sectionMessage = reasons.SectionsNotReady, t+" is not ready"
 			if c != nil && c.Reason != "" {
 				sectionReason, sectionMessage = c.Reason, t+": "+c.Message
 			}
@@ -141,7 +139,7 @@ func recomputeReady(conditions *[]metav1.Condition, sectionTypes []string, obser
 			// reached and passed that section - without this check, Ready
 			// could flip True mid-reconcile the moment every section
 			// happens to be True for ANY generation, not the current one.
-			sectionReason, sectionMessage = reasonSectionsNotReady, t+" has not been reconciled for the current generation yet"
+			sectionReason, sectionMessage = reasons.SectionsNotReady, t+" has not been reconciled for the current generation yet"
 		default:
 			continue
 		}
@@ -170,19 +168,19 @@ func recomputeReady(conditions *[]metav1.Condition, sectionTypes []string, obser
 // rather than keep showing whatever Ready last said before deletion started
 // (the per-section conditions aren't touched by the deletion path at all, so
 // nothing else would ever correct it).
-func SetDeletionBlocked(conditions *[]metav1.Condition, observedGeneration int64, reasons []string) {
-	message := JoinCapped(reasons, "; ")
+func SetDeletionBlocked(conditions *[]metav1.Condition, observedGeneration int64, blocked []string) {
+	message := JoinCapped(blocked, "; ")
 	apimeta.SetStatusCondition(conditions, metav1.Condition{
 		Type:               ConditionTypeDeletionBlocked,
 		Status:             metav1.ConditionTrue,
-		Reason:             "ResourcesNotDrained",
+		Reason:             reasons.ResourcesNotDrained,
 		Message:            message,
 		ObservedGeneration: observedGeneration,
 	})
 	apimeta.SetStatusCondition(conditions, metav1.Condition{
 		Type:               ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             "DeletionBlocked",
+		Reason:             reasons.DeletionBlocked,
 		Message:            message,
 		ObservedGeneration: observedGeneration,
 	})

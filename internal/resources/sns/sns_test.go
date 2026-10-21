@@ -30,6 +30,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kmstest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
@@ -676,8 +677,8 @@ func TestEnsure_RefusesAFlippedFIFOWhileTheOldTopicIsStillTracked(t *testing.T) 
 	_, err = Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, flipped, ledger, nil, nil)
 
 	var reconcileErr *cloudctlaws.ReconcileError
-	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != cloudctlaws.ReasonFIFOChanged {
-		t.Fatalf("expected a %s error, got %v", cloudctlaws.ReasonFIFOChanged, err)
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.FIFOChanged {
+		t.Fatalf("expected a %s error, got %v", reasons.FIFOChanged, err)
 	}
 	if len(client.topics) != topics {
 		t.Error("a refused flip must not create the other kind of topic")

@@ -24,6 +24,8 @@ import (
 	"testing"
 
 	"pgregory.net/rapid"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 func TestResourceName(t *testing.T) {
@@ -375,8 +377,8 @@ func TestCheckFIFOUnchanged(t *testing.T) {
 				return
 			}
 			var reconcileErr *ReconcileError
-			if !errors.As(err, &reconcileErr) || reconcileErr.Retryable || reconcileErr.Reason != ReasonFIFOChanged {
-				t.Fatalf("expected a permanent %s error, got %v", ReasonFIFOChanged, err)
+			if !errors.As(err, &reconcileErr) || reconcileErr.Retryable || reconcileErr.Reason != reasons.FIFOChanged {
+				t.Fatalf("expected a permanent %s error, got %v", reasons.FIFOChanged, err)
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)

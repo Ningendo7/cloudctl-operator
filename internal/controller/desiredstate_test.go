@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -42,6 +43,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/observability"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -877,16 +879,16 @@ func TestWarnIfLedgerLarge(t *testing.T) {
 		}
 		return cr
 	}
-	var reasons []string
-	record := func(eventType, reason, _ string) { reasons = append(reasons, eventType+"/"+reason) }
+	var recorded []string
+	record := func(eventType, reason, _ string) { recorded = append(recorded, eventType+"/"+reason) }
 
 	warnIfLedgerLarge(ledgerOf(largeLedgerEntries), record)
-	if len(reasons) != 0 {
-		t.Fatalf("no warning expected at the threshold, got %v", reasons)
+	if len(recorded) != 0 {
+		t.Fatalf("no warning expected at the threshold, got %v", recorded)
 	}
 	warnIfLedgerLarge(ledgerOf(largeLedgerEntries+1), record)
-	if len(reasons) != 1 || reasons[0] != "Warning/LedgerLarge" {
-		t.Errorf("expected one Warning/LedgerLarge past the threshold, got %v", reasons)
+	if len(recorded) != 1 || recorded[0] != "Warning/LedgerLarge" {
+		t.Errorf("expected one Warning/LedgerLarge past the threshold, got %v", recorded)
 	}
 	warnIfLedgerLarge(ledgerOf(largeLedgerEntries+1), nil) // no recorder wired: must not panic
 }
@@ -971,12 +973,51 @@ func TestReconcile_ACRWithResourcesInAnotherRegionIsRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 			cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionTypeSQSReady)
-			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonRegionChanged {
-				t.Errorf("SQSReady = %+v, want False with reason %s", cond, reasonRegionChanged)
+			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasons.RegionChanged {
+				t.Errorf("SQSReady = %+v, want False with reason %s", cond, reasons.RegionChanged)
 			}
 			if len(updated.Status.ManagedResources) != len(inOtherRegion) {
 				t.Errorf("the ledger must be left alone, has %d entries", len(updated.Status.ManagedResources))
 			}
 		})
+	}
+}
+
+func TestSetSectionCondition_AnOwnershipRefusalNamesItsReasonOnTheSectionTheEventAndReady(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{}
+	cr.Generation = 1
+	var recorded []string
+	record := func(eventType, reason, _ string) { recorded = append(recorded, eventType+"/"+reason) }
+
+	_, err := cloudctlaws.CheckExistingOwnership(context.Background(), "queue", "orders", nil, "ns", "app", "uid", false)
+	setSectionCondition(context.Background(), cr, conditionTypeSQSReady, err, record)
+
+	section := apimeta.FindStatusCondition(cr.Status.Conditions, conditionTypeSQSReady)
+	if section == nil || section.Reason != reasons.AdoptRequired {
+		t.Fatalf("the section should carry %s, got %+v", reasons.AdoptRequired, section)
+	}
+	ready := apimeta.FindStatusCondition(cr.Status.Conditions, status.ConditionTypeReady)
+	if ready == nil || ready.Reason != reasons.AdoptRequired || !strings.HasPrefix(ready.Message, "SQSReady: ") {
+		t.Errorf("Ready should carry the section's reason and name it, got %+v", ready)
+	}
+	if want := "Warning/AdoptRequired"; !slices.Contains(recorded, want) {
+		t.Errorf("expected the event %s, got %v", want, recorded)
+	}
+}
+
+func TestSetSectionCondition_NoSecondEventForAReasonThatRecordsItsOwn(t *testing.T) {
+	var recorded []string
+	record := func(eventType, reason, _ string) { recorded = append(recorded, eventType+"/"+reason) }
+
+	own := &cloudctlaws.ReconcileError{Err: errors.New("gone"), Reason: reasons.InstanceMissing}
+	setSectionCondition(context.Background(), &depsv1alpha1.AppDependencies{}, conditionTypeRDSReady, own, record)
+	if len(recorded) != 0 {
+		t.Errorf("InstanceMissing is recorded where it is raised, not again here, got %v", recorded)
+	}
+
+	other := &cloudctlaws.ReconcileError{Err: errors.New("exists"), Reason: reasons.NameTaken}
+	setSectionCondition(context.Background(), &depsv1alpha1.AppDependencies{}, conditionTypeRDSReady, other, record)
+	if !slices.Equal(recorded, []string{"Warning/NameTaken"}) {
+		t.Errorf("a reason without an event of its own is recorded here, got %v", recorded)
 	}
 }

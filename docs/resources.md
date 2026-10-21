@@ -445,7 +445,7 @@ A move to another **region** is not supported: an operator refuses a CR whose re
 - **`kubectl get appdeps`** shows `Ready`, and the aggregate condition's
   `Reason`, which is the first section that isn't ready, in its own words
   (`-o wide` adds the message). Every section's condition is under
-  `status.conditions`.
+  `status.conditions`; [reasons.md](reasons.md) lists every reason.
 - **Ownership tagging, adoption, and the trust window** — see
   [architecture.md](architecture.md#ownership-a-resource-is-owned-by-exactly-one-cr).
 - **Deletion safety, the quiet window, and `PendingDeletion`/`StuckPendingDeletion`** —

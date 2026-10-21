@@ -165,7 +165,7 @@ func Cleanup(
 		}
 		if !cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, crUID) {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("table %q no longer verified as owned by this CR — refusing to delete it", entry.Name)
+				firstErr = cloudctlaws.OwnershipLostError("table", entry.Name, "delete it")
 			}
 			continue
 		}

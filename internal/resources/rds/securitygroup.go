@@ -35,6 +35,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -209,7 +210,7 @@ func deleteGroupError(err error, errContext string) error {
 		return &cloudctlaws.ReconcileError{
 			Err:       fmt.Errorf("%s: still in use by another group's rule or a network interface; retrying: %w", errContext, err),
 			Retryable: true,
-			Reason:    reasonWaitingForRuleRelease,
+			Reason:    reasons.WaitingForRuleRelease,
 		}
 	}
 	return wrapEC2Error(err, errContext)
@@ -283,11 +284,14 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 			return groupID, existing.IpPermissions, nil
 		}
 		if owner, ok := tags[cloudctlaws.OwnerTagKey]; ok && owner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return "", nil, fmt.Errorf("security group %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", groupID, owner)
+			return "", nil, cloudctlaws.OwnedByAnotherCRError("security group", groupID, owner)
 		}
 		staleUID, stale := cloudctlaws.IsStaleUID(tags, namespace, crName, crUID)
 		if !adopt && (!stale || !cloudctlaws.MayTransferFrom(ctx, staleUID)) {
-			return "", nil, fmt.Errorf("security group %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", groupID)
+			if stale {
+				return "", nil, cloudctlaws.PreviousIncarnationError("security group", groupID, staleUID)
+			}
+			return "", nil, cloudctlaws.AdoptRequiredError("security group", groupID)
 		}
 		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 			Resources: []string{groupID},

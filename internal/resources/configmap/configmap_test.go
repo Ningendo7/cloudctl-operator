@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -401,8 +402,10 @@ func TestEnsure_PreExistingForeignConfigMap_Refused(t *testing.T) {
 		},
 	}
 
-	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err == nil {
-		t.Fatal("expected Ensure to refuse overwriting a ConfigMap it doesn't own")
+	err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.NameTaken {
+		t.Fatalf("expected a %s refusal for a ConfigMap it doesn't own, got %v", reasons.NameTaken, err)
 	}
 
 	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
@@ -561,8 +564,8 @@ func sqsProducer(namespace, crName, queue string, shareWith ...depsv1alpha1.Shar
 func assertCollision(t *testing.T, err error, sources ...string) {
 	t.Helper()
 	var reconcileErr *cloudctlaws.ReconcileError
-	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != rds.ReasonKeyCollision {
-		t.Fatalf("expected %s, got %v", rds.ReasonKeyCollision, err)
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.ConnectionKeyCollision {
+		t.Fatalf("expected %s, got %v", reasons.ConnectionKeyCollision, err)
 	}
 	for _, s := range sources {
 		if !strings.Contains(err.Error(), s) {

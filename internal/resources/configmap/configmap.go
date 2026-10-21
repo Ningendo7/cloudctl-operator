@@ -39,6 +39,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/iam"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
@@ -102,7 +103,7 @@ func Ensure(ctx context.Context, k8sClient client.Client, apiReader client.Reade
 
 	if exists {
 		if owner := metav1.GetControllerOf(existing); owner == nil || owner.UID != cr.UID {
-			return fmt.Errorf("ConfigMap %q already exists and is not owned by this CR - refusing to manage it", name)
+			return &cloudctlaws.ReconcileError{Err: fmt.Errorf("ConfigMap %q already exists and is not owned by this CR - refusing to manage it", name), Reason: reasons.NameTaken}
 		}
 	}
 

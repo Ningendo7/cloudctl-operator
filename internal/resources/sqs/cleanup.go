@@ -228,7 +228,7 @@ func Cleanup(
 		}
 		if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, crUID) {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("queue %q no longer verified as owned by this CR — refusing to delete it", entry.Name)
+				firstErr = cloudctlaws.OwnershipLostError("queue", entry.Name, "delete it")
 			}
 			continue
 		}

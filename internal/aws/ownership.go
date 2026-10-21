@@ -19,6 +19,8 @@ package aws
 import (
 	"context"
 	"fmt"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 const (
@@ -106,16 +108,50 @@ func MayTransferFrom(ctx context.Context, staleUID string) bool {
 // in the error ("queue", "bucket").
 func CheckExistingOwnership(ctx context.Context, kind, name string, tags map[string]string, namespace, crName, crUID string, adopt bool) (transferred bool, err error) {
 	if owner, ok := tags[OwnerTagKey]; ok && owner != OwnerTagValue(namespace, crName) {
-		return false, fmt.Errorf("%s %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", kind, name, owner)
+		return false, OwnedByAnotherCRError(kind, name, owner)
 	}
 	if staleUID, stale := IsStaleUID(tags, namespace, crName, crUID); stale {
 		if !MayTransferFrom(ctx, staleUID) {
-			return false, fmt.Errorf("%s %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", kind, name, staleUID, AdoptFromUIDAnnotation, staleUID)
+			return false, PreviousIncarnationError(kind, name, staleUID)
 		}
 		return true, nil
 	}
 	if !adopt {
-		return false, fmt.Errorf("%s %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", kind, name)
+		return false, AdoptRequiredError(kind, name)
 	}
 	return false, nil
+}
+
+// OwnedByAnotherCRError is the refusal for a resource tagged as another CR's.
+func OwnedByAnotherCRError(kind, name, owner string) error {
+	return &ReconcileError{
+		Err:    fmt.Errorf("%s %q is already owned by a different AppDependencies CR (%s) — this looks like a naming collision, not adopting", kind, name, owner),
+		Reason: reasons.OwnedByAnotherCR,
+	}
+}
+
+// PreviousIncarnationError is the refusal for a resource tagged with this
+// CR's name and the UID of an earlier CR.
+func PreviousIncarnationError(kind, name, staleUID string) error {
+	return &ReconcileError{
+		Err:    fmt.Errorf("%s %q is tagged with this CR's name but a different UID (%s) — likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", kind, name, staleUID, AdoptFromUIDAnnotation, staleUID),
+		Reason: reasons.PreviousIncarnation,
+	}
+}
+
+// AdoptRequiredError is the refusal for an untagged resource without adopt.
+func AdoptRequiredError(kind, name string) error {
+	return &ReconcileError{
+		Err:    fmt.Errorf("%s %q exists but is not tagged as owned by this CR — set adopt:true to bring it under management", kind, name),
+		Reason: reasons.AdoptRequired,
+	}
+}
+
+// OwnershipLostError is the refusal to act on a resource whose ownership tags
+// no longer match; refusal finishes the sentence, such as "delete it".
+func OwnershipLostError(kind, name, refusal string) error {
+	return &ReconcileError{
+		Err:    fmt.Errorf("%s %q no longer verified as owned by this CR — refusing to %s", kind, name, refusal),
+		Reason: reasons.OwnershipLost,
+	}
 }

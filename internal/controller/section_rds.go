@@ -23,6 +23,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 )
 
@@ -100,7 +101,7 @@ func rdsSection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependen
 				if names := stuckInstanceNames(results); len(names) > 0 {
 					conditionErr = &cloudctlaws.ReconcileError{
 						Err:    fmt.Errorf("instance(s) %s removed from spec and stuck pending manual deletion - billing continues, this operator will never delete them automatically", strings.Join(names, ", ")),
-						Reason: reasonInstanceStuckPendingDeletion,
+						Reason: reasons.InstanceStuckPendingDeletion,
 					}
 				}
 			}

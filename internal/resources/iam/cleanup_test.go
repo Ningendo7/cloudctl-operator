@@ -28,6 +28,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -378,8 +379,8 @@ func TestCleanup_ARoleWithExternalAttachmentsIsReportedAndCompletesOnceTheyAreGo
 
 	ledger, err := Cleanup(context.Background(), iamClient, newFakeK8sClient(), cr, ledger, true)
 	var reconcileErr *cloudctlaws.ReconcileError
-	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != ReasonRoleHasExternalAttachments || !reconcileErr.Retryable {
-		t.Fatalf("expected a retryable %s error, got %v", ReasonRoleHasExternalAttachments, err)
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.RoleHasExternalAttachments || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable %s error, got %v", reasons.RoleHasExternalAttachments, err)
 	}
 	for _, want := range []string{"AdministratorAccess", "batch-instances"} {
 		if !strings.Contains(err.Error(), want) {
@@ -410,7 +411,7 @@ func TestCleanup_ARoleConflictIsStillReportedWhenTheAttachmentsCannotBeListed(t 
 
 	_, err := Cleanup(context.Background(), iamClient, newFakeK8sClient(), cr, ledger, true)
 	var reconcileErr *cloudctlaws.ReconcileError
-	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != ReasonRoleHasExternalAttachments {
-		t.Fatalf("expected %s, got %v", ReasonRoleHasExternalAttachments, err)
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.RoleHasExternalAttachments {
+		t.Fatalf("expected %s, got %v", reasons.RoleHasExternalAttachments, err)
 	}
 }
