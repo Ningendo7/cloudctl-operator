@@ -183,3 +183,40 @@ func TestStripRequestIDs(t *testing.T) {
 		})
 	}
 }
+
+func TestSetSectionCondition_ReadyReportsTheFirstSectionThatIsNotReady(t *testing.T) {
+	var conditions []metav1.Condition
+	sections := []string{"SQSReady", "S3Ready", "RDSReady"}
+
+	SetSectionCondition(&conditions, "SQSReady", metav1.ConditionTrue, "Reconciled", "ok", 1, sections)
+	SetSectionCondition(&conditions, "S3Ready", metav1.ConditionFalse, "AdoptionConflict", "bucket x is owned by another CR", 1, sections)
+	SetSectionCondition(&conditions, "RDSReady", metav1.ConditionFalse, "TransientError", "instance is still creating", 1, sections)
+
+	ready := findCondition(conditions, ConditionTypeReady)
+	if ready.Status != metav1.ConditionFalse || ready.Reason != "AdoptionConflict" {
+		t.Errorf("Ready should carry the first failing section's reason, got %q (%s)", ready.Reason, ready.Status)
+	}
+	want := "S3Ready: bucket x is owned by another CR (also not ready: RDSReady)"
+	if ready.Message != want {
+		t.Errorf("Ready message = %q, want %q", ready.Message, want)
+	}
+}
+
+func TestSetSectionCondition_ReadyKeepsAGenericReasonForASectionNotRunYet(t *testing.T) {
+	var conditions []metav1.Condition
+	SetSectionCondition(&conditions, "SQSReady", metav1.ConditionTrue, "Reconciled", "ok", 1, []string{"SQSReady", "S3Ready"})
+
+	ready := findCondition(conditions, ConditionTypeReady)
+	if ready.Reason != "SectionsNotReady" || ready.Message != "S3Ready is not ready" {
+		t.Errorf("a section with no condition yet should read as before, got %q: %q", ready.Reason, ready.Message)
+	}
+}
+
+func TestSetSectionCondition_ReadyMessageIsCapped(t *testing.T) {
+	var conditions []metav1.Condition
+	SetSectionCondition(&conditions, "SQSReady", metav1.ConditionFalse, "Error", strings.Repeat("x", MaxMessageLength), 1, []string{"SQSReady"})
+
+	if got := len(findCondition(conditions, ConditionTypeReady).Message); got > MaxMessageLength {
+		t.Errorf("Ready message is %d bytes, over the %d cap", got, MaxMessageLength)
+	}
+}
