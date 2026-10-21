@@ -19,12 +19,13 @@ package aws
 import (
 	"errors"
 	"fmt"
-	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"regexp"
 	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 func TestResourceName(t *testing.T) {

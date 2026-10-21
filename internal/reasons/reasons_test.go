@@ -122,12 +122,12 @@ func TestReasonsDocIsUpToDate(t *testing.T) {
 	path := filepath.Join("..", "..", "docs", "reasons.md")
 	want := Markdown()
 	if *update {
-		if err := os.WriteFile(path, []byte(want), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(want), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		t.Fatalf("%v; generate it with: go test ./internal/reasons -run Doc -update", err)
 	}

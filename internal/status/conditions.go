@@ -18,13 +18,14 @@ package status
 
 import (
 	"fmt"
-	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 // ConditionTypeReady is the aggregate condition computed from every

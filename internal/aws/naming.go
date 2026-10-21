@@ -20,8 +20,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"strings"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 // identityHashLen is how many hex characters of the identity hash appear
