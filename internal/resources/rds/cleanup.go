@@ -148,7 +148,7 @@ func Cleanup(
 		}
 		if !owned {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("instance %q no longer verified as owned by this CR - refusing to act on it", entry.Name)
+				firstErr = cloudctlaws.OwnershipLostError("instance", entry.Name, "act on it")
 			}
 			continue
 		}

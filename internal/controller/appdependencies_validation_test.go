@@ -37,6 +37,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 // These specs exercise the CRD's CEL validation rules against a real
@@ -733,7 +734,7 @@ var _ = Describe("Upgrading the CRD from v0.2.0", func() {
 		kmsReady := apimeta.FindStatusCondition(consumer.Status.Conditions, conditionTypeKMSReady)
 		Expect(kmsReady).NotTo(BeNil())
 		Expect(kmsReady.Status).To(Equal(metav1.ConditionFalse))
-		Expect(kmsReady.Reason).To(Equal(reasonLegacyKMSKeyRef))
+		Expect(kmsReady.Reason).To(Equal(reasons.LegacyKMSKeyRef))
 		Expect(kmsReady.Message).To(And(ContainSubstring(`sqs resource "events"`), ContainSubstring("kms.resources")))
 		Expect(sqsClient.queues).To(BeEmpty(), "an encrypted resource must not be created unencrypted because its key reference was lost")
 

@@ -29,6 +29,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -79,7 +80,7 @@ func Cleanup(
 		return ledger, wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of IAM role %q before delete", name))
 	}
 	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), cr.Namespace, cr.Name, string(cr.UID)) {
-		return ledger, fmt.Errorf("IAM role %q no longer verified as owned by this CR — refusing to delete it", name)
+		return ledger, cloudctlaws.OwnershipLostError("IAM role", name, "delete it")
 	}
 
 	if _, err := iamClient.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{
@@ -121,10 +122,6 @@ func roleNameFromARN(arn string) (string, error) {
 	return arn[idx+1:], nil
 }
 
-// ReasonRoleHasExternalAttachments marks a role AWS refuses to delete
-// because something other than this operator is attached to it.
-const ReasonRoleHasExternalAttachments = "RoleHasExternalAttachments"
-
 // roleInUseError explains why DeleteRole was refused. A managed policy
 // attached by hand (a common quick fix during an incident) or an instance
 // profile is not the operator's to detach, so it names them and retries.
@@ -157,6 +154,6 @@ func roleInUseError(ctx context.Context, iamClient iamAPI, name string) error {
 		Err: fmt.Errorf("IAM role %q can't be deleted while it has %s that this operator did not add; "+
 			"detach them and the deletion continues by itself", name, what),
 		Retryable: true,
-		Reason:    ReasonRoleHasExternalAttachments,
+		Reason:    reasons.RoleHasExternalAttachments,
 	}
 }

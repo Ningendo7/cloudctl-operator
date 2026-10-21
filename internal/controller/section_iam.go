@@ -22,6 +22,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/iam"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/serviceaccount"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
@@ -129,13 +130,13 @@ func iamSection(r *AppDependenciesReconciler) section {
 			cr.Status.ManagedResources = ledger
 			if err != nil {
 				var reconcileErr *cloudctlaws.ReconcileError
-				if errors.As(err, &reconcileErr) && reconcileErr.Reason == iam.ReasonRoleHasExternalAttachments {
+				if errors.As(err, &reconcileErr) && reconcileErr.Reason == reasons.RoleHasExternalAttachments {
 					// Waiting on a person, so say so on the CR, where they
 					// will look, as well as in the log; the error still
 					// requeues it.
 					status.SetDeletionBlocked(&cr.Status.Conditions, cr.Generation, []string{err.Error()})
 					if recordEvent := eventRecorderFor(r, cr); recordEvent != nil {
-						recordEvent("Warning", iam.ReasonRoleHasExternalAttachments, err.Error())
+						recordEvent("Warning", reasons.RoleHasExternalAttachments, err.Error())
 					}
 				}
 				return false, nil, err

@@ -42,6 +42,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/observability"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -971,12 +972,34 @@ func TestReconcile_ACRWithResourcesInAnotherRegionIsRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 			cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionTypeSQSReady)
-			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonRegionChanged {
-				t.Errorf("SQSReady = %+v, want False with reason %s", cond, reasonRegionChanged)
+			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasons.RegionChanged {
+				t.Errorf("SQSReady = %+v, want False with reason %s", cond, reasons.RegionChanged)
 			}
 			if len(updated.Status.ManagedResources) != len(inOtherRegion) {
 				t.Errorf("the ledger must be left alone, has %d entries", len(updated.Status.ManagedResources))
 			}
 		})
+	}
+}
+
+func TestSetSectionCondition_AnOwnershipRefusalNamesItsReasonOnTheSectionTheEventAndReady(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{}
+	cr.Generation = 1
+	var events []string
+	record := func(eventType, reason, _ string) { events = append(events, eventType+"/"+reason) }
+
+	_, err := cloudctlaws.CheckExistingOwnership(context.Background(), "queue", "orders", nil, "ns", "app", "uid", false)
+	setSectionCondition(context.Background(), cr, conditionTypeSQSReady, err, record)
+
+	section := apimeta.FindStatusCondition(cr.Status.Conditions, conditionTypeSQSReady)
+	if section == nil || section.Reason != reasons.AdoptRequired {
+		t.Fatalf("the section should carry %s, got %+v", reasons.AdoptRequired, section)
+	}
+	ready := apimeta.FindStatusCondition(cr.Status.Conditions, status.ConditionTypeReady)
+	if ready == nil || ready.Reason != reasons.AdoptRequired || !strings.HasPrefix(ready.Message, "SQSReady: ") {
+		t.Errorf("Ready should carry the section's reason and name it, got %+v", ready)
+	}
+	if want := "Warning/SQSReadyAdoptRequired"; !slices.Contains(events, want) {
+		t.Errorf("expected the event %s, got %v", want, events)
 	}
 }

@@ -52,6 +52,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/iam"
 )
 
@@ -377,7 +378,7 @@ func reconcileAlarms(
 				exists = false
 			default:
 				if firstErr == nil {
-					firstErr = fmt.Errorf("alarm %q already exists but isn't tagged as owned by this CR — refusing to overwrite it", d.name)
+					firstErr = &cloudctlaws.ReconcileError{Err: fmt.Errorf("alarm %q already exists but isn't tagged as owned by this CR — refusing to overwrite it", d.name), Reason: reasons.NameTaken}
 				}
 				continue
 			}

@@ -32,6 +32,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/observability"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/configmap"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
@@ -150,12 +151,6 @@ const (
 	conditionTypeAlarmsReady         = "AlarmsReady"
 	conditionTypeIAMReady            = "IAMReady"
 	conditionTypeConnectionInfoReady = "ConnectionInfoReady"
-
-	reasonError                        = "Error"
-	reasonTransientError               = "TransientError"
-	reasonLegacyKMSKeyRef              = "LegacyKMSKeyRef"
-	reasonRegionChanged                = "RegionChanged"
-	reasonInstanceStuckPendingDeletion = "InstanceStuckPendingDeletion"
 )
 
 // sectionTypes lists every per-section Ready condition type this CR can
@@ -334,22 +329,22 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 			&cr.Status.Conditions,
 			conditionType,
 			metav1.ConditionTrue,
-			"Reconciled", "reconciled successfully",
+			reasons.Reconciled, "reconciled successfully",
 			cr.Generation,
 			sectionTypes,
 		)
 		return
 	}
 
-	reason := reasonError
+	reason := reasons.Error
 	var reconcileErr *cloudctlaws.ReconcileError
 	switch {
 	case errors.As(err, &reconcileErr) && reconcileErr.Reason != "":
 		reason = reconcileErr.Reason
 	case cloudctlaws.IsPermissionDenied(err):
-		reason = "PermissionDenied"
+		reason = reasons.PermissionDenied
 	case isRetryable(err):
-		reason = reasonTransientError
+		reason = reasons.TransientError
 	}
 
 	// The log keeps the full error; the condition and event get it without
@@ -448,7 +443,7 @@ func refuseOtherRegion(ctx context.Context, r *AppDependenciesReconciler, cr, or
 			setSectionCondition(ctx, cr, sectionForEntryType(entry.Type), &cloudctlaws.ReconcileError{
 				Err: fmt.Errorf("%s %q is in %s but this operator works in %s; resources do not move between regions, so this CR needs an operator in %s. Nothing is reconciled meanwhile",
 					entry.Type, entry.Name, other, region, other),
-				Reason: reasonRegionChanged,
+				Reason: reasons.RegionChanged,
 			}, eventRecorderFor(r, cr))
 			return true, r.Status().Patch(ctx, cr, statusPatch(original, cr))
 		}

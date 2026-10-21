@@ -33,6 +33,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
@@ -375,7 +376,7 @@ func ensureInstanceObserving(
 	case statusFailed:
 		return ledger, &cloudctlaws.ReconcileError{
 			Err:    fmt.Errorf("instance %q entered status %q - this requires manual investigation, not an automatic retry", instanceID, instanceStatus),
-			Reason: instanceStatusReason(instanceStatus),
+			Reason: reasons.InstanceStatus(instanceStatus),
 		}
 	case statusAvailable:
 	case "backing-up", "storage-optimization":
@@ -385,7 +386,7 @@ func ensureInstanceObserving(
 		return ledger, &cloudctlaws.ReconcileError{
 			Err:       fmt.Errorf("instance %q is still %s", instanceID, instanceStatus),
 			Retryable: true,
-			Reason:    instanceStatusReason(instanceStatus),
+			Reason:    reasons.InstanceStatus(instanceStatus),
 		}
 	}
 
@@ -646,8 +647,6 @@ func effectiveAttributes(instance types.DBInstance) instanceAttributes {
 // from DescribeDBInstances before that is treated as it having been deleted.
 const creationVisibilityGrace = 5 * time.Minute
 
-const reasonInstanceMissing = "InstanceMissing"
-
 func instanceMissingError(entry depsv1alpha1.ManagedResource, instanceID string, recordEvent status.EventRecorder) error {
 	if entry.State == depsv1alpha1.ManagedResourceStateCreating && time.Since(entry.CreatedAt.Time) < creationVisibilityGrace {
 		return &cloudctlaws.ReconcileError{
@@ -662,7 +661,7 @@ func instanceMissingError(entry depsv1alpha1.ManagedResource, instanceID string,
 		Err: fmt.Errorf("RDS instance %q (%s) no longer exists in AWS: it was deleted out-of-band, and this operator will not create an empty "+
 			"replacement. Restore it under the same identifier from a snapshot or point-in-time backup and set adopt: true, "+
 			"or remove it from spec and add it again to start fresh", instanceID, entry.ARN),
-		Reason: reasonInstanceMissing,
+		Reason: reasons.InstanceMissing,
 	}
 }
 
@@ -681,20 +680,6 @@ func recordObservedStatus(ledger *[]depsv1alpha1.ManagedResource, resourceName, 
 	entry.ObservedStatus = observed
 	entry.ObservedStatusSince = &now
 	status.UpsertManagedResource(ledger, entry)
-}
-
-// instanceStatusReason turns a DBInstanceStatus such as
-// "configuring-enhanced-monitoring" into a valid condition reason
-// ("InstanceConfiguringEnhancedMonitoring").
-func instanceStatusReason(instanceStatus string) string {
-	var b strings.Builder
-	b.WriteString("Instance")
-	for _, word := range strings.FieldsFunc(instanceStatus, func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
-	}) {
-		b.WriteString(strings.ToUpper(word[:1]) + word[1:])
-	}
-	return b.String()
 }
 
 func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn string, deletionPolicy depsv1alpha1.DeletionPolicy) []depsv1alpha1.ManagedResource {
@@ -785,17 +770,17 @@ func ensureInstanceOwnership(ctx context.Context, awsClient rdsAPI, namespace, c
 
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
 		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return fmt.Errorf("instance %q is already owned by a different AppDependencies CR (%s) - this looks like a naming collision, not adopting", instanceID, existingOwner)
+			return cloudctlaws.OwnedByAnotherCRError("instance", instanceID, existingOwner)
 		}
 		transferred := false
 		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
 			if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-				return fmt.Errorf("instance %q is tagged with this CR's name but a different UID (%s) - likely a stale resource from a deleted-and-recreated CR, refusing to adopt automatically; to take it over, annotate this CR with %s=%s", instanceID, staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
+				return cloudctlaws.PreviousIncarnationError("instance", instanceID, staleUID)
 			}
 			transferred = true
 		}
 		if !transferred && !adopt {
-			return fmt.Errorf("instance %q exists but is not tagged as owned by this CR - set adopt:true to bring it under management", instanceID)
+			return cloudctlaws.AdoptRequiredError("instance", instanceID)
 		}
 
 		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
@@ -816,9 +801,8 @@ func ensureInstanceOwnership(ctx context.Context, awsClient rdsAPI, namespace, c
 	return nil
 }
 
-// reasonImmutableSettingChanged marks a tracked instance whose spec asks for
+// reasons.ImmutableSettingChanged marks a tracked instance whose spec asks for
 // an engine, subnet group or storage encryption it can't have.
-const reasonImmutableSettingChanged = "ImmutableSettingChanged"
 
 func checkImmutableSettings(instance types.DBInstance, instanceID string, opts instanceOptions) error {
 	actualSubnetGroup := ""
@@ -842,7 +826,7 @@ func checkImmutableSettings(instance types.DBInstance, instanceID string, opts i
 	}
 	return &cloudctlaws.ReconcileError{
 		Err:    fmt.Errorf("instance %q can't change: %s; set them back, or move the data to a new entry", instanceID, strings.Join(changed, "; ")),
-		Reason: reasonImmutableSettingChanged,
+		Reason: reasons.ImmutableSettingChanged,
 	}
 }
 

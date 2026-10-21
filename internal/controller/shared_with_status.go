@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -80,14 +81,14 @@ func checkSharedWithReferences(ctx context.Context, k8sClient client.Client, cr 
 	if len(stale) == 0 {
 		status.SetSectionCondition(
 			&cr.Status.Conditions, conditionTypeSharedWithReferences, metav1.ConditionTrue,
-			"AllReferencesValid", "every sharedWith entry resolves to an existing AppDependencies CR",
+			reasons.AllReferencesValid, "every sharedWith entry resolves to an existing AppDependencies CR",
 			cr.Generation, sectionTypes,
 		)
 		return
 	}
 	status.SetSectionCondition(
 		&cr.Status.Conditions, conditionTypeSharedWithReferences, metav1.ConditionFalse,
-		"StaleReferencesFound", status.JoinCapped(stale, "; "),
+		reasons.StaleReferencesFound, status.JoinCapped(stale, "; "),
 		cr.Generation, sectionTypes,
 	)
 }

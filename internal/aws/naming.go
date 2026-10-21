@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"strings"
 )
 
@@ -136,10 +137,6 @@ func QueueOrTopicName(namespace, crName, resourceType string, fifo bool, maxLen 
 	return name
 }
 
-// ReasonFIFOChanged is the reason of the error for an existing queue or topic
-// whose spec now asks for the other type.
-const ReasonFIFOChanged = "FIFOChanged"
-
 // CheckFIFOUnchanged refuses an entry whose queue or topic, named by arn, is
 // not the type the spec now asks for. fifo can't be edited on an entry, but
 // removing it and adding it back passes that rule while its old entry is
@@ -157,7 +154,7 @@ func CheckFIFOUnchanged(kind, arn string, fifo bool) error {
 	return &ReconcileError{
 		Err: fmt.Errorf("%s %q is a %s %s but the spec now asks for a %s one; the type can't change on an existing %s, so set fifo back, or remove the entry, wait for it to be deleted and add it again",
 			kind, arn[strings.LastIndex(arn, ":")+1:], have, kind, want, kind),
-		Reason: ReasonFIFOChanged,
+		Reason: reasons.FIFOChanged,
 	}
 }
 

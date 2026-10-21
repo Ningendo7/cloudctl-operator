@@ -30,6 +30,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
@@ -597,8 +598,6 @@ func wrapAWSError(err error, errContext string) error {
 // DynamoDB can briefly answer "no such table" right after CreateTable.
 const creationVisibilityGrace = 5 * time.Minute
 
-const reasonTableMissing = "TableMissing"
-
 func tableMissingError(entry depsv1alpha1.ManagedResource, tableName string, recordEvent status.EventRecorder) error {
 	if entry.State == depsv1alpha1.ManagedResourceStateCreating && time.Since(entry.CreatedAt.Time) < creationVisibilityGrace {
 		return &cloudctlaws.ReconcileError{
@@ -613,6 +612,6 @@ func tableMissingError(entry depsv1alpha1.ManagedResource, tableName string, rec
 		Err: fmt.Errorf("DynamoDB table %q (%s) no longer exists in AWS: it was deleted out-of-band, and this operator will not create an empty "+
 			"replacement. Restore it under the same name from a backup and set adopt: true, "+
 			"or remove it from spec and add it again to start fresh", tableName, entry.ARN),
-		Reason: reasonTableMissing,
+		Reason: reasons.TableMissing,
 	}
 }

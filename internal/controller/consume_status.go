@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -37,11 +38,6 @@ import (
 // purely to make "how long has this been true" visible, not to add a
 // second gate on the same fact.
 const conditionTypeConsumeReferences = "ConsumeReferencesValid"
-
-const (
-	reasonProducerNotFoundYet         = "ProducerNotFoundYet"
-	reasonProducerLikelyMisconfigured = "ProducerLikelyMisconfigured"
-)
 
 // consumeReferenceDanglingThreshold is how long a consumes entry's
 // producer CR can be missing before the message stops reading like an
@@ -85,18 +81,18 @@ func checkConsumeReferences(ctx context.Context, k8sClient client.Client, cr *de
 	if len(dangling) == 0 {
 		status.SetSectionCondition(
 			&cr.Status.Conditions, conditionTypeConsumeReferences, metav1.ConditionTrue,
-			"AllProducersExist", "every consumes entry's producer CR currently exists",
+			reasons.AllProducersExist, "every consumes entry's producer CR currently exists",
 			cr.Generation, sectionTypes,
 		)
 		return
 	}
 
-	reason := reasonProducerNotFoundYet
+	reason := reasons.ProducerNotFoundYet
 	message := status.JoinCapped(dangling, "; ")
 	if existing := apimeta.FindStatusCondition(cr.Status.Conditions, conditionTypeConsumeReferences); existing != nil &&
 		existing.Status == metav1.ConditionFalse &&
 		time.Since(existing.LastTransitionTime.Time) > consumeReferenceDanglingThreshold {
-		reason = reasonProducerLikelyMisconfigured
+		reason = reasons.ProducerLikelyMisconfigured
 		message = fmt.Sprintf("%s (unresolved for over %s - this looks like a real misconfiguration, e.g. a typo in the consumer's namespace/name, rather than a startup-ordering race)",
 			message, consumeReferenceDanglingThreshold)
 	}

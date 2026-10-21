@@ -36,6 +36,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kmstest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
@@ -1241,11 +1242,11 @@ func TestEnsure_ModifyingStatus_StillRetries(t *testing.T) {
 	}
 }
 
-func ensureRecording(t *testing.T, client *fakeRDS, spec depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource, reasons *[]string) ([]depsv1alpha1.ManagedResource, error) {
+func ensureRecording(t *testing.T, client *fakeRDS, spec depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource, recorded *[]string) ([]depsv1alpha1.ManagedResource, error) {
 	t.Helper()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
-	record := func(_, reason, _ string) { *reasons = append(*reasons, reason) }
+	record := func(_, reason, _ string) { *recorded = append(*recorded, reason) }
 	return Ensure(context.Background(), client, kmsWithRDSKey(), newFakeEC2(), k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, ledger, nil, record)
 }
 
@@ -1258,8 +1259,8 @@ func TestEnsure_ChangesDeferToMaintenanceWindowByDefault(t *testing.T) {
 	}
 
 	spec.InstanceClass = "db.t4g.small"
-	var reasons []string
-	ledger, err = ensureRecording(t, client, spec, ledger, &reasons)
+	var recorded []string
+	ledger, err = ensureRecording(t, client, spec, ledger, &recorded)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -1270,11 +1271,11 @@ func TestEnsure_ChangesDeferToMaintenanceWindowByDefault(t *testing.T) {
 	if got := client.instances[instanceID].instanceClass; got != "db.t4g.micro" {
 		t.Errorf("expected the live class untouched until the window, got %q", got)
 	}
-	if !contains(reasons, "ChangeDeferred") {
-		t.Errorf("expected a ChangeDeferred event so the wait is visible, got %v", reasons)
+	if !contains(recorded, "ChangeDeferred") {
+		t.Errorf("expected a ChangeDeferred event so the wait is visible, got %v", recorded)
 	}
 
-	if _, err := ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+	if _, err := ensureRecording(t, client, spec, ledger, &recorded); err != nil {
 		t.Fatalf("third Ensure() error = %v", err)
 	}
 	if client.modifyDBInstanceCalls != 1 {
@@ -1316,8 +1317,8 @@ func TestEnsure_ApplyImmediately_AppliesNow(t *testing.T) {
 
 	spec.InstanceClass = "db.t4g.small"
 	spec.ApplyImmediately = true
-	var reasons []string
-	if _, err := ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+	var recorded []string
+	if _, err := ensureRecording(t, client, spec, ledger, &recorded); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 	if in := client.lastModifyDBInstanceInput; in.ApplyImmediately == nil || !*in.ApplyImmediately {
@@ -1327,7 +1328,7 @@ func TestEnsure_ApplyImmediately_AppliesNow(t *testing.T) {
 	if got := client.instances[instanceID].instanceClass; got != "db.t4g.small" {
 		t.Errorf("expected the class applied now, got %q", got)
 	}
-	if contains(reasons, "ChangeDeferred") {
+	if contains(recorded, "ChangeDeferred") {
 		t.Error("an immediate change must not report itself as deferred")
 	}
 }
@@ -1342,11 +1343,11 @@ func TestEnsure_SecurityGroupReattach_NeedsNoDeferralEvent(t *testing.T) {
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	client.instances[instanceID].securityGroupIDs = []string{"sg-pre-existing"}
 
-	var reasons []string
-	if _, err := ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+	var recorded []string
+	if _, err := ensureRecording(t, client, spec, ledger, &recorded); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
-	if contains(reasons, "ChangeDeferred") {
+	if contains(recorded, "ChangeDeferred") {
 		t.Error("a security group change applies at once and must not be reported as deferred")
 	}
 }
@@ -1465,8 +1466,8 @@ func TestEnsure_BackupsAreNeverTurnedOffByDrift(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec.Backup = backup
-			var reasons []string
-			if _, err := ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+			var recorded []string
+			if _, err := ensureRecording(t, client, spec, ledger, &recorded); err != nil {
 				t.Fatalf("Ensure() error = %v", err)
 			}
 			instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
@@ -1476,8 +1477,8 @@ func TestEnsure_BackupsAreNeverTurnedOffByDrift(t *testing.T) {
 			if client.modifyDBInstanceCalls != 0 {
 				t.Errorf("expected no modify call, got %d", client.modifyDBInstanceCalls)
 			}
-			if !contains(reasons, "BackupsLeftEnabled") {
-				t.Errorf("expected a warning that backups were left on, got %v", reasons)
+			if !contains(recorded, "BackupsLeftEnabled") {
+				t.Errorf("expected a warning that backups were left on, got %v", recorded)
 			}
 		})
 	}
@@ -1528,15 +1529,15 @@ func TestEnsure_StorageGrowthAlone_AppliesAtOnce(t *testing.T) {
 	}
 
 	spec.AllocatedStorage = 40
-	var reasons []string
-	if _, err := ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+	var recorded []string
+	if _, err := ensureRecording(t, client, spec, ledger, &recorded); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	if !aws.ToBool(client.lastModifyDBInstanceInput.ApplyImmediately) || client.instances[instanceID].allocatedStorage != 40 {
 		t.Errorf("expected storage growth applied at once, got input %+v", client.lastModifyDBInstanceInput)
 	}
-	if contains(reasons, "ChangeDeferred") {
+	if contains(recorded, "ChangeDeferred") {
 		t.Error("an immediate growth must not report itself as deferred")
 	}
 }
@@ -1666,8 +1667,8 @@ func TestInstanceStatusReason(t *testing.T) {
 		"":                                "Instance",
 	}
 	for in, want := range cases {
-		if got := instanceStatusReason(in); got != want {
-			t.Errorf("instanceStatusReason(%q) = %q, want %q", in, got, want)
+		if got := reasons.InstanceStatus(in); got != want {
+			t.Errorf("reasons.InstanceStatus(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -1723,7 +1724,7 @@ func TestEnsure_AdoptionRefusesMismatchedInstance(t *testing.T) {
 
 			ledger, err := Ensure(context.Background(), client, kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
 			var reconcileErr *cloudctlaws.ReconcileError
-			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonAdoptionConflict || reconcileErr.Retryable {
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.AdoptionConflict || reconcileErr.Retryable {
 				t.Fatalf("expected a non-retryable AdoptionConflict error, got %v", err)
 			}
 			if !strings.Contains(err.Error(), tc.wantMsg) {
@@ -1855,12 +1856,12 @@ func TestEnsure_PubliclyAccessibleInstance_WarnsButIsNotChanged(t *testing.T) {
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	client.instances[instanceID].publiclyAccessible = true
 
-	var reasons []string
-	if _, err = ensureRecording(t, client, spec, ledger, &reasons); err != nil {
+	var recorded []string
+	if _, err = ensureRecording(t, client, spec, ledger, &recorded); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
-	if !contains(reasons, "InstancePubliclyAccessible") {
-		t.Errorf("expected an InstancePubliclyAccessible warning, got %v", reasons)
+	if !contains(recorded, "InstancePubliclyAccessible") {
+		t.Errorf("expected an InstancePubliclyAccessible warning, got %v", recorded)
 	}
 	if client.modifyDBInstanceCalls != 0 {
 		t.Errorf("expected the setting to be left alone, got %d modify calls", client.modifyDBInstanceCalls)
@@ -1898,10 +1899,10 @@ func TestEnsure_InstanceDeletedOutOfBand_IsALoudErrorNotARecreate(t *testing.T) 
 	delete(client.instances, instanceID)
 	client.lastCreateDBInstanceInput = nil
 
-	var reasons []string
-	_, err = ensureRecording(t, client, spec, ledger, &reasons)
+	var recorded []string
+	_, err = ensureRecording(t, client, spec, ledger, &recorded)
 	var reconcileErr *cloudctlaws.ReconcileError
-	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonInstanceMissing || reconcileErr.Retryable {
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.InstanceMissing || reconcileErr.Retryable {
 		t.Fatalf("expected a non-retryable InstanceMissing error, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "adopt: true") || !strings.Contains(err.Error(), "remove it from spec") {
@@ -1910,8 +1911,8 @@ func TestEnsure_InstanceDeletedOutOfBand_IsALoudErrorNotARecreate(t *testing.T) 
 	if client.lastCreateDBInstanceInput != nil {
 		t.Error("expected no replacement instance to be created")
 	}
-	if !contains(reasons, "InstanceMissing") {
-		t.Errorf("expected an InstanceMissing warning, got %v", reasons)
+	if !contains(recorded, "InstanceMissing") {
+		t.Errorf("expected an InstanceMissing warning, got %v", recorded)
 	}
 }
 
@@ -1927,7 +1928,7 @@ func TestEnsure_JustCreatedInstanceNotYetVisible_IsRetryable(t *testing.T) {
 
 	_, err = ensureOnce(t, client, spec, ledger)
 	var reconcileErr *cloudctlaws.ReconcileError
-	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable || reconcileErr.Reason == reasonInstanceMissing {
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable || reconcileErr.Reason == reasons.InstanceMissing {
 		t.Fatalf("expected a retryable not-visible-yet error right after creation, got %v", err)
 	}
 }
@@ -2005,15 +2006,15 @@ func TestEnsure_KeepsDeletionProtectionInLineWithTheSpecForAnInstanceItCreated(t
 				t.Fatalf("first Ensure() error = %v", err)
 			}
 			client.instances[instanceID].deletionProtection = tc.have
-			var reasons []string
-			if _, err := ensureRecording(t, client, protectionSpec(tc.field), ledger, &reasons); err != nil {
+			var recorded []string
+			if _, err := ensureRecording(t, client, protectionSpec(tc.field), ledger, &recorded); err != nil {
 				t.Fatalf("second Ensure() error = %v", err)
 			}
 			if got := client.instances[instanceID].deletionProtection; got != tc.want {
 				t.Errorf("deletion protection = %v, want %v", got, tc.want)
 			}
-			if got := slices.Contains(reasons, "DeletionProtectionEnabled"); got != tc.wantWarning {
-				t.Errorf("DeletionProtectionEnabled warning = %v, want %v (events %v)", got, tc.wantWarning, reasons)
+			if got := slices.Contains(recorded, "DeletionProtectionEnabled"); got != tc.wantWarning {
+				t.Errorf("DeletionProtectionEnabled warning = %v, want %v (events %v)", got, tc.wantWarning, recorded)
 			}
 		})
 	}
@@ -2033,15 +2034,15 @@ func TestEnsure_LeavesAnAdoptedInstancesDeletionProtectionAloneUnlessTheSpecSets
 			spec := protectionSpec(tc.field)
 			spec.Adopt = true
 			client.instances[instanceID] = existingInstanceMatching(instanceID, spec)
-			var reasons []string
-			if _, err := ensureRecording(t, client, spec, nil, &reasons); err != nil {
+			var recorded []string
+			if _, err := ensureRecording(t, client, spec, nil, &recorded); err != nil {
 				t.Fatalf("Ensure() error = %v", err)
 			}
 			if got := client.instances[instanceID].deletionProtection; got != tc.want {
 				t.Errorf("deletion protection = %v, want %v", got, tc.want)
 			}
-			if got := slices.Contains(reasons, "DeletionProtectionOff"); got != tc.wantWarning {
-				t.Errorf("DeletionProtectionOff warning = %v, want %v (events %v)", got, tc.wantWarning, reasons)
+			if got := slices.Contains(recorded, "DeletionProtectionOff"); got != tc.wantWarning {
+				t.Errorf("DeletionProtectionOff warning = %v, want %v (events %v)", got, tc.wantWarning, recorded)
 			}
 		})
 	}
@@ -2080,7 +2081,7 @@ func TestEnsure_AdoptionChecksEncryptionAgainstTheNewDefault(t *testing.T) {
 				return
 			}
 			var reconcileErr *cloudctlaws.ReconcileError
-			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonAdoptionConflict || !strings.Contains(err.Error(), tc.wantMsg) {
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.AdoptionConflict || !strings.Contains(err.Error(), tc.wantMsg) {
 				t.Fatalf("expected an AdoptionConflict mentioning %q, got %v", tc.wantMsg, err)
 			}
 		})
@@ -2169,7 +2170,7 @@ func TestEnsure_ARelinquishedInstanceIsComparedWithTheSpecWhenDeclaredAgain(t *t
 	other.Engine = "mysql"
 	_, err = ensure(other, ledger)
 	var reconcileErr *cloudctlaws.ReconcileError
-	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonAdoptionConflict {
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.AdoptionConflict {
 		t.Fatalf("expected an AdoptionConflict for another engine, got %v", err)
 	}
 	if client.modifyDBInstanceCalls != modifies {
@@ -2223,8 +2224,8 @@ func TestEnsure_ATrackedInstanceRefusesAnotherEngineOrSubnetGroup(t *testing.T) 
 			modifies := client.modifyDBInstanceCalls
 			_, err := ensure(changed, ledger)
 			var reconcileErr *cloudctlaws.ReconcileError
-			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasonImmutableSettingChanged || reconcileErr.Retryable {
-				t.Fatalf("expected a permanent %s error, got %v", reasonImmutableSettingChanged, err)
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.ImmutableSettingChanged || reconcileErr.Retryable {
+				t.Fatalf("expected a permanent %s error, got %v", reasons.ImmutableSettingChanged, err)
 			}
 			if client.modifyDBInstanceCalls != modifies {
 				t.Error("a refused change must not modify the instance")

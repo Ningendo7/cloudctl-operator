@@ -177,7 +177,7 @@ func Cleanup(
 		}
 		if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("bucket %q no longer verified as owned by this CR — refusing to delete it", entry.Name)
+				firstErr = cloudctlaws.OwnershipLostError("bucket", entry.Name, "delete it")
 			}
 			continue
 		}

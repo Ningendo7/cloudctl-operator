@@ -18,8 +18,11 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 func TestIsOwnedBy(t *testing.T) {
@@ -97,13 +100,14 @@ func TestCheckExistingOwnership(t *testing.T) {
 		adopt           bool
 		wantTransferred bool
 		wantErr         string
+		wantReason      string
 	}{
-		{"untagged without adopt", plain, nil, false, false, "set adopt:true"},
-		{"untagged with adopt", plain, nil, true, false, ""},
-		{"another CR owns it, even with adopt", plain, map[string]string{OwnerTagKey: "ns/other"}, true, false, "naming collision"},
-		{"previous UID without the annotation, even with adopt", plain, mine("old-uid"), true, false, "adopt-from-uid=old-uid"},
-		{"previous UID named by the annotation", told, mine("old-uid"), false, true, ""},
-		{"a different previous UID than the annotation", told, mine("other-uid"), true, false, "adopt-from-uid=other-uid"},
+		{"untagged without adopt", plain, nil, false, false, "set adopt:true", reasons.AdoptRequired},
+		{"untagged with adopt", plain, nil, true, false, "", ""},
+		{"another CR owns it, even with adopt", plain, map[string]string{OwnerTagKey: "ns/other"}, true, false, "naming collision", reasons.OwnedByAnotherCR},
+		{"previous UID without the annotation, even with adopt", plain, mine("old-uid"), true, false, "adopt-from-uid=old-uid", reasons.PreviousIncarnation},
+		{"previous UID named by the annotation", told, mine("old-uid"), false, true, "", ""},
+		{"a different previous UID than the annotation", told, mine("other-uid"), true, false, "adopt-from-uid=other-uid", reasons.PreviousIncarnation},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,9 +118,24 @@ func TestCheckExistingOwnership(t *testing.T) {
 			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
 			}
+			var reconcileErr *ReconcileError
+			if tc.wantReason != "" && (!errors.As(err, &reconcileErr) || reconcileErr.Reason != tc.wantReason || reconcileErr.Retryable) {
+				t.Fatalf("error = %#v, want a non-retryable refusal with reason %q", err, tc.wantReason)
+			}
 			if transferred != tc.wantTransferred {
 				t.Errorf("transferred = %v, want %v", transferred, tc.wantTransferred)
 			}
 		})
+	}
+}
+
+func TestOwnershipLostError(t *testing.T) {
+	err := OwnershipLostError("queue", "orders", "delete it")
+	var reconcileErr *ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.OwnershipLost || reconcileErr.Retryable {
+		t.Fatalf("got %#v, want a non-retryable OwnershipLost", err)
+	}
+	if !strings.Contains(err.Error(), `queue "orders" no longer verified as owned by this CR`) {
+		t.Errorf("unexpected message: %v", err)
 	}
 }

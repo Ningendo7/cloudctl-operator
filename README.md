@@ -181,6 +181,8 @@ re-reads the resource's ownership tags first. See
 - **[docs/aws-assumptions.md](docs/aws-assumptions.md)** — which AWS API
   behaviors this code depends on have been verified against a real account
   (and when) versus assumed from documentation.
+- **[docs/reasons.md](docs/reasons.md)** — every condition reason, what it
+  means and what to do about it.
 - **[docs/threat-model.md](docs/threat-model.md)** — what a multi-tenant
   fleet of `AppDependencies` CRs can and can't cause this operator to do,
   and how to limit who may create them.

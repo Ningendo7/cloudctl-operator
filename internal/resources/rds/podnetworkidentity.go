@@ -318,10 +318,6 @@ func ensureSecurityGroupPolicy(ctx context.Context, k8sClient client.Client, nam
 	return nil
 }
 
-// reasonWaitingForRuleRelease marks a pod group that can't be deleted yet
-// because another group's rule, or a running pod, still uses it.
-const reasonWaitingForRuleRelease = "WaitingForRuleRelease"
-
 // CleanupPodNetworkIdentity tears down everything EnsurePodNetworkIdentity
 // creates, once consumes is empty or the CR is being deleted. A no-op if
 // nothing was ever set up. Holds no data, so unlike the RDS instance

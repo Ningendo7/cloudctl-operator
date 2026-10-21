@@ -31,6 +31,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 const (
@@ -348,8 +349,9 @@ func TestEnsure_RefusesToOverwriteUnownedAlarm(t *testing.T) {
 
 	err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
 		&depsv1alpha1.AlarmsSpec{Enabled: true}, spec, nil, nil)
-	if err == nil {
-		t.Fatal("expected an error refusing to overwrite an unowned alarm")
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.NameTaken {
+		t.Fatalf("expected a %s refusal to overwrite an unowned alarm, got %v", reasons.NameTaken, err)
 	}
 }
 

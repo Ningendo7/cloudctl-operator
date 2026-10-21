@@ -37,6 +37,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -93,7 +94,7 @@ func EnsureCredentialsSecret(
 
 	if exists {
 		if owner := metav1.GetControllerOf(existing); owner == nil || owner.UID != cr.UID {
-			return fmt.Errorf("secret %q already exists and is not owned by this CR - refusing to manage it", name)
+			return &cloudctlaws.ReconcileError{Err: fmt.Errorf("secret %q already exists and is not owned by this CR - refusing to manage it", name), Reason: reasons.NameTaken}
 		}
 	}
 
@@ -204,9 +205,6 @@ func addCredentials(
 
 var invalidEnvChars = regexp.MustCompile(`[^A-Z0-9_]`)
 
-// ReasonKeyCollision marks two different sources that map to one key.
-const ReasonKeyCollision = "ConnectionKeyCollision"
-
 // KeyedData is the flat map behind a ConfigMap or Secret, remembering which
 // source wrote each key. Keys are upper-cased with every other character
 // turned into '_', so different names can fold into one key (Orders and
@@ -228,7 +226,7 @@ func (d *KeyedData) Put(key, value, source string) error {
 	if prior, taken := d.sources[key]; taken && prior != source {
 		return &cloudctlaws.ReconcileError{
 			Err:    fmt.Errorf("%s and %s would both be written to the key %s; rename one of them so their keys differ", prior, source, key),
-			Reason: ReasonKeyCollision,
+			Reason: reasons.ConnectionKeyCollision,
 		}
 	}
 	d.values[key] = value
