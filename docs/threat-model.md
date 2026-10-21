@@ -48,6 +48,31 @@ override (unlike `serviceAccountName`), so it's 1:1 tied to the CR's own
 `(namespace, name)` identity, which Kubernetes already guarantees is
 unique — two different CRs can't collide on it structurally.
 
+## Who may create CRs
+
+Nobody can until an admin binds a role, so bind it per team with a
+`RoleBinding` (not a `ClusterRoleBinding`) to `appdependencies-editor-role`
+in that team's namespace. Whoever can create a CR there can, with the
+operator's AWS credentials:
+
+- **Spend:** any `instanceClass` matching the CRD pattern, storage up to
+  64 TiB, provisioned DynamoDB, and any number of CRs.
+- **Delete their own data:** `deletionPolicy: Delete` with `force: true`
+  empties and deletes their buckets.
+- **Squat names**, as described under "Accepted" below.
+
+Bound these with what Kubernetes already provides, since the limits depend on
+your organisation:
+
+- [config/samples/policy/](../config/samples/policy/appdependencies-guardrails.yaml)
+  is a `ValidatingAdmissionPolicy` (Kubernetes 1.30 or later, tried on 1.36)
+  that allows CRs only in namespaces labelled `cloudctl.io/enabled=true`,
+  and caps RDS instance classes and storage. Edit its lists to your own.
+- `ResourceQuota` caps the CRs per namespace:
+  `count/appdependencies.deps.cloudctl.io: "10"`.
+- The operator's IAM role can carry conditions, such as
+  `rds:DatabaseClass` and a region, so a mistake above still has a ceiling.
+
 ## Fixed (found during this pass)
 
 **ServiceAccount role-arn collision.** `internal/resources/serviceaccount`

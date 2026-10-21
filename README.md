@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 A Kubernetes operator for everyday AWS application dependencies. Declare
-*what your app needs* — a queue, a topic, a bucket, a table — and get back
+*what your app needs* — a queue, a topic, a bucket, a table, a database — and get back
 a derived least-privilege IAM role, safe deletion semantics, and
 connection details wired straight into your pods. No hand-authored IAM
 policy, no raw Terraform-in-YAML.
@@ -55,13 +55,15 @@ default.
 - **SNS** — standard and FIFO topics, dedicated or shared KMS encryption.
 - **DynamoDB** — tables with on-demand or provisioned billing, point-in-time recovery, dedicated or shared KMS encryption.
 - **S3** — buckets with versioning/lifecycle-based backup, dedicated or shared KMS encryption.
+- **RDS** — Postgres, MySQL and MariaDB instances in a subnet group your platform team grants, with a dedicated security group opened only to the CRs you share it with, AWS-managed credentials mirrored into a Secret, encryption and deletion protection on by default. The operator never deletes an instance.
 - **KMS** — standalone keys for deliberate reuse across resources, with real access-level-aware grants.
 - **CloudWatch alarms** — per-resource alarms, including notification to a topic owned by a different team's CR.
 - **IAM** — never hand-authored. One role per CR, derived from exactly what it owns and what's been explicitly shared with it, attached via IRSA.
 
 Every resource type shares the same safety model: ownership tagging (so
 the operator never touches a resource it doesn't own), `adopt`-gated
-claiming of pre-existing resources, `Retain`-by-default deletion with a
+claiming of pre-existing resources, `deletionPolicy: Retain` by default
+(removing a resource from spec, or deleting the CR, leaves it in AWS) with a
 non-empty guard, and a persisted ownership ledger that survives a resource
 being removed from spec. See [docs/architecture.md](docs/architecture.md)
 for the full design and [docs/resources.md](docs/resources.md) for
@@ -156,36 +158,14 @@ afterward (or fork the manifest to set them inline before applying).
 Both install paths deploy the same image, built for `linux/amd64`,
 `linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
 
-## Testing rigor
+## Testing
 
-Three tiers, each catching a different class of bug: unit (fake AWS
-clients, runs in milliseconds, every resource type), integration (real
-API shapes against LocalStack, CI-gated on every PR, SQS/SNS/DynamoDB/S3/
-IAM), and live (a real AWS account, opt-in, never in CI — those same
-five, plus KMS's standalone key type and CloudWatch alarms). The live
-tier exists specifically to catch what the other two structurally can't:
-real, undocumented, or easy-to-mismodel AWS behavior — wrong exception
-types, string-matched error codes with no typed SDK equivalent, response
-formats that diverge from what a request sent, eventual-consistency
-gaps. A fake only ever encodes this project's own belief about an API;
-LocalStack only ever encodes its maintainers' — confirmed directly, not
-just assumed: standalone KMS and CloudWatch alarms are both deliberately
-excluded from the integration tier because LocalStack's own emulation of
-them has proven unfaithful (alarms' `DescribeAlarms` call reproducibly
-500s against the pinned LocalStack image).
-
-Every destructive action re-verifies live ownership tags immediately
-before acting, regardless of how recently that verification last ran —
-cached trust can skip a read-level recheck, but never authorizes a
-delete by itself. Adoption of a pre-existing resource is refused outright
-unless it's explicitly requested and the resource carries no conflicting
-ownership tag from a different CR.
-
-Every PR is gated on all of: unit tests, integration tests, lint
-(`golangci-lint`), a Helm chart end-to-end smoke test (real `kind`
-cluster, real chart install), a full E2E lifecycle suite per resource
-type, and a manifests/chart drift check. See
-[docs/testing.md](docs/testing.md) for the complete breakdown.
+Unit tests with fake AWS clients, integration tests against LocalStack, and
+live tests against a real AWS account (opt-in, never in CI) catch different
+kinds of bugs; every PR also runs lint, a Helm chart install on `kind`, an
+end-to-end suite and a manifests drift check. Every destructive action
+re-reads the resource's ownership tags first. See
+[docs/testing.md](docs/testing.md).
 
 ## Documentation
 
@@ -203,35 +183,21 @@ type, and a manifests/chart drift check. See
   (and when) versus assumed from documentation.
 - **[docs/threat-model.md](docs/threat-model.md)** — what a multi-tenant
   fleet of `AppDependencies` CRs can and can't cause this operator to do,
-  given it runs with one set of broad AWS credentials.
+  and how to limit who may create them.
 - **[docs/observability.md](docs/observability.md)** — the operator's
   Prometheus metrics, the optional alerts and Grafana dashboard, and what
   the platform has to provide to collect and keep them.
 
-Resources default to `deletionPolicy: Retain` — removing one from spec, or
-deleting the CR, leaves the AWS resource in place rather than risking data
-loss on a typo. See [architecture.md](docs/architecture.md) for the full
-deletion-safety model.
-
 ## Status
 
-Tagged releases are published from `main` once every check — unit,
-integration, lint, Helm chart, E2E, and the manifests/chart drift check —
-passes for that exact commit; see
-[Releases](https://github.com/Ningendo7/cloudctl-operator/releases) for
-the current version. SQS, SNS, DynamoDB, S3, and IAM are implemented and
-covered by all three test tiers. RDS is implemented with unit, envtest and
-live coverage only (LocalStack's community edition has no RDS). KMS's dedicated-key path (the common
-case — `encryption.enabled` on any other resource type) rides along
-inside those same tiers. The standalone `kms.resources` type and
-CloudWatch alarms have unit and live coverage but no integration tier —
-LocalStack's own emulation of both has proven unfaithful enough there
-that testing against it risked false confidence rather than real
-coverage (confirmed directly for alarms, not just assumed from KMS's own
-prior history).
-
-Prometheus metrics, alerts, a Grafana dashboard and opt-in OpenTelemetry
-tracing are in place; see [docs/observability.md](docs/observability.md).
+Releases are published from `main` once every check passes for that exact
+commit; see [Releases](https://github.com/Ningendo7/cloudctl-operator/releases)
+for the current version. Every resource type has unit and live coverage.
+SQS, SNS, DynamoDB, S3 and IAM also run against LocalStack; RDS, standalone
+KMS keys and CloudWatch alarms do not, because LocalStack's emulation of
+them is missing or unfaithful. Prometheus metrics, alerts, a Grafana
+dashboard and opt-in OpenTelemetry tracing are described in
+[docs/observability.md](docs/observability.md).
 
 ## License
 

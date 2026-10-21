@@ -1,0 +1,65 @@
+# Example admission guardrails for AppDependencies. Needs Kubernetes 1.30 or
+# later (ValidatingAdmissionPolicy); edit the allow-lists to your own. Not part
+# of the install: apply it yourself.
+#
+# Only namespaces labelled cloudctl.io/enabled=true may hold CRs:
+#   kubectl label namespace checkout cloudctl.io/enabled=true
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: appdependencies-enabled-namespaces
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["deps.cloudctl.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["appdependencies"]
+  validations:
+    - expression: "false"
+      message: "AppDependencies are only allowed in namespaces labelled cloudctl.io/enabled=true"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: appdependencies-enabled-namespaces
+spec:
+  policyName: appdependencies-enabled-namespaces
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: cloudctl.io/enabled
+          operator: NotIn
+          values: ["true"]
+---
+# Caps on what a CR can ask for.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: appdependencies-limits
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["deps.cloudctl.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["appdependencies"]
+  variables:
+    - name: databases
+      expression: "has(object.spec.rds) && has(object.spec.rds.resources) ? object.spec.rds.resources : []"
+  validations:
+    - expression: "variables.databases.all(d, d.instanceClass in ['db.t4g.micro', 'db.t4g.small', 'db.t4g.medium'])"
+      message: "rds instanceClass must be one of db.t4g.micro, db.t4g.small, db.t4g.medium"
+    - expression: "variables.databases.all(d, d.allocatedStorage <= 500)"
+      message: "rds allocatedStorage is limited to 500 GiB"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: appdependencies-limits
+spec:
+  policyName: appdependencies-limits
+  validationActions: [Deny]
