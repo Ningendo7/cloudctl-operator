@@ -14,12 +14,21 @@ spec:
     kind: AppDependencies
     listKind: AppDependenciesList
     plural: appdependencies
+    shortNames:
+    - appdeps
     singular: appdependencies
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].message
+      name: Message
+      priority: 1
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age

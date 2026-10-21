@@ -30,6 +30,10 @@ import (
 // currently-required per-section condition (e.g. SQSReady, S3Ready).
 const ConditionTypeReady = "Ready"
 
+// reasonSectionsNotReady is Ready's reason for a section that has no
+// condition of its own yet, or has not run for the current generation.
+const reasonSectionsNotReady = "SectionsNotReady"
+
 // ConditionTypeDeletionBlocked reports a CR stuck mid-deletion because at
 // least one owned resource is still waiting on its non-empty guard (or, for
 // KMS, its deletion quiet window) before it can actually be removed. Not a
@@ -115,13 +119,18 @@ func recomputeReady(conditions *[]metav1.Condition, sectionTypes []string, obser
 	reason := "AllSectionsReady"
 	message := "all declared sections are ready"
 
+	var alsoNotReady []string
 	for _, t := range sectionTypes {
 		c := apimeta.FindStatusCondition(*conditions, t)
+		var sectionReason, sectionMessage string
 		switch {
 		case c == nil || c.Status != metav1.ConditionTrue:
-			readyStatus = metav1.ConditionFalse
-			reason = "SectionsNotReady"
-			message = fmt.Sprintf("%s is not ready", t)
+			// Ready reports why the first section is not ready, in that
+			// section's own words, so kubectl get shows the cause.
+			sectionReason, sectionMessage = reasonSectionsNotReady, t+" is not ready"
+			if c != nil && c.Reason != "" {
+				sectionReason, sectionMessage = c.Reason, t+": "+c.Message
+			}
 		case c.ObservedGeneration != observedGeneration:
 			// ensureDesiredState checkpoints status after every section, so
 			// this runs once per section per reconcile - a section further
@@ -132,20 +141,25 @@ func recomputeReady(conditions *[]metav1.Condition, sectionTypes []string, obser
 			// reached and passed that section - without this check, Ready
 			// could flip True mid-reconcile the moment every section
 			// happens to be True for ANY generation, not the current one.
-			readyStatus = metav1.ConditionFalse
-			reason = "SectionsNotReady"
-			message = fmt.Sprintf("%s has not been reconciled for the current generation yet", t)
+			sectionReason, sectionMessage = reasonSectionsNotReady, t+" has not been reconciled for the current generation yet"
 		default:
 			continue
 		}
-		break
+		if readyStatus == metav1.ConditionTrue {
+			readyStatus, reason, message = metav1.ConditionFalse, sectionReason, sectionMessage
+			continue
+		}
+		alsoNotReady = append(alsoNotReady, t)
+	}
+	if len(alsoNotReady) > 0 {
+		message += " (also not ready: " + strings.Join(alsoNotReady, ", ") + ")"
 	}
 
 	apimeta.SetStatusCondition(conditions, metav1.Condition{
 		Type:               ConditionTypeReady,
 		Status:             readyStatus,
 		Reason:             reason,
-		Message:            message,
+		Message:            CapMessage(message),
 		ObservedGeneration: observedGeneration,
 	})
 }
