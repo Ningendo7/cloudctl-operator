@@ -5,7 +5,8 @@ Generated from `internal/reasons`; do not edit by hand. Regenerate with
 
 A condition's `reason` says what is wrong. *Waiting* clears by itself, *Failing* needs a
 person, *Info* is healthy. `Ready` carries the first section that is not ready,
-with that section's own reason.
+with that section's own reason. A failing section also records a Warning event under
+the same reason, with the section at the start of its text.
 
 | Reason | Kind | Meaning | What to do |
 |---|---|---|---|

@@ -43,6 +43,9 @@ type Reason struct {
 	Action string
 	// Prefix marks a family: every reason starting with Name is covered.
 	Prefix bool
+	// OwnEvent marks a reason whose place of origin already records an event
+	// of the same name, so the controller must not record a second one.
+	OwnEvent bool
 }
 
 var catalogue []Reason
@@ -50,6 +53,23 @@ var catalogue []Reason
 func register(name string, kind Kind, meaning, action string) string {
 	catalogue = append(catalogue, Reason{Name: name, Kind: kind, Meaning: meaning, Action: action})
 	return name
+}
+
+// ownEvent marks the reason named as already having an event of its own.
+func ownEvent(name string) string {
+	for i := range catalogue {
+		if catalogue[i].Name == name {
+			catalogue[i].OwnEvent = true
+		}
+	}
+	return name
+}
+
+// EmitsOwnEvent reports whether the code raising the reason also records an
+// event under the same name.
+func EmitsOwnEvent(name string) bool {
+	r, ok := Lookup(name)
+	return ok && r.OwnEvent
 }
 
 func registerFamily(prefix string, kind Kind, meaning, action string) {
@@ -143,21 +163,21 @@ var (
 	FIFOChanged = register("FIFOChanged", Failing,
 		"The spec asks for a different queue or topic type than the one that exists; fifo cannot change.",
 		"Set fifo back, or remove the entry, wait for it to be deleted and add it again.")
-	InstanceMissing = register("InstanceMissing", Failing,
+	InstanceMissing = ownEvent(register("InstanceMissing", Failing,
 		"The ledger knows an RDS instance that AWS no longer has. The operator does not create an empty replacement.",
-		"Restore it under the same identifier and set adopt: true, or remove the entry and add it again.")
-	TableMissing = register("TableMissing", Failing,
+		"Restore it under the same identifier and set adopt: true, or remove the entry and add it again."))
+	TableMissing = ownEvent(register("TableMissing", Failing,
 		"The ledger knows a DynamoDB table that AWS no longer has. The operator does not create an empty replacement.",
-		"Restore it from a backup under the same name and set adopt: true, or remove the entry and add it again.")
+		"Restore it from a backup under the same name and set adopt: true, or remove the entry and add it again."))
 	InstanceFailed = register("InstanceFailed", Failing,
 		"AWS reports the RDS instance as failed. It is not retried.",
 		"Investigate the instance in AWS.")
 	InstanceStuckPendingDeletion = register("InstanceStuckPendingDeletion", Failing,
 		"An RDS instance was removed from spec with deletionPolicy Delete. The operator never deletes an instance.",
 		"After the final snapshot is available, turn off deletion protection and delete it yourself, or add it back to spec.")
-	RoleHasExternalAttachments = register("RoleHasExternalAttachments", Failing,
+	RoleHasExternalAttachments = ownEvent(register("RoleHasExternalAttachments", Failing,
 		"AWS refused to delete the IAM role because something other than this operator is attached to it.",
-		"Detach it, or delete the role yourself.")
+		"Detach it, or delete the role yourself."))
 )
 
 // Encryption keys.
@@ -168,12 +188,12 @@ var (
 	KMSKeyRefNotDeclared = register("KMSKeyRefNotDeclared", Failing,
 		"encryption.kmsKeyRef names a key that is not declared under kms.resources.",
 		"Declare the key, or correct the name.")
-	KeyDisabled = register("KeyDisabled", Failing,
+	KeyDisabled = ownEvent(register("KeyDisabled", Failing,
 		"The KMS key is disabled, so nothing encrypted with it can be read or written. The operator does not re-enable it.",
-		"Re-enable the key if that is intended, or point the resource at another key.")
-	KeyUnavailable = register("KeyUnavailable", Failing,
+		"Re-enable the key if that is intended, or point the resource at another key."))
+	KeyUnavailable = ownEvent(register("KeyUnavailable", Failing,
 		"The KMS key is in a state that cannot encrypt or decrypt.",
-		"Check the key in AWS.")
+		"Check the key in AWS."))
 )
 
 // References to other CRs and objects.
@@ -235,7 +255,8 @@ func Markdown() string {
 	b.WriteString("`go test ./internal/reasons -run Doc -update`.\n\n")
 	b.WriteString("A condition's `reason` says what is wrong. *Waiting* clears by itself, *Failing* needs a\n")
 	b.WriteString("person, *Info* is healthy. `Ready` carries the first section that is not ready,\n")
-	b.WriteString("with that section's own reason.\n\n")
+	b.WriteString("with that section's own reason. A failing section also records a Warning event under\n")
+	b.WriteString("the same reason, with the section at the start of its text.\n\n")
 	b.WriteString("| Reason | Kind | Meaning | What to do |\n|---|---|---|---|\n")
 	for _, r := range catalogue {
 		name := "`" + r.Name + "`"

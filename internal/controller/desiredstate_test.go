@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -999,7 +1000,24 @@ func TestSetSectionCondition_AnOwnershipRefusalNamesItsReasonOnTheSectionTheEven
 	if ready == nil || ready.Reason != reasons.AdoptRequired || !strings.HasPrefix(ready.Message, "SQSReady: ") {
 		t.Errorf("Ready should carry the section's reason and name it, got %+v", ready)
 	}
-	if want := "Warning/SQSReadyAdoptRequired"; !slices.Contains(events, want) {
+	if want := "Warning/AdoptRequired"; !slices.Contains(events, want) {
 		t.Errorf("expected the event %s, got %v", want, events)
+	}
+}
+
+func TestSetSectionCondition_NoSecondEventForAReasonThatRecordsItsOwn(t *testing.T) {
+	var events []string
+	record := func(eventType, reason, _ string) { events = append(events, eventType+"/"+reason) }
+
+	own := &cloudctlaws.ReconcileError{Err: errors.New("gone"), Reason: reasons.InstanceMissing}
+	setSectionCondition(context.Background(), &depsv1alpha1.AppDependencies{}, conditionTypeRDSReady, own, record)
+	if len(events) != 0 {
+		t.Errorf("InstanceMissing is recorded where it is raised, not again here, got %v", events)
+	}
+
+	other := &cloudctlaws.ReconcileError{Err: errors.New("exists"), Reason: reasons.NameTaken}
+	setSectionCondition(context.Background(), &depsv1alpha1.AppDependencies{}, conditionTypeRDSReady, other, record)
+	if !slices.Equal(events, []string{"Warning/NameTaken"}) {
+		t.Errorf("a reason without an event of its own is recorded here, got %v", events)
 	}
 }

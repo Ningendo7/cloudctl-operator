@@ -354,11 +354,11 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 
 	// A Warning event here, not just the condition below: status.conditions
 	// alone is invisible to the standard `kubectl describe`/`get events`
-	// triage flow, which only shows Events - every error/refusal condition
-	// deserves one, the same way every success path already reports a
-	// Normal event via this same recorder.
-	if recordEvent != nil {
-		recordEvent("Warning", conditionType+reason, fmt.Sprintf("%s: %s", conditionType, message))
+	// triage flow, which only shows Events. It carries the condition's
+	// reason, with the section in the text; a reason whose own code already
+	// records an event is not recorded twice.
+	if recordEvent != nil && !reasons.EmitsOwnEvent(reason) {
+		recordEvent("Warning", reason, fmt.Sprintf("%s: %s", conditionType, message))
 	}
 
 	status.SetSectionCondition(
