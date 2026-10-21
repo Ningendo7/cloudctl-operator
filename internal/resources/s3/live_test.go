@@ -352,8 +352,8 @@ func TestLive_Ensure_ServerSideEncryptionNotFoundThenSharedKeyApplies(t *testing
 }
 
 // TestLive_RelinquishIfStillTagged_TellsGoneFromUntaggedFromOwned checks that
-// NoSuchBucket means gone, NoSuchTagSet means exists, and an empty tag set
-// clears the last tag.
+// NoSuchBucket means gone, NoSuchTagSet means exists, and letting go leaves
+// the released-from tag.
 func TestLive_RelinquishIfStillTagged_TellsGoneFromUntaggedFromOwned(t *testing.T) {
 	cfg := skipUnlessLiveAWSCredentials(t)
 	client := s3sdk.NewFromConfig(cfg)
@@ -365,7 +365,7 @@ func TestLive_RelinquishIfStillTagged_TellsGoneFromUntaggedFromOwned(t *testing.
 	}
 
 	t.Run("missing bucket is gone", func(t *testing.T) {
-		_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", entryFor("missing"))
+		_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", entryFor("missing"), nil)
 		if err != nil || !gone {
 			t.Errorf("relinquishIfStillTagged() gone=%v err=%v, want gone", gone, err)
 		}
@@ -375,7 +375,7 @@ func TestLive_RelinquishIfStillTagged_TellsGoneFromUntaggedFromOwned(t *testing.
 		bucket := bucketName(namespace, crName, "untagged", accountID)
 		t.Cleanup(func() { deleteBucketIfExists(t, client, bucket) })
 		createRealBucket(t, client, bucket, region)
-		relinquished, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", entryFor("untagged"))
+		relinquished, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", entryFor("untagged"), nil)
 		if err != nil || gone || relinquished {
 			t.Errorf("relinquishIfStillTagged() relinquished=%v gone=%v err=%v, want none of them", relinquished, gone, err)
 		}
@@ -391,12 +391,17 @@ func TestLive_RelinquishIfStillTagged_TellsGoneFromUntaggedFromOwned(t *testing.
 		}); err != nil {
 			t.Fatalf("real PutBucketTagging() (setup) error = %v", err)
 		}
-		relinquished, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", entryFor("owned"))
+		relinquished, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", entryFor("owned"), nil)
 		if err != nil || gone || !relinquished {
 			t.Fatalf("relinquishIfStillTagged() relinquished=%v gone=%v err=%v, want relinquished", relinquished, gone, err)
 		}
-		if _, tagErr := client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket}); !isNoSuchTagSet(tagErr) {
-			t.Errorf("expected no tag set after relinquishing, got %v", tagErr)
+		tagsOut, tagErr := client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
+		if tagErr != nil {
+			t.Fatalf("GetBucketTagging() after relinquishing error = %v", tagErr)
+		}
+		got := tagsToMap(tagsOut.TagSet)
+		if _, owned := got[cloudctlaws.OwnerTagKey]; owned || got[cloudctlaws.ReleasedFromTagKey] != namespace+"/"+crName {
+			t.Errorf("expected the ownership tags gone and released-from left, got %v", got)
 		}
 	})
 }
@@ -598,5 +603,48 @@ func TestLive_Ensure_TakesOverABucketFromAPreviousUID(t *testing.T) {
 	}
 	if !cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.TagSet), namespace, crName, "uid-2") {
 		t.Errorf("expected the bucket to be tagged with the new UID, got %+v", tagsOut.TagSet)
+	}
+}
+
+// TestLive_Ensure_AdoptingAgainRemovesOnlyTheReleasedTags checks against real
+// S3, which replaces the whole tag set on every write, that taking a released
+// bucket back drops the two released tags and keeps someone else's tag.
+func TestLive_Ensure_AdoptingAgainRemovesOnlyTheReleasedTags(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := s3sdk.NewFromConfig(cfg)
+	region, accountID := liveRegionAndAccount(t, cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	bucket := bucketName(namespace, crName, "receipts", accountID)
+	t.Cleanup(func() { deleteBucketIfExists(t, client, bucket) })
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}}}
+
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	current, err := client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
+	if err != nil {
+		t.Fatalf("GetBucketTagging() error = %v", err)
+	}
+	withTeam := cloudctlaws.MergeTags(tagsToMap(current.TagSet), map[string]string{"team": "payments"})
+	if _, err := client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{Bucket: &bucket, Tagging: &types.Tagging{TagSet: mapToTags(withTeam)}}); err != nil {
+		t.Fatalf("PutBucketTagging() error = %v", err)
+	}
+	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.S3Spec{}, ledger, false, false, nil); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	spec.Resources[0].Adopt = true
+	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() with adopt error = %v", err)
+	}
+	tagsOut, err := client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
+	if err != nil {
+		t.Fatalf("GetBucketTagging() error = %v", err)
+	}
+	got := tagsToMap(tagsOut.TagSet)
+	if cloudctlaws.HasReleaseTags(got) || got["team"] != "payments" || !cloudctlaws.IsOwnedBy(got, namespace, crName, "uid-1") {
+		t.Errorf("expected ownership back, the released tags gone and the other tag kept, got %v", got)
 	}
 }

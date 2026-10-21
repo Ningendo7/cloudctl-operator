@@ -31,6 +31,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/decisions"
 	"github.com/Ningendo7/cloudctl-operator/internal/observability"
 	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/configmap"
@@ -253,6 +254,7 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 			lastCheckpointed = cr.Status.DeepCopy()
 		}
 	}
+	decisions.Stamp(cr.Status.ManagedResources)
 	warnIfLedgerLarge(cr, eventRecorderFor(r, cr))
 	checkSharedWithReferences(ctx, r.Client, cr)
 	checkConsumeReferences(ctx, r.Client, cr)

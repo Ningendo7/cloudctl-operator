@@ -152,7 +152,7 @@ func Cleanup(
 
 		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
 			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry, recordEvent)
 				if relErr != nil {
 					if firstErr == nil {
 						firstErr = relErr
@@ -297,7 +297,7 @@ func markPendingDeletion(
 // claiming otherwise. The ledger keeps the entry for visibility; only the
 // AWS-side ownership claim is relinquished. Idempotent — safe on every
 // reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, client kmsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, client kmsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) (relinquished, gone bool, err error) {
 	describeOut, err := client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: &entry.ARN})
 	if err != nil {
 		var notFound *types.NotFoundException
@@ -318,6 +318,11 @@ func relinquishIfStillTagged(ctx context.Context, client kmsAPI, namespace, crNa
 		return false, false, nil // already relinquished, or never verified as ours — don't touch it
 	}
 
+	if released := cloudctlaws.ReleaseTags(ctx, namespace, crName, time.Now()); released != nil {
+		if _, tagErr := client.TagResource(ctx, &kms.TagResourceInput{KeyId: &entry.ARN, Tags: mapToTags(released)}); tagErr != nil {
+			cloudctlaws.ReleaseTagFailed(recordEvent, "KMS key", entry.Name, tagErr)
+		}
+	}
 	if _, uErr := client.UntagResource(ctx, &kms.UntagResourceInput{
 		KeyId:   &entry.ARN,
 		TagKeys: []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},

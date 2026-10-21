@@ -2274,3 +2274,58 @@ func TestEnsure_ASmallerStorageSpecIsReportedNotIgnoredSilently(t *testing.T) {
 		t.Error("storage must never be shrunk")
 	}
 }
+
+func TestReleasedTagsFollowAnInstanceThatIsLetGoAndComesBack(t *testing.T) {
+	client := newFakeRDS()
+	ec2Client := newFakeEC2()
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ensure := func(spec depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+		return Ensure(context.Background(), client, kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012",
+			&depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, ledger, nil, nil)
+	}
+	spec := baseInstanceSpec("orders-db")
+	spec.DeletionPolicy = depsv1alpha1.DeletionPolicyRetain
+	ledger, err := ensure(spec, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client.instances[instanceID].status = "available"
+	client.instances[instanceID].tags["team"] = "payments"
+
+	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	tags := client.instances[instanceID].tags
+	if tags[cloudctlaws.ReleasedFromTagKey] != "default/checkout-service" || tags["team"] != "payments" {
+		t.Fatalf("letting go should leave the released tags and keep the others, got %v", tags)
+	}
+	if _, owned := tags[cloudctlaws.OwnerTagKey]; owned {
+		t.Error("the ownership tag should be gone")
+	}
+
+	spec.Adopt = true
+	if _, err := ensure(spec, ledger); err != nil {
+		t.Fatalf("adopting it again error = %v", err)
+	}
+	tags = client.instances[instanceID].tags
+	if cloudctlaws.HasReleaseTags(tags) || tags["team"] != "payments" || tags[cloudctlaws.OwnerTagKey] == "" {
+		t.Errorf("adopting should remove only the released tags and restore ownership, got %v", tags)
+	}
+}
+
+func TestCleanup_LeavesNoReleasedTagsWhenTurnedOff(t *testing.T) {
+	client := newFakeRDS()
+	ledger := setupInstance(t, client, "default", "checkout-service", "orders-db", depsv1alpha1.DeletionPolicyRetain)
+	entry, _ := status.FindManagedResource(ledger, resourceType, "orders-db")
+
+	ctx := cloudctlaws.WithReleaseTags(context.Background(), false)
+	if _, _, err := Cleanup(ctx, client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if cloudctlaws.HasReleaseTags(client.findByARN(entry.ARN).tags) {
+		t.Errorf("no released tags expected when turned off, got %v", client.findByARN(entry.ARN).tags)
+	}
+}

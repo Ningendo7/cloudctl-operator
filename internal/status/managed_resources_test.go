@@ -208,3 +208,15 @@ func TestNeedsRelinquishedRecheck(t *testing.T) {
 		})
 	}
 }
+
+func TestUpsertManagedResource_KeepsTheStampedDecisionsOfARebuiltEntry(t *testing.T) {
+	ledger := []depsv1alpha1.ManagedResource{{
+		Type: "kms", Name: "shared", OnDelete: depsv1alpha1.OnDeleteRetain, HeldBy: []string{"sqs/orders"},
+	}}
+
+	UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{Type: "kms", Name: "shared", ARN: "arn:aws:kms:us-east-1:123456789012:key/k"})
+
+	if ledger[0].OnDelete != depsv1alpha1.OnDeleteRetain || len(ledger[0].HeldBy) != 1 {
+		t.Errorf("a rebuilt entry should keep onDelete and heldBy until they are stamped again, got %+v", ledger[0])
+	}
+}

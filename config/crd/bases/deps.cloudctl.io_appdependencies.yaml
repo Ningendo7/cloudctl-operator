@@ -1332,6 +1332,14 @@ spec:
                       description: force mirrors the spec entry's force flag at the
                         same point.
                       type: boolean
+                    heldBy:
+                      description: |-
+                        heldBy lists the entries (type/name) that still need this KMS key, up to
+                        20, then "and N more". Set by the operator on key entries only.
+                      items:
+                        type: string
+                      maxItems: 21
+                      type: array
                     kmsKeyARN:
                       description: |-
                         kmsKeyARN is the ARN of the KMS key this resource's data is encrypted
@@ -1368,6 +1376,16 @@ spec:
                         observedStatusSince is when observedStatus last changed value, not
                         when it was last polled.
                       format: date-time
+                      type: string
+                    onDelete:
+                      description: |-
+                        onDelete is what the operator will do with this resource if the CR is
+                        deleted or the entry leaves spec. Set by the operator on every pass.
+                      enum:
+                      - Retain
+                      - Delete
+                      - DeleteEvenIfNotEmpty
+                      - ManualDeletion
                       type: string
                     pendingDeletionSince:
                       description: |-

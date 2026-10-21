@@ -1021,3 +1021,45 @@ func TestSetSectionCondition_NoSecondEventForAReasonThatRecordsItsOwn(t *testing
 		t.Errorf("a reason without an event of its own is recorded here, got %v", recorded)
 	}
 }
+
+func TestReconcile_StampsWhatWillHappenOnDeleteOnEveryEntry(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Spec: depsv1alpha1.AppDependenciesSpec{
+			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+				{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
+				{Name: "scratch", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+			}},
+		},
+	}
+	patchCount := 0
+	r := newCountingReconciler(t, &patchCount, cr)
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var got depsv1alpha1.AppDependencies
+	if err := r.Get(context.Background(), req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]depsv1alpha1.OnDeleteOutcome{"sqs/orders": depsv1alpha1.OnDeleteRetain, "sqs/scratch": depsv1alpha1.OnDeleteEvenIfNotEmpty}
+	for _, e := range got.Status.ManagedResources {
+		if outcome, ok := want[e.Type+"/"+e.Name]; ok && e.OnDelete != outcome {
+			t.Errorf("%s/%s onDelete = %q, want %q", e.Type, e.Name, e.OnDelete, outcome)
+		}
+		if e.OnDelete == "" {
+			t.Errorf("%s/%s has no onDelete", e.Type, e.Name)
+		}
+	}
+	var key *depsv1alpha1.ManagedResource
+	for i := range got.Status.ManagedResources {
+		if got.Status.ManagedResources[i].Type == "kms" {
+			key = &got.Status.ManagedResources[i]
+		}
+	}
+	if key == nil || !slices.Equal(key.HeldBy, []string{"sqs/orders"}) {
+		t.Errorf("the dedicated key should say the queue holds it, got %+v", key)
+	}
+}

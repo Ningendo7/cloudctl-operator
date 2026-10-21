@@ -982,7 +982,34 @@ type ManagedResource struct {
 	// resource, so it isn't read back before the trust window expires.
 	// +optional
 	AppliedDigest string `json:"appliedDigest,omitempty"`
+
+	// onDelete is what the operator will do with this resource if the CR is
+	// deleted or the entry leaves spec. Set by the operator on every pass.
+	// +optional
+	OnDelete OnDeleteOutcome `json:"onDelete,omitempty"`
+
+	// heldBy lists the entries (type/name) that still need this KMS key, up to
+	// 20, then "and N more". Set by the operator on key entries only.
+	// +optional
+	// +kubebuilder:validation:MaxItems=21
+	HeldBy []string `json:"heldBy,omitempty"`
 }
+
+// OnDeleteOutcome says what happens to a resource when its CR is deleted or
+// its entry leaves spec.
+// +kubebuilder:validation:Enum=Retain;Delete;DeleteEvenIfNotEmpty;ManualDeletion
+type OnDeleteOutcome string
+
+const (
+	// OnDeleteRetain leaves the resource in AWS and removes the ownership tags.
+	OnDeleteRetain OnDeleteOutcome = "Retain"
+	// OnDeleteDelete deletes it after the quiet window, once it is empty.
+	OnDeleteDelete OnDeleteOutcome = "Delete"
+	// OnDeleteEvenIfNotEmpty deletes it without the emptiness check (force).
+	OnDeleteEvenIfNotEmpty OnDeleteOutcome = "DeleteEvenIfNotEmpty"
+	// OnDeleteManual is an RDS instance: never deleted by the operator.
+	OnDeleteManual OnDeleteOutcome = "ManualDeletion"
+)
 
 // AppDependenciesStatus defines the observed state of AppDependencies.
 type AppDependenciesStatus struct {

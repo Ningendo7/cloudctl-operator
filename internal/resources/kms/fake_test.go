@@ -228,6 +228,9 @@ func (f *fakeKMS) TagResource(_ context.Context, in *kms.TagResourceInput, _ ...
 		return nil, &types.NotFoundException{}
 	}
 	k := f.keys[arn]
+	if k.keyState == types.KeyStatePendingDeletion {
+		return nil, &types.KMSInvalidStateException{}
+	}
 	if k.tags == nil {
 		k.tags = map[string]string{}
 	}

@@ -222,6 +222,11 @@ func ensureTopic(
 		if _, tagErr := awsClient.TagResource(ctx, &sns.TagResourceInput{ResourceArn: &topicArn, Tags: mapToTags(merged)}); tagErr != nil {
 			return ledger, wrapAWSError(tagErr, "adopting topic (tagging)")
 		}
+		if cloudctlaws.HasReleaseTags(currentTags) {
+			if _, untagErr := awsClient.UntagResource(ctx, &sns.UntagResourceInput{ResourceArn: &topicArn, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
+				cloudctlaws.ReleaseTagFailed(recordEvent, "topic", topicName, untagErr)
+			}
+		}
 		if recordEvent != nil {
 			if transferred {
 				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SNS topic %s from a previous incarnation of this CR", topicArn))

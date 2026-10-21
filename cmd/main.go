@@ -148,6 +148,7 @@ func main() {
 	var oidcProviderURL string
 	var podBaseSecurityGroupIDs string
 	var maxConcurrentReconciles int
+	var releaseTags bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -177,6 +178,9 @@ func main() {
 			"database group, normally the EKS cluster security group. Security Groups for Pods replaces a "+
 			"pod's groups with the ones it is given, so without these the pods can lose Service, load "+
 			"balancer and probe traffic.")
+	flag.BoolVar(&releaseTags, "release-tags", true,
+		"Leave cloudctl.io/released-from and cloudctl.io/released-at tags on a retained resource when the "+
+			"operator lets go of it, saying which CR it came from. They are never used as ownership.")
 	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 5,
 		"Maximum number of AppDependencies CRs reconciled in parallel. AWS-side "+
 			"call volume is independently bounded by the per-service rate-limit "+
@@ -335,6 +339,7 @@ func main() {
 				OIDCProviderURL:         oidcProviderURL,
 				PodBaseSecurityGroupIDs: baseSecurityGroups,
 				MaxConcurrentReconciles: maxConcurrentReconciles,
+				DisableReleaseTags:      !releaseTags,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("creating appdependencies controller: %w", err)
 			}

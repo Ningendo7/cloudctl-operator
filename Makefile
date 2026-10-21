@@ -379,6 +379,19 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
   ## these the pods can lose Service, load balancer and probe traffic.\
   ##\
   podBaseSecurityGroupIds: []' charts/chart/values.yaml
+	@# manager.releaseTags: chart-only, like podBaseSecurityGroupIds above. The
+	@# flag defaults to on, so only false needs to reach the manager.
+	sed -i '/^        command:$$/i\
+        {{- if eq (toString .Values.manager.releaseTags) "false" }}\
+        - --release-tags=false\
+        {{- end }}' charts/chart/templates/manager/manager.yaml
+	sed -i '/^  podBaseSecurityGroupIds: \[\]$$/a\
+\
+  ## Leave cloudctl.io/released-from and cloudctl.io/released-at tags on a\
+  ## retained resource when the operator lets go of it. They are not used as\
+  ## ownership. Set false to leave no tag.\
+  ##\
+  releaseTags: true' charts/chart/values.yaml
 	@# Default pod anti-affinity (the plugin emits an empty one), used only
 	@# when manager.affinity is unset and replicas > 1.
 	sed -i '/^      affinity: {{ toYaml \. | nindent 10 }}$$/a\

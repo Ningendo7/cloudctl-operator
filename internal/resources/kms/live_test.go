@@ -232,3 +232,50 @@ func TestLive_Ensure_TakesOverAKeyFromAPreviousUID(t *testing.T) {
 		t.Errorf("expected the key to be tagged with the new UID, got %+v", tags)
 	}
 }
+
+// TestLive_Cleanup_ReleasingAKeyLeavesProvenanceAndAdoptingTakesItBack lets go
+// of the shared live-test key and takes it back, so no key is created for it.
+// The key is adopted again even if an assertion fails.
+func TestLive_Cleanup_ReleasingAKeyLeavesProvenanceAndAdoptingTakesItBack(t *testing.T) {
+	client := newLiveClient(t)
+	ctx := context.Background()
+	const namespace, crName, uid = "live", "shared-key", "live-shared-key"
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
+		{Name: "shared", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true},
+	}}
+	ledger, err := Ensure(ctx, client, namespace, crName, uid, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() (shared key) error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, resourceType, "shared")
+	t.Cleanup(func() {
+		if _, err := Ensure(context.Background(), client, namespace, crName, uid, spec, nil, nil, nil); err != nil {
+			t.Logf("could not adopt the shared key again: %v", err)
+		}
+	})
+
+	relinquished, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, uid, entry, nil)
+	if err != nil || gone || !relinquished {
+		t.Fatalf("relinquishIfStillTagged() relinquished=%v gone=%v err=%v", relinquished, gone, err)
+	}
+	tags, err := listAllResourceTags(ctx, client, entry.ARN)
+	if err != nil {
+		t.Fatalf("listAllResourceTags() error = %v", err)
+	}
+	got := tagsToMap(tags)
+	if _, owned := got[cloudctlaws.OwnerTagKey]; owned || got[cloudctlaws.ReleasedFromTagKey] != namespace+"/"+crName {
+		t.Fatalf("expected the ownership tags gone and released-from left, got %v", got)
+	}
+
+	if _, err := Ensure(ctx, client, namespace, crName, uid, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() with adopt error = %v", err)
+	}
+	tags, err = listAllResourceTags(ctx, client, entry.ARN)
+	if err != nil {
+		t.Fatalf("listAllResourceTags() error = %v", err)
+	}
+	got = tagsToMap(tags)
+	if cloudctlaws.HasReleaseTags(got) || !cloudctlaws.IsOwnedBy(got, namespace, crName, uid) {
+		t.Errorf("expected ownership back and the released tags gone, got %v", got)
+	}
+}

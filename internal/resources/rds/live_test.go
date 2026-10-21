@@ -599,10 +599,12 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ListTagsForResource() error = %v", err)
 		}
+		gotTags := make(map[string]string, len(tagsOut.TagList))
 		for _, tg := range tagsOut.TagList {
-			if aws.ToString(tg.Key) == cloudctlaws.OwnerTagKey {
-				t.Error("expected the ownership tag to be gone from the retained instance")
-			}
+			gotTags[aws.ToString(tg.Key)] = aws.ToString(tg.Value)
+		}
+		if _, owned := gotTags[cloudctlaws.OwnerTagKey]; owned || gotTags[cloudctlaws.ReleasedFromTagKey] != namespace+"/"+crName {
+			t.Errorf("expected the ownership tag gone and released-from left on the retained instance, got %v", gotTags)
 		}
 
 		deleteInstanceWithRetry(t, rdsClient, instanceID)

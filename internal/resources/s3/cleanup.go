@@ -115,7 +115,7 @@ func Cleanup(
 				// Let go earlier and pins no key: nothing to remember.
 				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 			} else if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry, recordEvent)
 				if relErr != nil {
 					if firstErr == nil {
 						firstErr = relErr
@@ -429,7 +429,7 @@ func bucketNameFromARN(arn string) (string, error) {
 // relinquishIfStillTagged removes our ownership tag from a resource whose
 // deletionPolicy is Retain and is no longer declared. Idempotent - safe on
 // every reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, client s3API, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, client s3API, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) (relinquished, gone bool, err error) {
 	bucket, nameErr := bucketNameFromARN(entry.ARN)
 	if nameErr != nil {
 		return false, false, nameErr
@@ -456,26 +456,30 @@ func relinquishIfStillTagged(ctx context.Context, client s3API, namespace, crNam
 			remaining[k] = v
 		}
 	}
-	// PutBucketTagging replaces the whole tag set - an empty TagSet is a
-	// valid way to clear it entirely (GetBucketTagging then reports
-	// NoSuchTagSet), so this needs no separate branch from the non-empty
-	// case below beyond which map gets encoded.
-	if len(remaining) == 0 {
-		_, err := client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
-			Bucket:  &bucket,
-			Tagging: &types.Tagging{TagSet: []types.Tag{}},
-		})
-		if err != nil {
-			return false, false, wrapAWSError(err, fmt.Sprintf("relinquishing ownership tag on retained bucket %q", entry.Name))
+	// PutBucketTagging replaces the whole tag set, so the released tags go in
+	// the same write. A bucket allows only ten tags: if they do not fit,
+	// letting go still has to succeed, so the write is repeated without them.
+	released := cloudctlaws.ReleaseTags(ctx, namespace, crName, time.Now())
+	if released != nil {
+		err := putBucketTags(ctx, client, bucket, cloudctlaws.MergeTags(remaining, released))
+		if err == nil {
+			return true, false, nil
 		}
-		return true, false, nil
+		cloudctlaws.ReleaseTagFailed(recordEvent, "bucket", entry.Name, err)
 	}
-
-	if _, err := client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
-		Bucket:  &bucket,
-		Tagging: &types.Tagging{TagSet: mapToTags(remaining)},
-	}); err != nil {
+	if err := putBucketTags(ctx, client, bucket, remaining); err != nil {
 		return false, false, wrapAWSError(err, fmt.Sprintf("relinquishing ownership tag on retained bucket %q", entry.Name))
 	}
 	return true, false, nil
+}
+
+// putBucketTags writes the whole tag set; an empty one clears it, and
+// GetBucketTagging then reports NoSuchTagSet.
+func putBucketTags(ctx context.Context, client s3API, bucket string, tags map[string]string) error {
+	set := []types.Tag{}
+	if len(tags) > 0 {
+		set = mapToTags(tags)
+	}
+	_, err := client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{Bucket: &bucket, Tagging: &types.Tagging{TagSet: set}})
+	return err
 }

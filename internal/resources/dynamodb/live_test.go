@@ -561,7 +561,7 @@ func TestLive_Cleanup_RetainedTableIsLetGoAndAMissingOneIsGone(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the retained table should still exist: %v", err)
 		}
-		if !cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, "uid-1") {
+		if got := tagsToMap(tags); !cloudctlaws.IsOwnedBy(got, namespace, crName, "uid-1") && got[cloudctlaws.ReleasedFromTagKey] != "" {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -570,7 +570,7 @@ func TestLive_Cleanup_RetainedTableIsLetGoAndAMissingOneIsGone(t *testing.T) {
 	}
 
 	missing := depsv1alpha1.ManagedResource{Type: resourceType, Name: "never-created", ARN: "arn:aws:dynamodb:" + region + ":" + accountID + ":table/" + cloudctlaws.ResourceName(namespace, crName, resourceType, "never-created", 255)}
-	_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", missing)
+	_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", missing, nil)
 	if err != nil || !gone {
 		t.Errorf("relinquishIfStillTagged() on a missing table gone=%v err=%v, want gone", gone, err)
 	}

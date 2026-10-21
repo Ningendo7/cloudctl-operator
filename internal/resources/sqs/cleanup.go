@@ -155,7 +155,7 @@ func Cleanup(
 				// Let go earlier and pins no key: nothing to remember.
 				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 			} else if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, sqsClient, namespace, crName, crUID, entry)
+				relinquished, gone, relErr := relinquishIfStillTagged(ctx, sqsClient, namespace, crName, crUID, entry, recordEvent)
 				if relErr != nil {
 					if firstErr == nil {
 						firstErr = relErr
@@ -404,7 +404,7 @@ func clearPendingDeletion(ctx context.Context, sqsClient sqsAPI, entry depsv1alp
 // manage it, so the AWS-side tag shouldn't keep claiming otherwise. The
 // ledger keeps the entry for visibility; only the AWS-side ownership claim
 // is relinquished. Idempotent — safe on every reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, sqsClient sqsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, sqsClient sqsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) (relinquished, gone bool, err error) {
 	queueName, nameErr := queueNameFromARN(entry.ARN)
 	if nameErr != nil {
 		return false, false, nameErr
@@ -428,6 +428,11 @@ func relinquishIfStillTagged(ctx context.Context, sqsClient sqsAPI, namespace, c
 		return false, false, nil // already relinquished, or never verified as ours - don't touch it
 	}
 
+	if released := cloudctlaws.ReleaseTags(ctx, namespace, crName, time.Now()); released != nil {
+		if _, tagErr := sqsClient.TagQueue(ctx, &sqs.TagQueueInput{QueueUrl: urlOut.QueueUrl, Tags: released}); tagErr != nil {
+			cloudctlaws.ReleaseTagFailed(recordEvent, "queue", entry.Name, tagErr)
+		}
+	}
 	if _, uErr := sqsClient.UntagQueue(ctx, &sqs.UntagQueueInput{
 		QueueUrl: urlOut.QueueUrl,
 		TagKeys:  []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},

@@ -292,7 +292,7 @@ func ensureBucket(
 			}
 		}
 
-		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
+		merged := cloudctlaws.WithoutReleaseTags(cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID)))
 		if _, tagErr := awsClient.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
 			Bucket:  &bucket,
 			Tagging: &types.Tagging{TagSet: mapToTags(merged)},

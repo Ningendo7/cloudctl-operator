@@ -235,6 +235,10 @@ func mapBytes(s string, keep func(byte) bool) string {
 // names in AWS.
 const DedicatedKeyRole = "key"
 
+// ResourceTypeRDSSnapshot is the ledger type of an RDS instance's final
+// snapshot, which is encrypted with its instance's key.
+const ResourceTypeRDSSnapshot = "rds-snapshot"
+
 // DedicatedKeyLedgerName derives the ledger entry name for a dedicated KMS
 // key belonging to a resource in another section, keyed by that section's
 // own resource type as well as its resource name — an SQS queue and an S3

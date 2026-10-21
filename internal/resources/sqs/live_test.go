@@ -624,12 +624,12 @@ func TestLive_Cleanup_RetainedQueueIsLetGoAndAMissingOneIsGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("real ListQueueTags() error = %v", err)
 	}
-	if _, owned := tagsOut.Tags[cloudctlaws.OwnerTagKey]; owned {
-		t.Errorf("expected the ownership tag to be gone, tags: %+v", tagsOut.Tags)
+	if _, owned := tagsOut.Tags[cloudctlaws.OwnerTagKey]; owned || tagsOut.Tags[cloudctlaws.ReleasedFromTagKey] != namespace+"/"+crName {
+		t.Errorf("expected the ownership tag gone and released-from left, tags: %+v", tagsOut.Tags)
 	}
 
 	missing := depsv1alpha1.ManagedResource{Type: resourceType, Name: "never-created", ARN: "arn:aws:sqs:us-east-1:123456789012:" + cloudctlaws.ResourceName(namespace, crName, "sqs", "never-created", 80)}
-	_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", missing)
+	_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", missing, nil)
 	if err != nil || !gone {
 		t.Errorf("relinquishIfStillTagged() on a missing queue gone=%v err=%v, want gone", gone, err)
 	}
