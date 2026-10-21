@@ -22,7 +22,7 @@ package decisions
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -40,8 +40,15 @@ const (
 // maxHeldBy is how many holders a key entry lists before saying "and N more".
 const maxHeldBy = 20
 
+const (
+	typeSQS      = "sqs"
+	typeSNS      = "sns"
+	typeS3       = "s3"
+	typeDynamoDB = "dynamodb"
+)
+
 // forceable are the types whose emptiness check force: true bypasses.
-var forceable = map[string]bool{"sqs": true, "sns": true, "s3": true, "dynamodb": true}
+var forceable = map[string]bool{typeSQS: true, typeSNS: true, typeS3: true, typeDynamoDB: true}
 
 // OnDelete says what happens to an entry's resource when its CR is deleted
 // or the entry leaves spec.
@@ -121,7 +128,7 @@ func heldBy(holders []Holder) []string {
 	for _, h := range holders {
 		names = append(names, h.Type+"/"+h.Name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	if len(names) > maxHeldBy {
 		rest := len(names) - maxHeldBy
 		names = append(names[:maxHeldBy], fmt.Sprintf("and %d more", rest))

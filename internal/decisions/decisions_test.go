@@ -38,11 +38,11 @@ func TestOnDelete(t *testing.T) {
 		in   depsv1alpha1.ManagedResource
 		want depsv1alpha1.OnDeleteOutcome
 	}{
-		{"a retained queue", entry("sqs", "q", retain), depsv1alpha1.OnDeleteRetain},
-		{"a queue to delete", entry("sqs", "q", del), depsv1alpha1.OnDeleteDelete},
-		{"a queue to delete, forced", forced(entry("sqs", "q", del)), depsv1alpha1.OnDeleteEvenIfNotEmpty},
-		{"a bucket to delete, forced", forced(entry("s3", "b", del)), depsv1alpha1.OnDeleteEvenIfNotEmpty},
-		{"a retained table, forced", forced(entry("dynamodb", "t", retain)), depsv1alpha1.OnDeleteRetain},
+		{"a retained queue", entry(typeSQS, "q", retain), depsv1alpha1.OnDeleteRetain},
+		{"a queue to delete", entry(typeSQS, "q", del), depsv1alpha1.OnDeleteDelete},
+		{"a queue to delete, forced", forced(entry(typeSQS, "q", del)), depsv1alpha1.OnDeleteEvenIfNotEmpty},
+		{"a bucket to delete, forced", forced(entry(typeS3, "b", del)), depsv1alpha1.OnDeleteEvenIfNotEmpty},
+		{"a retained table, forced", forced(entry(typeDynamoDB, "t", retain)), depsv1alpha1.OnDeleteRetain},
 		{"a key to delete, force has no meaning", forced(entry("kms", "k", del)), depsv1alpha1.OnDeleteDelete},
 		{"a retained key", entry("kms", "k", retain), depsv1alpha1.OnDeleteRetain},
 		{"an instance to delete is never deleted", entry("rds", "db", del), depsv1alpha1.OnDeleteManual},
@@ -64,12 +64,12 @@ func TestKeyHolders(t *testing.T) {
 	del, retain := depsv1alpha1.DeletionPolicyDelete, depsv1alpha1.DeletionPolicyRetain
 	ledger := []depsv1alpha1.ManagedResource{
 		{Type: "kms", Name: "shared", ARN: arn},
-		{Type: "kms", Name: cloudctlaws.DedicatedKeyLedgerName("s3", "receipts")},
+		{Type: "kms", Name: cloudctlaws.DedicatedKeyLedgerName(typeS3, "receipts")},
 		{Type: "kms", Name: cloudctlaws.DedicatedKeyLedgerName("rds", "db")},
-		{Type: "sqs", Name: "orders", DeletionPolicy: del, KMSKeyARN: arn},
-		{Type: "s3", Name: "receipts", DeletionPolicy: retain},
+		{Type: typeSQS, Name: "orders", DeletionPolicy: del, KMSKeyARN: arn},
+		{Type: typeS3, Name: "receipts", DeletionPolicy: retain},
 		{Type: "rds-snapshot", Name: "db", DeletionPolicy: retain},
-		{Type: "sns", Name: "events", DeletionPolicy: del},
+		{Type: typeSNS, Name: "events", DeletionPolicy: del},
 		{Type: "iam", Name: "role", DeletionPolicy: del, KMSKeyARN: arn},
 	}
 
@@ -78,7 +78,7 @@ func TestKeyHolders(t *testing.T) {
 	if h := got["shared"]; len(h) != 1 || h[0].Name != "orders" || h[0].Retained {
 		t.Errorf("shared key holders = %+v, want the queue, not retained", h)
 	}
-	if h := got[cloudctlaws.DedicatedKeyLedgerName("s3", "receipts")]; len(h) != 1 || !h[0].Retained {
+	if h := got[cloudctlaws.DedicatedKeyLedgerName(typeS3, "receipts")]; len(h) != 1 || !h[0].Retained {
 		t.Errorf("a dedicated key is found from its owner's type and name, and a retained owner marks it retained, got %+v", h)
 	}
 	if h := got[cloudctlaws.DedicatedKeyLedgerName("rds", "db")]; len(h) != 1 || h[0].Type != "rds-snapshot" {
@@ -93,8 +93,8 @@ func TestStampSetsDecisionsAndIsIdempotent(t *testing.T) {
 	const arn = "arn:aws:kms:us-east-1:123456789012:key/shared"
 	ledger := []depsv1alpha1.ManagedResource{
 		{Type: "kms", Name: "shared", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain},
-		{Type: "sqs", Name: "b", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, KMSKeyARN: arn},
-		{Type: "sqs", Name: "a", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, KMSKeyARN: arn},
+		{Type: typeSQS, Name: "b", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, KMSKeyARN: arn},
+		{Type: typeSQS, Name: "a", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, KMSKeyARN: arn},
 	}
 
 	Stamp(ledger)
@@ -120,8 +120,8 @@ func TestStampSetsDecisionsAndIsIdempotent(t *testing.T) {
 func TestStampListsAtMostTwentyHolders(t *testing.T) {
 	const arn = "arn:aws:kms:us-east-1:123456789012:key/shared"
 	ledger := []depsv1alpha1.ManagedResource{{Type: "kms", Name: "shared", ARN: arn}}
-	for i := 0; i < 25; i++ {
-		ledger = append(ledger, depsv1alpha1.ManagedResource{Type: "sqs", Name: fmt.Sprintf("q%02d", i), KMSKeyARN: arn})
+	for i := range 25 {
+		ledger = append(ledger, depsv1alpha1.ManagedResource{Type: typeSQS, Name: fmt.Sprintf("q%02d", i), KMSKeyARN: arn})
 	}
 
 	Stamp(ledger)

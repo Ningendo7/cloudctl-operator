@@ -1006,7 +1006,7 @@ func TestRelinquishIfStillTagged_StillLetsGoWhenTheReleasedTagsDoNotFit(t *testi
 		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "svc"),
 		cloudctlaws.OwnerUIDTagKey: "uid-1",
 	}
-	for i := 0; i < 9; i++ {
+	for i := range 9 {
 		tags[fmt.Sprintf("team-%d", i)] = "x"
 	}
 	client.buckets["some-bucket"] = &fakeBucket{tags: tags}

@@ -148,8 +148,8 @@ func findResult(results []CleanupResult, name string) *CleanupResult {
 	return nil
 }
 
-func markPastQuietWindow(ledger []depsv1alpha1.ManagedResource, resourceType, name string) []depsv1alpha1.ManagedResource {
-	entry, entryFound := status.FindManagedResource(ledger, resourceType, name)
+func markPastQuietWindow(ledger []depsv1alpha1.ManagedResource, resourceType string) []depsv1alpha1.ManagedResource {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, "widget")
 	if !entryFound {
 		return ledger
 	}
@@ -404,7 +404,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("first Cleanup() error = %v", err)
 		}
-		ledger = markPastQuietWindow(ledger, s.ResourceType(), "widget")
+		ledger = markPastQuietWindow(ledger, s.ResourceType())
 
 		_, results, err := s.Cleanup(ctx, ledger, nil, false)
 		if err != nil {
@@ -430,7 +430,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("first Cleanup() error = %v", err)
 		}
-		ledger = markPastQuietWindow(ledger, s.ResourceType(), "widget")
+		ledger = markPastQuietWindow(ledger, s.ResourceType())
 
 		updated, _, err := s.Cleanup(ctx, ledger, nil, false)
 		if err != nil {
@@ -556,7 +556,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("first Cleanup() error = %v", err)
 		}
-		ledger = markPastQuietWindow(ledger, s.ResourceType(), "widget")
+		ledger = markPastQuietWindow(ledger, s.ResourceType())
 		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
 			t.Fatalf("second Cleanup() error = %v", err)
 		}
@@ -587,7 +587,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("first Cleanup() error = %v", err)
 		}
-		ledger = markPastQuietWindow(ledger, s.ResourceType(), "widget")
+		ledger = markPastQuietWindow(ledger, s.ResourceType())
 		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
 			t.Fatalf("second Cleanup() error = %v", err)
 		}
