@@ -117,7 +117,7 @@ func Cleanup(
 				// Let go earlier and pins no key: nothing to remember.
 				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 			} else if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry, recordEvent)
 				if relErr != nil {
 					if firstErr == nil {
 						firstErr = relErr
@@ -269,7 +269,7 @@ func markPendingDeletion(ledger []depsv1alpha1.ManagedResource, results []Cleanu
 // relinquishIfStillTagged removes our ownership tag (and any leftover
 // pending-deletion deny statement) from a resource whose deletionPolicy is
 // Retain and is no longer declared. Idempotent — safe on every reconcile.
-func relinquishIfStillTagged(ctx context.Context, client snsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, client snsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) (relinquished, gone bool, err error) {
 	tagsOut, tErr := client.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{
 		ResourceArn: &entry.ARN,
 	})
@@ -287,6 +287,11 @@ func relinquishIfStillTagged(ctx context.Context, client snsAPI, namespace, crNa
 		return false, false, nil // already relinquished, or never verified as ours
 	}
 
+	if released := cloudctlaws.ReleaseTags(ctx, namespace, crName, time.Now()); released != nil {
+		if _, tagErr := client.TagResource(ctx, &sns.TagResourceInput{ResourceArn: &entry.ARN, Tags: mapToTags(released)}); tagErr != nil {
+			cloudctlaws.ReleaseTagFailed(recordEvent, "topic", entry.Name, tagErr)
+		}
+	}
 	if _, uErr := client.UntagResource(ctx, &sns.UntagResourceInput{
 		ResourceArn: &entry.ARN,
 		TagKeys:     []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},

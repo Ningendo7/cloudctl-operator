@@ -17,8 +17,10 @@ limitations under the License.
 package aws
 
 import (
+	"context"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestMergeTags(t *testing.T) {
@@ -59,5 +61,47 @@ func TestMergeTags(t *testing.T) {
 				t.Errorf("MergeTags() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestReleaseTags(t *testing.T) {
+	now := time.Date(2026, 10, 21, 23, 59, 0, 0, time.FixedZone("x", -5*3600))
+
+	got := ReleaseTags(context.Background(), "checkout", "checkout-service", now)
+
+	if got[ReleasedFromTagKey] != "checkout/checkout-service" || got[ReleasedAtTagKey] != "2026-10-22" {
+		t.Errorf("ReleaseTags() = %v, want the CR and the UTC date", got)
+	}
+	if ReleaseTags(WithReleaseTags(context.Background(), false), "checkout", "checkout-service", now) != nil {
+		t.Error("turned off, ReleaseTags should return nothing")
+	}
+	if ReleaseTags(WithReleaseTags(context.Background(), true), "checkout", "checkout-service", now) == nil {
+		t.Error("turned on explicitly, ReleaseTags should return the tags")
+	}
+}
+
+func TestReleasedTagsAreNeverOwnership(t *testing.T) {
+	tags := ReleaseTags(context.Background(), "ns", "app", time.Now())
+	if IsOwnedBy(tags, "ns", "app", "uid") {
+		t.Error("the released tags must not make a resource look owned")
+	}
+	if _, stale := IsStaleUID(tags, "ns", "app", "uid"); stale {
+		t.Error("the released tags must not look like a previous incarnation")
+	}
+}
+
+func TestWithoutReleaseTagsKeepsEverythingElse(t *testing.T) {
+	in := map[string]string{"team": "payments", ReleasedFromTagKey: "ns/app", ReleasedAtTagKey: "2026-10-21"}
+
+	out := WithoutReleaseTags(in)
+
+	if len(out) != 1 || out["team"] != "payments" {
+		t.Errorf("WithoutReleaseTags() = %v, want only the unrelated tag", out)
+	}
+	if len(in) != 3 {
+		t.Error("the input map must not be modified")
+	}
+	if HasReleaseTags(out) || !HasReleaseTags(in) {
+		t.Error("HasReleaseTags disagrees with WithoutReleaseTags")
 	}
 }

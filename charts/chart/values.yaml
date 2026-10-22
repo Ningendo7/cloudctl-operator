@@ -34,6 +34,12 @@ manager:
   ##
   podBaseSecurityGroupIds: []
 
+  ## Leave cloudctl.io/released-from and cloudctl.io/released-at tags on a
+  ## retained resource when the operator lets go of it. They are not used as
+  ## ownership. Set false to leave no tag.
+  ##
+  releaseTags: true
+
   ## Image pull secrets
   ##
   # imagePullSecrets:

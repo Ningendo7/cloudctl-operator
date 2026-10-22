@@ -61,6 +61,10 @@ type AppDependenciesReconciler struct {
 	// rds.consumes keep next to the database group.
 	PodBaseSecurityGroupIDs []string
 
+	// DisableReleaseTags stops the released-from tags being left on a
+	// resource the operator lets go of. Left false, they are written.
+	DisableReleaseTags bool
+
 	// MaxConcurrentReconciles bounds how many AppDependencies CRs this
 	// manager reconciles in parallel. Left at zero (the Go zero value, not
 	// a deliberate "disable" setting) falls back to defaultMaxConcurrentReconciles
@@ -100,6 +104,7 @@ func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// A CR told which previous UID to take resources over from (a restore,
 	// a new cluster) carries it to every section through the context.
 	ctx = cloudctlaws.WithAdoptFromUID(ctx, cr.Annotations[cloudctlaws.AdoptFromUIDAnnotation])
+	ctx = cloudctlaws.WithReleaseTags(ctx, !r.DisableReleaseTags)
 
 	if !cr.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, &cr)

@@ -24,16 +24,13 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/decisions"
 	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
-	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
-const (
-	resourceTypeKMS         = "kms"
-	rdsSnapshotResourceType = rds.SnapshotResourceType
-)
+const resourceTypeKMS = "kms"
 
 // encryptedResource is one declared resource that can carry an encryption
 // block, whichever section it comes from.
@@ -163,35 +160,11 @@ func kmsKeysInUse(cr *depsv1alpha1.AppDependencies, includeSpec bool) map[string
 		}
 	}
 
-	byARN := map[string]string{}
-	for _, e := range cr.Status.ManagedResources {
-		if e.Type == resourceTypeKMS {
-			byARN[e.ARN] = e.Name
-		}
-	}
-	mark := func(name string, retained bool) {
-		use := inUse[name]
-		use.Retained = use.Retained || retained
-		inUse[name] = use
-	}
-	for _, e := range cr.Status.ManagedResources {
-		if e.Type == resourceTypeKMS || e.Type == resourceTypeIAM {
-			continue
-		}
-		retained := e.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete
-		if name, ok := byARN[e.KMSKeyARN]; ok && e.KMSKeyARN != "" {
-			mark(name, retained)
-			continue
-		}
-		ownerType, resourceName := e.Type, e.Name
-		if ownerType == rdsSnapshotResourceType {
-			ownerType = resourceTypeRDS
-		}
-		if base, _, derived := strings.Cut(resourceName, "#"); derived {
-			resourceName = base
-		}
-		if dedicated := kms.DedicatedKeyLedgerName(ownerType, resourceName); status.HasManagedResource(cr.Status.ManagedResources, resourceTypeKMS, dedicated) {
-			mark(dedicated, retained)
+	for name, holders := range decisions.KeyHolders(cr.Status.ManagedResources) {
+		for _, h := range holders {
+			use := inUse[name]
+			use.Retained = use.Retained || h.Retained
+			inUse[name] = use
 		}
 	}
 	return inUse

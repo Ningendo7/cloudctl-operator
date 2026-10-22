@@ -129,4 +129,20 @@ func (s *dynamodbLifecycleSubject) DeleteOutOfBand(name string) error {
 	return nil
 }
 
+func (s *dynamodbLifecycleSubject) Tags(name string) map[string]string {
+	if table, ok := s.client.tables[s.tableName(name)]; ok {
+		return table.tags
+	}
+	return nil
+}
+
+func (s *dynamodbLifecycleSubject) PutTag(name, key, value string) error {
+	table, ok := s.client.tables[s.tableName(name)]
+	if !ok {
+		return fmt.Errorf("table %q not found", name)
+	}
+	table.tags[key] = value
+	return nil
+}
+
 func (s *dynamodbLifecycleSubject) KeepsRelinquishedEntries() bool { return false }

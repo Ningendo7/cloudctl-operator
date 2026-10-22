@@ -35,6 +35,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/decisions"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -112,6 +114,13 @@ type Subject interface {
 	// someone had deleted it by hand.
 	DeleteOutOfBand(name string) error
 
+	// Tags returns the tags on the named resource in the fake AWS backend.
+	Tags(name string) map[string]string
+
+	// PutTag sets one tag on the named resource, as someone else's tooling
+	// would.
+	PutTag(name, key, value string) error
+
 	// KeepsRelinquishedEntries is true for a resource type whose ledger entry
 	// stays after the resource is let go even when it pins no key (KMS keys
 	// themselves); the others drop it.
@@ -139,8 +148,8 @@ func findResult(results []CleanupResult, name string) *CleanupResult {
 	return nil
 }
 
-func markPastQuietWindow(ledger []depsv1alpha1.ManagedResource, resourceType, name string) []depsv1alpha1.ManagedResource {
-	entry, entryFound := status.FindManagedResource(ledger, resourceType, name)
+func markPastQuietWindow(ledger []depsv1alpha1.ManagedResource, resourceType string) []depsv1alpha1.ManagedResource {
+	entry, entryFound := status.FindManagedResource(ledger, resourceType, "widget")
 	if !entryFound {
 		return ledger
 	}
@@ -395,7 +404,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("first Cleanup() error = %v", err)
 		}
-		ledger = markPastQuietWindow(ledger, s.ResourceType(), "widget")
+		ledger = markPastQuietWindow(ledger, s.ResourceType())
 
 		_, results, err := s.Cleanup(ctx, ledger, nil, false)
 		if err != nil {
@@ -421,7 +430,7 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		if err != nil {
 			t.Fatalf("first Cleanup() error = %v", err)
 		}
-		ledger = markPastQuietWindow(ledger, s.ResourceType(), "widget")
+		ledger = markPastQuietWindow(ledger, s.ResourceType())
 
 		updated, _, err := s.Cleanup(ctx, ledger, nil, false)
 		if err != nil {
@@ -429,6 +438,161 @@ func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 		}
 		if entry, entryFound := status.FindManagedResource(updated, s.ResourceType(), "widget"); entryFound {
 			t.Errorf("expected the ledger entry removed once actually deleted, got %+v", entry)
+		}
+	})
+
+	t.Run("LettingGoLeavesProvenanceAndKeepsOtherTags", func(t *testing.T) {
+		s := newSubject(t)
+		ctx := context.Background()
+		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+		if err != nil {
+			t.Fatalf("EnsureOne() error = %v", err)
+		}
+		if err := s.PutTag("widget", "team", "payments"); err != nil {
+			t.Fatalf("PutTag() error = %v", err)
+		}
+		if _, _, err := s.Cleanup(ctx, ledger, nil, false); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+
+		tags := s.Tags("widget")
+		if tags[cloudctlaws.ReleasedFromTagKey] != "default/lifecycle-test" {
+			t.Errorf("released-from = %q, want the CR it came from", tags[cloudctlaws.ReleasedFromTagKey])
+		}
+		if tags[cloudctlaws.ReleasedAtTagKey] != time.Now().UTC().Format(time.DateOnly) {
+			t.Errorf("released-at = %q, want today's UTC date", tags[cloudctlaws.ReleasedAtTagKey])
+		}
+		if _, owned := tags[cloudctlaws.OwnerTagKey]; owned {
+			t.Error("the ownership tag should be gone")
+		}
+		if tags["team"] != "payments" {
+			t.Errorf("another tool's tag was lost: %v", tags)
+		}
+	})
+
+	t.Run("LettingGoLeavesNoProvenanceWhenTurnedOff", func(t *testing.T) {
+		s := newSubject(t)
+		ctx := cloudctlaws.WithReleaseTags(context.Background(), false)
+		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+		if err != nil {
+			t.Fatalf("EnsureOne() error = %v", err)
+		}
+		if _, _, err := s.Cleanup(ctx, ledger, nil, false); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+		if cloudctlaws.HasReleaseTags(s.Tags("widget")) {
+			t.Errorf("no released tags expected when turned off, got %v", s.Tags("widget"))
+		}
+	})
+
+	t.Run("AdoptingAgainRemovesOnlyTheReleasedTags", func(t *testing.T) {
+		s := newSubject(t)
+		ctx := context.Background()
+		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+		if err != nil {
+			t.Fatalf("EnsureOne() error = %v", err)
+		}
+		if err := s.PutTag("widget", "team", "payments"); err != nil {
+			t.Fatalf("PutTag() error = %v", err)
+		}
+		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+		if !cloudctlaws.HasReleaseTags(s.Tags("widget")) {
+			t.Fatal("test setup broken: expected the released tags after letting go")
+		}
+		// A relinquished entry that stays in the ledger (KMS, or a pinned key)
+		// re-adopts through the same path as one that left it.
+		if _, err = s.EnsureOne(ctx, ledger, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true}); err != nil {
+			t.Fatalf("EnsureOne() with adopt error = %v", err)
+		}
+
+		tags := s.Tags("widget")
+		if cloudctlaws.HasReleaseTags(tags) {
+			t.Errorf("the released tags should go when the resource is owned again, got %v", tags)
+		}
+		if tags["team"] != "payments" {
+			t.Errorf("another tool's tag was lost: %v", tags)
+		}
+		if tags[cloudctlaws.OwnerTagKey] != "default/lifecycle-test" {
+			t.Errorf("the ownership tag should be back, got %v", tags)
+		}
+	})
+
+	// What status publishes as onDelete must be what Cleanup does.
+	t.Run("OnDeleteRetainMatchesCleanup", func(t *testing.T) {
+		s := newSubject(t)
+		ctx := context.Background()
+		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+		if err != nil {
+			t.Fatalf("EnsureOne() error = %v", err)
+		}
+		entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "widget")
+		if got := decisions.OnDelete(entry); got != depsv1alpha1.OnDeleteRetain {
+			t.Fatalf("OnDelete() = %s, want Retain", got)
+		}
+		if _, results, err := s.Cleanup(ctx, ledger, nil, false); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		} else if r := findResult(results, "widget"); r == nil || r.Reason != CleanupReasonRetained {
+			t.Errorf("onDelete says Retain but Cleanup did %+v", results)
+		}
+	})
+
+	t.Run("OnDeleteDeleteMatchesCleanup", func(t *testing.T) {
+		s := newSubject(t)
+		ctx := context.Background()
+		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
+		if err != nil {
+			t.Fatalf("EnsureOne() error = %v", err)
+		}
+		entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "widget")
+		if got := decisions.OnDelete(entry); got != depsv1alpha1.OnDeleteDelete {
+			t.Fatalf("OnDelete() = %s, want Delete", got)
+		}
+		if err := s.SetNonEmpty("widget", false); err != nil && !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("SetNonEmpty() error = %v", err)
+		}
+		ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
+		if err != nil {
+			t.Fatalf("first Cleanup() error = %v", err)
+		}
+		ledger = markPastQuietWindow(ledger, s.ResourceType())
+		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+			t.Fatalf("second Cleanup() error = %v", err)
+		}
+		if status.HasManagedResource(ledger, s.ResourceType(), "widget") {
+			t.Error("onDelete says Delete but the resource was not deleted")
+		}
+	})
+
+	t.Run("OnDeleteForcedMatchesCleanup", func(t *testing.T) {
+		s := newSubject(t)
+		ctx := context.Background()
+		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
+		if err != nil {
+			t.Fatalf("EnsureOne() error = %v", err)
+		}
+		if err := s.SetNonEmpty("widget", true); errors.Is(err, ErrUnsupported) {
+			t.Skip("this resource type has no emptiness check for force to bypass")
+		} else if err != nil {
+			t.Fatalf("SetNonEmpty() error = %v", err)
+		}
+		entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "widget")
+		entry.Force = true
+		status.UpsertManagedResource(&ledger, entry)
+		if got := decisions.OnDelete(entry); got != depsv1alpha1.OnDeleteEvenIfNotEmpty {
+			t.Fatalf("OnDelete() = %s, want DeleteEvenIfNotEmpty", got)
+		}
+		ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
+		if err != nil {
+			t.Fatalf("first Cleanup() error = %v", err)
+		}
+		ledger = markPastQuietWindow(ledger, s.ResourceType())
+		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+			t.Fatalf("second Cleanup() error = %v", err)
+		}
+		if status.HasManagedResource(ledger, s.ResourceType(), "widget") {
+			t.Error("onDelete says DeleteEvenIfNotEmpty but a non-empty resource was kept")
 		}
 	})
 

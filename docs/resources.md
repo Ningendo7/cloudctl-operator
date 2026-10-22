@@ -446,6 +446,19 @@ A move to another **region** is not supported: an operator refuses a CR whose re
   `Reason`, which is the first section that isn't ready, in its own words
   (`-o wide` adds the message). Every section's condition is under
   `status.conditions`; [reasons.md](reasons.md) lists every reason.
+- **What happens on delete** — each ledger entry carries `onDelete`:
+  `Retain` (left in AWS, ownership tags removed), `Delete` (deleted once
+  empty, after the quiet window), `DeleteEvenIfNotEmpty` (`force: true`) or
+  `ManualDeletion` (an RDS instance, which the operator never deletes). A KMS
+  key entry lists in `heldBy` the entries that still need it, up to 20.
+- **Released tags** — when the operator lets go of a retained resource it
+  leaves `cloudctl.io/released-from=<namespace>/<cr-name>` and
+  `cloudctl.io/released-at=<date>` on it, so a resource nobody remembers can be
+  traced: `aws resourcegroupstaggingapi get-resources --tag-filters Key=cloudctl.io/released-from`.
+  They are never used as ownership, and adopting the resource again removes
+  just those two. A failure to write them (an S3 bucket allows ten tags) is
+  reported as `ReleaseTagFailed` and does not stop the release. Turn them off
+  with `--release-tags=false` (chart: `manager.releaseTags: false`).
 - **Ownership tagging, adoption, and the trust window** — see
   [architecture.md](architecture.md#ownership-a-resource-is-owned-by-exactly-one-cr).
 - **Deletion safety, the quiet window, and `PendingDeletion`/`StuckPendingDeletion`** —

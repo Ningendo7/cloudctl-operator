@@ -116,7 +116,7 @@ func Cleanup(
 				// Let go earlier and pins no key: nothing to remember.
 				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 			} else if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry)
+				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry, recordEvent)
 				if relErr != nil {
 					if firstErr == nil {
 						firstErr = relErr
@@ -282,7 +282,7 @@ func tableNameFromARN(arn string) (string, error) {
 // relinquishIfStillTagged removes our ownership tag from a resource whose
 // deletionPolicy is Retain and is no longer declared. Idempotent — safe on
 // every reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, client dynamodbAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, client dynamodbAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) (relinquished, gone bool, err error) {
 	tags, tErr := listAllTags(ctx, client, entry.ARN)
 	if tErr != nil {
 		var notFound *types.ResourceNotFoundException
@@ -296,6 +296,11 @@ func relinquishIfStillTagged(ctx context.Context, client dynamodbAPI, namespace,
 		return false, false, nil // already relinquished, or never verified as ours
 	}
 
+	if released := cloudctlaws.ReleaseTags(ctx, namespace, crName, time.Now()); released != nil {
+		if _, tagErr := client.TagResource(ctx, &dynamodb.TagResourceInput{ResourceArn: &entry.ARN, Tags: mapToTags(released)}); tagErr != nil {
+			cloudctlaws.ReleaseTagFailed(recordEvent, "table", entry.Name, tagErr)
+		}
+	}
 	if _, uErr := client.UntagResource(ctx, &dynamodb.UntagResourceInput{
 		ResourceArn: &entry.ARN,
 		TagKeys:     []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},

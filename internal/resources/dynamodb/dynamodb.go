@@ -300,6 +300,11 @@ func ensureTable(
 		}); tagErr != nil {
 			return ledger, wrapAWSError(tagErr, "adopting table (tagging)")
 		}
+		if cloudctlaws.HasReleaseTags(currentTags) {
+			if _, untagErr := awsClient.UntagResource(ctx, &dynamodb.UntagResourceInput{ResourceArn: &tableArn, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
+				cloudctlaws.ReleaseTagFailed(recordEvent, "table", tableName, untagErr)
+			}
+		}
 		if recordEvent != nil {
 			if transferred {
 				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over DynamoDB table %s from a previous incarnation of this CR", tableArn))

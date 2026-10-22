@@ -116,4 +116,20 @@ func (s *sqsLifecycleSubject) DeleteOutOfBand(name string) error {
 	return nil
 }
 
+func (s *sqsLifecycleSubject) Tags(name string) map[string]string {
+	if q, ok := s.client.queues[s.queueName(name)]; ok {
+		return q.tags
+	}
+	return nil
+}
+
+func (s *sqsLifecycleSubject) PutTag(name, key, value string) error {
+	q, ok := s.client.queues[s.queueName(name)]
+	if !ok {
+		return fmt.Errorf("queue %q not found", name)
+	}
+	q.tags[key] = value
+	return nil
+}
+
 func (s *sqsLifecycleSubject) KeepsRelinquishedEntries() bool { return false }

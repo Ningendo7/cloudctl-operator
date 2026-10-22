@@ -109,4 +109,20 @@ func (s *snsLifecycleSubject) DeleteOutOfBand(name string) error {
 	return nil
 }
 
+func (s *snsLifecycleSubject) Tags(name string) map[string]string {
+	if topic, ok := s.client.topics[s.topicArn(name)]; ok {
+		return topic.tags
+	}
+	return nil
+}
+
+func (s *snsLifecycleSubject) PutTag(name, key, value string) error {
+	topic, ok := s.client.topics[s.topicArn(name)]
+	if !ok {
+		return fmt.Errorf("topic %q not found", name)
+	}
+	topic.tags[key] = value
+	return nil
+}
+
 func (s *snsLifecycleSubject) KeepsRelinquishedEntries() bool { return false }

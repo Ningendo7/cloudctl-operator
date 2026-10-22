@@ -51,7 +51,7 @@ const deletionQuietWindow = 10 * time.Minute
 // final snapshot is tracked under - a separate ledger entry rather than a
 // new ManagedResource field, the same reuse-the-ledger approach
 // podNetworkIdentityResourceType already takes for the pod security group.
-const snapshotResourceType = "rds-snapshot"
+const snapshotResourceType = cloudctlaws.ResourceTypeRDSSnapshot
 
 // SnapshotResourceType is the ledger type of an instance's final snapshot.
 const SnapshotResourceType = snapshotResourceType
@@ -200,7 +200,7 @@ func retainEntry(
 	if entry.State == depsv1alpha1.ManagedResourceStateRelinquished && !status.NeedsRelinquishedRecheck(entry) {
 		return ledger, true, nil
 	}
-	relinquished, gone, err := relinquishIfStillTagged(ctx, awsClient, namespace, crName, crUID, entry)
+	relinquished, gone, err := relinquishIfStillTagged(ctx, awsClient, namespace, crName, crUID, entry, recordEvent)
 	if err != nil {
 		return ledger, false, err
 	}
@@ -450,7 +450,7 @@ func instanceIDFromARN(arn string) (string, error) {
 // relinquishIfStillTagged removes this operator's ownership tags from an
 // instance whose deletionPolicy is Retain and is no longer declared.
 // Idempotent - safe on every reconcile pass.
-func relinquishIfStillTagged(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (relinquished, gone bool, err error) {
+func relinquishIfStillTagged(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) (relinquished, gone bool, err error) {
 	tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &entry.ARN})
 	if tErr != nil {
 		var notFound *types.DBInstanceNotFoundFault
@@ -464,6 +464,11 @@ func relinquishIfStillTagged(ctx context.Context, awsClient rdsAPI, namespace, c
 		return false, false, nil // already relinquished, or never verified as ours
 	}
 
+	if released := cloudctlaws.ReleaseTags(ctx, namespace, crName, time.Now()); released != nil {
+		if _, tagErr := awsClient.AddTagsToResource(ctx, &rds.AddTagsToResourceInput{ResourceName: &entry.ARN, Tags: mapToTags(released)}); tagErr != nil {
+			cloudctlaws.ReleaseTagFailed(recordEvent, "instance", entry.Name, tagErr)
+		}
+	}
 	if _, uErr := awsClient.RemoveTagsFromResource(ctx, &rds.RemoveTagsFromResourceInput{
 		ResourceName: &entry.ARN,
 		TagKeys:      []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},

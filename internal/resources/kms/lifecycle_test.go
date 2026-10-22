@@ -104,4 +104,24 @@ func (s *kmsLifecycleSubject) DeleteOutOfBand(name string) error {
 	return nil
 }
 
+func (s *kmsLifecycleSubject) key(name string) *fakeKey {
+	return s.client.keys[s.client.aliases[aliasName(s.namespace, s.crName, name, keyOptions{})]]
+}
+
+func (s *kmsLifecycleSubject) Tags(name string) map[string]string {
+	if k := s.key(name); k != nil {
+		return k.tags
+	}
+	return nil
+}
+
+func (s *kmsLifecycleSubject) PutTag(name, key, value string) error {
+	k := s.key(name)
+	if k == nil {
+		return fmt.Errorf("key %q not found", name)
+	}
+	k.tags[key] = value
+	return nil
+}
+
 func (s *kmsLifecycleSubject) KeepsRelinquishedEntries() bool { return true }

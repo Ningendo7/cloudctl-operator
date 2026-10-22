@@ -399,6 +399,11 @@ func ensureSingleQueue(
 		}); tagErr != nil {
 			return ledger, "", wrapAWSError(tagErr, "adopting queue (tagging)")
 		}
+		if cloudctlaws.HasReleaseTags(tagsOut.Tags) {
+			if _, untagErr := awsClient.UntagQueue(ctx, &sqs.UntagQueueInput{QueueUrl: &queueURL, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
+				cloudctlaws.ReleaseTagFailed(recordEvent, "queue", queueName, untagErr)
+			}
+		}
 		if recordEvent != nil {
 			if transferred {
 				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SQS queue %s from a previous incarnation of this CR", queueName))

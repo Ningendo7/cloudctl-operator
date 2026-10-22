@@ -419,21 +419,8 @@ func adoptKey(
 		return ledger, cloudctlaws.AdoptRequiredError("KMS alias", alias)
 	}
 
-	merged := cloudctlaws.MergeTags(tagMap, ownerTags(namespace, crName, crUID))
-	if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
-		KeyId: &arn,
-		Tags:  mapToTags(merged),
-	}); err != nil {
-		return ledger, wrapAWSError(err, fmt.Sprintf("adopting KMS key %q (tagging)", alias))
-	}
-	if recordEvent != nil {
-		if transferred {
-			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over KMS key %s (alias %s) from a previous incarnation of this CR", arn, alias))
-		} else {
-			recordEvent("Normal", "KeyAdopted", fmt.Sprintf("Adopted existing KMS key %s (alias %s) under management", arn, alias))
-		}
-	}
-
+	// AWS refuses to tag a key that is pending deletion, so the deletion is
+	// cancelled first.
 	if meta.KeyState == types.KeyStatePendingDeletion {
 		if err := reviveKey(ctx, kmsClient, arn); err != nil {
 			return ledger, wrapAWSError(err, fmt.Sprintf("canceling scheduled deletion of adopted KMS key %q", alias))
@@ -442,6 +429,26 @@ func adoptKey(
 			recordEvent("Normal", "KeyDeletionCancelled", fmt.Sprintf("Canceled scheduled deletion of adopted KMS key %s (alias %s)", arn, alias))
 		}
 		meta.KeyState = types.KeyStateEnabled
+	}
+
+	merged := cloudctlaws.MergeTags(tagMap, ownerTags(namespace, crName, crUID))
+	if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
+		KeyId: &arn,
+		Tags:  mapToTags(merged),
+	}); err != nil {
+		return ledger, wrapAWSError(err, fmt.Sprintf("adopting KMS key %q (tagging)", alias))
+	}
+	if cloudctlaws.HasReleaseTags(tagMap) {
+		if _, untagErr := kmsClient.UntagResource(ctx, &kms.UntagResourceInput{KeyId: &arn, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
+			cloudctlaws.ReleaseTagFailed(recordEvent, "KMS key", alias, untagErr)
+		}
+	}
+	if recordEvent != nil {
+		if transferred {
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over KMS key %s (alias %s) from a previous incarnation of this CR", arn, alias))
+		} else {
+			recordEvent("Normal", "KeyAdopted", fmt.Sprintf("Adopted existing KMS key %s (alias %s) under management", arn, alias))
+		}
 	}
 
 	ledger = recordKey(ledger, resourceName, arn, opts.deletionPolicy, depsv1alpha1.ManagedResourceStateVerified)

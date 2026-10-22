@@ -300,12 +300,12 @@ func TestLive_Cleanup_RetainedTopicIsLetGoAndAMissingOneIsGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the retained topic should still exist: %v", err)
 	}
-	if cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.Tags), namespace, crName, "uid-1") {
-		t.Errorf("expected the ownership tags to be gone, tags: %+v", tagsOut.Tags)
+	if got := tagsToMap(tagsOut.Tags); cloudctlaws.IsOwnedBy(got, namespace, crName, "uid-1") || got[cloudctlaws.ReleasedFromTagKey] != namespace+"/"+crName {
+		t.Errorf("expected the ownership tags gone and released-from left, tags: %+v", tagsOut.Tags)
 	}
 
 	missing := depsv1alpha1.ManagedResource{Type: resourceType, Name: "never-created", ARN: cloudctlaws.TopicARN(region, accountID, cloudctlaws.ResourceName(namespace, crName, "sns", "never-created", 256))}
-	_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", missing)
+	_, gone, err := relinquishIfStillTagged(ctx, client, namespace, crName, "uid-1", missing, nil)
 	if err != nil || !gone {
 		t.Errorf("relinquishIfStillTagged() on a missing topic gone=%v err=%v, want gone", gone, err)
 	}
@@ -339,5 +339,43 @@ func TestLive_Ensure_TakesOverATopicFromAPreviousUID(t *testing.T) {
 	}
 	if !cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.Tags), namespace, crName, "uid-2") {
 		t.Errorf("expected the topic to be tagged with the new UID, got %+v", tagsOut.Tags)
+	}
+}
+
+// TestLive_Ensure_AdoptingAgainRemovesOnlyTheReleasedTags checks against real
+// SNS that taking a released topic back removes the two released tags and
+// leaves someone else's tag alone.
+func TestLive_Ensure_AdoptingAgainRemovesOnlyTheReleasedTags(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := sns.NewFromConfig(cfg)
+	region, accountID := liveRegionAndAccount(t, cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	topicARN := cloudctlaws.TopicARN(region, accountID, cloudctlaws.ResourceName(namespace, crName, "sns", "events", 256))
+	t.Cleanup(func() { deleteTopicIfExists(t, client, topicARN) })
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}}}
+
+	ledger, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if _, err := client.TagResource(ctx, &sns.TagResourceInput{ResourceArn: &topicARN, Tags: mapToTags(map[string]string{"team": "payments"})}); err != nil {
+		t.Fatalf("TagResource() error = %v", err)
+	}
+	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.SNSSpec{}, ledger, false, false, nil); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	spec.Resources[0].Adopt = true
+	if _, err := Ensure(ctx, client, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() with adopt error = %v", err)
+	}
+	tagsOut, err := client.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{ResourceArn: &topicARN})
+	if err != nil {
+		t.Fatalf("ListTagsForResource() error = %v", err)
+	}
+	got := tagsToMap(tagsOut.Tags)
+	if cloudctlaws.HasReleaseTags(got) || got["team"] != "payments" || !cloudctlaws.IsOwnedBy(got, namespace, crName, "uid-1") {
+		t.Errorf("expected ownership back, the released tags gone and the other tag kept, got %v", got)
 	}
 }

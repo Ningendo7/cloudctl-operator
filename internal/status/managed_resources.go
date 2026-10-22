@@ -56,11 +56,19 @@ func HasManagedResource(resources []depsv1alpha1.ManagedResource, resourceType, 
 // type+name. An update that doesn't set KMSKeyARN keeps the one already
 // recorded: the resource packages rebuild entries from scratch, and losing
 // it would let the key be deleted while the data it encrypts still exists.
+// OnDelete and HeldBy are kept the same way, since they are stamped once at
+// the end of a pass and a rebuilt entry would otherwise change status twice.
 func UpsertManagedResource(resources *[]depsv1alpha1.ManagedResource, entry depsv1alpha1.ManagedResource) {
 	for i := range *resources {
 		if (*resources)[i].Type == entry.Type && (*resources)[i].Name == entry.Name {
 			if entry.KMSKeyARN == "" {
 				entry.KMSKeyARN = (*resources)[i].KMSKeyARN
+			}
+			if entry.OnDelete == "" {
+				entry.OnDelete = (*resources)[i].OnDelete
+			}
+			if entry.HeldBy == nil {
+				entry.HeldBy = (*resources)[i].HeldBy
 			}
 			(*resources)[i] = entry
 			return

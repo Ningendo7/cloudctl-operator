@@ -790,6 +790,11 @@ func ensureInstanceOwnership(ctx context.Context, awsClient rdsAPI, namespace, c
 		}); tagErr != nil {
 			return wrapAWSError(tagErr, "adopting instance (tagging)")
 		}
+		if cloudctlaws.HasReleaseTags(currentTags) {
+			if _, untagErr := awsClient.RemoveTagsFromResource(ctx, &rds.RemoveTagsFromResourceInput{ResourceName: &instanceARN, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
+				cloudctlaws.ReleaseTagFailed(recordEvent, "instance", instanceID, untagErr)
+			}
+		}
 		if recordEvent != nil {
 			if transferred {
 				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over RDS instance %s from a previous incarnation of this CR", instanceARN))

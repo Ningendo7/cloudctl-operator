@@ -19,6 +19,7 @@ package s3
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -993,8 +994,36 @@ func TestRelinquishIfStillTagged_AnUntaggedBucketIsNotGone(t *testing.T) {
 	client := newFakeS3()
 	client.getBucketTaggingErr = noSuchTagSetError()
 	entry := depsv1alpha1.ManagedResource{Type: resourceType, Name: "receipts", ARN: "arn:aws:s3:::some-bucket"}
-	relinquished, gone, err := relinquishIfStillTagged(context.Background(), client, "default", "svc", "uid-1", entry)
+	relinquished, gone, err := relinquishIfStillTagged(context.Background(), client, "default", "svc", "uid-1", entry, nil)
 	if err != nil || gone || relinquished {
 		t.Errorf("relinquishIfStillTagged() relinquished=%v gone=%v err=%v, want none of them", relinquished, gone, err)
+	}
+}
+
+func TestRelinquishIfStillTagged_StillLetsGoWhenTheReleasedTagsDoNotFit(t *testing.T) {
+	client := newFakeS3()
+	tags := map[string]string{
+		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "svc"),
+		cloudctlaws.OwnerUIDTagKey: "uid-1",
+	}
+	for i := range 9 {
+		tags[fmt.Sprintf("team-%d", i)] = "x"
+	}
+	client.buckets["some-bucket"] = &fakeBucket{tags: tags}
+	entry := depsv1alpha1.ManagedResource{Type: resourceType, Name: "receipts", ARN: "arn:aws:s3:::some-bucket"}
+	var events []string
+	record := func(eventType, reason, _ string) { events = append(events, eventType+"/"+reason) }
+
+	relinquished, gone, err := relinquishIfStillTagged(context.Background(), client, "default", "svc", "uid-1", entry, record)
+
+	if err != nil || gone || !relinquished {
+		t.Fatalf("relinquishIfStillTagged() relinquished=%v gone=%v err=%v, want it let go", relinquished, gone, err)
+	}
+	got := client.buckets["some-bucket"].tags
+	if _, owned := got[cloudctlaws.OwnerTagKey]; owned || len(got) != 9 || cloudctlaws.HasReleaseTags(got) {
+		t.Errorf("expected the 9 other tags only, got %v", got)
+	}
+	if !slices.Contains(events, "Warning/ReleaseTagFailed") {
+		t.Errorf("expected a ReleaseTagFailed warning, got %v", events)
 	}
 }

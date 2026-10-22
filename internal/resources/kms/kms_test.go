@@ -943,3 +943,21 @@ func TestPinsAKey(t *testing.T) {
 		})
 	}
 }
+
+func TestEnsure_AdoptingAKeyPendingDeletionCancelsTheDeletionBeforeTagging(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/existing-id"
+	client.keys[arn] = &fakeKey{arn: arn, keyID: "existing-id", keyState: types.KeyStatePendingDeletion, tags: map[string]string{}}
+	client.aliases[aliasName("default", "checkout-service", "primary", keyOptions{})] = arn
+	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary", Adopt: true}}}
+
+	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v; AWS refuses to tag a key that is pending deletion", err)
+	}
+	if client.keys[arn].keyState != types.KeyStateEnabled {
+		t.Errorf("expected the scheduled deletion to be canceled, got %v", client.keys[arn].keyState)
+	}
+	if !cloudctlaws.IsOwnedBy(client.keys[arn].tags, "default", "checkout-service", "uid-1") {
+		t.Errorf("expected the key to be tagged as owned, got %v", client.keys[arn].tags)
+	}
+}

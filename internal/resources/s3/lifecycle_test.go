@@ -109,4 +109,20 @@ func (s *s3LifecycleSubject) DeleteOutOfBand(name string) error {
 	return nil
 }
 
+func (s *s3LifecycleSubject) Tags(name string) map[string]string {
+	if b, ok := s.client.buckets[s.bucketName(name)]; ok {
+		return b.tags
+	}
+	return nil
+}
+
+func (s *s3LifecycleSubject) PutTag(name, key, value string) error {
+	b, ok := s.client.buckets[s.bucketName(name)]
+	if !ok {
+		return fmt.Errorf("bucket %q not found", name)
+	}
+	b.tags[key] = value
+	return nil
+}
+
 func (s *s3LifecycleSubject) KeepsRelinquishedEntries() bool { return false }
