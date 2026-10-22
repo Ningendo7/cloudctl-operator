@@ -119,7 +119,8 @@ func TestStampSetsDecisionsAndIsIdempotent(t *testing.T) {
 
 func TestStampListsAtMostTwentyHolders(t *testing.T) {
 	const arn = "arn:aws:kms:us-east-1:123456789012:key/shared"
-	ledger := []depsv1alpha1.ManagedResource{{Type: "kms", Name: "shared", ARN: arn}}
+	ledger := make([]depsv1alpha1.ManagedResource, 0, 26)
+	ledger = append(ledger, depsv1alpha1.ManagedResource{Type: "kms", Name: "shared", ARN: arn})
 	for i := range 25 {
 		ledger = append(ledger, depsv1alpha1.ManagedResource{Type: typeSQS, Name: fmt.Sprintf("q%02d", i), KMSKeyARN: arn})
 	}
