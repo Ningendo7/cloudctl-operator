@@ -168,6 +168,7 @@ var _ = Describe("AppDependencies reconciliation against LocalStack", Ordered, f
 	})
 
 	sqsLifecycleSpec()
+	cliLifecycleSpec()
 	watchLifecycleSpec()
 	snsLifecycleSpec()
 	subscriptionLifecycleSpec()

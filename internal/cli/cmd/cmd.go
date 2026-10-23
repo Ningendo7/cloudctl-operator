@@ -341,12 +341,14 @@ func (a *app) runVersion() error {
 	if err := a.checkOutput(); err != nil {
 		return err
 	}
-	reader, _, err := a.connect()
-	if err != nil {
-		return err
-	}
 	client := version.Current()
-	info, serverErr := reader.ServerVersions(context.Background())
+	// version must work without a cluster, so failing to connect is reported
+	// as an unknown server, not an error.
+	var info kube.ServerInfo
+	reader, _, serverErr := a.newReader(a.opts)
+	if serverErr == nil {
+		info, serverErr = reader.ServerVersions(context.Background())
+	}
 	if a.structured() {
 		apiVersions := info.APIVersions
 		if apiVersions == nil {
@@ -367,7 +369,7 @@ func (a *app) runVersion() error {
 	if a.server {
 		writeOperator(&b, client.Version, info.OperatorImage)
 	}
-	_, err = io.WriteString(a.streams.Out, b.String())
+	_, err := io.WriteString(a.streams.Out, b.String())
 	return err
 }
 

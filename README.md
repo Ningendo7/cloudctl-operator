@@ -158,6 +158,27 @@ afterward (or fork the manifest to set them inline before applying).
 Both install paths deploy the same image, built for `linux/amd64`,
 `linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
 
+### The `kubectl appdeps` CLI
+
+A read-only kubectl plugin, also usable as `appdeps`, that explains a CR
+(`status`), lists its ledger (`resources`) and shows what is kept beyond its CR
+(`retained`). Each release attaches signed archives for Linux and macOS:
+
+```bash
+VERSION=<release> OS=linux ARCH=amd64   # or darwin, arm64
+FILE=appdeps_${VERSION}_${OS}_${ARCH}.tar.gz
+curl -LO https://github.com/Ningendo7/cloudctl-operator/releases/download/$VERSION/$FILE
+curl -LO https://github.com/Ningendo7/cloudctl-operator/releases/download/$VERSION/$FILE.sigstore.json
+cosign verify-blob --bundle $FILE.sigstore.json \
+  --certificate-identity https://github.com/Ningendo7/cloudctl-operator/.github/workflows/release.yml@refs/tags/$VERSION \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com $FILE
+tar -xzf $FILE kubectl-appdeps appdeps && sudo install kubectl-appdeps appdeps /usr/local/bin/
+kubectl appdeps version
+```
+
+`checksums.txt` and an SPDX SBOM per platform are attached too. Or build it:
+`go install github.com/Ningendo7/cloudctl-operator/cmd/kubectl-appdeps@<release>`.
+
 ## Testing
 
 Unit tests with fake AWS clients, integration tests against LocalStack, and
