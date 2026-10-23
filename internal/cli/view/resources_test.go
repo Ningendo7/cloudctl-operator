@@ -17,6 +17,7 @@ limitations under the License.
 package view_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -42,14 +43,11 @@ func ledgerCR() *depsv1alpha1.AppDependencies {
 }
 
 func names(rows []view.ResourceRow) string {
-	out := ""
-	for i, r := range rows {
-		if i > 0 {
-			out += ","
-		}
-		out += r.Type + "/" + r.Name
+	parts := make([]string, 0, len(rows))
+	for _, r := range rows {
+		parts = append(parts, r.Type+"/"+r.Name)
 	}
-	return out
+	return strings.Join(parts, ",")
 }
 
 func TestResources_AreSortedByTypeThenName(t *testing.T) {
@@ -170,10 +168,11 @@ func TestRetained_RowsSortByNamespaceCRTypeName(t *testing.T) {
 
 	rows := view.Retained([]depsv1alpha1.AppDependencies{*b, *a2, *a1})
 
-	var got string
+	var order strings.Builder
 	for _, r := range rows {
-		got += r.Namespace + "/" + r.CR + "/" + r.Type + "/" + r.Name + " "
+		order.WriteString(r.Namespace + "/" + r.CR + "/" + r.Type + "/" + r.Name + " ")
 	}
+	got := order.String()
 	if want := "a-ns/first/sqs/q a-ns/second/sqs/q b-ns/app/s3/a b-ns/app/sqs/z "; got != want {
 		t.Errorf("order = %q, want %q", got, want)
 	}

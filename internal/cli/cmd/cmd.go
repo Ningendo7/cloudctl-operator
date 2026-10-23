@@ -1,3 +1,19 @@
+/*
+Copyright 2026 Patrick Ajah.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // Package cmd wires the commands together: flags, exit codes and output.
 package cmd
 
@@ -23,6 +39,14 @@ const (
 	ExitNotReady = 1
 	ExitUsage    = 2
 	ExitCluster  = 3
+)
+
+// The output formats -o accepts.
+const (
+	formatTable = "table"
+	formatWide  = "wide"
+	formatJSON  = "json"
+	formatYAML  = "yaml"
 )
 
 // Streams are where a run reads and writes.
@@ -89,7 +113,7 @@ func (a *app) root() *cobra.Command {
 	flags.StringVar(&a.opts.Context, "context", "", "kubeconfig context to use")
 	flags.StringVarP(&a.opts.Namespace, "namespace", "n", "", "namespace")
 	flags.BoolVarP(&a.opts.AllNamespaces, "all-namespaces", "A", false, "all namespaces")
-	flags.StringVarP(&a.output, "output", "o", "table", "output format: table, wide, json or yaml")
+	flags.StringVarP(&a.output, "output", "o", formatTable, "output format: table, wide, json or yaml")
 	flags.BoolVar(&a.noHeaders, "no-headers", false, "leave the header row out of tables")
 	root.AddCommand(a.statusCmd(), a.resourcesCmd(), a.retainedCmd(), a.versionCmd())
 	return root
@@ -102,32 +126,40 @@ func (a *app) exitCode(err error) int {
 	if err == nil {
 		return ExitOK
 	}
+	code, msg := ExitUsage, err
 	var exit *exitError
 	if errors.As(err, &exit) {
-		if exit.err != nil {
-			fmt.Fprintln(a.streams.Err, "Error:", exit.err)
-		}
-		return exit.code
+		code, msg = exit.code, exit.err
 	}
-	fmt.Fprintln(a.streams.Err, "Error:", err)
-	return ExitUsage
+	if msg != nil {
+		// Nothing better can be done if stderr itself cannot be written.
+		_, _ = fmt.Fprintln(a.streams.Err, "Error:", msg)
+	}
+	return code
 }
 
-func (a *app) structured() bool { return a.output == "json" || a.output == "yaml" }
+func (a *app) structured() bool { return a.output == formatJSON || a.output == formatYAML }
 
 func (a *app) checkOutput() error {
 	switch a.output {
-	case "table", "wide", "json", "yaml":
+	case formatTable, formatWide, formatJSON, formatYAML:
 		return nil
 	}
 	return fmt.Errorf("unknown output format %q", a.output)
 }
 
 func (a *app) emit(doc any) error {
-	if a.output == "yaml" {
+	if a.output == formatYAML {
 		return render.YAML(a.streams.Out, doc)
 	}
 	return render.JSON(a.streams.Out, doc)
+}
+
+// document adds the schema version and kind every JSON and YAML output carries.
+func document(kind string, fields map[string]any) map[string]any {
+	fields["schemaVersion"] = view.SchemaVersion
+	fields["kind"] = kind
+	return fields
 }
 
 func (a *app) connect() (kube.Reader, kube.Target, error) {
@@ -184,7 +216,9 @@ func (a *app) runStatus(name string) error {
 			return err
 		}
 		if a.events {
-			a.printEvents(reader, target.Namespace, name)
+			if err := a.printEvents(reader, target.Namespace, name); err != nil {
+				return err
+			}
 		}
 	}
 	if !v.Ready {
@@ -193,21 +227,25 @@ func (a *app) runStatus(name string) error {
 	return nil
 }
 
-// printEvents never fails the command: events are optional.
-func (a *app) printEvents(reader kube.Reader, namespace, name string) {
+// printEvents fails only if stdout cannot be written: events are optional, so
+// not being able to read them is a note on stderr.
+func (a *app) printEvents(reader kube.Reader, namespace, name string) error {
 	events, err := reader.Events(context.Background(), namespace, name)
 	if err != nil {
 		note := "could not read events: " + err.Error()
 		if hint := kube.ExplainForbidden(err); hint != "" {
 			note += "\n" + hint
 		}
-		fmt.Fprintln(a.streams.Err, note)
-		return
+		_, _ = fmt.Fprintln(a.streams.Err, note)
+		return nil
 	}
-	fmt.Fprintln(a.streams.Out, "\nKubernetes keeps events for about an hour; this is not history.")
+	var b strings.Builder
+	b.WriteString("\nKubernetes keeps events for about an hour; this is not history.\n")
 	for _, e := range events {
-		fmt.Fprintf(a.streams.Out, "  %s  %s  %s  %s\n", view.Age(a.now(), e.Last), e.Type, e.Reason, e.Message)
+		fmt.Fprintf(&b, "  %s  %s  %s  %s\n", view.Age(a.now(), e.Last), e.Type, e.Reason, e.Message)
 	}
+	_, err = io.WriteString(a.streams.Out, b.String())
+	return err
 }
 
 func (a *app) resourcesCmd() *cobra.Command {
@@ -241,13 +279,14 @@ func (a *app) runResources(name string) error {
 	}
 	rows := view.Resources(cr, a.filter)
 	if a.structured() {
-		return a.emit(map[string]any{
-			"schemaVersion": view.SchemaVersion, "kind": "Resources",
+		return a.emit(document("Resources", map[string]any{
 			"context": target.Context, "namespace": target.Namespace, "name": name, "items": rows,
-		})
+		}))
 	}
-	fmt.Fprintf(a.streams.Out, "Context: %s   Namespace: %s   CR: %s\n\n", target.Context, target.Namespace, name)
-	return render.ResourcesText(a.streams.Out, rows, a.now(), a.output == "wide", a.noHeaders)
+	if _, err := fmt.Fprintf(a.streams.Out, "Context: %s   Namespace: %s   CR: %s\n\n", target.Context, target.Namespace, name); err != nil {
+		return err
+	}
+	return render.ResourcesText(a.streams.Out, rows, a.now(), a.output == formatWide, a.noHeaders)
 }
 
 func (a *app) retainedCmd() *cobra.Command {
@@ -277,12 +316,13 @@ func (a *app) runRetained() error {
 		shown = "all"
 	}
 	if a.structured() {
-		return a.emit(map[string]any{
-			"schemaVersion": view.SchemaVersion, "kind": "Retained",
+		return a.emit(document("Retained", map[string]any{
 			"context": target.Context, "namespace": shown, "items": rows,
-		})
+		}))
 	}
-	fmt.Fprintf(a.streams.Out, "Context: %s   Namespace: %s\n\n", target.Context, shown)
+	if _, err := fmt.Fprintf(a.streams.Out, "Context: %s   Namespace: %s\n\n", target.Context, shown); err != nil {
+		return err
+	}
 	return render.RetainedText(a.streams.Out, rows, a.noHeaders)
 }
 
@@ -312,34 +352,34 @@ func (a *app) runVersion() error {
 		if apiVersions == nil {
 			apiVersions = []string{}
 		}
-		return a.emit(map[string]any{
-			"schemaVersion": view.SchemaVersion, "kind": "Version",
+		return a.emit(document("Version", map[string]any{
 			"client": map[string]string{"version": client.Version, "commit": client.Commit, "goVersion": client.GoVersion},
 			"server": map[string]any{"apiVersions": apiVersions, "operatorImage": info.OperatorImage},
-		})
+		}))
 	}
-	out := a.streams.Out
-	fmt.Fprintf(out, "Client: %s (%s)\n", client.Version, client.Commit)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Client: %s (%s)\n", client.Version, client.Commit)
 	if serverErr != nil {
-		fmt.Fprintf(out, "Server API: unknown (%s)\n", serverErr)
+		fmt.Fprintf(&b, "Server API: unknown (%s)\n", serverErr)
 	} else {
-		fmt.Fprintf(out, "Server API: %s\n", strings.Join(info.APIVersions, ", "))
+		fmt.Fprintf(&b, "Server API: %s\n", strings.Join(info.APIVersions, ", "))
 	}
 	if a.server {
-		printOperator(out, client.Version, info.OperatorImage)
+		writeOperator(&b, client.Version, info.OperatorImage)
 	}
-	return nil
+	_, err = io.WriteString(a.streams.Out, b.String())
+	return err
 }
 
-func printOperator(out io.Writer, clientVersion, image string) {
+func writeOperator(b *strings.Builder, clientVersion, image string) {
 	if image == "" {
-		fmt.Fprintln(out, "Operator: unknown")
+		b.WriteString("Operator: unknown\n")
 		return
 	}
-	fmt.Fprintf(out, "Operator: %s\n", image)
+	fmt.Fprintf(b, "Operator: %s\n", image)
 	operator := image[strings.LastIndex(image, ":")+1:]
 	if cm, om := minor(clientVersion), minor(operator); cm != "" && om != "" && cm != om {
-		fmt.Fprintf(out, "Warning: the CLI is %s and the operator is %s; output may not match\n", clientVersion, operator)
+		fmt.Fprintf(b, "Warning: the CLI is %s and the operator is %s; output may not match\n", clientVersion, operator)
 	}
 }
 

@@ -17,6 +17,7 @@ limitations under the License.
 package view_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -120,7 +121,8 @@ func TestStatus_SectionsAndOtherConditionsAreSortedAndSeparated(t *testing.T) {
 
 	v := view.Status(cr, target, clitest.Now)
 
-	var sections, other []string
+	sections := make([]string, 0, len(v.Sections))
+	other := make([]string, 0, len(v.Other))
 	for _, s := range v.Sections {
 		sections = append(sections, s.Type)
 	}
@@ -212,7 +214,7 @@ func TestStatus_TheLedgerIsSummarised(t *testing.T) {
 	if l.Total != 5 || l.ByState["Verified"] != 3 || l.ByState["Creating"] != 1 || l.ByState["Relinquished"] != 1 {
 		t.Errorf("ledger = %+v, want 5 entries: 3 Verified, 1 Creating, 1 Relinquished", l)
 	}
-	var attention []string
+	attention := make([]string, 0, len(l.Attention))
 	for _, r := range l.Attention {
 		attention = append(attention, r.Type+"/"+r.Name)
 	}
@@ -238,13 +240,4 @@ func TestStatus_LastVerifiedIsTheNewestInTheLedger(t *testing.T) {
 	}
 }
 
-func join(items []string) string {
-	out := ""
-	for i, s := range items {
-		if i > 0 {
-			out += ","
-		}
-		out += s
-	}
-	return out
-}
+func join(items []string) string { return strings.Join(items, ",") }

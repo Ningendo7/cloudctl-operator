@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -259,7 +260,7 @@ func TestReader_ServerVersions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ServerVersions() error = %v", err)
 	}
-	if len(info.APIVersions) == 0 || !contains(info.APIVersions, "deps.cloudctl.io/v1alpha1") {
+	if len(info.APIVersions) == 0 || !slices.Contains(info.APIVersions, "deps.cloudctl.io/v1alpha1") {
 		t.Errorf("APIVersions = %v, want deps.cloudctl.io/v1alpha1", info.APIVersions)
 	}
 	if info.OperatorImage != "ghcr.io/ningendo7/cloudctl-operator:v0.8.1" {
@@ -283,7 +284,7 @@ func TestReader_AViewerOnlyUserCanReadWhatTheCommandsNeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ServerVersions() as the viewer must not fail when the Deployment is unreadable: %v", err)
 	}
-	if info.OperatorImage != "" || !contains(info.APIVersions, "deps.cloudctl.io/v1alpha1") {
+	if info.OperatorImage != "" || !slices.Contains(info.APIVersions, "deps.cloudctl.io/v1alpha1") {
 		t.Errorf("info = %+v, want the API versions and an unknown operator", info)
 	}
 }
@@ -331,13 +332,4 @@ func TestReader_NeverTouchesSecretsAndNeverWrites(t *testing.T) {
 			t.Errorf("request %q touches secrets", req)
 		}
 	}
-}
-
-func contains(items []string, want string) bool {
-	for _, s := range items {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }

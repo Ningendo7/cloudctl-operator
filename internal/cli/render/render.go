@@ -1,3 +1,19 @@
+/*
+Copyright 2026 Patrick Ajah.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // Package render prints view models as text, JSON or YAML. The text format is
 // specified by the golden files in testdata.
 package render
@@ -27,7 +43,7 @@ func table(rows [][]string) string {
 	var b strings.Builder
 	w := tabwriter.NewWriter(&b, 0, 8, 3, ' ', 0)
 	for _, row := range rows {
-		fmt.Fprintln(w, strings.Join(row, "\t"))
+		_, _ = fmt.Fprintln(w, strings.Join(row, "\t")) // into a strings.Builder: cannot fail
 	}
 	_ = w.Flush() // writes to a strings.Builder, which cannot fail
 	return b.String()
@@ -89,7 +105,8 @@ func writeReadyBlock(b *strings.Builder, v view.StatusView, now time.Time, showS
 
 func writeSectionBlocks(b *strings.Builder, v view.StatusView, now time.Time, showSource bool) {
 	if len(v.Sections) > 0 {
-		rows := [][]string{{"SECTION", "READY", "REASON", "KIND", "SINCE"}}
+		rows := make([][]string, 0, len(v.Sections)+1)
+		rows = append(rows, []string{"SECTION", "READY", "REASON", "KIND", "SINCE"})
 		for _, s := range v.Sections {
 			rows = append(rows, []string{s.Type, truth(s.Ready), s.Reason, s.Kind, view.Age(now, s.Since)})
 		}
@@ -100,7 +117,8 @@ func writeSectionBlocks(b *strings.Builder, v view.StatusView, now time.Time, sh
 		b.WriteString("\n")
 	}
 	if len(v.Other) > 0 {
-		rows := [][]string{{"CONDITION", "STATUS", "REASON", "SINCE"}}
+		rows := make([][]string, 0, len(v.Other)+1)
+		rows = append(rows, []string{"CONDITION", "STATUS", "REASON", "SINCE"})
 		for _, s := range v.Other {
 			rows = append(rows, []string{s.Type, truth(s.Ready), s.Reason, view.Age(now, s.Since)})
 		}

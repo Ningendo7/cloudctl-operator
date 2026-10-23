@@ -236,21 +236,19 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 		Expect(producerSGID).NotTo(BeEmpty())
 		Expect(fakeEC2.ingressOf(producerSGID)).To(BeEmpty(), "expected no ingress yet - the consumer hasn't published an identity")
 
-		var updatedProducer depsv1alpha1.AppDependencies
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(producer), &updatedProducer)).To(Succeed())
-		updatedProducer.Spec.RDS.Resources[0].SharedWith = []depsv1alpha1.SharedWithEntry{{Namespace: testNS, Name: consumer.Name}}
-		Expect(k8sClient.Update(ctx, &updatedProducer)).To(Succeed())
+		updateCR(client.ObjectKeyFromObject(producer), func(cr *depsv1alpha1.AppDependencies) {
+			cr.Spec.RDS.Resources[0].SharedWith = []depsv1alpha1.SharedWithEntry{{Namespace: testNS, Name: consumer.Name}}
+		})
 
 		// Now the consumer declares it consumes this instance - its own
 		// reconcile publishes a pod identity, which (via the new watch)
 		// must immediately wake the producer back up, with no manual
 		// Reconcile call on the producer from this test.
-		var updatedConsumer depsv1alpha1.AppDependencies
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(consumer), &updatedConsumer)).To(Succeed())
-		updatedConsumer.Spec.RDS = &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
-			{Namespace: testNS, Name: producer.Name, ResourceName: "orders-db"},
-		}}
-		Expect(k8sClient.Update(ctx, &updatedConsumer)).To(Succeed())
+		updateCR(client.ObjectKeyFromObject(consumer), func(cr *depsv1alpha1.AppDependencies) {
+			cr.Spec.RDS = &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+				{Namespace: testNS, Name: producer.Name, ResourceName: "orders-db"},
+			}}
+		})
 
 		Eventually(func() []fakeIngressRule {
 			return fakeEC2.ingressOf(producerSGID)

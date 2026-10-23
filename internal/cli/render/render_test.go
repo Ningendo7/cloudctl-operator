@@ -265,7 +265,7 @@ func TestJSONNeverDropsAKeyOfTheV1Contract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range strings.Fields(string(raw)) {
+	for key := range strings.FieldsSeq(string(raw)) {
 		if !have[key] {
 			t.Errorf("the v1 contract key %q is no longer produced", key)
 		}
