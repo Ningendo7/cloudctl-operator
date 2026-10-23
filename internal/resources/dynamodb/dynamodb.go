@@ -207,29 +207,10 @@ func ensureTable(
 	}
 
 	table := describeOut.Table
-	switch table.TableStatus {
-	case types.TableStatusActive, types.TableStatusReplicationNotAuthorized:
-		// The second concerns global table replicas, which this operator
-		// never sets up; the table in this region still serves traffic.
-	case types.TableStatusInaccessibleEncryptionCredentials, types.TableStatusArchiving, types.TableStatusArchived:
-		return ledger, tableKeyUnavailableError(tableName, table.TableStatus, recordEvent)
-	case types.TableStatusCreating, types.TableStatusUpdating:
-		// Not usable yet — tags, ownership, and drift-correction all wait
-		// for ACTIVE. Retryable, not an error: this resolves on its own
-		// within the normal drift-detection requeue interval.
-		return ledger, &cloudctlaws.ReconcileError{
-			Err:       fmt.Errorf("table %q is still %s", tableName, table.TableStatus),
-			Retryable: true,
-		}
-	case types.TableStatusDeleting:
-		return ledger, &cloudctlaws.ReconcileError{
-			Err:       fmt.Errorf("table %q is being deleted (by this operator or out-of-band) — refusing to recreate or adopt while DELETING", tableName),
-			Retryable: true,
-		}
+	if err := tableStatusError(tableName, table.TableStatus, recordEvent); err != nil {
+		return ledger, err
 	}
 
-	// A status added to the SDK later also lands here, until the exhaustive
-	// linter makes it handled above.
 	tableArn := *table.TableArn
 
 	// Captured before the trust-window check so it's still available further
@@ -278,44 +259,8 @@ func ensureTable(
 	currentTags := tagsToMap(tags)
 
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "table", tableName, currentTags, namespace, crName, crUID, opts.adopt)
-		if ownErr != nil {
-			return ledger, ownErr
-		}
-		// Refuse here rather than adopt and fail later, opaquely, at the
-		// workload's first PutItem or Query.
-		if err := checkKeySchema(table, tableName, opts); err != nil {
+		if err := adoptTable(ctx, awsClient, namespace, crName, crUID, tableName, opts, table, currentTags, recordEvent); err != nil {
 			return ledger, err
-		}
-
-		if opts.checkAdoptedKey != nil {
-			currentKey := ""
-			if table.SSEDescription != nil {
-				currentKey = aws.ToString(table.SSEDescription.KMSMasterKeyArn)
-			}
-			if err := opts.checkAdoptedKey(ctx, currentKey); err != nil {
-				return ledger, fmt.Errorf("table %q can't be adopted: %w", tableName, err)
-			}
-		}
-
-		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
-		if _, tagErr := awsClient.TagResource(ctx, &dynamodb.TagResourceInput{
-			ResourceArn: &tableArn,
-			Tags:        mapToTags(merged),
-		}); tagErr != nil {
-			return ledger, wrapAWSError(tagErr, "adopting table (tagging)")
-		}
-		if cloudctlaws.HasReleaseTags(currentTags) {
-			if _, untagErr := awsClient.UntagResource(ctx, &dynamodb.UntagResourceInput{ResourceArn: &tableArn, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
-				cloudctlaws.ReleaseTagFailed(recordEvent, "table", tableName, untagErr)
-			}
-		}
-		if recordEvent != nil {
-			if transferred {
-				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over DynamoDB table %s from a previous incarnation of this CR", tableArn))
-			} else {
-				recordEvent("Normal", "TableAdopted", fmt.Sprintf("Adopted existing DynamoDB table %s under management", tableArn))
-			}
 		}
 	}
 
@@ -328,6 +273,60 @@ func ensureTable(
 	}
 
 	return recordVerified(ledger, resourceName, tableArn, opts.deletionPolicy, opts.force), nil
+}
+
+// adoptTable brings an existing table not tagged as this CR's under
+// management, once the ownership rules allow it.
+func adoptTable(
+	ctx context.Context,
+	awsClient dynamodbAPI,
+	namespace, crName, crUID, tableName string,
+	opts tableOptions,
+	table *types.TableDescription,
+	currentTags map[string]string,
+	recordEvent status.EventRecorder,
+) error {
+	tableArn := *table.TableArn
+	transferred, err := cloudctlaws.CheckExistingOwnership(ctx, "table", tableName, currentTags, namespace, crName, crUID, opts.adopt)
+	if err != nil {
+		return err
+	}
+	// Refuse here rather than adopt and fail later, opaquely, at the
+	// workload's first PutItem or Query.
+	if err := checkKeySchema(table, tableName, opts); err != nil {
+		return err
+	}
+
+	if opts.checkAdoptedKey != nil {
+		currentKey := ""
+		if table.SSEDescription != nil {
+			currentKey = aws.ToString(table.SSEDescription.KMSMasterKeyArn)
+		}
+		if err := opts.checkAdoptedKey(ctx, currentKey); err != nil {
+			return fmt.Errorf("table %q can't be adopted: %w", tableName, err)
+		}
+	}
+
+	merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
+	if _, tagErr := awsClient.TagResource(ctx, &dynamodb.TagResourceInput{
+		ResourceArn: &tableArn,
+		Tags:        mapToTags(merged),
+	}); tagErr != nil {
+		return wrapAWSError(tagErr, "adopting table (tagging)")
+	}
+	if cloudctlaws.HasReleaseTags(currentTags) {
+		if _, untagErr := awsClient.UntagResource(ctx, &dynamodb.UntagResourceInput{ResourceArn: &tableArn, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
+			cloudctlaws.ReleaseTagFailed(recordEvent, "table", tableName, untagErr)
+		}
+	}
+	if recordEvent != nil {
+		if transferred {
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over DynamoDB table %s from a previous incarnation of this CR", tableArn))
+		} else {
+			recordEvent("Normal", "TableAdopted", fmt.Sprintf("Adopted existing DynamoDB table %s under management", tableArn))
+		}
+	}
+	return nil
 }
 
 // checkKeySchema refuses a table whose keys are not the declared ones: AWS
@@ -607,6 +606,33 @@ func wrapAWSError(err error, errContext string) error {
 // from DescribeTable before that is treated as it having been deleted:
 // DynamoDB can briefly answer "no such table" right after CreateTable.
 const creationVisibilityGrace = 5 * time.Minute
+
+// tableStatusError returns nil for a table that can be worked on, and why not
+// otherwise. A status added to the SDK later returns nil until the exhaustive
+// linter makes it handled here.
+func tableStatusError(tableName string, tableStatus types.TableStatus, recordEvent status.EventRecorder) error {
+	switch tableStatus {
+	case types.TableStatusActive, types.TableStatusReplicationNotAuthorized:
+		// The second concerns global table replicas, which this operator
+		// never sets up; the table in this region still serves traffic.
+	case types.TableStatusInaccessibleEncryptionCredentials, types.TableStatusArchiving, types.TableStatusArchived:
+		return tableKeyUnavailableError(tableName, tableStatus, recordEvent)
+	case types.TableStatusCreating, types.TableStatusUpdating:
+		// Not usable yet — tags, ownership, and drift-correction all wait
+		// for ACTIVE. Retryable, not an error: this resolves on its own
+		// within the normal drift-detection requeue interval.
+		return &cloudctlaws.ReconcileError{
+			Err:       fmt.Errorf("table %q is still %s", tableName, tableStatus),
+			Retryable: true,
+		}
+	case types.TableStatusDeleting:
+		return &cloudctlaws.ReconcileError{
+			Err:       fmt.Errorf("table %q is being deleted (by this operator or out-of-band) — refusing to recreate or adopt while DELETING", tableName),
+			Retryable: true,
+		}
+	}
+	return nil
+}
 
 // tableKeyUnavailableError reports a table DynamoDB cannot decrypt. Carrying
 // on as if it were ACTIVE would report Ready for a table the app can't use.
