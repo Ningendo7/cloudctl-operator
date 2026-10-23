@@ -125,6 +125,7 @@ func Cleanup(
 ) (updatedLedger []depsv1alpha1.ManagedResource, results []CleanupResult, err error) {
 	declared := declaredKeyNames(spec, inUse, deleting)
 
+	c := &keyCleaner{client: client, namespace: namespace, crName: crName, crUID: crUID, recordEvent: recordEvent}
 	updatedLedger = ledger
 	var firstErr error
 	for _, entry := range ledger {
@@ -141,103 +142,116 @@ func Cleanup(
 			entry = held
 		}
 
-		if declared[entry.Name] {
-			if entry.PendingDeletionSince != nil {
-				cleared := entry
-				cleared.PendingDeletionSince = nil
-				status.UpsertManagedResource(&updatedLedger, cleared)
-			}
-			continue
+		var entryErr error
+		switch {
+		case declared[entry.Name]:
+			updatedLedger = restoreDeclared(entry, updatedLedger)
+		case entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete:
+			updatedLedger, results, entryErr = c.retain(ctx, entry, updatedLedger, results)
+		default:
+			updatedLedger, results, entryErr = c.scheduleDeletion(ctx, entry, updatedLedger, results)
 		}
-
-		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry, recordEvent)
-				if relErr != nil {
-					if firstErr == nil {
-						firstErr = relErr
-					}
-					continue
-				}
-				if gone {
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-					continue
-				}
-				if relinquished && recordEvent != nil {
-					recordEvent("Normal", "KeyOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained KMS key %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
-				}
-				status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
-			}
-			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
-			continue
+		if entryErr != nil && firstErr == nil {
+			firstErr = entryErr
 		}
-
-		describeOut, dErr := client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: &entry.ARN})
-		if dErr != nil {
-			var notFound *types.NotFoundException
-			if errors.As(dErr, &notFound) {
-				// Already gone in AWS — just drop it from the ledger.
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				continue
-			}
-			if firstErr == nil {
-				firstErr = wrapAWSError(dErr, fmt.Sprintf("looking up KMS key %q before delete", entry.Name))
-			}
-			continue
-		}
-		if describeOut.KeyMetadata.KeyState == types.KeyStatePendingDeletion {
-			// Already scheduled from a previous pass — nothing left for us
-			// to do but wait out AWS's own window; our ledger entry for it
-			// was already removed the pass ScheduleKeyDeletion succeeded.
-			continue
-		}
-
-		tags, tErr := listAllResourceTags(ctx, client, entry.ARN)
-		if tErr != nil {
-			if firstErr == nil {
-				firstErr = wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of KMS key %q before delete", entry.Name))
-			}
-			continue
-		}
-		if !cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, crUID) {
-			if firstErr == nil {
-				firstErr = cloudctlaws.OwnershipLostError("KMS key", entry.Name, "delete it")
-			}
-			continue
-		}
-
-		if entry.PendingDeletionSince == nil {
-			// First time this key has come up for deletion — never act on
-			// the same pass it's first noticed, giving a moment for a
-			// spec change that's about to be reverted.
-			updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
-			if recordEvent != nil {
-				recordEvent("Warning", "KeyDeletionPending", fmt.Sprintf("KMS key %s (%s) is no longer declared and will be scheduled for deletion in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
-			}
-			continue
-		}
-		if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
-			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonPendingDeletion})
-			continue
-		}
-
-		windowDays := int32(scheduledDeletionWindowDays)
-		if _, sErr := client.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{
-			KeyId:               &entry.ARN,
-			PendingWindowInDays: &windowDays,
-		}); sErr != nil {
-			if firstErr == nil {
-				firstErr = wrapAWSError(sErr, fmt.Sprintf("scheduling deletion of KMS key %q", entry.Name))
-			}
-			continue
-		}
-		if recordEvent != nil {
-			recordEvent("Warning", "KeyDeletionScheduled", fmt.Sprintf("Scheduled KMS key %s (%s) for deletion in %d days", entry.Name, entry.ARN, scheduledDeletionWindowDays))
-		}
-		status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 	}
 
 	return updatedLedger, results, firstErr
+}
+
+// keyCleaner carries what every entry in one Cleanup pass shares.
+type keyCleaner struct {
+	client                   kmsAPI
+	namespace, crName, crUID string
+	recordEvent              status.EventRecorder
+}
+
+// restoreDeclared cancels a pending deletion for a key that is declared again.
+func restoreDeclared(entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) []depsv1alpha1.ManagedResource {
+	if entry.PendingDeletionSince != nil {
+		cleared := entry
+		cleared.PendingDeletionSince = nil
+		status.UpsertManagedResource(&ledger, cleared)
+	}
+	return ledger
+}
+
+// retain lets go of an undeclared key whose policy is not Delete, and
+// rechecks a relinquished one about daily.
+func (c *keyCleaner) retain(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	retained := CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained}
+	if entry.State == depsv1alpha1.ManagedResourceStateRelinquished && !status.NeedsRelinquishedRecheck(entry) {
+		return ledger, append(results, retained), nil
+	}
+	relinquished, gone, err := relinquishIfStillTagged(ctx, c.client, c.namespace, c.crName, c.crUID, entry, c.recordEvent)
+	if err != nil {
+		return ledger, results, err
+	}
+	if gone {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if relinquished && c.recordEvent != nil {
+		c.recordEvent("Normal", "KeyOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained KMS key %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+	}
+	status.UpsertManagedResource(&ledger, status.Relinquished(entry))
+	return ledger, append(results, retained), nil
+}
+
+// scheduleDeletion walks an undeclared Delete-policy key through its quiet
+// window to AWS's own scheduled deletion.
+func (c *keyCleaner) scheduleDeletion(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	describeOut, err := c.client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: &entry.ARN})
+	if err != nil {
+		var notFound *types.NotFoundException
+		if errors.As(err, &notFound) {
+			// Already gone in AWS — just drop it from the ledger.
+			status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+			return ledger, results, nil
+		}
+		return ledger, results, wrapAWSError(err, fmt.Sprintf("looking up KMS key %q before delete", entry.Name))
+	}
+	if describeOut.KeyMetadata.KeyState == types.KeyStatePendingDeletion {
+		// Already scheduled from a previous pass — nothing left for us
+		// to do but wait out AWS's own window; our ledger entry for it
+		// was already removed the pass ScheduleKeyDeletion succeeded.
+		return ledger, results, nil
+	}
+
+	tags, err := listAllResourceTags(ctx, c.client, entry.ARN)
+	if err != nil {
+		return ledger, results, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of KMS key %q before delete", entry.Name))
+	}
+	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), c.namespace, c.crName, c.crUID) {
+		return ledger, results, cloudctlaws.OwnershipLostError("KMS key", entry.Name, "delete it")
+	}
+
+	if entry.PendingDeletionSince == nil {
+		// First time this key has come up for deletion — never act on
+		// the same pass it's first noticed, giving a moment for a
+		// spec change that's about to be reverted.
+		ledger, results = markPendingDeletion(ledger, results, entry)
+		if c.recordEvent != nil {
+			c.recordEvent("Warning", "KeyDeletionPending", fmt.Sprintf("KMS key %s (%s) is no longer declared and will be scheduled for deletion in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
+		}
+		return ledger, results, nil
+	}
+	if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
+		return ledger, append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonPendingDeletion}), nil
+	}
+
+	windowDays := int32(scheduledDeletionWindowDays)
+	if _, err := c.client.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{
+		KeyId:               &entry.ARN,
+		PendingWindowInDays: &windowDays,
+	}); err != nil {
+		return ledger, results, wrapAWSError(err, fmt.Sprintf("scheduling deletion of KMS key %q", entry.Name))
+	}
+	if c.recordEvent != nil {
+		c.recordEvent("Warning", "KeyDeletionScheduled", fmt.Sprintf("Scheduled KMS key %s (%s) for deletion in %d days", entry.Name, entry.ARN, scheduledDeletionWindowDays))
+	}
+	status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+	return ledger, results, nil
 }
 
 // declaredKeyNames is the set of ledger names Cleanup treats as still wanted:
