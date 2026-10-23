@@ -95,8 +95,6 @@ func queueNameFromARN(arn string) (string, error) {
 // that it's left spec) Force value - meant only for the finalize path, to
 // unstick a CR whose deletion can otherwise never complete once a
 // non-empty-guarded resource has no spec entry left to flip force:true on.
-//
-//nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,
 	sqsClient sqsAPI,
@@ -111,18 +109,9 @@ func Cleanup(
 	forceDeleteAll bool,
 	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, results []CleanupResult, err error) {
-	declared := map[string]bool{}
-	subscribesToByName := map[string][]depsv1alpha1.ConsumeRef{}
-	if spec != nil && !deleting {
-		for _, q := range spec.Resources {
-			declared[q.Name] = true
-			subscribesToByName[q.Name] = q.SubscribesTo
-			if q.DLQ {
-				declared[cloudctlaws.DerivedKey(q.Name, "dlq")] = true
-			}
-		}
-	}
+	declared, subscribesToByName := declaredQueues(spec, deleting)
 
+	c := &queueCleaner{sqsClient: sqsClient, namespace: namespace, crName: crName, crUID: crUID, forceDeleteAll: forceDeleteAll, recordEvent: recordEvent}
 	updatedLedger = ledger
 	var firstErr error
 	for _, entry := range ledger {
@@ -130,189 +119,269 @@ func Cleanup(
 			continue
 		}
 
-		if declared[entry.Name] {
-			if entry.PendingDeletionSince != nil {
-				if clearErr := clearPendingDeletion(ctx, sqsClient, entry); clearErr != nil {
-					if firstErr == nil {
-						firstErr = clearErr
-					}
-					continue
-				}
-				cleared := entry
-				cleared.PendingDeletionSince = nil
-				cleared.LastEmptyCheckAt = nil
-				status.UpsertManagedResource(&updatedLedger, cleared)
-				if recordEvent != nil {
-					recordEvent("Normal", "QueueDeletionCancelled", fmt.Sprintf("Canceled pending deletion of queue %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
-				}
-			}
-			continue
+		var entryErr error
+		switch {
+		case declared[entry.Name]:
+			updatedLedger, entryErr = c.restoreDeclared(ctx, entry, updatedLedger)
+		case entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete:
+			updatedLedger, results, entryErr = c.retain(ctx, entry, updatedLedger, results)
+		default:
+			updatedLedger, results, entryErr = c.deleteUndeclared(ctx, entry, updatedLedger, results)
 		}
-
-		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			pinsKey := kms.PinsAKey(updatedLedger, resourceType, entry)
-			if entry.State == depsv1alpha1.ManagedResourceStateRelinquished && !pinsKey {
-				// Let go earlier and pins no key: nothing to remember.
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-			} else if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, sqsClient, namespace, crName, crUID, entry, recordEvent)
-				if relErr != nil {
-					if firstErr == nil {
-						firstErr = relErr
-					}
-					continue
-				}
-				if gone {
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-					continue
-				}
-				if relinquished && recordEvent != nil {
-					recordEvent("Normal", "QueueOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained queue %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
-				}
-				if pinsKey {
-					status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
-				} else {
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				}
-			}
-			results = append(results, CleanupResult{
-				Name:   entry.Name,
-				Reason: CleanupReasonRetained,
-			})
-			continue
+		if entryErr != nil && firstErr == nil {
+			firstErr = entryErr
 		}
-
-		// A pending queue waiting out the quiet window or backoff reads nothing;
-		// ownership is re-checked below, before anything changes it.
-		if !entry.Force && !forceDeleteAll && entry.PendingDeletionSince != nil &&
-			(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
-			results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-			continue
-		}
-
-		queueName, nameErr := queueNameFromARN(entry.ARN)
-		if nameErr != nil {
-			if firstErr == nil {
-				firstErr = nameErr
-			}
-			continue
-		}
-		urlOut, uErr := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
-			QueueName: &queueName,
-		})
-		if uErr != nil {
-			var notFound *types.QueueDoesNotExist
-			if errors.As(uErr, &notFound) {
-				// Already gone in AWS - just drop it from the ledger.
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				continue
-			}
-			// Anything else (throttling, a permission gap, a network blip)
-			// must NOT be treated as "gone" - doing so would silently drop
-			// a queue that still exists from the ledger, abandoning it
-			// without ever actually deleting or retaining it per policy.
-			if firstErr == nil {
-				firstErr = wrapAWSError(uErr, fmt.Sprintf("resolving queue URL for %q before delete", entry.Name))
-			}
-			continue
-		}
-
-		tagsOut, tErr := sqsClient.ListQueueTags(ctx, &sqs.ListQueueTagsInput{
-			QueueUrl: urlOut.QueueUrl,
-		})
-		if tErr != nil {
-			if firstErr == nil {
-				firstErr = wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of queue %q before delete", entry.Name))
-			}
-			continue
-		}
-		if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, crUID) {
-			if firstErr == nil {
-				firstErr = cloudctlaws.OwnershipLostError("queue", entry.Name, "delete it")
-			}
-			continue
-		}
-
-		if !entry.Force && !forceDeleteAll {
-			if entry.PendingDeletionSince == nil {
-				// First time this queue has come up for deletion. Never
-				// delete on the same pass it's first noticed, even if it
-				// looks empty right now — GetQueueAttributes' counters are
-				// approximate/eventually consistent, so a message sent
-				// moments ago could still not be reflected. Deny new sends
-				// and hold for the quiet window first.
-				if denyErr := addPendingDeletionDeny(ctx, sqsClient, *urlOut.QueueUrl, entry.ARN); denyErr != nil {
-					if firstErr == nil {
-						firstErr = wrapAWSError(denyErr, fmt.Sprintf("blocking new sends to queue %q pending deletion", entry.Name))
-					}
-					continue
-				}
-				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
-				if recordEvent != nil {
-					recordEvent("Warning", "QueueDeletionPending", fmt.Sprintf("Queue %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
-				}
-				continue
-			}
-
-			attrs, aErr := sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
-				QueueUrl: urlOut.QueueUrl,
-				AttributeNames: []types.QueueAttributeName{
-					types.QueueAttributeNameApproximateNumberOfMessages,
-					types.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
-					types.QueueAttributeNameApproximateNumberOfMessagesDelayed,
-				},
-			})
-			if aErr != nil {
-				if firstErr == nil {
-					firstErr = wrapAWSError(aErr, fmt.Sprintf("checking queue %q is empty", entry.Name))
-				}
-				continue
-			}
-			// A queue can show zero visible messages while still holding
-			// in-flight messages a consumer is actively processing, or
-			// delayed messages not yet readable - these are independent
-			// counters, not aliases of each other, so all three have to be
-			// zero for the queue to actually be empty.
-			visible := attrs.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessages)]
-			inFlight := attrs.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible)]
-			delayed := attrs.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessagesDelayed)]
-			if visible != "0" || inFlight != "0" || delayed != "0" {
-				// Quiet window elapsed and it's genuinely in use — stays
-				// denied and pending, now under the long human-reaction
-				// grace period rather than the short propagation-safety one.
-				checked := entry
-				now := metav1.Now()
-				checked.LastEmptyCheckAt = &now
-				updatedLedger, results = markPendingDeletion(updatedLedger, results, checked)
-				continue
-			}
-		}
-
-		if _, dErr := sqsClient.DeleteQueue(ctx, &sqs.DeleteQueueInput{
-			QueueUrl: urlOut.QueueUrl,
-		}); dErr != nil {
-			if firstErr == nil {
-				firstErr = wrapAWSError(dErr, fmt.Sprintf("deleting queue %q", entry.Name))
-			}
-			continue
-		}
-		if recordEvent != nil {
-			recordEvent("Warning", "QueueDeleted", fmt.Sprintf("Deleted queue %s (%s)", entry.Name, entry.ARN))
-		}
-		status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 	}
 
-	// Subscriptions are reconciled as a second pass over updatedLedger,
-	// separate from the deletion state machine above: a still-declared
-	// queue needs its subscriptions reasserted/pruned against its current
-	// subscribesTo every pass (not just on deletion), and a queue dropped
-	// from spec needs every subscription it ever had torn down regardless
-	// of whether it ends up Retained, pending deletion, or actually
-	// deleted this same pass - an active delivery path, not a grant, so it
-	// can't just be left to expire on its own.
-	// Walks the queues as the pass began: a retained queue's entry may have
-	// just left updatedLedger, but its subscriptions still need tearing down.
-	for _, entry := range ledger {
+	var subErr error
+	updatedLedger, subErr = cleanupQueueSubscriptions(ctx, sqsClient, snsClient, k8sClient, namespace, crName, ledger, updatedLedger, subscribesToByName, recordEvent)
+	if subErr != nil && firstErr == nil {
+		firstErr = subErr
+	}
+
+	return updatedLedger, results, firstErr
+}
+
+// declaredQueues names the queues spec still declares, a DLQ included, and
+// what each subscribes to. Both are empty when nothing is declared.
+func declaredQueues(spec *depsv1alpha1.SQSSpec, deleting bool) (declared map[string]bool, subscribesToByName map[string][]depsv1alpha1.ConsumeRef) {
+	declared = map[string]bool{}
+	subscribesToByName = map[string][]depsv1alpha1.ConsumeRef{}
+	if spec == nil || deleting {
+		return declared, subscribesToByName
+	}
+	for _, q := range spec.Resources {
+		declared[q.Name] = true
+		subscribesToByName[q.Name] = q.SubscribesTo
+		if q.DLQ {
+			declared[cloudctlaws.DerivedKey(q.Name, "dlq")] = true
+		}
+	}
+	return declared, subscribesToByName
+}
+
+// queueCleaner carries what every entry in one Cleanup pass shares.
+type queueCleaner struct {
+	sqsClient                sqsAPI
+	namespace, crName, crUID string
+	forceDeleteAll           bool
+	recordEvent              status.EventRecorder
+}
+
+// restoreDeclared lifts the send-blocking deny from a queue that is declared
+// again, and cancels its pending deletion.
+func (c *queueCleaner) restoreDeclared(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	if entry.PendingDeletionSince == nil {
+		return ledger, nil
+	}
+	if err := clearPendingDeletion(ctx, c.sqsClient, entry); err != nil {
+		return ledger, err
+	}
+	cleared := entry
+	cleared.PendingDeletionSince = nil
+	cleared.LastEmptyCheckAt = nil
+	status.UpsertManagedResource(&ledger, cleared)
+	if c.recordEvent != nil {
+		c.recordEvent("Normal", "QueueDeletionCancelled", fmt.Sprintf("Canceled pending deletion of queue %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
+	}
+	return ledger, nil
+}
+
+// retain lets go of an undeclared queue whose policy is not Delete, and
+// rechecks a relinquished one about daily. An entry is kept only while it
+// pins a KMS key.
+func (c *queueCleaner) retain(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	retained := CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained}
+	pinsKey := kms.PinsAKey(ledger, resourceType, entry)
+	if entry.State == depsv1alpha1.ManagedResourceStateRelinquished {
+		if !pinsKey {
+			// Let go earlier and pins no key: nothing to remember.
+			status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+			return ledger, append(results, retained), nil
+		}
+		if !status.NeedsRelinquishedRecheck(entry) {
+			return ledger, append(results, retained), nil
+		}
+	}
+
+	relinquished, gone, err := relinquishIfStillTagged(ctx, c.sqsClient, c.namespace, c.crName, c.crUID, entry, c.recordEvent)
+	if err != nil {
+		return ledger, results, err
+	}
+	if gone {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if relinquished && c.recordEvent != nil {
+		c.recordEvent("Normal", "QueueOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained queue %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+	}
+	if pinsKey {
+		status.UpsertManagedResource(&ledger, status.Relinquished(entry))
+	} else {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+	}
+	return ledger, append(results, retained), nil
+}
+
+// deleteUndeclared deletes an undeclared Delete-policy queue once its quiet
+// window has passed and it is empty, unless force skips both.
+func (c *queueCleaner) deleteUndeclared(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	forced := entry.Force || c.forceDeleteAll
+
+	// A pending queue waiting out the quiet window or backoff reads nothing;
+	// ownership is re-checked below, before anything changes it.
+	if !forced && entry.PendingDeletionSince != nil &&
+		(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
+		return ledger, append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)}), nil
+	}
+
+	queueURL, gone, err := c.verifyOwned(ctx, entry)
+	if gone {
+		// Already gone in AWS - just drop it from the ledger.
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if err != nil {
+		return ledger, results, err
+	}
+
+	if !forced {
+		var proceed bool
+		ledger, results, proceed, err = c.gateOnEmpty(ctx, entry, queueURL, ledger, results)
+		if err != nil || !proceed {
+			return ledger, results, err
+		}
+	}
+
+	ledger, err = c.deleteQueue(ctx, entry, queueURL, ledger)
+	return ledger, results, err
+}
+
+// verifyOwned resolves the queue's URL and re-reads its tags before anything
+// acts on the ledger's word. gone is true when the queue no longer exists.
+func (c *queueCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.ManagedResource) (queueURL string, gone bool, err error) {
+	queueName, err := queueNameFromARN(entry.ARN)
+	if err != nil {
+		return "", false, err
+	}
+	urlOut, err := c.sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
+		QueueName: &queueName,
+	})
+	if err != nil {
+		var notFound *types.QueueDoesNotExist
+		if errors.As(err, &notFound) {
+			return "", true, nil
+		}
+		// Anything else (throttling, a permission gap, a network blip)
+		// must NOT be treated as "gone" - doing so would silently drop
+		// a queue that still exists from the ledger, abandoning it
+		// without ever actually deleting or retaining it per policy.
+		return "", false, wrapAWSError(err, fmt.Sprintf("resolving queue URL for %q before delete", entry.Name))
+	}
+
+	tagsOut, err := c.sqsClient.ListQueueTags(ctx, &sqs.ListQueueTagsInput{
+		QueueUrl: urlOut.QueueUrl,
+	})
+	if err != nil {
+		return "", false, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of queue %q before delete", entry.Name))
+	}
+	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, c.namespace, c.crName, c.crUID) {
+		return "", false, cloudctlaws.OwnershipLostError("queue", entry.Name, "delete it")
+	}
+	return *urlOut.QueueUrl, false, nil
+}
+
+// gateOnEmpty holds a queue's deletion until it has been pending for the
+// quiet window and is empty. proceed is false while it must still wait.
+func (c *queueCleaner) gateOnEmpty(ctx context.Context, entry depsv1alpha1.ManagedResource, queueURL string, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) (updated []depsv1alpha1.ManagedResource, updatedResults []CleanupResult, proceed bool, err error) {
+	if entry.PendingDeletionSince == nil {
+		// First time this queue has come up for deletion. Never
+		// delete on the same pass it's first noticed, even if it
+		// looks empty right now — GetQueueAttributes' counters are
+		// approximate/eventually consistent, so a message sent
+		// moments ago could still not be reflected. Deny new sends
+		// and hold for the quiet window first.
+		if err := addPendingDeletionDeny(ctx, c.sqsClient, queueURL, entry.ARN); err != nil {
+			return ledger, results, false, wrapAWSError(err, fmt.Sprintf("blocking new sends to queue %q pending deletion", entry.Name))
+		}
+		ledger, results = markPendingDeletion(ledger, results, entry)
+		if c.recordEvent != nil {
+			c.recordEvent("Warning", "QueueDeletionPending", fmt.Sprintf("Queue %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
+		}
+		return ledger, results, false, nil
+	}
+
+	attrs, err := c.sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl: &queueURL,
+		AttributeNames: []types.QueueAttributeName{
+			types.QueueAttributeNameApproximateNumberOfMessages,
+			types.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
+			types.QueueAttributeNameApproximateNumberOfMessagesDelayed,
+		},
+	})
+	if err != nil {
+		return ledger, results, false, wrapAWSError(err, fmt.Sprintf("checking queue %q is empty", entry.Name))
+	}
+	if !queueIsEmpty(attrs.Attributes) {
+		// Quiet window elapsed and it's genuinely in use — stays
+		// denied and pending, now under the long human-reaction
+		// grace period rather than the short propagation-safety one.
+		checked := entry
+		now := metav1.Now()
+		checked.LastEmptyCheckAt = &now
+		ledger, results = markPendingDeletion(ledger, results, checked)
+		return ledger, results, false, nil
+	}
+	return ledger, results, true, nil
+}
+
+// queueIsEmpty reads the queue's message counters. A queue can show zero
+// visible messages while still holding in-flight messages a consumer is
+// actively processing, or delayed messages not yet readable - these are
+// independent counters, not aliases of each other, so all three have to be
+// zero for the queue to actually be empty.
+func queueIsEmpty(attrs map[string]string) bool {
+	return attrs[string(types.QueueAttributeNameApproximateNumberOfMessages)] == "0" &&
+		attrs[string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible)] == "0" &&
+		attrs[string(types.QueueAttributeNameApproximateNumberOfMessagesDelayed)] == "0"
+}
+
+// deleteQueue deletes the queue and drops its ledger entry.
+func (c *queueCleaner) deleteQueue(ctx context.Context, entry depsv1alpha1.ManagedResource, queueURL string, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	if _, err := c.sqsClient.DeleteQueue(ctx, &sqs.DeleteQueueInput{
+		QueueUrl: &queueURL,
+	}); err != nil {
+		return ledger, wrapAWSError(err, fmt.Sprintf("deleting queue %q", entry.Name))
+	}
+	if c.recordEvent != nil {
+		c.recordEvent("Warning", "QueueDeleted", fmt.Sprintf("Deleted queue %s (%s)", entry.Name, entry.ARN))
+	}
+	status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+	return ledger, nil
+}
+
+// cleanupQueueSubscriptions reconciles subscriptions as a second pass over
+// the ledger, separate from the deletion state machine: a still-declared
+// queue needs its subscriptions reasserted/pruned against its current
+// subscribesTo every pass (not just on deletion), and a queue dropped from
+// spec needs every subscription it ever had torn down regardless of whether
+// it ends up Retained, pending deletion, or actually deleted this same pass
+// - an active delivery path, not a grant, so it can't just be left to expire
+// on its own. It walks the queues as the pass began (startLedger): a retained
+// queue's entry may have just left the ledger, but its subscriptions still
+// need tearing down.
+func cleanupQueueSubscriptions(
+	ctx context.Context,
+	sqsClient sqsAPI,
+	snsClient cloudctlaws.SNSClient,
+	k8sClient client.Client,
+	namespace, crName string,
+	startLedger, ledger []depsv1alpha1.ManagedResource,
+	subscribesToByName map[string][]depsv1alpha1.ConsumeRef,
+	recordEvent status.EventRecorder,
+) ([]depsv1alpha1.ManagedResource, error) {
+	var firstErr error
+	for _, entry := range startLedger {
 		if entry.Type != resourceType {
 			continue
 		}
@@ -322,7 +391,7 @@ func Cleanup(
 		}
 		// Without a tracked subscription there is nothing to tear down, and
 		// the queue's URL is only needed to do that.
-		if !hasSubscriptionEntries(updatedLedger, queueName) {
+		if !hasSubscriptionEntries(ledger, queueName) {
 			continue
 		}
 		urlOut, uErr := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
@@ -339,13 +408,12 @@ func Cleanup(
 		}
 
 		var subErr error
-		updatedLedger, subErr = CleanupSubscriptions(ctx, snsClient, sqsClient, k8sClient, namespace, crName, queueName, *urlOut.QueueUrl, subscribesTo, updatedLedger, recordEvent)
+		ledger, subErr = CleanupSubscriptions(ctx, snsClient, sqsClient, k8sClient, namespace, crName, queueName, *urlOut.QueueUrl, subscribesTo, ledger, recordEvent)
 		if subErr != nil && firstErr == nil {
 			firstErr = subErr
 		}
 	}
-
-	return updatedLedger, results, firstErr
+	return ledger, firstErr
 }
 
 func pendingDeletionReason(since time.Time) CleanupReason {

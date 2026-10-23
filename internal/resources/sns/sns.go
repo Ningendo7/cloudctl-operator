@@ -102,27 +102,9 @@ func ensureTopic(
 	topicName := cloudctlaws.QueueOrTopicName(namespace, crName, resourceType, t.FIFO, snsNameMaxLen, t.Name)
 	topicArn := cloudctlaws.TopicARN(region, accountID, topicName)
 
-	var kmsKeyARN *string
-	if t.Encryption != nil {
-		if t.Encryption.KMSKeyRef != "" {
-			arn, ok := kms.SharedKeyARN(ledger, t.Encryption.KMSKeyRef)
-			if !ok {
-				return ledger, &cloudctlaws.ReconcileError{
-					Err:           fmt.Errorf("encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources", t.Encryption.KMSKeyRef),
-					Retryable:     true,
-					WakesOnChange: true,
-				}
-			}
-			kmsKeyARN = &arn
-		}
-		if t.Encryption.Enabled {
-			arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, resourceType, t.Name, t.DeletionPolicy, ledger, checkpoint, recordEvent)
-			ledger = updatedLedger
-			if err != nil {
-				return ledger, fmt.Errorf("encryption key: %w", err)
-			}
-			kmsKeyARN = &arn
-		}
+	kmsKeyARN, ledger, err := resolveTopicKey(ctx, kmsClient, namespace, crName, crUID, t, ledger, checkpoint, recordEvent)
+	if err != nil {
+		return ledger, err
 	}
 
 	if err := checkFIFOUnchanged(ledger, t.Name, t.FIFO); err != nil {
@@ -130,39 +112,12 @@ func ensureTopic(
 	}
 
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, t.Name); existingFound && !status.NeedsRevalidation(existing) {
-		// Still within the trust window - skip re-verifying ownership, but
-		// attribute drift correction is a different concern and must still
-		// run every reconcile regardless of the trust window. Local-only
-		// fields (deletionPolicy/force) can still change from a spec edit
-		// with no AWS call needed, so refresh those against the cached
-		// entry; ARN and LastVerifiedAt stay as they were until the window
-		// actually expires and a real ownership check runs again.
-		updated := existing
-		updated.DeletionPolicy = t.DeletionPolicy
-		updated.Force = t.Force
-		status.UpsertManagedResource(&ledger, updated)
-
-		// Existence is checked on every pass, trust window or not: the
-		// window only exempts the ownership-tag re-check, and a topic
-		// deleted out-of-band must not stay reported Ready until it lapses.
-		var probeErr error
-		if len(desiredTopicAttributes(t, kmsKeyARN)) == 0 {
-			_, probeErr = awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
-		} else {
-			probeErr = reconcileTopicAttributes(ctx, awsClient, topicArn, t, kmsKeyARN)
+		trustedLedger, present, trustErr := ensureWithinTrust(ctx, awsClient, topicArn, existing, t, kmsKeyARN, ledger, recordEvent)
+		if trustErr != nil || present {
+			return trustedLedger, trustErr
 		}
-		var gone *types.NotFoundException
-		switch {
-		case errors.As(probeErr, &gone):
-			if recordEvent != nil {
-				recordEvent("Warning", "TopicMissing", fmt.Sprintf("SNS topic %s no longer exists in AWS; recreating it", topicArn))
-			}
-			// Falls through to the full path below, which recreates it.
-		case probeErr != nil:
-			return ledger, wrapAWSError(probeErr, "reconciling topic attributes")
-		default:
-			return ledger, nil
-		}
+		// The topic is gone; the full path below recreates it.
+		ledger = trustedLedger
 	}
 
 	ownerTags := map[string]string{
@@ -180,59 +135,17 @@ func ensureTopic(
 	// the same "no such topic" condition.
 	var notFound *types.ResourceNotFoundException
 	if errors.As(err, &notFound) {
-		attrs := desiredTopicAttributes(t, kmsKeyARN)
-		if t.FIFO {
-			attrs["FifoTopic"] = awsAttrTrue
-		}
-
-		createOut, cErr := awsClient.CreateTopic(ctx, &sns.CreateTopicInput{
-			Name:       &topicName,
-			Attributes: attrs,
-			Tags:       mapToTags(ownerTags),
-		})
-		if cErr != nil {
-			return ledger, wrapAWSError(cErr, "creating topic")
-		}
-		if recordEvent != nil {
-			recordEvent("Normal", "TopicCreated", fmt.Sprintf("Created SNS topic %s", *createOut.TopicArn))
-		}
-		return recordVerified(ledger, t.Name, *createOut.TopicArn, t.DeletionPolicy, t.Force), nil
+		return createTopic(ctx, awsClient, topicName, ownerTags, t, kmsKeyARN, ledger, recordEvent)
 	}
 	if err != nil {
 		return ledger, wrapAWSError(err, "looking up topic")
-
 	}
 
 	// Topic already exists — verify we actually own it before trusting it.
 	currentTags := tagsToMap(tagsOut.Tags)
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "topic", topicName, currentTags, namespace, crName, crUID, t.Adopt)
-		if ownErr != nil {
-			return ledger, ownErr
-		}
-		attrsOut, aErr := awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
-		if aErr != nil {
-			return ledger, wrapAWSError(aErr, "reading the topic's encryption before adopting it")
-		}
-		if err := kms.CheckAdoptedKey(ctx, kmsClient, attrsOut.Attributes["KmsMasterKeyId"], aws.ToString(kmsKeyARN)); err != nil {
-			return ledger, fmt.Errorf("topic %q can't be adopted: %w", topicName, err)
-		}
-
-		merged := cloudctlaws.MergeTags(currentTags, ownerTags)
-		if _, tagErr := awsClient.TagResource(ctx, &sns.TagResourceInput{ResourceArn: &topicArn, Tags: mapToTags(merged)}); tagErr != nil {
-			return ledger, wrapAWSError(tagErr, "adopting topic (tagging)")
-		}
-		if cloudctlaws.HasReleaseTags(currentTags) {
-			if _, untagErr := awsClient.UntagResource(ctx, &sns.UntagResourceInput{ResourceArn: &topicArn, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
-				cloudctlaws.ReleaseTagFailed(recordEvent, "topic", topicName, untagErr)
-			}
-		}
-		if recordEvent != nil {
-			if transferred {
-				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SNS topic %s from a previous incarnation of this CR", topicArn))
-			} else {
-				recordEvent("Normal", "TopicAdopted", fmt.Sprintf("Adopted existing SNS topic %s under management", topicArn))
-			}
+		if err := adoptTopic(ctx, awsClient, kmsClient, namespace, crName, crUID, topicName, topicArn, currentTags, ownerTags, t, kmsKeyARN, recordEvent); err != nil {
+			return ledger, err
 		}
 	}
 
@@ -241,6 +154,161 @@ func ensureTopic(
 	}
 
 	return recordVerified(ledger, t.Name, topicArn, t.DeletionPolicy, t.Force), nil
+}
+
+// resolveTopicKey returns the key the topic is encrypted with: a shared one
+// from the ledger, or a dedicated one created for it. The ledger returned is
+// current even on error.
+func resolveTopicKey(
+	ctx context.Context,
+	kmsClient cloudctlaws.KMSClient,
+	namespace, crName, crUID string,
+	t depsv1alpha1.SNSTopicSpec,
+	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
+) (kmsKeyARN *string, updatedLedger []depsv1alpha1.ManagedResource, err error) {
+	if t.Encryption == nil {
+		return nil, ledger, nil
+	}
+	if t.Encryption.KMSKeyRef != "" {
+		arn, ok := kms.SharedKeyARN(ledger, t.Encryption.KMSKeyRef)
+		if !ok {
+			return nil, ledger, &cloudctlaws.ReconcileError{
+				Err:           fmt.Errorf("encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources", t.Encryption.KMSKeyRef),
+				Retryable:     true,
+				WakesOnChange: true,
+			}
+		}
+		kmsKeyARN = &arn
+	}
+	if t.Encryption.Enabled {
+		arn, updated, keyErr := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, resourceType, t.Name, t.DeletionPolicy, ledger, checkpoint, recordEvent)
+		if keyErr != nil {
+			return nil, updated, fmt.Errorf("encryption key: %w", keyErr)
+		}
+		ledger = updated
+		kmsKeyARN = &arn
+	}
+	return kmsKeyARN, ledger, nil
+}
+
+// ensureWithinTrust handles a topic whose ownership was verified recently.
+// Ownership is not re-checked, but attribute drift correction is a different
+// concern and must still run every reconcile regardless of the trust window.
+// Local-only fields (deletionPolicy/force) can still change from a spec edit
+// with no AWS call needed, so those are refreshed against the cached entry;
+// ARN and LastVerifiedAt stay as they were until the window actually expires
+// and a real ownership check runs again. present is false when the topic no
+// longer exists, and the caller recreates it.
+func ensureWithinTrust(
+	ctx context.Context,
+	awsClient snsAPI,
+	topicArn string,
+	existing depsv1alpha1.ManagedResource,
+	t depsv1alpha1.SNSTopicSpec,
+	kmsKeyARN *string,
+	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
+) (updatedLedger []depsv1alpha1.ManagedResource, present bool, err error) {
+	updated := existing
+	updated.DeletionPolicy = t.DeletionPolicy
+	updated.Force = t.Force
+	status.UpsertManagedResource(&ledger, updated)
+
+	// Existence is checked on every pass, trust window or not: the
+	// window only exempts the ownership-tag re-check, and a topic
+	// deleted out-of-band must not stay reported Ready until it lapses.
+	var probeErr error
+	if len(desiredTopicAttributes(t, kmsKeyARN)) == 0 {
+		_, probeErr = awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
+	} else {
+		probeErr = reconcileTopicAttributes(ctx, awsClient, topicArn, t, kmsKeyARN)
+	}
+	var gone *types.NotFoundException
+	switch {
+	case errors.As(probeErr, &gone):
+		if recordEvent != nil {
+			recordEvent("Warning", "TopicMissing", fmt.Sprintf("SNS topic %s no longer exists in AWS; recreating it", topicArn))
+		}
+		return ledger, false, nil
+	case probeErr != nil:
+		return ledger, false, wrapAWSError(probeErr, "reconciling topic attributes")
+	}
+	return ledger, true, nil
+}
+
+// createTopic creates a topic that does not exist yet.
+func createTopic(
+	ctx context.Context,
+	awsClient snsAPI,
+	topicName string,
+	ownerTags map[string]string,
+	t depsv1alpha1.SNSTopicSpec,
+	kmsKeyARN *string,
+	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
+) ([]depsv1alpha1.ManagedResource, error) {
+	attrs := desiredTopicAttributes(t, kmsKeyARN)
+	if t.FIFO {
+		attrs["FifoTopic"] = awsAttrTrue
+	}
+
+	createOut, cErr := awsClient.CreateTopic(ctx, &sns.CreateTopicInput{
+		Name:       &topicName,
+		Attributes: attrs,
+		Tags:       mapToTags(ownerTags),
+	})
+	if cErr != nil {
+		return ledger, wrapAWSError(cErr, "creating topic")
+	}
+	if recordEvent != nil {
+		recordEvent("Normal", "TopicCreated", fmt.Sprintf("Created SNS topic %s", *createOut.TopicArn))
+	}
+	return recordVerified(ledger, t.Name, *createOut.TopicArn, t.DeletionPolicy, t.Force), nil
+}
+
+// adoptTopic brings an existing topic not tagged as this CR's under
+// management, once the ownership rules allow it.
+func adoptTopic(
+	ctx context.Context,
+	awsClient snsAPI,
+	kmsClient cloudctlaws.KMSClient,
+	namespace, crName, crUID, topicName, topicArn string,
+	currentTags, ownerTags map[string]string,
+	t depsv1alpha1.SNSTopicSpec,
+	kmsKeyARN *string,
+	recordEvent status.EventRecorder,
+) error {
+	transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "topic", topicName, currentTags, namespace, crName, crUID, t.Adopt)
+	if ownErr != nil {
+		return ownErr
+	}
+	attrsOut, aErr := awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
+	if aErr != nil {
+		return wrapAWSError(aErr, "reading the topic's encryption before adopting it")
+	}
+	if err := kms.CheckAdoptedKey(ctx, kmsClient, attrsOut.Attributes["KmsMasterKeyId"], aws.ToString(kmsKeyARN)); err != nil {
+		return fmt.Errorf("topic %q can't be adopted: %w", topicName, err)
+	}
+
+	merged := cloudctlaws.MergeTags(currentTags, ownerTags)
+	if _, tagErr := awsClient.TagResource(ctx, &sns.TagResourceInput{ResourceArn: &topicArn, Tags: mapToTags(merged)}); tagErr != nil {
+		return wrapAWSError(tagErr, "adopting topic (tagging)")
+	}
+	if cloudctlaws.HasReleaseTags(currentTags) {
+		if _, untagErr := awsClient.UntagResource(ctx, &sns.UntagResourceInput{ResourceArn: &topicArn, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
+			cloudctlaws.ReleaseTagFailed(recordEvent, "topic", topicName, untagErr)
+		}
+	}
+	if recordEvent != nil {
+		if transferred {
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SNS topic %s from a previous incarnation of this CR", topicArn))
+		} else {
+			recordEvent("Normal", "TopicAdopted", fmt.Sprintf("Adopted existing SNS topic %s under management", topicArn))
+		}
+	}
+	return nil
 }
 
 // desiredTopicAttributes computes the mutable attributes this package

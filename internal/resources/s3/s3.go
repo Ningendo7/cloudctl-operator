@@ -198,113 +198,29 @@ func ensureBucket(
 	bucketArn := "arn:aws:s3:::" + bucket
 
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, resourceName); existingFound && !status.NeedsRevalidation(existing) {
-		// Still within the trust window - skip re-verifying existence and
-		// ownership (HeadBucket + GetBucketTagging), but attribute drift
-		// correction is a different concern and still runs every reconcile
-		// regardless of the trust window - versioning and lifecycle are
-		// always evaluated, so unlike SQS there's no legitimate case where
-		// this whole round trip could be skipped outright. Local-only
-		// fields (deletionPolicy/force) can still change from a spec edit
-		// with no AWS call needed, so refresh those against the cached
-		// entry; LastVerifiedAt stays as it was until the window actually
-		// expires and a real ownership check runs again.
-		updated := existing
-		updated.DeletionPolicy = opts.deletionPolicy
-		updated.Force = opts.force
-		status.UpsertManagedResource(&ledger, updated)
-
-		// A bucket deleted out-of-band must not stay reported Ready until
-		// the window lapses: this already reads the bucket every pass, so a
-		// missing one is recreated by the full path below.
-		err := reconcileBucketAttributes(ctx, awsClient, bucket, opts)
-		switch {
-		case err != nil && isNotFoundError(err):
-			if recordEvent != nil {
-				recordEvent("Warning", "BucketMissing", fmt.Sprintf("S3 bucket %s no longer exists in AWS; recreating it", bucket))
-			}
-			// Falls through to the full path below, which recreates it.
-		case err != nil:
-			return ledger, wrapAWSError(err, "reconciling bucket attributes")
-		default:
-			return ledger, nil
+		trustedLedger, present, trustErr := ensureWithinTrust(ctx, awsClient, bucket, existing, opts, ledger, recordEvent)
+		if trustErr != nil || present {
+			return trustedLedger, trustErr
 		}
+		// The bucket is gone; the full path below recreates it.
+		ledger = trustedLedger
 	}
 
-	_, err := awsClient.HeadBucket(ctx, &s3sdk.HeadBucketInput{
-		Bucket: &bucket,
-	})
-	if err != nil {
-		if !isNotFoundError(err) {
-			return ledger, wrapAWSError(err, "checking bucket existence")
-		}
-
-		input := &s3sdk.CreateBucketInput{
-			Bucket: &bucket,
-			CreateBucketConfiguration: &types.CreateBucketConfiguration{
-				Tags: mapToTags(ownerTags(namespace, crName, crUID)),
-			},
-		}
-		if region != "us-east-1" {
-			// us-east-1 is the one region where an explicit
-			// LocationConstraint is rejected - Tags alone on
-			// CreateBucketConfiguration is fine there.
-			input.CreateBucketConfiguration.LocationConstraint = types.BucketLocationConstraint(region)
-		}
-		if _, cErr := awsClient.CreateBucket(ctx, input); cErr != nil {
-			return ledger, wrapAWSError(cErr, "creating bucket")
-		}
-		if recordEvent != nil {
-			recordEvent("Normal", "BucketCreated", fmt.Sprintf("Created S3 bucket %s", bucket))
-		}
+	if err := createBucketIfMissing(ctx, awsClient, namespace, crName, crUID, region, bucket, recordEvent); err != nil {
+		return ledger, err
 	}
 
 	// Whether just created above (already tagged as ours) or pre-existing,
 	// both paths converge here: read current tags, and either confirm
 	// ownership or decide whether adopting a foreign bucket is justified.
-	tagsOut, tErr := awsClient.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
-	currentTags := map[string]string{}
-	if tErr != nil {
-		if !isNoSuchTagSet(tErr) {
-			return ledger, wrapAWSError(tErr, "reading bucket tags")
-		}
-		// NoSuchTagSet: bucket exists but carries no tags at all - nothing
-		// to preserve, not an error.
-	} else {
-		currentTags = tagsToMap(tagsOut.TagSet)
+	currentTags, err := readBucketTags(ctx, awsClient, bucket)
+	if err != nil {
+		return ledger, err
 	}
 
 	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "bucket", bucket, currentTags, namespace, crName, crUID, opts.adopt)
-		if ownErr != nil {
-			return ledger, ownErr
-		}
-		if opts.checkAdoptedKey != nil {
-			currentKey, keyErr := bucketKMSKey(ctx, awsClient, bucket)
-			if keyErr != nil {
-				return ledger, keyErr
-			}
-			if err := opts.checkAdoptedKey(ctx, currentKey); err != nil {
-				return ledger, fmt.Errorf("bucket %q can't be adopted: %w", bucket, err)
-			}
-			if want := aws.ToString(opts.kmsKeyARN); want != "" && !sameKey(currentKey, want) && recordEvent != nil {
-				recordEvent("Normal", "BucketExistingObjectsKeepTheirEncryption", fmt.Sprintf(
-					"Adopted S3 bucket %s: new objects use KMS key %s; objects already in it keep their current encryption until they are rewritten", bucket, want))
-			}
-		}
-
-		merged := cloudctlaws.WithoutReleaseTags(cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID)))
-		if _, tagErr := awsClient.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
-			Bucket:  &bucket,
-			Tagging: &types.Tagging{TagSet: mapToTags(merged)},
-		}); tagErr != nil {
-			return ledger, wrapAWSError(tagErr, "tagging bucket")
-		}
-		if recordEvent != nil {
-			if transferred {
-				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over S3 bucket %s from a previous incarnation of this CR", bucket))
-			} else {
-				recordEvent("Normal", "BucketAdopted", fmt.Sprintf("Adopted existing S3 bucket %s under management", bucket))
-			}
+		if err := adoptBucket(ctx, awsClient, namespace, crName, crUID, bucket, currentTags, opts, recordEvent); err != nil {
+			return ledger, err
 		}
 	}
 
@@ -315,9 +231,161 @@ func ensureBucket(
 	return recordVerified(ledger, resourceName, bucketArn, opts.deletionPolicy, opts.force), nil
 }
 
+// ensureWithinTrust handles a bucket whose ownership was verified recently.
+// Existence and ownership (HeadBucket + GetBucketTagging) are not re-checked,
+// but attribute drift correction is a different concern and still runs every
+// reconcile regardless of the trust window - versioning and lifecycle are
+// always evaluated, so unlike SQS there's no legitimate case where this whole
+// round trip could be skipped outright. Local-only fields (deletionPolicy/
+// force) can still change from a spec edit with no AWS call needed, so those
+// are refreshed against the cached entry; LastVerifiedAt stays as it was
+// until the window actually expires and a real ownership check runs again.
+// present is false when the bucket no longer exists, and the caller
+// recreates it.
+func ensureWithinTrust(
+	ctx context.Context,
+	awsClient s3API,
+	bucket string,
+	existing depsv1alpha1.ManagedResource,
+	opts bucketOptions,
+	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
+) (updatedLedger []depsv1alpha1.ManagedResource, present bool, err error) {
+	updated := existing
+	updated.DeletionPolicy = opts.deletionPolicy
+	updated.Force = opts.force
+	status.UpsertManagedResource(&ledger, updated)
+
+	// A bucket deleted out-of-band must not stay reported Ready until
+	// the window lapses: this already reads the bucket every pass, so a
+	// missing one is recreated by the full path.
+	attrErr := reconcileBucketAttributes(ctx, awsClient, bucket, opts)
+	switch {
+	case attrErr != nil && isNotFoundError(attrErr):
+		if recordEvent != nil {
+			recordEvent("Warning", "BucketMissing", fmt.Sprintf("S3 bucket %s no longer exists in AWS; recreating it", bucket))
+		}
+		return ledger, false, nil
+	case attrErr != nil:
+		return ledger, false, wrapAWSError(attrErr, "reconciling bucket attributes")
+	}
+	return ledger, true, nil
+}
+
+// createBucketIfMissing creates the bucket, already tagged as this CR's,
+// unless it exists.
+func createBucketIfMissing(
+	ctx context.Context,
+	awsClient s3API,
+	namespace, crName, crUID, region, bucket string,
+	recordEvent status.EventRecorder,
+) error {
+	_, err := awsClient.HeadBucket(ctx, &s3sdk.HeadBucketInput{
+		Bucket: &bucket,
+	})
+	if err == nil {
+		return nil
+	}
+	if !isNotFoundError(err) {
+		return wrapAWSError(err, "checking bucket existence")
+	}
+
+	input := &s3sdk.CreateBucketInput{
+		Bucket: &bucket,
+		CreateBucketConfiguration: &types.CreateBucketConfiguration{
+			Tags: mapToTags(ownerTags(namespace, crName, crUID)),
+		},
+	}
+	if region != "us-east-1" {
+		// us-east-1 is the one region where an explicit
+		// LocationConstraint is rejected - Tags alone on
+		// CreateBucketConfiguration is fine there.
+		input.CreateBucketConfiguration.LocationConstraint = types.BucketLocationConstraint(region)
+	}
+	if _, cErr := awsClient.CreateBucket(ctx, input); cErr != nil {
+		return wrapAWSError(cErr, "creating bucket")
+	}
+	if recordEvent != nil {
+		recordEvent("Normal", "BucketCreated", fmt.Sprintf("Created S3 bucket %s", bucket))
+	}
+	return nil
+}
+
+// readBucketTags returns the bucket's tags. A bucket with none at all is not
+// an error: there is nothing to preserve.
+func readBucketTags(ctx context.Context, awsClient s3API, bucket string) (map[string]string, error) {
+	tagsOut, err := awsClient.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
+	if err == nil {
+		return tagsToMap(tagsOut.TagSet), nil
+	}
+	if isNoSuchTagSet(err) {
+		return map[string]string{}, nil
+	}
+	return nil, wrapAWSError(err, "reading bucket tags")
+}
+
+// adoptBucket brings an existing bucket not tagged as this CR's under
+// management, once the ownership rules allow it.
+func adoptBucket(
+	ctx context.Context,
+	awsClient s3API,
+	namespace, crName, crUID, bucket string,
+	currentTags map[string]string,
+	opts bucketOptions,
+	recordEvent status.EventRecorder,
+) error {
+	transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "bucket", bucket, currentTags, namespace, crName, crUID, opts.adopt)
+	if ownErr != nil {
+		return ownErr
+	}
+	if opts.checkAdoptedKey != nil {
+		currentKey, keyErr := bucketKMSKey(ctx, awsClient, bucket)
+		if keyErr != nil {
+			return keyErr
+		}
+		if err := opts.checkAdoptedKey(ctx, currentKey); err != nil {
+			return fmt.Errorf("bucket %q can't be adopted: %w", bucket, err)
+		}
+		if want := aws.ToString(opts.kmsKeyARN); want != "" && !sameKey(currentKey, want) && recordEvent != nil {
+			recordEvent("Normal", "BucketExistingObjectsKeepTheirEncryption", fmt.Sprintf(
+				"Adopted S3 bucket %s: new objects use KMS key %s; objects already in it keep their current encryption until they are rewritten", bucket, want))
+		}
+	}
+
+	merged := cloudctlaws.WithoutReleaseTags(cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID)))
+	if _, tagErr := awsClient.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
+		Bucket:  &bucket,
+		Tagging: &types.Tagging{TagSet: mapToTags(merged)},
+	}); tagErr != nil {
+		return wrapAWSError(tagErr, "tagging bucket")
+	}
+	if recordEvent != nil {
+		if transferred {
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over S3 bucket %s from a previous incarnation of this CR", bucket))
+		} else {
+			recordEvent("Normal", "BucketAdopted", fmt.Sprintf("Adopted existing S3 bucket %s under management", bucket))
+		}
+	}
+	return nil
+}
+
 // reconcileBucketAttributes corrects drift on versioning, encryption and the
 // lifecycle policy, writing only when AWS differs from the desired state.
 func reconcileBucketAttributes(ctx context.Context, awsClient s3API, bucket string, opts bucketOptions) error {
+	if err := reconcileVersioning(ctx, awsClient, bucket, opts); err != nil {
+		return err
+	}
+	// Encryption is checked before the lifecycle step, which has its own
+	// early return on the (very common) "no lifecycle rules configured"
+	// path - placing it after would silently skip encryption reconciliation
+	// for exactly that common case.
+	if err := reconcileEncryption(ctx, awsClient, bucket, opts); err != nil {
+		return err
+	}
+	return reconcileLifecycle(ctx, awsClient, bucket, opts)
+}
+
+func reconcileVersioning(ctx context.Context, awsClient s3API, bucket string, opts bucketOptions) error {
 	desiredVersioning := opts.backupEnabled
 	if opts.versioningOverride != nil {
 		desiredVersioning = *opts.versioningOverride
@@ -329,67 +397,79 @@ func reconcileBucketAttributes(ctx context.Context, awsClient s3API, bucket stri
 	if err != nil {
 		return fmt.Errorf("reading versioning status: %w", err)
 	}
-	if (current.Status == types.BucketVersioningStatusEnabled) != desiredVersioning {
-		versioningStatus := types.BucketVersioningStatusSuspended
-		if desiredVersioning {
-			versioningStatus = types.BucketVersioningStatusEnabled
-		}
-		if _, err := awsClient.PutBucketVersioning(ctx, &s3sdk.PutBucketVersioningInput{
-			Bucket:                  &bucket,
-			VersioningConfiguration: &types.VersioningConfiguration{Status: versioningStatus},
-		}); err != nil {
-			return fmt.Errorf("correcting versioning: %w", err)
-		}
+	if (current.Status == types.BucketVersioningStatusEnabled) == desiredVersioning {
+		return nil
 	}
+	versioningStatus := types.BucketVersioningStatusSuspended
+	if desiredVersioning {
+		versioningStatus = types.BucketVersioningStatusEnabled
+	}
+	if _, err := awsClient.PutBucketVersioning(ctx, &s3sdk.PutBucketVersioningInput{
+		Bucket:                  &bucket,
+		VersioningConfiguration: &types.VersioningConfiguration{Status: versioningStatus},
+	}); err != nil {
+		return fmt.Errorf("correcting versioning: %w", err)
+	}
+	return nil
+}
 
-	// Checked before the lifecycle block below, which has its own early
-	// return on the (very common) "no lifecycle rules configured" path -
-	// placing this after it would silently skip encryption reconciliation
-	// for exactly that common case.
-	//
-	// Only ever corrects the "enable, or point at a different key"
-	// direction — same accepted gap as every other resource type's
-	// encryption drift correction: removing encryption from spec doesn't
-	// proactively revert an already-encrypted bucket back to the default
-	// SSE-S3 key.
-	if opts.kmsKeyARN != nil {
-		currentKeyARN := ""
-		bucketKeyEnabled := false
-		encOut, encErr := awsClient.GetBucketEncryption(ctx, &s3sdk.GetBucketEncryptionInput{Bucket: &bucket})
-		if encErr != nil && !isServerSideEncryptionConfigurationNotFound(encErr) {
-			return fmt.Errorf("reading encryption configuration: %w", encErr)
-		}
-		if encOut != nil && encOut.ServerSideEncryptionConfiguration != nil {
-			for _, rule := range encOut.ServerSideEncryptionConfiguration.Rules {
-				if rule.ApplyServerSideEncryptionByDefault != nil && rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID != nil {
-					currentKeyARN = *rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID
-					bucketKeyEnabled = aws.ToBool(rule.BucketKeyEnabled)
-					break
-				}
-			}
-		}
-		// Without a Bucket Key, S3 calls KMS for every object read and write,
-		// which is billed and counts against the account's KMS rate quota.
-		if currentKeyARN != *opts.kmsKeyARN || !bucketKeyEnabled {
-			if _, err := awsClient.PutBucketEncryption(ctx, &s3sdk.PutBucketEncryptionInput{
-				Bucket: &bucket,
-				ServerSideEncryptionConfiguration: &types.ServerSideEncryptionConfiguration{
-					Rules: []types.ServerSideEncryptionRule{
-						{
-							ApplyServerSideEncryptionByDefault: &types.ServerSideEncryptionByDefault{
-								SSEAlgorithm:   types.ServerSideEncryptionAwsKms,
-								KMSMasterKeyID: opts.kmsKeyARN,
-							},
-							BucketKeyEnabled: aws.Bool(true),
-						},
+// reconcileEncryption only ever corrects the "enable, or point at a
+// different key" direction - same accepted gap as every other resource
+// type's encryption drift correction: removing encryption from spec doesn't
+// proactively revert an already-encrypted bucket back to the default SSE-S3
+// key.
+func reconcileEncryption(ctx context.Context, awsClient s3API, bucket string, opts bucketOptions) error {
+	if opts.kmsKeyARN == nil {
+		return nil
+	}
+	currentKeyARN, bucketKeyEnabled, err := currentBucketEncryption(ctx, awsClient, bucket)
+	if err != nil {
+		return err
+	}
+	// Without a Bucket Key, S3 calls KMS for every object read and write,
+	// which is billed and counts against the account's KMS rate quota.
+	if currentKeyARN == *opts.kmsKeyARN && bucketKeyEnabled {
+		return nil
+	}
+	if _, err := awsClient.PutBucketEncryption(ctx, &s3sdk.PutBucketEncryptionInput{
+		Bucket: &bucket,
+		ServerSideEncryptionConfiguration: &types.ServerSideEncryptionConfiguration{
+			Rules: []types.ServerSideEncryptionRule{
+				{
+					ApplyServerSideEncryptionByDefault: &types.ServerSideEncryptionByDefault{
+						SSEAlgorithm:   types.ServerSideEncryptionAwsKms,
+						KMSMasterKeyID: opts.kmsKeyARN,
 					},
+					BucketKeyEnabled: aws.Bool(true),
 				},
-			}); err != nil {
-				return fmt.Errorf("correcting server-side encryption key: %w", err)
-			}
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("correcting server-side encryption key: %w", err)
+	}
+	return nil
+}
+
+// currentBucketEncryption returns the KMS key the bucket encrypts with by
+// default, and whether it uses a Bucket Key. Both are zero for a bucket with
+// no KMS default.
+func currentBucketEncryption(ctx context.Context, awsClient s3API, bucket string) (keyARN string, bucketKeyEnabled bool, err error) {
+	encOut, encErr := awsClient.GetBucketEncryption(ctx, &s3sdk.GetBucketEncryptionInput{Bucket: &bucket})
+	if encErr != nil && !isServerSideEncryptionConfigurationNotFound(encErr) {
+		return "", false, fmt.Errorf("reading encryption configuration: %w", encErr)
+	}
+	if encOut == nil || encOut.ServerSideEncryptionConfiguration == nil {
+		return "", false, nil
+	}
+	for _, rule := range encOut.ServerSideEncryptionConfiguration.Rules {
+		if rule.ApplyServerSideEncryptionByDefault != nil && rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID != nil {
+			return *rule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID, aws.ToBool(rule.BucketKeyEnabled), nil
 		}
 	}
+	return "", false, nil
+}
 
+func reconcileLifecycle(ctx context.Context, awsClient s3API, bucket string, opts bucketOptions) error {
 	rules := desiredLifecycleRules(opts)
 	desired := buildLifecycleRules(rules)
 	var currentRules []types.LifecycleRule

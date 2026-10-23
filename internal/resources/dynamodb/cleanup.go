@@ -69,8 +69,6 @@ type CleanupResult struct {
 //
 // forceDeleteAll overrides every entry's own Force value - meant only for
 // the finalize path, see the sqs package's Cleanup for why this exists.
-//
-//nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,
 	client dynamodbAPI,
@@ -90,6 +88,7 @@ func Cleanup(
 		}
 	}
 
+	c := &tableCleaner{client: client, namespace: namespace, crName: crName, crUID: crUID, forceDeleteAll: forceDeleteAll, recordEvent: recordEvent}
 	updatedLedger = ledger
 	var firstErr error
 	for _, entry := range ledger {
@@ -97,130 +96,180 @@ func Cleanup(
 			continue
 		}
 
-		if declared[entry.Name] {
-			if entry.PendingDeletionSince != nil {
-				cleared := entry
-				cleared.PendingDeletionSince = nil
-				cleared.LastEmptyCheckAt = nil
-				status.UpsertManagedResource(&updatedLedger, cleared)
-				if recordEvent != nil {
-					recordEvent("Normal", "TableDeletionCancelled", fmt.Sprintf("Canceled pending deletion of table %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
-				}
-			}
-			continue
+		var entryErr error
+		switch {
+		case declared[entry.Name]:
+			updatedLedger = c.restoreDeclared(entry, updatedLedger)
+		case entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete:
+			updatedLedger, results, entryErr = c.retain(ctx, entry, updatedLedger, results)
+		default:
+			updatedLedger, results, entryErr = c.deleteUndeclared(ctx, entry, updatedLedger, results)
 		}
-
-		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			pinsKey := kms.PinsAKey(updatedLedger, resourceType, entry)
-			if entry.State == depsv1alpha1.ManagedResourceStateRelinquished && !pinsKey {
-				// Let go earlier and pins no key: nothing to remember.
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-			} else if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry, recordEvent)
-				if relErr != nil {
-					if firstErr == nil {
-						firstErr = relErr
-					}
-					continue
-				}
-				if gone {
-					// Deleted by hand after being retained: forget it, so
-					// declaring it again creates a fresh table instead of
-					// tripping over an entry for one that no longer exists.
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-					continue
-				}
-				if relinquished && recordEvent != nil {
-					recordEvent("Normal", "TableOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained table %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
-				}
-				if pinsKey {
-					status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
-				} else {
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				}
-			}
-			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
-			continue
+		if entryErr != nil && firstErr == nil {
+			firstErr = entryErr
 		}
-
-		// A pending table waiting out the quiet window or backoff reads nothing;
-		// ownership is re-checked below, before anything changes it.
-		if !entry.Force && !forceDeleteAll && entry.PendingDeletionSince != nil &&
-			(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
-			results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-			continue
-		}
-
-		tags, tErr := listAllTags(ctx, client, entry.ARN)
-		if tErr != nil {
-			var notFound *types.ResourceNotFoundException
-			if errors.As(tErr, &notFound) {
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				continue
-			}
-			if firstErr == nil {
-				firstErr = wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of table %q before delete", entry.Name))
-			}
-			continue
-		}
-		if !cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, crUID) {
-			if firstErr == nil {
-				firstErr = cloudctlaws.OwnershipLostError("table", entry.Name, "delete it")
-			}
-			continue
-		}
-
-		if !entry.Force && !forceDeleteAll {
-			if entry.PendingDeletionSince == nil {
-				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
-				if recordEvent != nil {
-					recordEvent("Warning", "TableDeletionPending", fmt.Sprintf("Table %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
-				}
-				continue
-			}
-			empty, emptyErr := tableIsEmpty(ctx, client, entry.ARN)
-			if emptyErr != nil {
-				if firstErr == nil {
-					firstErr = wrapAWSError(emptyErr, fmt.Sprintf("checking table %q is empty", entry.Name))
-				}
-				continue
-			}
-			if !empty {
-				checked := entry
-				now := metav1.Now()
-				checked.LastEmptyCheckAt = &now
-				updatedLedger, results = markPendingDeletion(updatedLedger, results, checked)
-				continue
-			}
-		}
-
-		tableName, nameErr := tableNameFromARN(entry.ARN)
-		if nameErr != nil {
-			if firstErr == nil {
-				firstErr = nameErr
-			}
-			continue
-		}
-		if _, dErr := client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: &tableName}); dErr != nil {
-			var notFound *types.ResourceNotFoundException
-			if !errors.As(dErr, &notFound) {
-				if firstErr == nil {
-					firstErr = wrapAWSError(dErr, fmt.Sprintf("deleting table %q", entry.Name))
-				}
-				continue
-			}
-			// Already gone (e.g. a previous attempt succeeded but the
-			// ledger write or a later step failed before recording it) —
-			// treat like a successful delete rather than refusing to make
-			// progress on a table that's already correctly cleaned up.
-		}
-		if recordEvent != nil {
-			recordEvent("Warning", "TableDeleted", fmt.Sprintf("Deleted table %s (%s)", entry.Name, entry.ARN))
-		}
-		status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 	}
 
 	return updatedLedger, results, firstErr
+}
+
+// tableCleaner carries what every entry in one Cleanup pass shares.
+type tableCleaner struct {
+	client                   dynamodbAPI
+	namespace, crName, crUID string
+	forceDeleteAll           bool
+	recordEvent              status.EventRecorder
+}
+
+// restoreDeclared cancels a pending deletion for a table that is declared again.
+func (c *tableCleaner) restoreDeclared(entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) []depsv1alpha1.ManagedResource {
+	if entry.PendingDeletionSince == nil {
+		return ledger
+	}
+	cleared := entry
+	cleared.PendingDeletionSince = nil
+	cleared.LastEmptyCheckAt = nil
+	status.UpsertManagedResource(&ledger, cleared)
+	if c.recordEvent != nil {
+		c.recordEvent("Normal", "TableDeletionCancelled", fmt.Sprintf("Canceled pending deletion of table %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
+	}
+	return ledger
+}
+
+// retain lets go of an undeclared table whose policy is not Delete, and
+// rechecks a relinquished one about daily. An entry is kept only while it
+// pins a KMS key.
+func (c *tableCleaner) retain(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	retained := CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained}
+	pinsKey := kms.PinsAKey(ledger, resourceType, entry)
+	if entry.State == depsv1alpha1.ManagedResourceStateRelinquished {
+		if !pinsKey {
+			// Let go earlier and pins no key: nothing to remember.
+			status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+			return ledger, append(results, retained), nil
+		}
+		if !status.NeedsRelinquishedRecheck(entry) {
+			return ledger, append(results, retained), nil
+		}
+	}
+
+	relinquished, gone, err := relinquishIfStillTagged(ctx, c.client, c.namespace, c.crName, c.crUID, entry, c.recordEvent)
+	if err != nil {
+		return ledger, results, err
+	}
+	if gone {
+		// Deleted by hand after being retained: forget it, so
+		// declaring it again creates a fresh table instead of
+		// tripping over an entry for one that no longer exists.
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if relinquished && c.recordEvent != nil {
+		c.recordEvent("Normal", "TableOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained table %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+	}
+	if pinsKey {
+		status.UpsertManagedResource(&ledger, status.Relinquished(entry))
+	} else {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+	}
+	return ledger, append(results, retained), nil
+}
+
+// deleteUndeclared deletes an undeclared Delete-policy table once its quiet
+// window has passed and it is empty, unless force skips both.
+func (c *tableCleaner) deleteUndeclared(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	forced := entry.Force || c.forceDeleteAll
+
+	// A pending table waiting out the quiet window or backoff reads nothing;
+	// ownership is re-checked below, before anything changes it.
+	if !forced && entry.PendingDeletionSince != nil &&
+		(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
+		return ledger, append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)}), nil
+	}
+
+	gone, err := c.verifyOwned(ctx, entry)
+	if gone {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if err != nil {
+		return ledger, results, err
+	}
+
+	if !forced {
+		var proceed bool
+		ledger, results, proceed, err = c.gateOnEmpty(ctx, entry, ledger, results)
+		if err != nil || !proceed {
+			return ledger, results, err
+		}
+	}
+
+	ledger, err = c.deleteTable(ctx, entry, ledger)
+	return ledger, results, err
+}
+
+// verifyOwned re-reads the table's tags before anything acts on the ledger's
+// word. gone is true when the table no longer exists.
+func (c *tableCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.ManagedResource) (gone bool, err error) {
+	tags, err := listAllTags(ctx, c.client, entry.ARN)
+	if err != nil {
+		var notFound *types.ResourceNotFoundException
+		if errors.As(err, &notFound) {
+			return true, nil
+		}
+		return false, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of table %q before delete", entry.Name))
+	}
+	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), c.namespace, c.crName, c.crUID) {
+		return false, cloudctlaws.OwnershipLostError("table", entry.Name, "delete it")
+	}
+	return false, nil
+}
+
+// gateOnEmpty holds a table's deletion until it has been pending for the
+// quiet window and is empty. proceed is false while it must still wait.
+func (c *tableCleaner) gateOnEmpty(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) (updated []depsv1alpha1.ManagedResource, updatedResults []CleanupResult, proceed bool, err error) {
+	if entry.PendingDeletionSince == nil {
+		ledger, results = markPendingDeletion(ledger, results, entry)
+		if c.recordEvent != nil {
+			c.recordEvent("Warning", "TableDeletionPending", fmt.Sprintf("Table %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
+		}
+		return ledger, results, false, nil
+	}
+	empty, err := tableIsEmpty(ctx, c.client, entry.ARN)
+	if err != nil {
+		return ledger, results, false, wrapAWSError(err, fmt.Sprintf("checking table %q is empty", entry.Name))
+	}
+	if !empty {
+		checked := entry
+		now := metav1.Now()
+		checked.LastEmptyCheckAt = &now
+		ledger, results = markPendingDeletion(ledger, results, checked)
+		return ledger, results, false, nil
+	}
+	return ledger, results, true, nil
+}
+
+// deleteTable deletes the table and drops its ledger entry.
+func (c *tableCleaner) deleteTable(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	tableName, err := tableNameFromARN(entry.ARN)
+	if err != nil {
+		return ledger, err
+	}
+	if _, err := c.client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: &tableName}); err != nil {
+		var notFound *types.ResourceNotFoundException
+		if !errors.As(err, &notFound) {
+			return ledger, wrapAWSError(err, fmt.Sprintf("deleting table %q", entry.Name))
+		}
+		// Already gone (e.g. a previous attempt succeeded but the
+		// ledger write or a later step failed before recording it) —
+		// treat like a successful delete rather than refusing to make
+		// progress on a table that's already correctly cleaned up.
+	}
+	if c.recordEvent != nil {
+		c.recordEvent("Warning", "TableDeleted", fmt.Sprintf("Deleted table %s (%s)", entry.Name, entry.ARN))
+	}
+	status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+	return ledger, nil
 }
 
 func pendingDeletionReason(since time.Time) CleanupReason {
