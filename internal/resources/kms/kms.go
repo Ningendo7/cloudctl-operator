@@ -219,8 +219,7 @@ func ensureKey(
 // IAM-policy-based grants effective at all, so there's no key-policy JSON
 // for this package to get wrong), record the ledger entry immediately
 // after (before the alias exists, so a crash here is recoverable from the
-// ledger alone — same reasoning as S3's TagPending, just for a different
-// non-atomic second step), enable rotation, then create the alias.
+// ledger alone), enable rotation, then create the alias.
 func createKey(
 	ctx context.Context,
 	kmsClient kmsAPI,

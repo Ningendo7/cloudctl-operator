@@ -24,9 +24,8 @@ import (
 
 // Checkpoint persists the ledger immediately, independent of the whole
 // reconcile pass finishing. A resource package calls it between the two AWS
-// calls of a multi-step create — KMS's CreateKey then CreateAlias, S3's
-// CreateBucket then PutBucketTagging — so that a crash in that window still
-// leaves a record on the next reconcile, rather than none at all. A nil
-// Checkpoint is valid and means "don't persist early," matching every
-// caller's behavior before this existed.
+// calls of a multi-step create, such as KMS's CreateKey then CreateAlias, so
+// that a crash in that window still leaves a record on the next reconcile,
+// rather than none at all. A nil Checkpoint is valid and means "don't persist
+// early," matching every caller's behavior before this existed.
 type Checkpoint func(ctx context.Context, ledger []depsv1alpha1.ManagedResource) error

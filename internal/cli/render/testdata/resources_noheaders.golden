@@ -1,0 +1,3 @@
+kms   shared      Relinquished   Retain                 Retain   false   5d   3m   s3/receipts,sqs/orders
+rds   orders-db   Creating       ManualDeletion         Delete   false   2m   -    -
+sqs   scratch     Verified       DeleteEvenIfNotEmpty   Delete   true    2d   9m   -

@@ -1,0 +1,25 @@
+Context: prod-eks   Namespace: checkout   CR: checkout-service
+
+Ready: False   spec generation 12, observed 12 (up to date)
+Operator last verified a resource: 3m ago
+
+SECTION    READY   REASON             KIND      SINCE
+RDSReady   False   InstanceCreating   Waiting   2m
+S3Ready    False   AdoptRequired      Failing   12m
+SQSReady   True    Reconciled         Info      4d
+
+CONDITION                   STATUS   REASON                 SINCE
+SharedWithReferencesValid   False    StaleReferencesFound   1h
+
+RDSReady: InstanceCreating  (Waiting)
+  instance "orders-db" is still creating
+  Meaning: AWS reports the RDS instance is not available yet, for example InstanceCreating or InstanceModifying.
+  Do:      None; it is polled until it is available.
+
+S3Ready: AdoptRequired  (Failing)
+  bucket "receipts" exists but is not tagged as owned by this CR
+  Meaning: A resource at the needed name exists and is not tagged as owned by anyone.
+  Do:      Set adopt: true on the entry to bring it under management.
+
+Ledger: 7 entries (5 Verified, 1 Creating, 1 Relinquished)
+  needs attention: dynamodb/sessions Verified pending deletion 3d; kms/shared Relinquished, held by 2; rds/orders-db Creating

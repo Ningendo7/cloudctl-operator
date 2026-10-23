@@ -246,9 +246,9 @@ func ensureQueue(
 }
 
 // ensureSingleQueue creates the named queue if it doesn't exist (tagging is
-// atomic with creation via CreateQueue's Tags field, so unlike S3 there's
-// no TagPending window here), verifies ownership and adopts if requested
-// when it already exists, and records it in the ledger either way.
+// atomic with creation via CreateQueue's Tags field), verifies ownership and
+// adopts if requested when it already exists, and records it in the ledger
+// either way.
 func ensureSingleQueue(
 	ctx context.Context,
 	awsClient sqsAPI,
