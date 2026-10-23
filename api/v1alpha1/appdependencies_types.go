@@ -56,11 +56,13 @@ const (
 type SharedWithEntry struct {
 	// namespace of the consuming AppDependencies CR.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace"`
 
 	// name of the consuming AppDependencies CR.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
@@ -80,17 +82,20 @@ type SharedWithEntry struct {
 type ConsumeRef struct {
 	// namespace of the AppDependencies CR that owns the resource.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace"`
 
 	// name of the AppDependencies CR that owns the resource.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
 	// resourceName is the `name` of the specific resource entry within the
 	// owning CR's section (e.g. the queue name under its sqs.resources list).
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	ResourceName string `json:"resourceName"`
 }
@@ -536,6 +541,7 @@ type DynamoDBTableSpec struct {
 	// allow changing a table's key schema after creation, so this is
 	// immutable once set.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="partitionKey is immutable; AWS does not support changing a table's key schema after creation"
 	PartitionKey string `json:"partitionKey"`
@@ -662,6 +668,7 @@ type RDSInstanceSpec struct {
 	// RDSSubnetGroupGrant, or reconciliation reports
 	// SubnetGroupNotAuthorized.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=255
 	DBSubnetGroupName string `json:"dbSubnetGroupName"`
 
