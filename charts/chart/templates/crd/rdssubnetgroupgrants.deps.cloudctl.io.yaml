@@ -58,6 +58,7 @@ spec:
                 description: dbSubnetGroupName is the real AWS DBSubnetGroup this
                   grant covers.
                 maxLength: 255
+                minLength: 1
                 type: string
             required:
             - allowedNamespaces

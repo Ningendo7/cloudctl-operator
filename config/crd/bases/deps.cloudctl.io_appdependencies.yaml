@@ -77,17 +77,20 @@ spec:
                         description: name of the AppDependencies CR that owns the
                           resource.
                         maxLength: 253
+                        minLength: 1
                         type: string
                       namespace:
                         description: namespace of the AppDependencies CR that owns
                           the resource.
                         maxLength: 63
+                        minLength: 1
                         type: string
                       resourceName:
                         description: |-
                           resourceName is the `name` of the specific resource entry within the
                           owning CR's section (e.g. the queue name under its sqs.resources list).
                         maxLength: 256
+                        minLength: 1
                         type: string
                     required:
                     - name
@@ -108,17 +111,20 @@ spec:
                           description: name of the AppDependencies CR that owns the
                             resource.
                           maxLength: 253
+                          minLength: 1
                           type: string
                         namespace:
                           description: namespace of the AppDependencies CR that owns
                             the resource.
                           maxLength: 63
+                          minLength: 1
                           type: string
                         resourceName:
                           description: |-
                             resourceName is the `name` of the specific resource entry within the
                             owning CR's section (e.g. the queue name under its sqs.resources list).
                           maxLength: 256
+                          minLength: 1
                           type: string
                       required:
                       - name
@@ -208,6 +214,7 @@ spec:
                             allow changing a table's key schema after creation, so this is
                             immutable once set.
                           maxLength: 128
+                          minLength: 1
                           type: string
                           x-kubernetes-validations:
                           - message: partitionKey is immutable; AWS does not support
@@ -236,11 +243,13 @@ spec:
                                 description: name of the consuming AppDependencies
                                   CR.
                                 maxLength: 253
+                                minLength: 1
                                 type: string
                               namespace:
                                 description: namespace of the consuming AppDependencies
                                   CR.
                                 maxLength: 63
+                                minLength: 1
                                 type: string
                             required:
                             - name
@@ -344,17 +353,20 @@ spec:
                           description: name of the AppDependencies CR that owns the
                             resource.
                           maxLength: 253
+                          minLength: 1
                           type: string
                         namespace:
                           description: namespace of the AppDependencies CR that owns
                             the resource.
                           maxLength: 63
+                          minLength: 1
                           type: string
                         resourceName:
                           description: |-
                             resourceName is the `name` of the specific resource entry within the
                             owning CR's section (e.g. the queue name under its sqs.resources list).
                           maxLength: 256
+                          minLength: 1
                           type: string
                       required:
                       - name
@@ -435,6 +447,7 @@ spec:
                             RDSSubnetGroupGrant, or reconciliation reports
                             SubnetGroupNotAuthorized.
                           maxLength: 255
+                          minLength: 1
                           type: string
                         deletionPolicy:
                           default: Retain
@@ -559,11 +572,13 @@ spec:
                                 description: name of the consuming AppDependencies
                                   CR.
                                 maxLength: 253
+                                minLength: 1
                                 type: string
                               namespace:
                                 description: namespace of the consuming AppDependencies
                                   CR.
                                 maxLength: 63
+                                minLength: 1
                                 type: string
                             required:
                             - name
@@ -612,17 +627,20 @@ spec:
                           description: name of the AppDependencies CR that owns the
                             resource.
                           maxLength: 253
+                          minLength: 1
                           type: string
                         namespace:
                           description: namespace of the AppDependencies CR that owns
                             the resource.
                           maxLength: 63
+                          minLength: 1
                           type: string
                         resourceName:
                           description: |-
                             resourceName is the `name` of the specific resource entry within the
                             owning CR's section (e.g. the queue name under its sqs.resources list).
                           maxLength: 256
+                          minLength: 1
                           type: string
                       required:
                       - name
@@ -809,11 +827,13 @@ spec:
                                 description: name of the consuming AppDependencies
                                   CR.
                                 maxLength: 253
+                                minLength: 1
                                 type: string
                               namespace:
                                 description: namespace of the consuming AppDependencies
                                   CR.
                                 maxLength: 63
+                                minLength: 1
                                 type: string
                             required:
                             - name
@@ -857,17 +877,20 @@ spec:
                           description: name of the AppDependencies CR that owns the
                             resource.
                           maxLength: 253
+                          minLength: 1
                           type: string
                         namespace:
                           description: namespace of the AppDependencies CR that owns
                             the resource.
                           maxLength: 63
+                          minLength: 1
                           type: string
                         resourceName:
                           description: |-
                             resourceName is the `name` of the specific resource entry within the
                             owning CR's section (e.g. the queue name under its sqs.resources list).
                           maxLength: 256
+                          minLength: 1
                           type: string
                       required:
                       - name
@@ -968,11 +991,13 @@ spec:
                                 description: name of the consuming AppDependencies
                                   CR.
                                 maxLength: 253
+                                minLength: 1
                                 type: string
                               namespace:
                                 description: namespace of the consuming AppDependencies
                                   CR.
                                 maxLength: 63
+                                minLength: 1
                                 type: string
                             required:
                             - name
@@ -1009,17 +1034,20 @@ spec:
                           description: name of the AppDependencies CR that owns the
                             resource.
                           maxLength: 253
+                          minLength: 1
                           type: string
                         namespace:
                           description: namespace of the AppDependencies CR that owns
                             the resource.
                           maxLength: 63
+                          minLength: 1
                           type: string
                         resourceName:
                           description: |-
                             resourceName is the `name` of the specific resource entry within the
                             owning CR's section (e.g. the queue name under its sqs.resources list).
                           maxLength: 256
+                          minLength: 1
                           type: string
                       required:
                       - name
@@ -1152,11 +1180,13 @@ spec:
                                 description: name of the consuming AppDependencies
                                   CR.
                                 maxLength: 253
+                                minLength: 1
                                 type: string
                               namespace:
                                 description: namespace of the consuming AppDependencies
                                   CR.
                                 maxLength: 63
+                                minLength: 1
                                 type: string
                             required:
                             - name
@@ -1184,17 +1214,20 @@ spec:
                                 description: name of the AppDependencies CR that owns
                                   the resource.
                                 maxLength: 253
+                                minLength: 1
                                 type: string
                               namespace:
                                 description: namespace of the AppDependencies CR that
                                   owns the resource.
                                 maxLength: 63
+                                minLength: 1
                                 type: string
                               resourceName:
                                 description: |-
                                   resourceName is the `name` of the specific resource entry within the
                                   owning CR's section (e.g. the queue name under its sqs.resources list).
                                 maxLength: 256
+                                minLength: 1
                                 type: string
                             required:
                             - name

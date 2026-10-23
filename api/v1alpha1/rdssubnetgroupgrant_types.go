@@ -32,6 +32,7 @@ import (
 type RDSSubnetGroupGrantSpec struct {
 	// dbSubnetGroupName is the real AWS DBSubnetGroup this grant covers.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=255
 	DBSubnetGroupName string `json:"dbSubnetGroupName"`
 
