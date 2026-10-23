@@ -9,6 +9,7 @@ linters:
     - dupl
     - errcheck
     - errorlint
+    - exhaustive
     - ginkgolinter
     - goconst
     - gocyclo
@@ -32,6 +33,8 @@ linters:
       logcheck:
         type: "module"
         description: Checks Go logging calls for Kubernetes logging conventions.
+    exhaustive:
+      default-signifies-exhaustive: true
     depguard:
       rules:
         forbid-sort-pkg:
