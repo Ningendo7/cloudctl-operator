@@ -620,6 +620,8 @@ func keyStateError(arn string, state types.KeyState, recordEvent status.EventRec
 		return &cloudctlaws.ReconcileError{Err: fmt.Errorf("KMS key %s is %s", arn, state), Retryable: true}
 	case types.KeyStateDisabled:
 		reason = reasons.KeyDisabled
+	case types.KeyStatePendingImport, types.KeyStatePendingReplicaDeletion, types.KeyStateUnavailable:
+		// Cannot encrypt or decrypt; reported as KeyUnavailable below.
 	}
 	msg := fmt.Sprintf("KMS key %s is %s, so nothing encrypted with it can be read or written; the operator does not re-enable it", arn, state)
 	if recordEvent != nil {

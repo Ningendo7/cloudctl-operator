@@ -208,6 +208,11 @@ func ensureTable(
 
 	table := describeOut.Table
 	switch table.TableStatus {
+	case types.TableStatusActive, types.TableStatusReplicationNotAuthorized:
+		// The second concerns global table replicas, which this operator
+		// never sets up; the table in this region still serves traffic.
+	case types.TableStatusInaccessibleEncryptionCredentials, types.TableStatusArchiving, types.TableStatusArchived:
+		return ledger, tableKeyUnavailableError(tableName, table.TableStatus, recordEvent)
 	case types.TableStatusCreating, types.TableStatusUpdating:
 		// Not usable yet — tags, ownership, and drift-correction all wait
 		// for ACTIVE. Retryable, not an error: this resolves on its own
@@ -223,8 +228,8 @@ func ensureTable(
 		}
 	}
 
-	// ACTIVE (or any status DynamoDB might introduce later — treated the
-	// same as ACTIVE rather than blocking on an exhaustive switch).
+	// A status added to the SDK later also lands here, until the exhaustive
+	// linter makes it handled above.
 	tableArn := *table.TableArn
 
 	// Captured before the trust-window check so it's still available further
@@ -602,6 +607,16 @@ func wrapAWSError(err error, errContext string) error {
 // from DescribeTable before that is treated as it having been deleted:
 // DynamoDB can briefly answer "no such table" right after CreateTable.
 const creationVisibilityGrace = 5 * time.Minute
+
+// tableKeyUnavailableError reports a table DynamoDB cannot decrypt. Carrying
+// on as if it were ACTIVE would report Ready for a table the app can't use.
+func tableKeyUnavailableError(tableName string, tableStatus types.TableStatus, recordEvent status.EventRecorder) error {
+	msg := fmt.Sprintf("DynamoDB table %s is %s: its KMS key cannot be used, so the table cannot be read or written", tableName, tableStatus)
+	if recordEvent != nil {
+		recordEvent("Warning", reasons.KeyUnavailable, msg)
+	}
+	return &cloudctlaws.ReconcileError{Err: errors.New(msg), Reason: reasons.KeyUnavailable}
+}
 
 func tableMissingError(entry depsv1alpha1.ManagedResource, tableName string, recordEvent status.EventRecorder) error {
 	if entry.State == depsv1alpha1.ManagedResourceStateCreating && time.Since(entry.CreatedAt.Time) < creationVisibilityGrace {
