@@ -25,9 +25,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Running Tests
-        run: |
-          go mod tidy
-          make test-race
+        run: make test-race
 
   integration:
     permissions:
@@ -63,5 +61,25 @@ jobs:
 
       - name: Running integration tests against LocalStack
         run: |
-          go mod tidy
           go test -tags=integration ./internal/resources/sqs/... ./internal/resources/s3/... ./internal/resources/sns/... ./internal/resources/dynamodb/... ./internal/resources/iam/... -v
+
+  cli-release:
+    permissions:
+      contents: read
+    name: CLI Release Archives
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build the CLI release archives and check them
+        run: |
+          make cli-release VERSION=v0.0.0-ci
+          hack/verify-cli-release.sh dist/cli v0.0.0-ci

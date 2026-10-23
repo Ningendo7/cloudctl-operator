@@ -48,7 +48,6 @@ jobs:
 
       - name: Prepare cloudctl-operator
         run: |
-          go mod tidy
           make docker-build
           kind load docker-image $IMG
 

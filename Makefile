@@ -207,6 +207,37 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
 
+##@ CLI
+
+CLI_PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+CLI_VERSION_PKG := github.com/Ningendo7/cloudctl-operator/internal/cli/version
+CLI_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null)
+CLI_LDFLAGS = -s -w -X $(CLI_VERSION_PKG).Version=$(VERSION) -X $(CLI_VERSION_PKG).Commit=$(CLI_COMMIT)
+CLI_DIST ?= dist/cli
+
+.PHONY: cli-build
+cli-build: ## Build kubectl-appdeps for this machine into bin/ (VERSION=VX.Y.Z stamps it).
+	mkdir -p $(LOCALBIN)
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(CLI_LDFLAGS)" -o $(LOCALBIN)/kubectl-appdeps ./cmd/kubectl-appdeps
+
+# The archives are byte-for-byte reproducible: fixed owner, order and mtime,
+# and gzip without a timestamp. GNU tar is required, as on the CI runners.
+.PHONY: cli-release
+cli-release: ## Build the CLI release archives and checksums.txt into dist/cli (VERSION=vX.Y.Z required).
+	@test -n "$(VERSION)" || { echo "VERSION is required, for example: make cli-release VERSION=v0.9.0"; exit 1; }
+	rm -rf $(CLI_DIST) && mkdir -p $(CLI_DIST)
+	@for platform in $(CLI_PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; stage=$(CLI_DIST)/stage/$${os}_$${arch}; \
+		echo "building $$os/$$arch"; \
+		mkdir -p $$stage; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(CLI_LDFLAGS)" \
+			-o $$stage/kubectl-appdeps ./cmd/kubectl-appdeps || exit 1; \
+		cp $$stage/kubectl-appdeps $$stage/appdeps && cp LICENSE $$stage/ || exit 1; \
+		tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' -C $$stage \
+			-cf - LICENSE appdeps kubectl-appdeps | gzip -n > $(CLI_DIST)/appdeps_$(VERSION)_$${os}_$${arch}.tar.gz || exit 1; \
+	done
+	cd $(CLI_DIST) && sha256sum appdeps_*.tar.gz > checksums.txt
+
 ##@ Deployment
 
 ifndef ignore-not-found

@@ -415,3 +415,31 @@ func TestCleanup_ARoleConflictIsStillReportedWhenTheAttachmentsCannotBeListed(t 
 		t.Fatalf("expected %s, got %v", reasons.RoleHasExternalAttachments, err)
 	}
 }
+
+// A consumer whose last grant is revoked keeps nothing: Ensure stops early,
+// and Cleanup in the same pass deletes the role, so the revoked access does
+// not outlive the revocation.
+func TestCleanup_AConsumerWhoseOnlyGrantIsRevokedLosesItsRole(t *testing.T) {
+	iamClient := newFakeIAM()
+	cr := ordersConsumer()
+	name := roleName(cr.Namespace, cr.Name)
+	arn := "arn:aws:iam::123456789012:role/" + name
+	iamClient.roles[name] = &fakeRole{
+		arn:      arn,
+		tags:     map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue(cr.Namespace, cr.Name), cloudctlaws.OwnerUIDTagKey: string(cr.UID)},
+		policies: map[string]string{roleInlinePolicyName: `{"Statement":[{"Resource":"arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders"}]}`},
+	}
+	revoked := producerCR("default", "checkout-service", nil, "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders")
+	k8s := newFakeK8sClient(revoked)
+
+	if _, _, err := Ensure(context.Background(), iamClient, k8s, testOIDCArn, testOIDCURL, cr, roleLedger(arn)); err == nil {
+		t.Fatal("expected Ensure to report the consumed resource as not granted")
+	}
+	ledger, err := Cleanup(context.Background(), iamClient, k8s, cr, roleLedger(arn), false)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if _, kept := iamClient.roles[name]; kept || status.HasManagedResource(ledger, resourceType, roleLedgerName) {
+		t.Error("the role that granted the revoked queue was kept")
+	}
+}

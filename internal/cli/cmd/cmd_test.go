@@ -425,6 +425,20 @@ func TestVersion(t *testing.T) {
 			t.Errorf("exit = %d, stdout:\n%s", r.code, r.stdout)
 		}
 	})
+	t.Run("works with no cluster at all", func(t *testing.T) {
+		set(t, "v0.8.1", "abc1234")
+		var out, errOut bytes.Buffer
+		noCluster := func(kube.Options) (kube.Reader, kube.Target, error) {
+			return nil, kube.Target{}, errors.New("no kubeconfig found")
+		}
+
+		code := cmd.Execute([]string{"version"}, "kubectl-appdeps", cmd.Streams{Out: &out, Err: &errOut}, noCluster, time.Now)
+
+		if code != cmd.ExitOK || !strings.Contains(out.String(), "Client: v0.8.1 (abc1234)") ||
+			!strings.Contains(out.String(), "Server API: unknown (no kubeconfig found)") {
+			t.Errorf("exit = %d, stdout = %q, stderr = %q", code, out.String(), errOut.String())
+		}
+	})
 	t.Run("--server shows the operator and warns on a minor difference", func(t *testing.T) {
 		set(t, "v0.8.1", "abc1234")
 		reader := &clitest.FakeReader{Server: kube.ServerInfo{OperatorImage: "ghcr.io/ningendo7/cloudctl-operator:v0.9.0"}}

@@ -47,9 +47,7 @@ jobs:
           sudo mv kubebuilder /usr/local/bin/kubebuilder
 
       - name: Regenerate manifests, deepcopy code, and the Helm chart
-        run: |
-          go mod tidy
-          make manifests generate helm-generate
+        run: make manifests generate helm-generate
 
       - name: Fail if regenerating changed anything
         run: |
