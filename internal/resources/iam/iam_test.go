@@ -546,3 +546,44 @@ func TestEnsure_ReadsTagsAndPolicyOnlyOncePerTrustWindow(t *testing.T) {
 		}
 	})
 }
+
+func TestEnsure_RevokingOneOfTwoGrantsNarrowsThePolicy(t *testing.T) {
+	iamClient := newFakeIAM()
+	const ordersARN = "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders"
+	const billingARN = "arn:aws:sqs:us-east-1:123456789012:default-billing-service-orders"
+	shared := []depsv1alpha1.SharedWithEntry{{Namespace: "default", Name: "fulfillment-service"}}
+	billing := producerCR("default", "billing-service", shared, billingARN)
+	k8s := newFakeK8sClient(producerCR("default", "checkout-service", shared, ordersARN), billing)
+	consumer := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service", UID: "uid-2"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+			{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
+			{Namespace: "default", Name: "billing-service", ResourceName: "orders"},
+		}}},
+	}
+	ledger, _, err := Ensure(context.Background(), iamClient, k8s, testOIDCArn, testOIDCURL, consumer, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	policy := func() string {
+		return iamClient.roles[roleName("default", "fulfillment-service")].policies[roleInlinePolicyName]
+	}
+	if !strings.Contains(policy(), billingARN) || !strings.Contains(policy(), ordersARN) {
+		t.Fatalf("test setup: expected both queues granted, got %s", policy())
+	}
+
+	billing.Spec.SQS.Resources[0].SharedWith = nil
+	if err := k8s.Update(context.Background(), billing); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Ensure(context.Background(), iamClient, k8s, testOIDCArn, testOIDCURL, consumer, ledger); err == nil {
+		t.Error("expected the revoked queue to be reported as not granted")
+	}
+
+	if strings.Contains(policy(), billingARN) {
+		t.Errorf("the revoked queue is still in the policy: %s", policy())
+	}
+	if !strings.Contains(policy(), ordersARN) {
+		t.Errorf("the queue still shared was dropped: %s", policy())
+	}
+}
