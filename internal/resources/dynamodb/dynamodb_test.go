@@ -32,6 +32,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kmstest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
@@ -1172,4 +1173,54 @@ func TestEnsure_RefusesOtherKeysOnATableTheCRStillTracks(t *testing.T) {
 			t.Fatalf("expected adopt:true to still refuse other keys, got %v", err)
 		}
 	})
+}
+
+// A table whose KMS key can't be used is unusable for the app, so it must
+// not be carried on with as if it were ACTIVE and reported Ready.
+func TestEnsure_TableWhoseKeyCannotBeUsedIsReported(t *testing.T) {
+	for _, tableStatus := range []types.TableStatus{
+		types.TableStatusInaccessibleEncryptionCredentials,
+		types.TableStatusArchiving,
+		types.TableStatusArchived,
+	} {
+		t.Run(string(tableStatus), func(t *testing.T) {
+			client := newFakeDynamoDB()
+			tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+			client.tables[tableName] = &fakeTable{
+				arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+				status:       tableStatus,
+				tags:         map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+				partitionKey: "id",
+			}
+			spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id"}}}
+			recordEvent, events := newEventCollector()
+
+			_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, recordEvent)
+			var reconcileErr *cloudctlaws.ReconcileError
+			if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.KeyUnavailable || reconcileErr.Retryable {
+				t.Fatalf("expected a non-retryable KeyUnavailable error, got %v", err)
+			}
+			if len(*events) != 1 || (*events)[0].eventType != "Warning" || (*events)[0].reason != reasons.KeyUnavailable {
+				t.Errorf("expected one KeyUnavailable warning, got %+v", *events)
+			}
+		})
+	}
+}
+
+// Global table replication is not something this operator sets up, so a
+// replica's authorization state says nothing about the table here.
+func TestEnsure_ReplicationNotAuthorizedIsTreatedAsActive(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	client.tables[tableName] = &fakeTable{
+		arn:          "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:       types.TableStatusReplicationNotAuthorized,
+		tags:         map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+		partitionKey: "id",
+	}
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id"}}}
+
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
 }

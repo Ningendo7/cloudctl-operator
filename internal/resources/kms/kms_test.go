@@ -648,6 +648,7 @@ func TestEnsure_KeyThatCannotBeUsedIsReportedNotReEnabled(t *testing.T) {
 		{types.KeyStateDisabled, "KeyDisabled"},
 		{types.KeyStateUnavailable, "KeyUnavailable"},
 		{types.KeyStatePendingImport, "KeyUnavailable"},
+		{types.KeyStatePendingReplicaDeletion, "KeyUnavailable"},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.state), func(t *testing.T) {
