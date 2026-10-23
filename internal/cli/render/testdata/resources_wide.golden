@@ -1,0 +1,4 @@
+TYPE   NAME        STATE          ON-DELETE              POLICY   FORCE   AGE   VERIFIED   HELD-BY                  ARN                                               PENDING-SINCE   OBSERVED
+kms    shared      Relinquished   Retain                 Retain   false   5d    3m         s3/receipts,sqs/orders   arn:aws:kms:us-east-1:123456789012:key/k          -               -
+rds    orders-db   Creating       ManualDeletion         Delete   false   2m    -          -                        arn:aws:rds:us-east-1:123456789012:db:orders-db   -               creating
+sqs    scratch     Verified       DeleteEvenIfNotEmpty   Delete   true    2d    9m         -                        arn:aws:sqs:us-east-1:123456789012:scratch        3d              -

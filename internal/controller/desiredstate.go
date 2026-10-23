@@ -42,9 +42,8 @@ import (
 // checkpointFor returns a Checkpoint that writes ledger onto cr and persists
 // it immediately, rather than waiting for this whole reconcile pass's single
 // trailing write — closing the gap where a crash between two AWS calls of a
-// multi-step create (KMS's CreateKey/CreateAlias, S3's
-// CreateBucket/PutBucketTagging) would otherwise lose the in-memory record
-// of the first call's result.
+// multi-step create (KMS's CreateKey/CreateAlias) would otherwise lose the
+// in-memory record of the first call's result.
 //
 // # Patches rather than updates
 //
