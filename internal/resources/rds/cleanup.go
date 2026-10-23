@@ -93,6 +93,7 @@ func Cleanup(
 		}
 	}
 
+	c := &cleaner{awsClient: awsClient, namespace: namespace, crName: crName, crUID: crUID, recordEvent: recordEvent}
 	updatedLedger = ledger
 	var firstErr error
 	for _, entry := range ledger {
@@ -100,80 +101,17 @@ func Cleanup(
 			continue
 		}
 
-		if declared[entry.Name] {
-			if entry.PendingDeletionSince != nil {
-				cleared := entry
-				cleared.PendingDeletionSince = nil
-				status.UpsertManagedResource(&updatedLedger, cleared)
-				if recordEvent != nil {
-					recordEvent("Normal", "InstanceDeletionCancelled", fmt.Sprintf("Canceled pending deletion of RDS instance %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
-				}
-			}
-			// Back in use - any tracked snapshot has outlived its purpose.
-			var retireErr error
-			updatedLedger, retireErr = retireFinalSnapshot(ctx, awsClient, namespace, crName, crUID, entry.Name, updatedLedger, "the instance reappeared in spec", recordEvent)
-			if retireErr != nil && firstErr == nil {
-				firstErr = retireErr
-			}
-			continue
+		var entryErr error
+		switch {
+		case declared[entry.Name]:
+			updatedLedger, entryErr = c.restoreDeclared(ctx, entry, updatedLedger)
+		case entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete:
+			updatedLedger, results, entryErr = c.retain(ctx, entry, updatedLedger, results)
+		default:
+			updatedLedger, results, entryErr = c.pendDeletion(ctx, entry, updatedLedger, results)
 		}
-
-		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			var retained bool
-			var retainErr error
-			updatedLedger, retained, retainErr = retainEntry(ctx, awsClient, namespace, crName, crUID, entry, updatedLedger, recordEvent)
-			if retainErr != nil && firstErr == nil {
-				firstErr = retainErr
-			}
-			if retained {
-				results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
-			}
-			continue
-		}
-
-		// Re-verified on every pass before anything acts on the ledger's
-		// word: the ARN is a deterministic name, so a replaced or
-		// re-tagged instance would otherwise get this CR's snapshot and
-		// its "stuck" report.
-		owned, gone, ownErr := verifyInstanceOwned(ctx, awsClient, namespace, crName, crUID, entry)
-		if ownErr != nil {
-			if firstErr == nil {
-				firstErr = ownErr
-			}
-			continue
-		}
-		if gone {
-			status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-			continue
-		}
-		if !owned {
-			if firstErr == nil {
-				firstErr = cloudctlaws.OwnershipLostError("instance", entry.Name, "act on it")
-			}
-			continue
-		}
-
-		if entry.PendingDeletionSince == nil {
-			updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
-			if recordEvent != nil {
-				recordEvent("Warning", "InstanceDeletionRequiresManualAction", fmt.Sprintf(
-					"RDS instance %s (%s) is no longer declared. A final snapshot will be taken proactively after %s, "+
-						"and this will be flagged as needing manual deletion after %s - this operator never deletes a database automatically; turn off its deletion protection first.",
-					entry.Name, entry.ARN, deletionQuietWindow, PendingDeletionGracePeriod))
-			}
-			continue
-		}
-
-		reason := pendingDeletionReason(entry.PendingDeletionSince.Time)
-		results = append(results, CleanupResult{Name: entry.Name, Reason: reason})
-
-		if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
-			continue
-		}
-
-		updatedLedger, err = ensureFinalSnapshot(ctx, awsClient, namespace, crName, crUID, entry, updatedLedger, recordEvent)
-		if err != nil && firstErr == nil {
-			firstErr = err
+		if entryErr != nil && firstErr == nil {
+			firstErr = entryErr
 		}
 	}
 
@@ -184,6 +122,74 @@ func Cleanup(
 	}
 
 	return updatedLedger, results, firstErr
+}
+
+// cleaner carries what every entry in one Cleanup pass shares.
+type cleaner struct {
+	awsClient                rdsAPI
+	namespace, crName, crUID string
+	recordEvent              status.EventRecorder
+}
+
+// restoreDeclared handles an entry that is declared: a pending deletion is
+// canceled, and any tracked snapshot has outlived its purpose.
+func (c *cleaner) restoreDeclared(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	if entry.PendingDeletionSince != nil {
+		cleared := entry
+		cleared.PendingDeletionSince = nil
+		status.UpsertManagedResource(&ledger, cleared)
+		if c.recordEvent != nil {
+			c.recordEvent("Normal", "InstanceDeletionCancelled", fmt.Sprintf("Canceled pending deletion of RDS instance %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
+		}
+	}
+	return retireFinalSnapshot(ctx, c.awsClient, c.namespace, c.crName, c.crUID, entry.Name, ledger, "the instance reappeared in spec", c.recordEvent)
+}
+
+// retain lets go of an undeclared entry whose policy is not Delete.
+func (c *cleaner) retain(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	ledger, retained, err := retainEntry(ctx, c.awsClient, c.namespace, c.crName, c.crUID, entry, ledger, c.recordEvent)
+	if retained {
+		results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
+	}
+	return ledger, results, err
+}
+
+// pendDeletion walks an undeclared Delete-policy entry through its quiet
+// window to the proactive snapshot. The operator never deletes the instance.
+func (c *cleaner) pendDeletion(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	// Re-verified on every pass before anything acts on the ledger's
+	// word: the ARN is a deterministic name, so a replaced or
+	// re-tagged instance would otherwise get this CR's snapshot and
+	// its "stuck" report.
+	owned, gone, err := verifyInstanceOwned(ctx, c.awsClient, c.namespace, c.crName, c.crUID, entry)
+	if err != nil {
+		return ledger, results, err
+	}
+	if gone {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if !owned {
+		return ledger, results, cloudctlaws.OwnershipLostError("instance", entry.Name, "act on it")
+	}
+
+	if entry.PendingDeletionSince == nil {
+		ledger, results = markPendingDeletion(ledger, results, entry)
+		if c.recordEvent != nil {
+			c.recordEvent("Warning", "InstanceDeletionRequiresManualAction", fmt.Sprintf(
+				"RDS instance %s (%s) is no longer declared. A final snapshot will be taken proactively after %s, "+
+					"and this will be flagged as needing manual deletion after %s - this operator never deletes a database automatically; turn off its deletion protection first.",
+				entry.Name, entry.ARN, deletionQuietWindow, PendingDeletionGracePeriod))
+		}
+		return ledger, results, nil
+	}
+
+	results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
+	if time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow {
+		return ledger, results, nil
+	}
+	ledger, err = ensureFinalSnapshot(ctx, c.awsClient, c.namespace, c.crName, c.crUID, entry, ledger, c.recordEvent)
+	return ledger, results, err
 }
 
 // retainEntry lets go of a retained instance, and rechecks a relinquished one

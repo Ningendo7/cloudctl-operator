@@ -183,6 +183,8 @@ func waitForSnapshotStatus(t *testing.T, client *rds.Client, snapshotID, want st
 // tagging, the shared-key (kmsKeyRef) encryption path, attribute drift
 // correction, ingress grant/revoke, adoption, credential rotation, and
 // the proactive snapshot-before-stuck-deletion safety net.
+//
+//nolint:gocyclo // one sequential lifecycle against real AWS; each step depends on the one before it, so it cannot be split into independent tests
 func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 	cfg := skipUnlessLiveAWSCredentials(t)
 	subnetGroup := liveSubnetGroupName(t)

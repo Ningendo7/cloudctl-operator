@@ -1352,103 +1352,103 @@ func TestEnsure_SecurityGroupReattach_NeedsNoDeferralEvent(t *testing.T) {
 	}
 }
 
-func TestEnsure_EngineVersionUpgrade(t *testing.T) {
-	minor := types.UpgradeTarget{EngineVersion: aws.String("16.6"), IsMajorVersionUpgrade: aws.Bool(false)}
-	major := types.UpgradeTarget{EngineVersion: aws.String("17.2"), IsMajorVersionUpgrade: aws.Bool(true)}
+var (
+	minorUpgradeTarget = types.UpgradeTarget{EngineVersion: aws.String("16.6"), IsMajorVersionUpgrade: aws.Bool(false)}
+	majorUpgradeTarget = types.UpgradeTarget{EngineVersion: aws.String("17.2"), IsMajorVersionUpgrade: aws.Bool(true)}
+)
+
+func TestEnsure_EngineVersionUpgrade_MinorUpgradeIsDeferredAndNotMajor(t *testing.T) {
+	client := newFakeRDS()
+	client.upgradeTargets = []types.UpgradeTarget{minorUpgradeTarget, majorUpgradeTarget}
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	spec.EngineVersion = "16.6"
+	if ledger, err = ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	in := client.lastModifyDBInstanceInput
+	if aws.ToString(in.EngineVersion) != "16.6" || in.AllowMajorVersionUpgrade != nil || *in.ApplyImmediately {
+		t.Errorf("unexpected modify input: %+v", in)
+	}
+	if _, err := ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("third Ensure() error = %v", err)
+	}
+	if client.modifyDBInstanceCalls != 1 {
+		t.Errorf("expected the pending upgrade not to be re-sent, got %d modify calls", client.modifyDBInstanceCalls)
+	}
+}
+
+func TestEnsure_EngineVersionUpgrade_MajorUpgradeSetsTheAllowFlag(t *testing.T) {
+	client := newFakeRDS()
+	client.upgradeTargets = []types.UpgradeTarget{minorUpgradeTarget, majorUpgradeTarget}
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	spec.EngineVersion = "17"
+	spec.AllowMajorVersionUpgrade = true
+	if _, err = ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if in := client.lastModifyDBInstanceInput; !aws.ToBool(in.AllowMajorVersionUpgrade) {
+		t.Errorf("expected AllowMajorVersionUpgrade for a major upgrade, got %+v", in)
+	}
+}
+
+func TestEnsure_EngineVersionUpgrade_MajorUpgradeIsRefusedWithoutTheOptIn(t *testing.T) {
+	client := newFakeRDS()
+	client.upgradeTargets = []types.UpgradeTarget{minorUpgradeTarget, majorUpgradeTarget}
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	spec.EngineVersion = "17"
+	_, err = ensureOnce(t, client, spec, ledger)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if err == nil || (errors.As(err, &reconcileErr) && reconcileErr.Retryable) {
+		t.Fatalf("expected a non-retryable refusal, got %v", err)
+	}
+	if client.modifyDBInstanceCalls != 0 {
+		t.Errorf("a refused major upgrade must send nothing, got %d modify calls", client.modifyDBInstanceCalls)
+	}
+}
+
+func TestEnsure_EngineVersionUpgrade_InstanceAheadOfSpecIsLeftAlone(t *testing.T) {
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
+	client := newFakeRDS()
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	client.instances[instanceID].engineVersion = "16.8"
+	if _, err = ensureOnce(t, client, spec, ledger); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if client.modifyDBInstanceCalls != 0 || client.describeEngineVersionsCalls != 0 {
+		t.Errorf("expected no AWS calls for an instance past spec, got modify=%d describe=%d", client.modifyDBInstanceCalls, client.describeEngineVersionsCalls)
+	}
+}
 
-	t.Run("minor upgrade is deferred and not major", func(t *testing.T) {
-		client := newFakeRDS()
-		client.upgradeTargets = []types.UpgradeTarget{minor, major}
-		spec := baseInstanceSpec("orders-db")
-		ledger, err := ensureOnce(t, client, spec, nil)
-		if err != nil {
-			t.Fatalf("first Ensure() error = %v", err)
-		}
-		spec.EngineVersion = "16.6"
-		if ledger, err = ensureOnce(t, client, spec, ledger); err != nil {
-			t.Fatalf("second Ensure() error = %v", err)
-		}
-		in := client.lastModifyDBInstanceInput
-		if aws.ToString(in.EngineVersion) != "16.6" || in.AllowMajorVersionUpgrade != nil || *in.ApplyImmediately {
-			t.Errorf("unexpected modify input: %+v", in)
-		}
-		if _, err := ensureOnce(t, client, spec, ledger); err != nil {
-			t.Fatalf("third Ensure() error = %v", err)
-		}
-		if client.modifyDBInstanceCalls != 1 {
-			t.Errorf("expected the pending upgrade not to be re-sent, got %d modify calls", client.modifyDBInstanceCalls)
-		}
-	})
-
-	t.Run("major upgrade sets the allow flag", func(t *testing.T) {
-		client := newFakeRDS()
-		client.upgradeTargets = []types.UpgradeTarget{minor, major}
-		spec := baseInstanceSpec("orders-db")
-		ledger, err := ensureOnce(t, client, spec, nil)
-		if err != nil {
-			t.Fatalf("first Ensure() error = %v", err)
-		}
-		spec.EngineVersion = "17"
-		spec.AllowMajorVersionUpgrade = true
-		if _, err = ensureOnce(t, client, spec, ledger); err != nil {
-			t.Fatalf("second Ensure() error = %v", err)
-		}
-		if in := client.lastModifyDBInstanceInput; !aws.ToBool(in.AllowMajorVersionUpgrade) {
-			t.Errorf("expected AllowMajorVersionUpgrade for a major upgrade, got %+v", in)
-		}
-	})
-
-	t.Run("major upgrade is refused without the opt-in", func(t *testing.T) {
-		client := newFakeRDS()
-		client.upgradeTargets = []types.UpgradeTarget{minor, major}
-		spec := baseInstanceSpec("orders-db")
-		ledger, err := ensureOnce(t, client, spec, nil)
-		if err != nil {
-			t.Fatalf("first Ensure() error = %v", err)
-		}
-		spec.EngineVersion = "17"
-		_, err = ensureOnce(t, client, spec, ledger)
-		var reconcileErr *cloudctlaws.ReconcileError
-		if err == nil || (errors.As(err, &reconcileErr) && reconcileErr.Retryable) {
-			t.Fatalf("expected a non-retryable refusal, got %v", err)
-		}
-		if client.modifyDBInstanceCalls != 0 {
-			t.Errorf("a refused major upgrade must send nothing, got %d modify calls", client.modifyDBInstanceCalls)
-		}
-	})
-
-	t.Run("instance already ahead of spec is left alone", func(t *testing.T) {
-		client := newFakeRDS()
-		spec := baseInstanceSpec("orders-db")
-		ledger, err := ensureOnce(t, client, spec, nil)
-		if err != nil {
-			t.Fatalf("first Ensure() error = %v", err)
-		}
-		client.instances[instanceID].engineVersion = "16.8"
-		if _, err = ensureOnce(t, client, spec, ledger); err != nil {
-			t.Fatalf("second Ensure() error = %v", err)
-		}
-		if client.modifyDBInstanceCalls != 0 || client.describeEngineVersionsCalls != 0 {
-			t.Errorf("expected no AWS calls for an instance past spec, got modify=%d describe=%d", client.modifyDBInstanceCalls, client.describeEngineVersionsCalls)
-		}
-	})
-
-	t.Run("invalid target is a permanent error", func(t *testing.T) {
-		client := newFakeRDS()
-		client.upgradeTargets = []types.UpgradeTarget{minor}
-		spec := baseInstanceSpec("orders-db")
-		ledger, err := ensureOnce(t, client, spec, nil)
-		if err != nil {
-			t.Fatalf("first Ensure() error = %v", err)
-		}
-		spec.EngineVersion = "18.1"
-		_, err = ensureOnce(t, client, spec, ledger)
-		var reconcileErr *cloudctlaws.ReconcileError
-		if err == nil || (errors.As(err, &reconcileErr) && reconcileErr.Retryable) {
-			t.Errorf("expected a non-retryable error for an unreachable version, got %v", err)
-		}
-	})
+func TestEnsure_EngineVersionUpgrade_InvalidTargetIsAPermanentError(t *testing.T) {
+	client := newFakeRDS()
+	client.upgradeTargets = []types.UpgradeTarget{minorUpgradeTarget}
+	spec := baseInstanceSpec("orders-db")
+	ledger, err := ensureOnce(t, client, spec, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	spec.EngineVersion = "18.1"
+	_, err = ensureOnce(t, client, spec, ledger)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if err == nil || (errors.As(err, &reconcileErr) && reconcileErr.Retryable) {
+		t.Errorf("expected a non-retryable error for an unreachable version, got %v", err)
+	}
 }
 
 func TestEnsure_BackupsAreNeverTurnedOffByDrift(t *testing.T) {
