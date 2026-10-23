@@ -20,6 +20,12 @@ owner reference, and cross-namespace sharing being revoked. The CRD's
 admission rules (patterns, bounds, CEL immutability) are checked against
 the real API server with a table of invalid specs.
 
+The common lifecycle (create, adopt, foreign-resource refusal, retain and
+relinquish, delete safety, pending-deletion cancellation) is defined once in
+`internal/resources/lifecycletest` and run by each resource package through
+its own `TestSharedLifecycleScenarios`, so their coverage of it can't drift
+apart.
+
 **What this can't catch:** a fake only ever encodes our own belief about
 how an AWS API behaves. If that belief is wrong — a misread error code, a
 field we assumed was optional but isn't — a fully green unit suite will
@@ -51,8 +57,8 @@ an unowned resource, forced delete), plus SQS's subscription management
 (real SNS `Subscribe`/`Unsubscribe` and the queue policy grant together).
 S3 in particular also has code guessing at string-matched error codes
 with no typed SDK exception to verify against
-(`isServerSideEncryptionConfigurationNotFoundError`, `isNoSuchTagSet`; see
-[resources.md](resources.md)). Two things are deliberately deferred here
+(`isServerSideEncryptionConfigurationNotFound`, `isNoSuchTagSet`). Two things
+are deliberately deferred here
 — LocalStack's community edition is the least faithful of the services
 this project depends on for both, so testing against it risks false
 confidence more than real coverage:
@@ -99,22 +105,15 @@ in the relevant package, not logged here — `git log` and
 [aws-assumptions.md](aws-assumptions.md) are the record of what's actually
 been confirmed against real AWS and when.
 
-The dedicated-key path (every other resource type's `encryption.enabled`)
-is exercised end-to-end through sqs/sns/s3/dynamodb's own live tests
-(same code, only the `resourceType` string differs) — including its
-delete path, scheduled directly via a real `ScheduleKeyDeletion` call at
-AWS's 7-day minimum rather than through `kms.Cleanup()`, since AWS has no
-faster or instant way to actually delete a key. The standalone
-`kms.resources` type has its own live tier covering creation, tagging,
-rotation, and adoption, with cleanup following that same direct-schedule
-pattern — but deliberately does **not** re-verify `kms.Cleanup()`'s own
-`ScheduleKeyDeletion` call against real AWS: that call's shape is already
-proven by the dedicated-key tests above, `Cleanup()`'s surrounding logic
-(the quiet window, backdating, ledger removal) is pure Go already covered
-by the unit tier's fakes, and the only difference would be the literal
-window value (30 days here vs. 7 there) — not a class of bug this tier
-exists to catch. Still no integration tier for standalone KMS (see the
-note above on why LocalStack is deferred for it).
+The dedicated-key path (every other type's `encryption.enabled`) is exercised
+end to end through the sqs, sns, s3 and dynamodb live tests, including its
+delete path, which schedules deletion directly with a real
+`ScheduleKeyDeletion` at AWS's 7-day minimum because AWS has no faster way to
+delete a key. The standalone `kms.resources` type has its own live tests for
+creation, tagging, rotation and adoption, cleaned up the same way. They
+deliberately don't re-verify `kms.Cleanup()`'s `ScheduleKeyDeletion` call: its
+shape is already proven by the dedicated-key tests, and the rest of
+`Cleanup()` is pure Go covered by the unit tier.
 
 RDS is live-only: LocalStack's community edition doesn't implement it, so
 there is no integration or e2e tier for it. Its long test creates one
@@ -149,7 +148,10 @@ and pending-deletion cancellation when a resource reappears in spec.
 Distinct from the integration tier above specifically in scope, not
 mechanism — both go through LocalStack, but this tier drives everything
 through a real Kubernetes reconcile loop (CRDs, finalizers, the actual
-controller binary) rather than calling package functions directly.
+controller binary) rather than calling package functions directly. The SQS
+lifecycle also runs the `kubectl appdeps` CLI (built with `make cli-build`)
+against the live CR, checking `status`, `resources -o json`, `retained` and
+`version`.
 
 A second suite, `resilience_test.go`, checks what only a real cluster and
 manager can show and does not depend on AWS being faithful: the manager's
@@ -180,6 +182,13 @@ manager replicas become ready, then a real `AppDependencies` CR reaching
 `Ready` and being deleted again; then the same with the `install.yaml`
 bundle built the way the release builds it. The e2e suite never touches
 either path, since it deploys a locally built image through kustomize.
+
+The `kubectl appdeps` archives are checked separately. Every PR builds them
+with `make cli-release` and runs `hack/verify-cli-release.sh` over the result
+(the `cli-release` job: contents, checksums, version, a static build). In the
+release workflow they are also signed and given an SBOM, and a `smoke-cli` job
+downloads them and runs `cosign verify-blob` on each before the release is
+created.
 
 A failure leaves an unreferenced tag in the registry rather than a broken
 release people have already pulled; fix forward with the next patch. It can

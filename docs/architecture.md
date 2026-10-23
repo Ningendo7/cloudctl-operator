@@ -92,14 +92,17 @@ a permanent dead end.
 
 ## Naming
 
-Every resource name is deterministic:
-`<namespace>-<cr-name>-<resource-key>`, since Kubernetes already guarantees
-namespace+name uniqueness and this operator targets one AWS account/region
-per cluster. FIFO resources get AWS's required `.fifo` suffix appended. The
-full computed name is validated against each service's real length limit
-(80 characters for SQS, 256 for SNS) before any AWS call is made — the
-CRD's own field-level `MaxLength` only bounds the user-supplied key, not the
-final composed name.
+Every resource name is deterministic, so it can be recomputed at any time
+without stored state: a readable prefix,
+`<namespace>-<cr-name>-<resource-key>` (cleaned of characters the service
+rejects), then `-` and a 12-character hash of the full `(namespace, cr-name,
+resource type, key)` tuple. Hashing the tuple, rather than joining its parts,
+means two identities can't land on one name even when a `-` appears inside
+one of them. Only the prefix is ever truncated to fit a service's length
+limit, never the hash, so the CRD's `MaxLength` on the key doesn't have to
+bound the final name. FIFO queues and topics get AWS's required `.fifo`
+suffix. S3 bucket names, which are unique across every AWS account, also get
+an 8-character hash of the account ID.
 
 ## Resource identity delivery to workloads
 
@@ -131,26 +134,20 @@ an entry the producer hasn't granted is left out of both, and a workload is
 never handed an identifier its role can't use.
 
 **RDS credentials (master username/password) → a generated Secret**,
-named `<cr-name>-credentials`, same ownership/regeneration/deletion rules
-as the ConfigMap above. Re-derived from AWS Secrets Manager's own managed
-secret every reconcile — this operator never generates or caches a
-password itself, Secrets Manager stays the sole source of truth. Consumed
-the same way as the ConfigMap (`envFrom: secretRef`), which is exactly
-where this mechanism's guarantee runs out: updating a Secret object never
-touches a container's process environment, since env vars are fixed at
-container start. The operator keeps the Secret's *content* correct within
-one drift-detection interval of any rotation (manual or AWS-automatic),
-but nothing restarts an already-running pod once that happens — it keeps
-using its stale, now-invalid password until something else recreates it.
-Teams that need that handled automatically should add Stakater Reloader's
-`reloader.stakater.com/auto: "true"` annotation to their own Deployment;
-this operator deliberately doesn't do that restart itself, since it would
-mean gaining write access to workload resources it has never touched
-anywhere else. IAM database authentication would remove the problem at
-the root instead of working around it (a signed, short-lived token
-generated per connection, nothing to rotate or go stale) but needs
-app-side connection-code changes this operator can't make on anyone's
-behalf — a candidate for a future `authMethod` option, not attempted here.
+named `<cr-name>-rds-credentials`, with the same ownership, regeneration and
+deletion rules as the ConfigMap above. It is re-derived from the secret RDS
+keeps in Secrets Manager on every reconcile; this operator never generates or
+caches a password, so Secrets Manager stays the sole source of truth. It is
+consumed through `envFrom: secretRef`, which is where the guarantee runs out:
+a container's environment is fixed at start, so after a rotation the Secret is
+correct within one drift-detection interval but a running pod keeps its old
+password until something restarts it. The operator deliberately doesn't do that
+restart, since it would need write access to workload resources it touches
+nowhere else; [resources.md](resources.md#rds) lists the options. IAM database
+authentication would remove the problem at the root (a signed, short-lived
+token per connection, nothing to rotate) but needs app-side changes this
+operator can't make, so it remains a candidate for a future `authMethod`
+option.
 
 ## Validation: CEL schema rules, not an admission webhook
 

@@ -101,10 +101,10 @@ still `CREATING`), unlike SQS/SNS. A newly created table sits in a
 verification, tagging drift, billing mode, and PITR are all deferred until
 then.
 
-The trust window (see [architecture.md](architecture.md)) skips only the
-ownership tag re-check. Existence is confirmed on every reconcile, and for
-DynamoDB that read doubles as the status check (`ACTIVE`/`CREATING`/
-`DELETING`) that has to be fresh before anything else can safely proceed.
+For DynamoDB the existence read on every reconcile doubles as the table status
+check, which has to be fresh before anything else can proceed. A table in
+`INACCESSIBLE_ENCRYPTION_CREDENTIALS`, `ARCHIVING` or `ARCHIVED` fails
+`DynamoDBReady` with `KeyUnavailable`, since its KMS key can't be used.
 
 **Not yet built:** a deny-policy blocking new writes while a table sits in
 `PendingDeletion` (SQS/SNS/S3 all have this; DynamoDB resource-based
@@ -144,11 +144,10 @@ spec:
 Deletion safety matches SQS/SNS in full: a bucket policy Deny on
 `s3:PutObject` (which alone covers every write path, including all three
 multipart upload calls) blocks new writes the moment a bucket enters
-`PendingDeletion`, and the trust window applies here too — within it,
-`HeadBucket`/`GetBucketTagging` are skipped, but attribute drift correction
-(versioning, lifecycle) still runs every reconcile, since S3 always has
-something to compare. A bucket deleted out-of-band shows up in those reads
-and is recreated on that same pass.
+`PendingDeletion`. Within the trust window `HeadBucket` and `GetBucketTagging`
+are skipped, but versioning, encryption and lifecycle are still reconciled on
+every pass, so a bucket deleted out-of-band is noticed and recreated on that
+same pass.
 
 **Not yet built:** `replication` (the CRD field exists but is explicitly
 rejected at reconcile time) — cross-region replication needs a bucket and
@@ -193,7 +192,7 @@ spec:
 | `deletionPolicy`, `adopt`, `sharedWith` | See below. |
 | `replication` | Not implemented; setting it is a permanent error. |
 
-**Credentials.** The operator never sets or generates a password. RDS creates and rotates the master user's password in Secrets Manager, and the operator mirrors it into a Secret named `<cr>-rds-credentials` in the *owning* CR's namespace only. Rotation reaches the Secret within one drift-detection interval, but never a running pod's environment. For credentials that must follow rotation, read the RDS-managed secret directly with External Secrets or the Secrets Store CSI driver. The master user can do anything in the database, so consumers never receive it: the owner creates per-app database users and hands the credentials to each team.
+**Credentials.** The operator never sets or generates a password. RDS creates and rotates the master user's password in Secrets Manager, and the operator mirrors it into a Secret named `<cr>-rds-credentials` in the *owning* CR's namespace only. Rotation reaches the Secret within one drift-detection interval, but never a running pod's environment. For credentials that must follow rotation, restart the pods when the Secret changes (for example with Stakater Reloader's `reloader.stakater.com/auto: "true"` annotation on the Deployment), or read the RDS-managed secret directly with External Secrets or the Secrets Store CSI driver. The master user can do anything in the database, so consumers never receive it: the owner creates per-app database users and hands the credentials to each team.
 
 **Connection info.** The owner's and each consumer's connection ConfigMap carries `RDS_<NAME>_HOST`, `_PORT`, `_ENGINE` and `_DB_INSTANCE_IDENTIFIER` (consumers' keys also include the producer's namespace and CR name).
 
@@ -222,8 +221,6 @@ An instance with more storage or a newer version than the spec's minimums is ado
 **An instance deleted out-of-band.** If the ledger knows an instance but AWS no longer has it, the operator does not create a replacement: an empty database reported Ready would hide the loss. `RDSReady` goes `False` with reason `InstanceMissing` and an `InstanceMissing` warning event, naming two ways out. Restore it under the same identifier from a snapshot or point-in-time backup and set `adopt: true` (the usual adoption checks then confirm it matches the spec), or remove it from spec and add it again to start fresh. An instance still in its first minutes after creation is retried quietly instead, in case AWS hasn't listed it yet.
 
 **Deletion.** The operator never calls `DeleteDBInstance`. With `deletionPolicy: Delete`, an instance removed from spec goes through the quiet window and a one-hour grace period, then escalates to `InstanceStuckPendingDeletion` on the `RDSReady` condition while the operator takes a final snapshot so the eventual manual delete has a restore point; billing continues until someone deletes the instance. Each pass first re-reads the instance's ownership tags and refuses to act (no snapshot, no stuck report) if they no longer match this CR; an instance already gone from AWS is dropped from the ledger. Final snapshots carry the same tags and are only deleted while they do. `Retain` (the default) just removes the ownership tag.
-
-**Testing.** Unit tests, the controller's envtest suite and a live suite against real AWS (`make test-live`, never in CI) cover RDS. There is no LocalStack integration tier or e2e suite for it: LocalStack's community edition doesn't implement RDS.
 
 ## KMS
 
@@ -261,13 +258,10 @@ revoking access would take it down, and deleting the key would make its
 data permanently unreadable. A centrally managed key belongs outside this
 operator, with a platform or security team.
 
-A freshly created key briefly sits in the ledger as `TagPending` even
-though tagging itself is atomic with `CreateKey` — the name is a holdover
-from when this state generically meant "created but not fully set up
-yet"; for KMS specifically it covers the gap between the key existing and
-its alias/rotation being set up, so a crash in between still has a
-findable-by-ARN record rather than risking a second key being created on
-the next reconcile.
+A freshly created key is `TagPending` in the ledger until its alias and
+rotation are set up, even though tagging is atomic with `CreateKey`. A crash
+in between leaves a record findable by ARN, so the next reconcile never
+creates a second key.
 
 A standalone `kms.resources` entry (as used by `kmsKeyRef` above) supports
 `deletionPolicy` and `adopt` like every other resource type, but
@@ -390,12 +384,10 @@ spec:
   `subscribesTo`, which the operator removes when access is revoked.
 - **Role naming and trust policy**: one role per CR, trust-scoped via IRSA
   (`sts:AssumeRoleWithWebIdentity`) to `system:serviceaccount:<namespace>:<serviceAccountName>`
-  using the cluster's OIDC provider. **`--oidc-provider-arn` and
-  `--oidc-provider-url` are required flags on the manager for any real
-  deployment** — the scaffolded `config/manager/manager.yaml` does not set
-  them by default, and any CR declaring a resource that needs an IAM role
-  (the common case) will fail reconciliation with `IAMReady: False` until
-  both are set. Same ownership tagging, adoption (`adopt: true`), and
+  using the cluster's OIDC provider. Both
+  `--oidc-provider-arn` and `--oidc-provider-url` must be set on the manager
+  (see the README prerequisites); without them a CR that needs a role fails
+  with `IAMReady: False`. Same ownership tagging, adoption (`adopt: true`), and
   drift-correction rules as every other resource type — including for the
   trust policy document itself, which IAM returns URL-encoded and must be
   decoded before comparing against the freshly-computed one, or every
@@ -415,7 +407,6 @@ spec:
   deletion) triggers an immediate reconcile of every consumer CR that
   references it, so access is granted or revoked without waiting on that
   consumer's own next periodic reconcile.
-
 - **ServiceAccount and connection ConfigMap**: the role ARN goes on
   `spec.serviceAccountName`, or on an operator-owned ServiceAccount named
   after the CR (`status.serviceAccountName` says which), and
@@ -471,24 +462,6 @@ A move to another **region** is not supported: an operator refuses a CR whose re
   from a fleet of long-neglected, never-emptied resources; a resource
   actively being drained within that first day is never affected. Doesn't
   apply to KMS, which has no emptiness concept at all (see below).
-
-### Lifecycle comparison across resource types
-
-| | SQS | SNS | DynamoDB | S3 | KMS | RDS |
-|---|---|---|---|---|---|---|
-| Create + tag atomic? | Yes | Yes | Yes | Yes | Yes | Yes |
-| "Non-empty" signal | message count (3 counters) | active subscriptions | item count (count-only `Scan`) | any object version/delete marker | *(no concept — see below)* | *(none — the operator never deletes an instance)* |
-| Async create lifecycle | No | No | Yes (`Creating`→`Active`) | No | No | Yes (minutes; status-driven) |
-| `force` bypasses non-empty guard | Yes | Yes | Yes | Yes | No — deletion is irreversible for anyone else still using the key, so there's nothing to force | No — there is no delete to force |
-| Deny-policy on `PendingDeletion` | Yes | Yes | No (see DynamoDB section) | Yes | N/A — uses `ScheduleKeyDeletion`'s own AWS-side wait instead | No |
-| `StuckPendingDeletion` escalation (7-day grace) | Yes | Yes | Yes | Yes | No — no self-imposed grace period; AWS's own 30-day `ScheduleKeyDeletion` window is the wait | Yes, after 1 hour, and it is permanent: the operator never deletes |
-| Emptiness-check backoff applies | Yes | Yes | Yes | Yes | No (nothing to back off) | No |
-
-Covered by the shared cross-resource-type test suite in
-`internal/resources/lifecycletest` (create, adopt, foreign-resource
-refusal, retain/relinquish, delete-safety, pending-deletion cancellation) —
-run via each package's own `TestSharedLifecycleScenarios`, so the five
-packages' coverage of this common lifecycle can't silently drift apart.
 - **Status conditions** — each section reports its own condition
   (`SQSReady`, `SNSReady`, ...) plus an aggregate `Ready` condition on the CR.
   Every section's error/refusal path (adoption refused, deletion refused for
@@ -520,3 +493,15 @@ packages' coverage of this common lifecycle can't silently drift apart.
   `ProducerNotFoundYet`; one still missing after 30 minutes escalates to
   `ProducerLikelyMisconfigured`, since at that point it's more likely a
   typo in the consumer's `namespace`/`name` than a startup-ordering race.
+
+### Lifecycle comparison across resource types
+
+| | SQS | SNS | DynamoDB | S3 | KMS | RDS |
+|---|---|---|---|---|---|---|
+| Create + tag atomic? | Yes | Yes | Yes | Yes | Yes | Yes |
+| "Non-empty" signal | message count (3 counters) | active subscriptions | item count (count-only `Scan`) | any object version/delete marker | *(no concept — see below)* | *(none — the operator never deletes an instance)* |
+| Async create lifecycle | No | No | Yes (`Creating`→`Active`) | No | No | Yes (minutes; status-driven) |
+| `force` bypasses non-empty guard | Yes | Yes | Yes | Yes | No — deletion is irreversible for anyone else still using the key, so there's nothing to force | No — there is no delete to force |
+| Deny-policy on `PendingDeletion` | Yes | Yes | No (see DynamoDB section) | Yes | N/A — uses `ScheduleKeyDeletion`'s own AWS-side wait instead | No |
+| `StuckPendingDeletion` escalation (7-day grace) | Yes | Yes | Yes | Yes | No — no self-imposed grace period; AWS's own 30-day `ScheduleKeyDeletion` window is the wait | Yes, after 1 hour, and it is permanent: the operator never deletes |
+| Emptiness-check backoff applies | Yes | Yes | Yes | Yes | No (nothing to back off) | No |

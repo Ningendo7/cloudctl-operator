@@ -79,6 +79,17 @@ AWS's published docs/SDK error type definitions, not exercised against a
 real account. Listed here so a future bug report pointing at one of these
 has somewhere to start.
 
+### DynamoDB table statuses and KMS key states
+
+`tableStatusError` (`internal/resources/dynamodb/dynamodb.go`) reports a table
+in `INACCESSIBLE_ENCRYPTION_CREDENTIALS`, `ARCHIVING` or `ARCHIVED` as
+`KeyUnavailable`, and treats `REPLICATION_NOT_AUTHORIZED` (a global-table state
+this operator never sets up) as active. `keyStateError`
+(`internal/resources/kms/kms.go`) reports a key in `PendingImport`,
+`PendingReplicaDeletion` or `Unavailable` the same way. Both follow the SDK's
+enum values and AWS's documentation; none of these states has been triggered
+against a real account.
+
 ### Error classification (`internal/aws/errors.go`)
 
 `IsRetryable` treats `smithy.ErrorFault() == FaultServer`, throttling error

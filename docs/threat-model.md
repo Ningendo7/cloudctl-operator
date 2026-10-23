@@ -29,8 +29,8 @@ different namespace in the schema at all.
 different CRs landing on the same AWS resource name would require an
 actual hash collision, not just similar names.
 
-**Adoption safety.** Every AWS resource type (SQS, SNS, S3, DynamoDB, KMS,
-IAM) refuses to touch a same-named resource unless its ownership tag
+**Adoption safety.** Every AWS resource type (SQS, SNS, S3, DynamoDB, RDS,
+KMS, IAM, alarms) refuses to touch a same-named resource unless its ownership tag
 (`cloudctl.io/owner` + `cloudctl.io/owner-uid`) matches this CR exactly.
 A name match alone is never treated as ownership — see `IsOwnedBy` in
 `internal/aws/ownership.go`.
@@ -73,7 +73,7 @@ your organisation:
 - The operator's IAM role can carry conditions, such as
   `rds:DatabaseClass` and a region, so a mistake above still has a ceiling.
 
-## Fixed (found during this pass)
+## Fixed
 
 **ServiceAccount role-arn collision.** `internal/resources/serviceaccount`
 used a fixed server-side-apply field-manager name and unconditional
