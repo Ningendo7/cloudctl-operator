@@ -162,469 +162,495 @@ func markPastQuietWindow(ledger []depsv1alpha1.ManagedResource, resourceType str
 // Run drives the shared lifecycle scenario list against subject, one
 // t.Run per scenario. Each scenario uses its own resource name so they
 // never interfere with each other even though they share one subject.
-//
-//nolint:gocyclo // one t.Run block per shared scenario; splitting would scatter closely-related assertions across multiple functions for no readability gain
 func Run(t *testing.T, newSubject func(t *testing.T) Subject) {
 	t.Helper()
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) { sc.run(t, newSubject) })
+	}
+}
 
-	t.Run("Create", func(t *testing.T) {
-		s := newSubject(t)
-		ledger, err := s.EnsureOne(context.Background(), nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+// scenarios is the shared lifecycle scenario list, in the order they run.
+var scenarios = []struct {
+	name string
+	run  func(t *testing.T, newSubject func(t *testing.T) Subject)
+}{
+	{"Create", scenarioCreate},
+	{"AdoptsForeignResourceWhenAdoptTrue", scenarioAdoptsForeignResourceWhenAdoptTrue},
+	{"RefusesForeignResourceWithoutAdopt", scenarioRefusesForeignResourceWithoutAdopt},
+	{"RefusesResourceOwnedByADifferentCR", scenarioRefusesResourceOwnedByADifferentCR},
+	{"RetainRelinquishesOwnershipOnRemoval", scenarioRetainRelinquishesOwnershipOnRemoval},
+	{"RetainedEntryThatPinsNoKeyLeavesTheLedgerButStillNeedsAdopt", scenarioRetainedEntryThatPinsNoKeyLeavesTheLedgerButStillNeedsAdopt},
+	{"RelinquishedEntryIsKeptAndNeedsAdoptToComeBack", scenarioRelinquishedEntryIsKeptAndNeedsAdoptToComeBack},
+	{"RelinquishedEntryIsDroppedOnceItsResourceIsGone", scenarioRelinquishedEntryIsDroppedOnceItsResourceIsGone},
+	{"RelinquishedEntryStaysWhileItsResourceExists", scenarioRelinquishedEntryStaysWhileItsResourceExists},
+	{"DeleteBlockedWhenNonEmpty", scenarioDeleteBlockedWhenNonEmpty},
+	{"DeleteRemovesWhenEmpty", scenarioDeleteRemovesWhenEmpty},
+	{"LettingGoLeavesProvenanceAndKeepsOtherTags", scenarioLettingGoLeavesProvenanceAndKeepsOtherTags},
+	{"LettingGoLeavesNoProvenanceWhenTurnedOff", scenarioLettingGoLeavesNoProvenanceWhenTurnedOff},
+	{"AdoptingAgainRemovesOnlyTheReleasedTags", scenarioAdoptingAgainRemovesOnlyTheReleasedTags},
+	{"OnDeleteRetainMatchesCleanup", scenarioOnDeleteRetainMatchesCleanup},
+	{"OnDeleteDeleteMatchesCleanup", scenarioOnDeleteDeleteMatchesCleanup},
+	{"OnDeleteForcedMatchesCleanup", scenarioOnDeleteForcedMatchesCleanup},
+	{"CancelsPendingDeletionOnReappearance", scenarioCancelsPendingDeletionOnReappearance},
+}
+
+func scenarioCreate(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ledger, err := s.EnsureOne(context.Background(), nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	entry, entryFound := status.FindManagedResource(ledger, s.ResourceType(), "widget")
+	if !entryFound {
+		t.Fatal("expected a ledger entry after EnsureOne")
+	}
+	if entry.ARN == "" {
+		t.Error("expected a non-empty ARN")
+	}
+}
+
+func scenarioAdoptsForeignResourceWhenAdoptTrue(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	if err := s.SeedForeign("widget", nil); err != nil {
+		t.Fatalf("SeedForeign() error = %v", err)
+	}
+	ledger, err := s.EnsureOne(context.Background(), nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true})
+	if err != nil {
+		t.Fatalf("expected adopt:true to succeed against a foreign resource, got %v", err)
+	}
+	if !status.HasManagedResource(ledger, s.ResourceType(), "widget") {
+		t.Error("expected a ledger entry after adopting")
+	}
+}
+
+func scenarioRefusesForeignResourceWithoutAdopt(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	if err := s.SeedForeign("widget", nil); err != nil {
+		t.Fatalf("SeedForeign() error = %v", err)
+	}
+	_, err := s.EnsureOne(context.Background(), nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err == nil {
+		t.Error("expected EnsureOne to refuse a foreign resource without adopt:true")
+	}
+}
+
+func scenarioRefusesResourceOwnedByADifferentCR(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	if err := s.SeedForeign("widget", &OwnerIdentity{Namespace: "other-ns", CRName: "someone-else", CRUID: "other-uid"}); err != nil {
+		t.Fatalf("SeedForeign() error = %v", err)
+	}
+	_, err := s.EnsureOne(context.Background(), nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true})
+	if err == nil {
+		t.Error("expected EnsureOne to refuse adopting a resource already owned by a different CR")
+	}
+}
+
+func scenarioRetainRelinquishesOwnershipOnRemoval(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	_, results, err := s.Cleanup(ctx, ledger, nil, false)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if r := findResult(results, "widget"); r == nil || r.Reason != CleanupReasonRetained {
+		t.Errorf("expected a Retained result once removed from spec, got %+v", results)
+	}
+}
+
+func scenarioRetainedEntryThatPinsNoKeyLeavesTheLedgerButStillNeedsAdopt(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	if s.KeepsRelinquishedEntries() {
+		t.Skip("this resource type keeps its entry after it is let go")
+	}
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "unpinned", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	var results []CleanupResult
+	if ledger, results, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if r := findResult(results, "unpinned"); r == nil || r.Reason != CleanupReasonRetained {
+		t.Fatalf("expected a Retained result, got %+v", results)
+	}
+	if status.HasManagedResource(ledger, s.ResourceType(), "unpinned") {
+		t.Fatal("expected an entry that pins no key to leave the ledger once the resource is let go")
+	}
+
+	// With no entry the resource is found untagged, which needs adopt, as
+	// a relinquished entry did.
+	if _, err := s.EnsureOne(ctx, ledger, "unpinned", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}); err == nil {
+		t.Fatal("expected re-declaring a retained resource without adopt to be refused")
+	}
+	ledger, err = s.EnsureOne(ctx, ledger, "unpinned", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true})
+	if err != nil {
+		t.Fatalf("EnsureOne() with adopt error = %v", err)
+	}
+	if entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "unpinned"); entry.State != depsv1alpha1.ManagedResourceStateVerified {
+		t.Errorf("expected the adopted entry to be Verified, got %s", entry.State)
+	}
+
+	t.Run("an entry relinquished by an earlier version goes without a read", func(t *testing.T) {
+		ledger, err := s.EnsureOne(ctx, nil, "older", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
 		if err != nil {
 			t.Fatalf("EnsureOne() error = %v", err)
 		}
-		entry, entryFound := status.FindManagedResource(ledger, s.ResourceType(), "widget")
-		if !entryFound {
-			t.Fatal("expected a ledger entry after EnsureOne")
-		}
-		if entry.ARN == "" {
-			t.Error("expected a non-empty ARN")
-		}
-	})
-
-	t.Run("AdoptsForeignResourceWhenAdoptTrue", func(t *testing.T) {
-		s := newSubject(t)
-		if err := s.SeedForeign("widget", nil); err != nil {
-			t.Fatalf("SeedForeign() error = %v", err)
-		}
-		ledger, err := s.EnsureOne(context.Background(), nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true})
-		if err != nil {
-			t.Fatalf("expected adopt:true to succeed against a foreign resource, got %v", err)
-		}
-		if !status.HasManagedResource(ledger, s.ResourceType(), "widget") {
-			t.Error("expected a ledger entry after adopting")
-		}
-	})
-
-	t.Run("RefusesForeignResourceWithoutAdopt", func(t *testing.T) {
-		s := newSubject(t)
-		if err := s.SeedForeign("widget", nil); err != nil {
-			t.Fatalf("SeedForeign() error = %v", err)
-		}
-		_, err := s.EnsureOne(context.Background(), nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-		if err == nil {
-			t.Error("expected EnsureOne to refuse a foreign resource without adopt:true")
-		}
-	})
-
-	t.Run("RefusesResourceOwnedByADifferentCR", func(t *testing.T) {
-		s := newSubject(t)
-		if err := s.SeedForeign("widget", &OwnerIdentity{Namespace: "other-ns", CRName: "someone-else", CRUID: "other-uid"}); err != nil {
-			t.Fatalf("SeedForeign() error = %v", err)
-		}
-		_, err := s.EnsureOne(context.Background(), nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true})
-		if err == nil {
-			t.Error("expected EnsureOne to refuse adopting a resource already owned by a different CR")
-		}
-	})
-
-	t.Run("RetainRelinquishesOwnershipOnRemoval", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		_, results, err := s.Cleanup(ctx, ledger, nil, false)
-		if err != nil {
+		entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "older")
+		status.UpsertManagedResource(&ledger, status.Relinquished(entry))
+		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
 			t.Fatalf("Cleanup() error = %v", err)
 		}
-		if r := findResult(results, "widget"); r == nil || r.Reason != CleanupReasonRetained {
-			t.Errorf("expected a Retained result once removed from spec, got %+v", results)
+		if status.HasManagedResource(ledger, s.ResourceType(), "older") {
+			t.Error("expected the old relinquished entry to be dropped")
 		}
 	})
+}
 
-	t.Run("RetainedEntryThatPinsNoKeyLeavesTheLedgerButStillNeedsAdopt", func(t *testing.T) {
-		s := newSubject(t)
-		if s.KeepsRelinquishedEntries() {
-			t.Skip("this resource type keeps its entry after it is let go")
-		}
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "unpinned", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
+func scenarioRelinquishedEntryIsKeptAndNeedsAdoptToComeBack(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	ledger = pinned(ledger, s.ResourceType(), "kept") // as an encrypted resource is
+	for range 2 {
 		var results []CleanupResult
 		if ledger, results, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
 			t.Fatalf("Cleanup() error = %v", err)
 		}
-		if r := findResult(results, "unpinned"); r == nil || r.Reason != CleanupReasonRetained {
+		if r := findResult(results, "kept"); r == nil || r.Reason != CleanupReasonRetained {
 			t.Fatalf("expected a Retained result, got %+v", results)
 		}
-		if status.HasManagedResource(ledger, s.ResourceType(), "unpinned") {
-			t.Fatal("expected an entry that pins no key to leave the ledger once the resource is let go")
-		}
+	}
+	// The entry is what keeps the key its data is encrypted with.
+	entry, found := status.FindManagedResource(ledger, s.ResourceType(), "kept")
+	if !found || entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+		t.Fatalf("expected the entry kept as Relinquished, got %+v (found=%v)", entry, found)
+	}
 
-		// With no entry the resource is found untagged, which needs adopt, as
-		// a relinquished entry did.
-		if _, err := s.EnsureOne(ctx, ledger, "unpinned", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}); err == nil {
-			t.Fatal("expected re-declaring a retained resource without adopt to be refused")
-		}
-		ledger, err = s.EnsureOne(ctx, ledger, "unpinned", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true})
-		if err != nil {
-			t.Fatalf("EnsureOne() with adopt error = %v", err)
-		}
-		if entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "unpinned"); entry.State != depsv1alpha1.ManagedResourceStateVerified {
-			t.Errorf("expected the adopted entry to be Verified, got %s", entry.State)
-		}
+	// Its last verification is recent, but its tags are gone: declaring
+	// it again must not trust it.
+	if _, err := s.EnsureOne(ctx, ledger, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}); err == nil {
+		t.Fatal("expected re-declaring a relinquished resource without adopt to be refused")
+	}
+	ledger, err = s.EnsureOne(ctx, ledger, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true})
+	if err != nil {
+		t.Fatalf("EnsureOne() with adopt error = %v", err)
+	}
+	if entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "kept"); entry.State != depsv1alpha1.ManagedResourceStateVerified {
+		t.Errorf("expected the adopted entry to be Verified, got %s", entry.State)
+	}
+}
 
-		t.Run("an entry relinquished by an earlier version goes without a read", func(t *testing.T) {
-			ledger, err := s.EnsureOne(ctx, nil, "older", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-			if err != nil {
-				t.Fatalf("EnsureOne() error = %v", err)
-			}
-			entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "older")
-			status.UpsertManagedResource(&ledger, status.Relinquished(entry))
-			if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
-				t.Fatalf("Cleanup() error = %v", err)
-			}
-			if status.HasManagedResource(ledger, s.ResourceType(), "older") {
-				t.Error("expected the old relinquished entry to be dropped")
-			}
-		})
-	})
-
-	t.Run("RelinquishedEntryIsKeptAndNeedsAdoptToComeBack", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		ledger = pinned(ledger, s.ResourceType(), "kept") // as an encrypted resource is
-		for range 2 {
-			var results []CleanupResult
-			if ledger, results, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
-				t.Fatalf("Cleanup() error = %v", err)
-			}
-			if r := findResult(results, "kept"); r == nil || r.Reason != CleanupReasonRetained {
-				t.Fatalf("expected a Retained result, got %+v", results)
-			}
-		}
-		// The entry is what keeps the key its data is encrypted with.
-		entry, found := status.FindManagedResource(ledger, s.ResourceType(), "kept")
-		if !found || entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
-			t.Fatalf("expected the entry kept as Relinquished, got %+v (found=%v)", entry, found)
-		}
-
-		// Its last verification is recent, but its tags are gone: declaring
-		// it again must not trust it.
-		if _, err := s.EnsureOne(ctx, ledger, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}); err == nil {
-			t.Fatal("expected re-declaring a relinquished resource without adopt to be refused")
-		}
-		ledger, err = s.EnsureOne(ctx, ledger, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true})
-		if err != nil {
-			t.Fatalf("EnsureOne() with adopt error = %v", err)
-		}
-		if entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "kept"); entry.State != depsv1alpha1.ManagedResourceStateVerified {
-			t.Errorf("expected the adopted entry to be Verified, got %s", entry.State)
-		}
-	})
-
-	t.Run("RelinquishedEntryIsDroppedOnceItsResourceIsGone", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "vanishing", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		ledger = pinned(ledger, s.ResourceType(), "vanishing") // as an encrypted resource is
-		cleanup := func() {
-			t.Helper()
-			if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
-				t.Fatalf("Cleanup() error = %v", err)
-			}
-		}
-		backdate := func() {
-			t.Helper()
-			entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "vanishing")
-			old := metav1.NewTime(time.Now().Add(-status.RelinquishedRecheckInterval - time.Hour))
-			entry.LastVerifiedAt = &old
-			status.UpsertManagedResource(&ledger, entry)
-		}
-		tracked := func() bool { return status.HasManagedResource(ledger, s.ResourceType(), "vanishing") }
-
-		cleanup() // relinquishes
-		if err := s.DeleteOutOfBand("vanishing"); err != nil {
-			t.Fatalf("DeleteOutOfBand() error = %v", err)
-		}
-		cleanup()
-		if !tracked() {
-			t.Fatal("a relinquished entry must not be read again within the recheck interval")
-		}
-		backdate()
-		cleanup()
-		if tracked() {
-			t.Error("expected the entry dropped once its resource is gone and the recheck is due")
-		}
-	})
-
-	t.Run("RelinquishedEntryStaysWhileItsResourceExists", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		ledger = pinned(ledger, s.ResourceType(), "kept") // as an encrypted resource is
+func scenarioRelinquishedEntryIsDroppedOnceItsResourceIsGone(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "vanishing", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	ledger = pinned(ledger, s.ResourceType(), "vanishing") // as an encrypted resource is
+	cleanup := func() {
+		t.Helper()
 		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
 			t.Fatalf("Cleanup() error = %v", err)
 		}
-		entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "kept")
+	}
+	backdate := func() {
+		t.Helper()
+		entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "vanishing")
 		old := metav1.NewTime(time.Now().Add(-status.RelinquishedRecheckInterval - time.Hour))
 		entry.LastVerifiedAt = &old
 		status.UpsertManagedResource(&ledger, entry)
+	}
+	tracked := func() bool { return status.HasManagedResource(ledger, s.ResourceType(), "vanishing") }
 
-		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
-			t.Fatalf("Cleanup() error = %v", err)
-		}
-		entry, found := status.FindManagedResource(ledger, s.ResourceType(), "kept")
-		if !found || entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
-			t.Fatalf("expected the entry kept as Relinquished, got %+v (found=%v)", entry, found)
-		}
-		if time.Since(entry.LastVerifiedAt.Time) > time.Minute {
-			t.Error("expected the recheck to restart the interval")
-		}
-	})
+	cleanup() // relinquishes
+	if err := s.DeleteOutOfBand("vanishing"); err != nil {
+		t.Fatalf("DeleteOutOfBand() error = %v", err)
+	}
+	cleanup()
+	if !tracked() {
+		t.Fatal("a relinquished entry must not be read again within the recheck interval")
+	}
+	backdate()
+	cleanup()
+	if tracked() {
+		t.Error("expected the entry dropped once its resource is gone and the recheck is due")
+	}
+}
 
-	t.Run("DeleteBlockedWhenNonEmpty", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		if err := s.SetNonEmpty("widget", true); errors.Is(err, ErrUnsupported) {
-			t.Skip("this resource type has no emptiness concept")
-		} else if err != nil {
-			t.Fatalf("SetNonEmpty() error = %v", err)
-		}
+func scenarioRelinquishedEntryStaysWhileItsResourceExists(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "kept", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	ledger = pinned(ledger, s.ResourceType(), "kept") // as an encrypted resource is
+	if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "kept")
+	old := metav1.NewTime(time.Now().Add(-status.RelinquishedRecheckInterval - time.Hour))
+	entry.LastVerifiedAt = &old
+	status.UpsertManagedResource(&ledger, entry)
 
-		ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
-		if err != nil {
-			t.Fatalf("first Cleanup() error = %v", err)
-		}
-		ledger = markPastQuietWindow(ledger, s.ResourceType())
+	if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	entry, found := status.FindManagedResource(ledger, s.ResourceType(), "kept")
+	if !found || entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
+		t.Fatalf("expected the entry kept as Relinquished, got %+v (found=%v)", entry, found)
+	}
+	if time.Since(entry.LastVerifiedAt.Time) > time.Minute {
+		t.Error("expected the recheck to restart the interval")
+	}
+}
 
-		_, results, err := s.Cleanup(ctx, ledger, nil, false)
-		if err != nil {
-			t.Fatalf("second Cleanup() error = %v", err)
-		}
-		if r := findResult(results, "widget"); r == nil || r.Reason != CleanupReasonPendingDeletion {
-			t.Errorf("expected a non-empty resource to stay PendingDeletion, got %+v", results)
-		}
-	})
+func scenarioDeleteBlockedWhenNonEmpty(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	if err := s.SetNonEmpty("widget", true); errors.Is(err, ErrUnsupported) {
+		t.Skip("this resource type has no emptiness concept")
+	} else if err != nil {
+		t.Fatalf("SetNonEmpty() error = %v", err)
+	}
 
-	t.Run("DeleteRemovesWhenEmpty", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		if err := s.SetNonEmpty("widget", false); err != nil && !errors.Is(err, ErrUnsupported) {
-			t.Fatalf("SetNonEmpty() error = %v", err)
-		}
+	ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	ledger = markPastQuietWindow(ledger, s.ResourceType())
 
-		ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
-		if err != nil {
-			t.Fatalf("first Cleanup() error = %v", err)
-		}
-		ledger = markPastQuietWindow(ledger, s.ResourceType())
+	_, results, err := s.Cleanup(ctx, ledger, nil, false)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+	if r := findResult(results, "widget"); r == nil || r.Reason != CleanupReasonPendingDeletion {
+		t.Errorf("expected a non-empty resource to stay PendingDeletion, got %+v", results)
+	}
+}
 
-		updated, _, err := s.Cleanup(ctx, ledger, nil, false)
-		if err != nil {
-			t.Fatalf("second Cleanup() error = %v", err)
-		}
-		if entry, entryFound := status.FindManagedResource(updated, s.ResourceType(), "widget"); entryFound {
-			t.Errorf("expected the ledger entry removed once actually deleted, got %+v", entry)
-		}
-	})
+func scenarioDeleteRemovesWhenEmpty(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	if err := s.SetNonEmpty("widget", false); err != nil && !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("SetNonEmpty() error = %v", err)
+	}
 
-	t.Run("LettingGoLeavesProvenanceAndKeepsOtherTags", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		if err := s.PutTag("widget", "team", "payments"); err != nil {
-			t.Fatalf("PutTag() error = %v", err)
-		}
-		if _, _, err := s.Cleanup(ctx, ledger, nil, false); err != nil {
-			t.Fatalf("Cleanup() error = %v", err)
-		}
+	ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	ledger = markPastQuietWindow(ledger, s.ResourceType())
 
-		tags := s.Tags("widget")
-		if tags[cloudctlaws.ReleasedFromTagKey] != "default/lifecycle-test" {
-			t.Errorf("released-from = %q, want the CR it came from", tags[cloudctlaws.ReleasedFromTagKey])
-		}
-		if tags[cloudctlaws.ReleasedAtTagKey] != time.Now().UTC().Format(time.DateOnly) {
-			t.Errorf("released-at = %q, want today's UTC date", tags[cloudctlaws.ReleasedAtTagKey])
-		}
-		if _, owned := tags[cloudctlaws.OwnerTagKey]; owned {
-			t.Error("the ownership tag should be gone")
-		}
-		if tags["team"] != "payments" {
-			t.Errorf("another tool's tag was lost: %v", tags)
-		}
-	})
+	updated, _, err := s.Cleanup(ctx, ledger, nil, false)
+	if err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+	if entry, entryFound := status.FindManagedResource(updated, s.ResourceType(), "widget"); entryFound {
+		t.Errorf("expected the ledger entry removed once actually deleted, got %+v", entry)
+	}
+}
 
-	t.Run("LettingGoLeavesNoProvenanceWhenTurnedOff", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := cloudctlaws.WithReleaseTags(context.Background(), false)
-		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		if _, _, err := s.Cleanup(ctx, ledger, nil, false); err != nil {
-			t.Fatalf("Cleanup() error = %v", err)
-		}
-		if cloudctlaws.HasReleaseTags(s.Tags("widget")) {
-			t.Errorf("no released tags expected when turned off, got %v", s.Tags("widget"))
-		}
-	})
+func scenarioLettingGoLeavesProvenanceAndKeepsOtherTags(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	if err := s.PutTag("widget", "team", "payments"); err != nil {
+		t.Fatalf("PutTag() error = %v", err)
+	}
+	if _, _, err := s.Cleanup(ctx, ledger, nil, false); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
 
-	t.Run("AdoptingAgainRemovesOnlyTheReleasedTags", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		if err := s.PutTag("widget", "team", "payments"); err != nil {
-			t.Fatalf("PutTag() error = %v", err)
-		}
-		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
-			t.Fatalf("Cleanup() error = %v", err)
-		}
-		if !cloudctlaws.HasReleaseTags(s.Tags("widget")) {
-			t.Fatal("test setup broken: expected the released tags after letting go")
-		}
-		// A relinquished entry that stays in the ledger (KMS, or a pinned key)
-		// re-adopts through the same path as one that left it.
-		if _, err = s.EnsureOne(ctx, ledger, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true}); err != nil {
-			t.Fatalf("EnsureOne() with adopt error = %v", err)
-		}
+	tags := s.Tags("widget")
+	if tags[cloudctlaws.ReleasedFromTagKey] != "default/lifecycle-test" {
+		t.Errorf("released-from = %q, want the CR it came from", tags[cloudctlaws.ReleasedFromTagKey])
+	}
+	if tags[cloudctlaws.ReleasedAtTagKey] != time.Now().UTC().Format(time.DateOnly) {
+		t.Errorf("released-at = %q, want today's UTC date", tags[cloudctlaws.ReleasedAtTagKey])
+	}
+	if _, owned := tags[cloudctlaws.OwnerTagKey]; owned {
+		t.Error("the ownership tag should be gone")
+	}
+	if tags["team"] != "payments" {
+		t.Errorf("another tool's tag was lost: %v", tags)
+	}
+}
 
-		tags := s.Tags("widget")
-		if cloudctlaws.HasReleaseTags(tags) {
-			t.Errorf("the released tags should go when the resource is owned again, got %v", tags)
-		}
-		if tags["team"] != "payments" {
-			t.Errorf("another tool's tag was lost: %v", tags)
-		}
-		if tags[cloudctlaws.OwnerTagKey] != "default/lifecycle-test" {
-			t.Errorf("the ownership tag should be back, got %v", tags)
-		}
-	})
+func scenarioLettingGoLeavesNoProvenanceWhenTurnedOff(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := cloudctlaws.WithReleaseTags(context.Background(), false)
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	if _, _, err := s.Cleanup(ctx, ledger, nil, false); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if cloudctlaws.HasReleaseTags(s.Tags("widget")) {
+		t.Errorf("no released tags expected when turned off, got %v", s.Tags("widget"))
+	}
+}
 
-	// What status publishes as onDelete must be what Cleanup does.
-	t.Run("OnDeleteRetainMatchesCleanup", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "widget")
-		if got := decisions.OnDelete(entry); got != depsv1alpha1.OnDeleteRetain {
-			t.Fatalf("OnDelete() = %s, want Retain", got)
-		}
-		if _, results, err := s.Cleanup(ctx, ledger, nil, false); err != nil {
-			t.Fatalf("Cleanup() error = %v", err)
-		} else if r := findResult(results, "widget"); r == nil || r.Reason != CleanupReasonRetained {
-			t.Errorf("onDelete says Retain but Cleanup did %+v", results)
-		}
-	})
+func scenarioAdoptingAgainRemovesOnlyTheReleasedTags(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	if err := s.PutTag("widget", "team", "payments"); err != nil {
+		t.Fatalf("PutTag() error = %v", err)
+	}
+	if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if !cloudctlaws.HasReleaseTags(s.Tags("widget")) {
+		t.Fatal("test setup broken: expected the released tags after letting go")
+	}
+	// A relinquished entry that stays in the ledger (KMS, or a pinned key)
+	// re-adopts through the same path as one that left it.
+	if _, err = s.EnsureOne(ctx, ledger, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true}); err != nil {
+		t.Fatalf("EnsureOne() with adopt error = %v", err)
+	}
 
-	t.Run("OnDeleteDeleteMatchesCleanup", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "widget")
-		if got := decisions.OnDelete(entry); got != depsv1alpha1.OnDeleteDelete {
-			t.Fatalf("OnDelete() = %s, want Delete", got)
-		}
-		if err := s.SetNonEmpty("widget", false); err != nil && !errors.Is(err, ErrUnsupported) {
-			t.Fatalf("SetNonEmpty() error = %v", err)
-		}
-		ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
-		if err != nil {
-			t.Fatalf("first Cleanup() error = %v", err)
-		}
-		ledger = markPastQuietWindow(ledger, s.ResourceType())
-		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
-			t.Fatalf("second Cleanup() error = %v", err)
-		}
-		if status.HasManagedResource(ledger, s.ResourceType(), "widget") {
-			t.Error("onDelete says Delete but the resource was not deleted")
-		}
-	})
+	tags := s.Tags("widget")
+	if cloudctlaws.HasReleaseTags(tags) {
+		t.Errorf("the released tags should go when the resource is owned again, got %v", tags)
+	}
+	if tags["team"] != "payments" {
+		t.Errorf("another tool's tag was lost: %v", tags)
+	}
+	if tags[cloudctlaws.OwnerTagKey] != "default/lifecycle-test" {
+		t.Errorf("the ownership tag should be back, got %v", tags)
+	}
+}
 
-	t.Run("OnDeleteForcedMatchesCleanup", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		if err := s.SetNonEmpty("widget", true); errors.Is(err, ErrUnsupported) {
-			t.Skip("this resource type has no emptiness check for force to bypass")
-		} else if err != nil {
-			t.Fatalf("SetNonEmpty() error = %v", err)
-		}
-		entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "widget")
-		entry.Force = true
-		status.UpsertManagedResource(&ledger, entry)
-		if got := decisions.OnDelete(entry); got != depsv1alpha1.OnDeleteEvenIfNotEmpty {
-			t.Fatalf("OnDelete() = %s, want DeleteEvenIfNotEmpty", got)
-		}
-		ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
-		if err != nil {
-			t.Fatalf("first Cleanup() error = %v", err)
-		}
-		ledger = markPastQuietWindow(ledger, s.ResourceType())
-		if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
-			t.Fatalf("second Cleanup() error = %v", err)
-		}
-		if status.HasManagedResource(ledger, s.ResourceType(), "widget") {
-			t.Error("onDelete says DeleteEvenIfNotEmpty but a non-empty resource was kept")
-		}
-	})
+// What status publishes as onDelete must be what Cleanup does.
+func scenarioOnDeleteRetainMatchesCleanup(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "widget")
+	if got := decisions.OnDelete(entry); got != depsv1alpha1.OnDeleteRetain {
+		t.Fatalf("OnDelete() = %s, want Retain", got)
+	}
+	if _, results, err := s.Cleanup(ctx, ledger, nil, false); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	} else if r := findResult(results, "widget"); r == nil || r.Reason != CleanupReasonRetained {
+		t.Errorf("onDelete says Retain but Cleanup did %+v", results)
+	}
+}
 
-	t.Run("CancelsPendingDeletionOnReappearance", func(t *testing.T) {
-		s := newSubject(t)
-		ctx := context.Background()
-		ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
-		if err != nil {
-			t.Fatalf("EnsureOne() error = %v", err)
-		}
-		if err := s.SetNonEmpty("widget", true); err != nil && !errors.Is(err, ErrUnsupported) {
-			t.Fatalf("SetNonEmpty() error = %v", err)
-		}
+func scenarioOnDeleteDeleteMatchesCleanup(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "widget")
+	if got := decisions.OnDelete(entry); got != depsv1alpha1.OnDeleteDelete {
+		t.Fatalf("OnDelete() = %s, want Delete", got)
+	}
+	if err := s.SetNonEmpty("widget", false); err != nil && !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("SetNonEmpty() error = %v", err)
+	}
+	ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	ledger = markPastQuietWindow(ledger, s.ResourceType())
+	if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+	if status.HasManagedResource(ledger, s.ResourceType(), "widget") {
+		t.Error("onDelete says Delete but the resource was not deleted")
+	}
+}
 
-		ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
-		if err != nil {
-			t.Fatalf("first Cleanup() error = %v", err)
-		}
-		if entry, entryFound := status.FindManagedResource(ledger, s.ResourceType(), "widget"); !entryFound || entry.PendingDeletionSince == nil {
-			t.Fatal("test setup broken: expected the resource marked pending deletion before reappearance")
-		}
+func scenarioOnDeleteForcedMatchesCleanup(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	if err := s.SetNonEmpty("widget", true); errors.Is(err, ErrUnsupported) {
+		t.Skip("this resource type has no emptiness check for force to bypass")
+	} else if err != nil {
+		t.Fatalf("SetNonEmpty() error = %v", err)
+	}
+	entry, _ := status.FindManagedResource(ledger, s.ResourceType(), "widget")
+	entry.Force = true
+	status.UpsertManagedResource(&ledger, entry)
+	if got := decisions.OnDelete(entry); got != depsv1alpha1.OnDeleteEvenIfNotEmpty {
+		t.Fatalf("OnDelete() = %s, want DeleteEvenIfNotEmpty", got)
+	}
+	ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	ledger = markPastQuietWindow(ledger, s.ResourceType())
+	if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
+		t.Fatalf("second Cleanup() error = %v", err)
+	}
+	if status.HasManagedResource(ledger, s.ResourceType(), "widget") {
+		t.Error("onDelete says DeleteEvenIfNotEmpty but a non-empty resource was kept")
+	}
+}
 
-		updated, _, err := s.Cleanup(ctx, ledger, []string{"widget"}, false)
-		if err != nil {
-			t.Fatalf("Cleanup (reappeared) error = %v", err)
-		}
-		entry, entryFound := status.FindManagedResource(updated, s.ResourceType(), "widget")
-		if !entryFound {
-			t.Fatal("expected the ledger entry to survive reappearance")
-		}
-		if entry.PendingDeletionSince != nil {
-			t.Error("expected PendingDeletionSince cleared on reappearance")
-		}
-	})
+func scenarioCancelsPendingDeletionOnReappearance(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	if err := s.SetNonEmpty("widget", true); err != nil && !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("SetNonEmpty() error = %v", err)
+	}
+
+	ledger, _, err = s.Cleanup(ctx, ledger, nil, false)
+	if err != nil {
+		t.Fatalf("first Cleanup() error = %v", err)
+	}
+	if entry, entryFound := status.FindManagedResource(ledger, s.ResourceType(), "widget"); !entryFound || entry.PendingDeletionSince == nil {
+		t.Fatal("test setup broken: expected the resource marked pending deletion before reappearance")
+	}
+
+	updated, _, err := s.Cleanup(ctx, ledger, []string{"widget"}, false)
+	if err != nil {
+		t.Fatalf("Cleanup (reappeared) error = %v", err)
+	}
+	entry, entryFound := status.FindManagedResource(updated, s.ResourceType(), "widget")
+	if !entryFound {
+		t.Fatal("expected the ledger entry to survive reappearance")
+	}
+	if entry.PendingDeletionSince != nil {
+		t.Error("expected PendingDeletionSince cleared on reappearance")
+	}
 }

@@ -304,19 +304,7 @@ func resumeKey(
 	})
 	var notFound *types.NotFoundException
 	if errors.As(err, &notFound) {
-		// Our own ledger's ARN doesn't resolve anymore — the key is
-		// genuinely gone (fully deleted, not just scheduled: a scheduled
-		// key still resolves, with KeyState PendingDeletion). Everything
-		// ever encrypted under it is already permanently unrecoverable;
-		// silently creating a same-named replacement would paper over
-		// that, not fix it. Surface it loudly instead.
-		if recordEvent != nil {
-			recordEvent("Warning", "KeyMissing", fmt.Sprintf("KMS key %s no longer exists in AWS and will not be recreated", entry.ARN))
-		}
-		return ledger, fmt.Errorf(
-			"KMS key %q (%s) no longer exists in AWS — it was deleted out-of-band, and everything encrypted under it is unrecoverable; remove and re-add this entry to provision a new key once you've confirmed that's acceptable",
-			entry.Name, entry.ARN,
-		)
+		return ledger, keyMissingError(entry, recordEvent)
 	}
 	if err != nil {
 		return ledger, wrapAWSError(err, fmt.Sprintf("looking up KMS key %q", entry.Name))
@@ -325,60 +313,102 @@ func resumeKey(
 		return ledger, err
 	}
 
-	if !status.NeedsRevalidation(entry) && describeOut.KeyMetadata.KeyState != types.KeyStatePendingDeletion {
+	pendingDeletion := describeOut.KeyMetadata.KeyState == types.KeyStatePendingDeletion
+	if !status.NeedsRevalidation(entry) && !pendingDeletion {
 		updated := entry
 		updated.DeletionPolicy = opts.deletionPolicy
 		status.UpsertManagedResource(&ledger, updated)
 		return ledger, nil
 	}
 
+	if err := verifyOrTakeOverKey(ctx, kmsClient, namespace, crName, crUID, entry, recordEvent); err != nil {
+		return ledger, err
+	}
+	if pendingDeletion {
+		if err := cancelScheduledDeletion(ctx, kmsClient, entry, alias, recordEvent); err != nil {
+			return ledger, err
+		}
+	}
+
 	keyID := *describeOut.KeyMetadata.KeyId
-
-	tags, tErr := listAllResourceTags(ctx, kmsClient, entry.ARN)
-	if tErr != nil {
-		return ledger, wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of KMS key %q", entry.Name))
+	if err := reassertKeySettings(ctx, kmsClient, entry, keyID, recordEvent); err != nil {
+		return ledger, err
 	}
-	if tagMap := tagsToMap(tags); !cloudctlaws.IsOwnedBy(tagMap, namespace, crName, crUID) {
-		staleUID, stale := cloudctlaws.IsStaleUID(tagMap, namespace, crName, crUID)
-		if !stale || !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-			return ledger, cloudctlaws.OwnershipLostError("KMS key", entry.Name, "manage it further")
-		}
-		if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
-			KeyId: &entry.ARN,
-			Tags:  mapToTags(cloudctlaws.MergeTags(tagMap, ownerTags(namespace, crName, crUID))),
-		}); err != nil {
-			return ledger, wrapAWSError(err, fmt.Sprintf("taking over KMS key %q (tagging)", entry.Name))
-		}
-		if recordEvent != nil {
-			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over KMS key %s from a previous incarnation of this CR", entry.ARN))
-		}
-	}
-
-	if describeOut.KeyMetadata.KeyState == types.KeyStatePendingDeletion {
-		if err := reviveKey(ctx, kmsClient, entry.ARN); err != nil {
-			return ledger, wrapAWSError(err, fmt.Sprintf("canceling scheduled deletion of KMS key %q now that it's declared again", entry.Name))
-		}
-		if recordEvent != nil {
-			recordEvent("Normal", "KeyDeletionCancelled", fmt.Sprintf("Canceled scheduled deletion of KMS key %s (alias %s); resource reappeared in spec", entry.ARN, alias))
-		}
-	}
-
-	if err := ensureKeyPolicy(ctx, kmsClient, entry.ARN); err != nil {
-		return ledger, wrapAWSError(err, fmt.Sprintf("re-asserting the key policy of KMS key %q", entry.Name))
-	}
-	reenabled, err := ensureRotation(ctx, kmsClient, keyID)
-	if err != nil {
-		return ledger, wrapAWSError(err, fmt.Sprintf("re-asserting automatic rotation of KMS key %q", entry.Name))
-	}
-	if reenabled && recordEvent != nil {
-		recordEvent("Warning", "KeyRotationReenabled", fmt.Sprintf("Automatic rotation of KMS key %s was off and has been turned back on", entry.ARN))
-	}
-
 	if err := ensureAlias(ctx, kmsClient, alias, entry.ARN, keyID); err != nil {
 		return ledger, err
 	}
 
 	return recordKey(ledger, entry.Name, entry.ARN, opts.deletionPolicy, depsv1alpha1.ManagedResourceStateVerified), nil
+}
+
+// keyMissingError reports a key whose ARN no longer resolves. Our own
+// ledger's ARN doesn't resolve anymore — the key is genuinely gone (fully
+// deleted, not just scheduled: a scheduled key still resolves, with KeyState
+// PendingDeletion). Everything ever encrypted under it is already
+// permanently unrecoverable; silently creating a same-named replacement
+// would paper over that, not fix it. Surface it loudly instead.
+func keyMissingError(entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) error {
+	if recordEvent != nil {
+		recordEvent("Warning", "KeyMissing", fmt.Sprintf("KMS key %s no longer exists in AWS and will not be recreated", entry.ARN))
+	}
+	return fmt.Errorf(
+		"KMS key %q (%s) no longer exists in AWS — it was deleted out-of-band, and everything encrypted under it is unrecoverable; remove and re-add this entry to provision a new key once you've confirmed that's acceptable",
+		entry.Name, entry.ARN,
+	)
+}
+
+// verifyOrTakeOverKey re-checks the key's ownership tags. A key left by an
+// earlier incarnation of this CR is taken over when that is allowed.
+func verifyOrTakeOverKey(ctx context.Context, kmsClient kmsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) error {
+	tags, err := listAllResourceTags(ctx, kmsClient, entry.ARN)
+	if err != nil {
+		return wrapAWSError(err, fmt.Sprintf("re-verifying ownership of KMS key %q", entry.Name))
+	}
+	tagMap := tagsToMap(tags)
+	if cloudctlaws.IsOwnedBy(tagMap, namespace, crName, crUID) {
+		return nil
+	}
+	staleUID, stale := cloudctlaws.IsStaleUID(tagMap, namespace, crName, crUID)
+	if !stale || !cloudctlaws.MayTransferFrom(ctx, staleUID) {
+		return cloudctlaws.OwnershipLostError("KMS key", entry.Name, "manage it further")
+	}
+	if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
+		KeyId: &entry.ARN,
+		Tags:  mapToTags(cloudctlaws.MergeTags(tagMap, ownerTags(namespace, crName, crUID))),
+	}); err != nil {
+		return wrapAWSError(err, fmt.Sprintf("taking over KMS key %q (tagging)", entry.Name))
+	}
+	if recordEvent != nil {
+		recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over KMS key %s from a previous incarnation of this CR", entry.ARN))
+	}
+	return nil
+}
+
+// cancelScheduledDeletion revives a key whose deletion was scheduled, now
+// that it is declared again.
+func cancelScheduledDeletion(ctx context.Context, kmsClient kmsAPI, entry depsv1alpha1.ManagedResource, alias string, recordEvent status.EventRecorder) error {
+	if err := reviveKey(ctx, kmsClient, entry.ARN); err != nil {
+		return wrapAWSError(err, fmt.Sprintf("canceling scheduled deletion of KMS key %q now that it's declared again", entry.Name))
+	}
+	if recordEvent != nil {
+		recordEvent("Normal", "KeyDeletionCancelled", fmt.Sprintf("Canceled scheduled deletion of KMS key %s (alias %s); resource reappeared in spec", entry.ARN, alias))
+	}
+	return nil
+}
+
+// reassertKeySettings puts the key policy and automatic rotation back.
+func reassertKeySettings(ctx context.Context, kmsClient kmsAPI, entry depsv1alpha1.ManagedResource, keyID string, recordEvent status.EventRecorder) error {
+	if err := ensureKeyPolicy(ctx, kmsClient, entry.ARN); err != nil {
+		return wrapAWSError(err, fmt.Sprintf("re-asserting the key policy of KMS key %q", entry.Name))
+	}
+	reenabled, err := ensureRotation(ctx, kmsClient, keyID)
+	if err != nil {
+		return wrapAWSError(err, fmt.Sprintf("re-asserting automatic rotation of KMS key %q", entry.Name))
+	}
+	if reenabled && recordEvent != nil {
+		recordEvent("Warning", "KeyRotationReenabled", fmt.Sprintf("Automatic rotation of KMS key %s was off and has been turned back on", entry.ARN))
+	}
+	return nil
 }
 
 // adoptKey handles finding a real, alias-named key this CR's own ledger

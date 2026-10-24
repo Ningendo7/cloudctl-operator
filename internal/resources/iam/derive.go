@@ -159,87 +159,21 @@ var notForConsumers = map[string][]string{
 // used for CEL validation of cross-object references (an Ingress pointing
 // at a not-yet-created Service isn't rejected, it just doesn't route yet).
 // skipped collects a human-readable reason for each one.
-//
-//nolint:gocyclo // four structurally-identical, deliberately-duplicated per-resource-type blocks (own+dedicated-key+shared-key+consumes); already covered by extensive TestCollectGrants_* tests, and splitting risks a correctness bug in this operator's single most security-critical function
+
 func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDependencies) (grants []grant, skipped []string, err error) {
-	if cr.Spec.SQS != nil {
-		for _, q := range cr.Spec.SQS.Resources {
-			grants, skipped = recordOwned(grants, skipped, cr, resourceTypeSQS, q.Name)
-			if q.Encryption != nil {
-				if q.Encryption.Enabled {
-					// The dedicated key is owned by this CR exactly as much as
-					// the queue it protects - same "always full access to what
-					// you own" rule, via the same recordOwned helper, keyed to
-					// the same ledger name kms.EnsureDedicatedKey uses.
-					grants, skipped = recordOwned(grants, skipped, cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSQS, q.Name))
-				}
+	for _, sec := range grantSections(cr) {
+		for _, owned := range sec.owned {
+			grants, skipped = recordOwned(grants, skipped, cr, sec.resourceType, owned.name)
+			if owned.dedicatedKey {
+				// The dedicated key is owned by this CR exactly as much as
+				// the resource it protects - same "always full access to what
+				// you own" rule, via the same recordOwned helper, keyed to
+				// the same ledger name kms.EnsureDedicatedKey uses.
+				grants, skipped = recordOwned(grants, skipped, cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(sec.resourceType, owned.name))
 			}
 		}
-		for _, ref := range cr.Spec.SQS.Consumes {
-			g, reason, err := resolveConsume(ctx, k8sClient, cr, resourceTypeSQS, ref)
-			switch {
-			case err != nil:
-				return nil, nil, err
-			case reason != "":
-				skipped = append(skipped, reason)
-			default:
-				grants = append(grants, g...)
-			}
-		}
-	}
-	if cr.Spec.SNS != nil {
-		for _, t := range cr.Spec.SNS.Resources {
-			grants, skipped = recordOwned(grants, skipped, cr, resourceTypeSNS, t.Name)
-			if t.Encryption != nil {
-				if t.Encryption.Enabled {
-					grants, skipped = recordOwned(grants, skipped, cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeSNS, t.Name))
-				}
-			}
-		}
-		for _, ref := range cr.Spec.SNS.Consumes {
-			g, reason, err := resolveConsume(ctx, k8sClient, cr, resourceTypeSNS, ref)
-			switch {
-			case err != nil:
-				return nil, nil, err
-			case reason != "":
-				skipped = append(skipped, reason)
-			default:
-				grants = append(grants, g...)
-			}
-		}
-	}
-	if cr.Spec.DynamoDB != nil {
-		for _, tbl := range cr.Spec.DynamoDB.Resources {
-			grants, skipped = recordOwned(grants, skipped, cr, resourceTypeDynamoDB, tbl.Name)
-			if tbl.Encryption != nil {
-				if tbl.Encryption.Enabled {
-					grants, skipped = recordOwned(grants, skipped, cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeDynamoDB, tbl.Name))
-				}
-			}
-		}
-		for _, ref := range cr.Spec.DynamoDB.Consumes {
-			g, reason, err := resolveConsume(ctx, k8sClient, cr, resourceTypeDynamoDB, ref)
-			switch {
-			case err != nil:
-				return nil, nil, err
-			case reason != "":
-				skipped = append(skipped, reason)
-			default:
-				grants = append(grants, g...)
-			}
-		}
-	}
-	if cr.Spec.S3 != nil {
-		for _, b := range cr.Spec.S3.Resources {
-			grants, skipped = recordOwned(grants, skipped, cr, resourceTypeS3, b.Name)
-			if b.Encryption != nil {
-				if b.Encryption.Enabled {
-					grants, skipped = recordOwned(grants, skipped, cr, resourceTypeKMS, cloudctlaws.DedicatedKeyLedgerName(resourceTypeS3, b.Name))
-				}
-			}
-		}
-		for _, ref := range cr.Spec.S3.Consumes {
-			g, reason, err := resolveConsume(ctx, k8sClient, cr, resourceTypeS3, ref)
+		for _, ref := range sec.consumes {
+			g, reason, err := resolveConsume(ctx, k8sClient, cr, sec.resourceType, ref)
 			switch {
 			case err != nil:
 				return nil, nil, err
@@ -260,6 +194,52 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	}
 
 	return grants, skipped, nil
+}
+
+// grantSection is what one declared section contributes: the resources the
+// CR owns and the ones it consumes from other CRs.
+type grantSection struct {
+	resourceType string
+	owned        []ownedResource
+	consumes     []depsv1alpha1.ConsumeRef
+}
+
+type ownedResource struct {
+	name string
+	// dedicatedKey is set when the resource has a key of its own, which the
+	// CR owns as well.
+	dedicatedKey bool
+}
+
+// grantSections lists the declared sections that have owned resources and
+// consumes (everything but KMS), in the order their grants are collected.
+func grantSections(cr *depsv1alpha1.AppDependencies) []grantSection {
+	var sections []grantSection
+	if s := cr.Spec.SQS; s != nil {
+		sections = append(sections, grantSection{resourceTypeSQS, ownedOf(s.Resources, func(q depsv1alpha1.SQSQueueSpec) (string, *depsv1alpha1.EncryptionSpec) { return q.Name, q.Encryption }), s.Consumes})
+	}
+	if s := cr.Spec.SNS; s != nil {
+		sections = append(sections, grantSection{resourceTypeSNS, ownedOf(s.Resources, func(t depsv1alpha1.SNSTopicSpec) (string, *depsv1alpha1.EncryptionSpec) { return t.Name, t.Encryption }), s.Consumes})
+	}
+	if s := cr.Spec.DynamoDB; s != nil {
+		sections = append(sections, grantSection{resourceTypeDynamoDB, ownedOf(s.Resources, func(t depsv1alpha1.DynamoDBTableSpec) (string, *depsv1alpha1.EncryptionSpec) {
+			return t.Name, t.Encryption
+		}), s.Consumes})
+	}
+	if s := cr.Spec.S3; s != nil {
+		sections = append(sections, grantSection{resourceTypeS3, ownedOf(s.Resources, func(b depsv1alpha1.S3BucketSpec) (string, *depsv1alpha1.EncryptionSpec) { return b.Name, b.Encryption }), s.Consumes})
+	}
+	return sections
+}
+
+// ownedOf lists a section's resources with whether each has a dedicated key.
+func ownedOf[T any](items []T, nameAndEncryption func(T) (string, *depsv1alpha1.EncryptionSpec)) []ownedResource {
+	owned := make([]ownedResource, 0, len(items))
+	for _, item := range items {
+		name, encryption := nameAndEncryption(item)
+		owned = append(owned, ownedResource{name: name, dedicatedKey: encryption != nil && encryption.Enabled})
+	}
+	return owned
 }
 
 // recordOwned appends a grant for an owned resource if it has a ledger

@@ -140,114 +140,146 @@ func Ensure(
 		return ledger, nil
 	}
 
+	e := &ensurer{
+		awsClient: awsClient, kmsClient: kmsClient, ec2Client: ec2Client, k8sClient: k8sClient,
+		namespace: namespace, crName: crName, crUID: crUID, region: region, accountID: accountID,
+		checkpoint: checkpoint, recordEvent: recordEvent,
+	}
 	var firstErr error
-	var grants []depsv1alpha1.RDSSubnetGroupGrant
-	var grantsFetched bool
-	var grantsErr error
 	for _, r := range spec.Resources {
-		if r.Replication != nil && r.Replication.Enabled {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("instance %q: %w", r.Name, ErrReplicationNotSupported)
-			}
-			continue
-		}
-
-		if !grantsFetched {
-			grants, grantsErr = listSubnetGroupGrants(ctx, k8sClient)
-			grantsFetched = true
-		}
-		if grantsErr != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("instance %q: checking subnet group authorization: %w", r.Name, grantsErr)
-			}
-			continue
-		}
-		if !isAuthorizedByGrants(grants, namespace, r.DBSubnetGroupName) {
-			if firstErr == nil {
-				firstErr = &cloudctlaws.ReconcileError{
-					Err: fmt.Errorf("instance %q: namespace %q is not authorized to use DB subnet group %q - "+
-						"a platform admin must create an RDSSubnetGroupGrant covering it", r.Name, namespace, r.DBSubnetGroupName),
-					Retryable:     true,
-					WakesOnChange: true,
-				}
-			}
-			continue
-		}
-
-		if err := checkAdoptable(ctx, awsClient, kmsClient, namespace, crName, r, ledger); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("instance %q: %w", r.Name, err)
-			}
-			continue
-		}
-
-		recordedSG, _ := status.FindManagedResource(ledger, podNetworkIdentityResourceType, instanceSecurityGroupLedgerName(r.Name))
-		sgARN, sgErr := ensureInstanceSecurityGroup(ctx, awsClient, ec2Client, k8sClient, namespace, crName, crUID, r.Name, r.DBSubnetGroupName, r.Engine, region, accountID, r.Adopt, r.SharedWith, recordedSG.ARN)
-		if sgErr != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("instance %q: security group: %w", r.Name, sgErr)
-			}
-			continue
-		}
-
-		ledger = recordInstanceSecurityGroup(ledger, r.Name, sgARN)
-
-		opts := instanceOptions{
-			deletionPolicy:     r.DeletionPolicy,
-			adopt:              r.Adopt,
-			engine:             r.Engine,
-			engineVersion:      r.EngineVersion,
-			instanceClass:      r.InstanceClass,
-			allocatedStorage:   r.AllocatedStorage,
-			applyImmediately:   r.ApplyImmediately,
-			allowMajor:         r.AllowMajorVersionUpgrade,
-			dbSubnetGroupName:  r.DBSubnetGroupName,
-			securityGroupID:    SecurityGroupIDFromARN(sgARN),
-			encryptionOff:      r.Encryption != nil && !r.Encryption.Enabled && r.Encryption.KMSKeyRef == "",
-			deletionProtection: r.DeletionProtection,
-		}
-		if r.HighAvailability != nil {
-			opts.multiAZ = r.HighAvailability.Enabled
-		}
-		if r.Backup != nil {
-			opts.backupEnabled = r.Backup.Enabled
-		}
-		if r.Encryption != nil {
-			if r.Encryption.KMSKeyRef != "" {
-				arn, ok := kms.SharedKeyARN(ledger, r.Encryption.KMSKeyRef)
-				if !ok {
-					if firstErr == nil {
-						firstErr = &cloudctlaws.ReconcileError{
-							Err: fmt.Errorf("instance %q: encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources",
-								r.Name, r.Encryption.KMSKeyRef),
-							Retryable:     true,
-							WakesOnChange: true,
-						}
-					}
-					continue
-				}
-				opts.kmsKeyARN = &arn
-			}
-			if r.Encryption.Enabled {
-				arn, updatedLedger, err := kms.EnsureDedicatedKey(ctx, kmsClient, namespace, crName, crUID, resourceType, r.Name, r.DeletionPolicy, ledger, checkpoint, recordEvent)
-				ledger = updatedLedger
-				if err != nil {
-					if firstErr == nil {
-						firstErr = fmt.Errorf("instance %q: encryption key: %w", r.Name, err)
-					}
-					continue
-				}
-				opts.kmsKeyARN = &arn
-			}
-		}
-
 		var err error
-		ledger, err = ensureInstance(ctx, awsClient, namespace, crName, crUID, r.Name, opts, ledger, recordEvent)
+		ledger, err = e.ensureResource(ctx, r, ledger)
 		if err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("instance %q: %w", r.Name, err)
+			firstErr = err
 		}
 	}
 	return ledger, firstErr
+}
+
+// ensurer carries what every instance in one Ensure pass shares.
+type ensurer struct {
+	awsClient   rdsAPI
+	kmsClient   cloudctlaws.KMSClient
+	ec2Client   cloudctlaws.EC2Client
+	k8sClient   client.Client
+	checkpoint  status.Checkpoint
+	recordEvent status.EventRecorder
+
+	namespace, crName, crUID, region, accountID string
+
+	// The grants are listed once, on first use, and reused for every
+	// instance in the pass.
+	grants        []depsv1alpha1.RDSSubnetGroupGrant
+	grantsErr     error
+	grantsFetched bool
+}
+
+// ensureResource reconciles one declared instance. Its errors are final,
+// already naming the instance, and the ledger returned is current even then.
+func (e *ensurer) ensureResource(ctx context.Context, r depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	if r.Replication != nil && r.Replication.Enabled {
+		return ledger, fmt.Errorf("instance %q: %w", r.Name, ErrReplicationNotSupported)
+	}
+	if err := e.authorizeSubnetGroup(ctx, r); err != nil {
+		return ledger, err
+	}
+	if err := checkAdoptable(ctx, e.awsClient, e.kmsClient, e.namespace, e.crName, r, ledger); err != nil {
+		return ledger, fmt.Errorf("instance %q: %w", r.Name, err)
+	}
+
+	recordedSG, _ := status.FindManagedResource(ledger, podNetworkIdentityResourceType, instanceSecurityGroupLedgerName(r.Name))
+	sgARN, err := ensureInstanceSecurityGroup(ctx, e.awsClient, e.ec2Client, e.k8sClient, e.namespace, e.crName, e.crUID, r.Name, r.DBSubnetGroupName, r.Engine, e.region, e.accountID, r.Adopt, r.SharedWith, recordedSG.ARN)
+	if err != nil {
+		return ledger, fmt.Errorf("instance %q: security group: %w", r.Name, err)
+	}
+	ledger = recordInstanceSecurityGroup(ledger, r.Name, sgARN)
+
+	opts := optionsFor(r, sgARN)
+	ledger, err = e.resolveEncryptionKey(ctx, r, &opts, ledger)
+	if err != nil {
+		return ledger, err
+	}
+
+	ledger, err = ensureInstance(ctx, e.awsClient, e.namespace, e.crName, e.crUID, r.Name, opts, ledger, e.recordEvent)
+	if err != nil {
+		return ledger, fmt.Errorf("instance %q: %w", r.Name, err)
+	}
+	return ledger, nil
+}
+
+// authorizeSubnetGroup refuses an instance whose subnet group no
+// RDSSubnetGroupGrant hands to this namespace.
+func (e *ensurer) authorizeSubnetGroup(ctx context.Context, r depsv1alpha1.RDSInstanceSpec) error {
+	if !e.grantsFetched {
+		e.grants, e.grantsErr = listSubnetGroupGrants(ctx, e.k8sClient)
+		e.grantsFetched = true
+	}
+	if e.grantsErr != nil {
+		return fmt.Errorf("instance %q: checking subnet group authorization: %w", r.Name, e.grantsErr)
+	}
+	if !isAuthorizedByGrants(e.grants, e.namespace, r.DBSubnetGroupName) {
+		return &cloudctlaws.ReconcileError{
+			Err: fmt.Errorf("instance %q: namespace %q is not authorized to use DB subnet group %q - "+
+				"a platform admin must create an RDSSubnetGroupGrant covering it", r.Name, e.namespace, r.DBSubnetGroupName),
+			Retryable:     true,
+			WakesOnChange: true,
+		}
+	}
+	return nil
+}
+
+// optionsFor translates a declared instance into what the AWS calls need.
+func optionsFor(r depsv1alpha1.RDSInstanceSpec, sgARN string) instanceOptions {
+	opts := instanceOptions{
+		deletionPolicy:     r.DeletionPolicy,
+		adopt:              r.Adopt,
+		engine:             r.Engine,
+		engineVersion:      r.EngineVersion,
+		instanceClass:      r.InstanceClass,
+		allocatedStorage:   r.AllocatedStorage,
+		applyImmediately:   r.ApplyImmediately,
+		allowMajor:         r.AllowMajorVersionUpgrade,
+		dbSubnetGroupName:  r.DBSubnetGroupName,
+		securityGroupID:    SecurityGroupIDFromARN(sgARN),
+		encryptionOff:      r.Encryption != nil && !r.Encryption.Enabled && r.Encryption.KMSKeyRef == "",
+		deletionProtection: r.DeletionProtection,
+	}
+	if r.HighAvailability != nil {
+		opts.multiAZ = r.HighAvailability.Enabled
+	}
+	if r.Backup != nil {
+		opts.backupEnabled = r.Backup.Enabled
+	}
+	return opts
+}
+
+// resolveEncryptionKey sets the instance's key: a shared one from the
+// ledger, or a dedicated one created for it.
+func (e *ensurer) resolveEncryptionKey(ctx context.Context, r depsv1alpha1.RDSInstanceSpec, opts *instanceOptions, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	if r.Encryption == nil {
+		return ledger, nil
+	}
+	if r.Encryption.KMSKeyRef != "" {
+		arn, ok := kms.SharedKeyARN(ledger, r.Encryption.KMSKeyRef)
+		if !ok {
+			return ledger, &cloudctlaws.ReconcileError{
+				Err: fmt.Errorf("instance %q: encryption.kmsKeyRef %q is not ready yet - declare it under kms.resources",
+					r.Name, r.Encryption.KMSKeyRef),
+				Retryable:     true,
+				WakesOnChange: true,
+			}
+		}
+		opts.kmsKeyARN = &arn
+	}
+	if r.Encryption.Enabled {
+		arn, updated, err := kms.EnsureDedicatedKey(ctx, e.kmsClient, e.namespace, e.crName, e.crUID, resourceType, r.Name, r.DeletionPolicy, ledger, e.checkpoint, e.recordEvent)
+		if err != nil {
+			return updated, fmt.Errorf("instance %q: encryption key: %w", r.Name, err)
+		}
+		ledger = updated
+		opts.kmsKeyARN = &arn
+	}
+	return ledger, nil
 }
 
 // listSubnetGroupGrants fetches every RDSSubnetGroupGrant (cluster-
@@ -306,38 +338,14 @@ func ensureInstanceObserving(
 ) ([]depsv1alpha1.ManagedResource, error) {
 	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, namespace, crName, resourceType, resourceName, 63)
 
-	describeOut, err := describeDBInstanceCached(ctx, awsClient, instanceID)
-
-	create := func() ([]depsv1alpha1.ManagedResource, error) {
-		created, createErr := createInstance(ctx, awsClient, namespace, crName, crUID, instanceID, resourceName, opts, ledger, recordEvent)
-		if createErr == nil {
-			*observed = statusCreating
-		}
-		return created, createErr
-	}
-
-	// Creation only ever happens for an instance this CR has never had. One
-	// the ledger knows but AWS no longer has was deleted out-of-band, and a
-	// replacement would be an empty database reported Ready.
-	missing := func() ([]depsv1alpha1.ManagedResource, error) {
-		if entry, found := trackedInstance(ledger, resourceName); found {
-			return ledger, instanceMissingError(entry, instanceID, recordEvent)
-		}
-		return create()
-	}
-
-	var notFound *types.DBInstanceNotFoundFault
-	if errors.As(err, &notFound) {
-		return missing()
-	}
+	instance, found, err := lookupInstance(ctx, awsClient, instanceID)
 	if err != nil {
-		return ledger, wrapAWSError(err, "looking up instance")
+		return ledger, err
 	}
-	if len(describeOut.DBInstances) == 0 {
-		return missing()
+	if !found {
+		return ensureMissingInstance(ctx, awsClient, namespace, crName, crUID, instanceID, resourceName, opts, ledger, recordEvent, observed)
 	}
 
-	instance := describeOut.DBInstances[0]
 	instanceStatus := aws.ToString(instance.DBInstanceStatus)
 	*observed = instanceStatus
 	instanceARN := aws.ToString(instance.DBInstanceArn)
@@ -358,44 +366,16 @@ func ensureInstanceObserving(
 		}
 	}
 
-	// The CRD forbids editing an instance's engine, subnet group or
-	// encryption, but removing a Delete-policy entry and adding it back
-	// passes that rule while the instance is still tracked, since it is never
-	// deleted.
-	if existingBeforeCheckFound && existingBeforeCheck.State != depsv1alpha1.ManagedResourceStateRelinquished {
-		if err := checkImmutableSettings(instance, instanceID, opts); err != nil {
-			return ledger, err
-		}
+	if err := checkTrackedImmutables(instance, instanceID, opts, existingBeforeCheck, existingBeforeCheckFound); err != nil {
+		return ledger, err
 	}
 
-	// Only a few statuses are known-terminal or known-serving; anything
-	// unrecognized is retried rather than assumed ready, since RDS's status
-	// set is large and open-ended (unlike DynamoDB's).
-	servingOnly := false
-	switch instanceStatus {
-	case statusFailed:
-		return ledger, &cloudctlaws.ReconcileError{
-			Err:    fmt.Errorf("instance %q entered status %q - this requires manual investigation, not an automatic retry", instanceID, instanceStatus),
-			Reason: reasons.InstanceStatus(instanceStatus),
-		}
-	case statusAvailable:
-	case "backing-up", "storage-optimization":
-		// Still serving connections, but AWS limits modifications meanwhile.
-		servingOnly = true
-	default:
-		return ledger, &cloudctlaws.ReconcileError{
-			Err:       fmt.Errorf("instance %q is still %s", instanceID, instanceStatus),
-			Retryable: true,
-			Reason:    reasons.InstanceStatus(instanceStatus),
-		}
+	servingOnly, err := checkInstanceStatus(instanceID, instanceStatus)
+	if err != nil {
+		return ledger, err
 	}
 
-	// Reported, not reverted: a public flag may be someone's deliberate
-	// change, and this operator's security group is the only access it
-	// controls.
-	if aws.ToBool(instance.PubliclyAccessible) && recordEvent != nil {
-		recordEvent("Warning", "InstancePubliclyAccessible", fmt.Sprintf("RDS instance %s is publicly accessible; this operator creates instances as private and never changes the setting - turn it off in AWS if unintended", instanceARN))
-	}
+	warnIfPublic(instance, instanceARN, recordEvent)
 
 	// Re-asserted every pass, independent of the ownership trust window.
 	if !servingOnly {
@@ -416,6 +396,90 @@ func ensureInstanceObserving(
 	}
 
 	return recordVerified(ledger, resourceName, instanceARN, opts.deletionPolicy), nil
+}
+
+// checkTrackedImmutables refuses an instance the ledger tracks whose engine,
+// subnet group or encryption differ from the spec. The CRD forbids editing
+// them, but removing a Delete-policy entry and adding it back passes that
+// rule while the instance is still tracked, since it is never deleted.
+func checkTrackedImmutables(instance types.DBInstance, instanceID string, opts instanceOptions, existing depsv1alpha1.ManagedResource, tracked bool) error {
+	if !tracked || existing.State == depsv1alpha1.ManagedResourceStateRelinquished {
+		return nil
+	}
+	return checkImmutableSettings(instance, instanceID, opts)
+}
+
+// lookupInstance describes the instance, reporting whether AWS has it.
+func lookupInstance(ctx context.Context, awsClient rdsAPI, instanceID string) (instance types.DBInstance, found bool, err error) {
+	out, err := describeDBInstanceCached(ctx, awsClient, instanceID)
+	var notFound *types.DBInstanceNotFoundFault
+	if errors.As(err, &notFound) {
+		return types.DBInstance{}, false, nil
+	}
+	if err != nil {
+		return types.DBInstance{}, false, wrapAWSError(err, "looking up instance")
+	}
+	if len(out.DBInstances) == 0 {
+		return types.DBInstance{}, false, nil
+	}
+	return out.DBInstances[0], true, nil
+}
+
+// ensureMissingInstance creates an instance AWS doesn't have. Creation only
+// ever happens for an instance this CR has never had. One the ledger knows
+// but AWS no longer has was deleted out-of-band, and a replacement would be
+// an empty database reported Ready.
+func ensureMissingInstance(
+	ctx context.Context,
+	awsClient rdsAPI,
+	namespace, crName, crUID, instanceID, resourceName string,
+	opts instanceOptions,
+	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
+	observed *string,
+) ([]depsv1alpha1.ManagedResource, error) {
+	if entry, found := trackedInstance(ledger, resourceName); found {
+		return ledger, instanceMissingError(entry, instanceID, recordEvent)
+	}
+	created, err := createInstance(ctx, awsClient, namespace, crName, crUID, instanceID, resourceName, opts, ledger, recordEvent)
+	if err == nil {
+		*observed = statusCreating
+	}
+	return created, err
+}
+
+// checkInstanceStatus says whether an instance in this status can be worked
+// on. Only a few statuses are known-terminal or known-serving; anything
+// unrecognized is retried rather than assumed ready, since RDS's status set
+// is large and open-ended (unlike DynamoDB's). servingOnly is an instance
+// still serving connections while AWS limits modifications.
+func checkInstanceStatus(instanceID, instanceStatus string) (servingOnly bool, err error) {
+	switch instanceStatus {
+	case statusFailed:
+		return false, &cloudctlaws.ReconcileError{
+			Err:    fmt.Errorf("instance %q entered status %q - this requires manual investigation, not an automatic retry", instanceID, instanceStatus),
+			Reason: reasons.InstanceStatus(instanceStatus),
+		}
+	case statusAvailable:
+		return false, nil
+	case "backing-up", "storage-optimization":
+		return true, nil
+	default:
+		return false, &cloudctlaws.ReconcileError{
+			Err:       fmt.Errorf("instance %q is still %s", instanceID, instanceStatus),
+			Retryable: true,
+			Reason:    reasons.InstanceStatus(instanceStatus),
+		}
+	}
+}
+
+// warnIfPublic reports a publicly accessible instance. Reported, not
+// reverted: a public flag may be someone's deliberate change, and this
+// operator's security group is the only access it controls.
+func warnIfPublic(instance types.DBInstance, instanceARN string, recordEvent status.EventRecorder) {
+	if aws.ToBool(instance.PubliclyAccessible) && recordEvent != nil {
+		recordEvent("Warning", "InstancePubliclyAccessible", fmt.Sprintf("RDS instance %s is publicly accessible; this operator creates instances as private and never changes the setting - turn it off in AWS if unintended", instanceARN))
+	}
 }
 
 func createInstance(
@@ -481,56 +545,16 @@ func createInstance(
 
 func reconcileInstanceAttributes(ctx context.Context, awsClient rdsAPI, instanceID, instanceARN string, instance types.DBInstance, opts instanceOptions, recordEvent status.EventRecorder) error {
 	modify := &rds.ModifyDBInstanceInput{DBInstanceIdentifier: &instanceID}
-	storageGrowth, otherChange := false, false
 	cur := effectiveAttributes(instance)
 
-	if cur.instanceClass != opts.instanceClass {
-		modify.DBInstanceClass = &opts.instanceClass
-		otherChange = true
-	}
-	if cur.multiAZ != opts.multiAZ {
-		modify.MultiAZ = aws.Bool(opts.multiAZ)
-		otherChange = true
-	}
-	// Backups are only ever raised: setting retention to 0 deletes the
-	// instance's automated backups, and lowering it deletes the older ones.
-	desiredBackupRetention := int32(0)
-	if opts.backupEnabled {
-		desiredBackupRetention = defaultBackupRetentionDays
-	}
-	switch {
-	case cur.backupRetention < desiredBackupRetention:
-		modify.BackupRetentionPeriod = aws.Int32(desiredBackupRetention)
-		otherChange = true
-	case cur.backupRetention > 0 && !opts.backupEnabled && recordEvent != nil:
-		recordEvent("Warning", "BackupsLeftEnabled", fmt.Sprintf("RDS instance %s has automated backups but its spec disables them; not turning them off, since that deletes the existing backups - disable them in AWS if intended", instanceARN))
-	}
-	// AWS rejects a decrease outright, so only growth is ever sent. A smaller
-	// spec still gets here, when the instance has grown on its own or the
-	// entry was removed and added back, and is reported.
-	reportStorageLargerThanSpec(instanceARN, cur.allocatedStorage, opts.allocatedStorage, recordEvent)
-	if opts.allocatedStorage > cur.allocatedStorage {
-		modify.AllocatedStorage = &opts.allocatedStorage
-		// Provisioned-IOPS volumes require Iops alongside a storage change.
-		if st := aws.ToString(instance.StorageType); (st == "io1" || st == "io2") && instance.Iops != nil {
-			modify.Iops = instance.Iops
-		}
-		storageGrowth = true
-	}
-	upgrade, major, err := engineVersionUpgrade(ctx, awsClient, opts.engine, cur.engineVersion, opts.engineVersion)
+	otherChange := reconcileSizing(modify, cur, opts)
+	otherChange = reconcileBackupRetention(modify, cur, opts, instanceARN, recordEvent) || otherChange
+	storageGrowth := reconcileStorage(modify, instance, cur, opts, instanceARN, recordEvent)
+	upgrade, err := reconcileEngineVersion(ctx, awsClient, modify, cur, opts)
 	if err != nil {
 		return err
 	}
-	if upgrade {
-		if major && !opts.allowMajor {
-			return fmt.Errorf("engineVersion %q is a major upgrade from %s - set allowMajorVersionUpgrade: true to allow it", opts.engineVersion, cur.engineVersion)
-		}
-		modify.EngineVersion = &opts.engineVersion
-		if major {
-			modify.AllowMajorVersionUpgrade = aws.Bool(true)
-		}
-		otherChange = true
-	}
+	otherChange = otherChange || upgrade
 
 	groups, groupMissing := withSecurityGroup(instance, opts.securityGroupID)
 	if groupMissing {
@@ -542,10 +566,79 @@ func reconcileInstanceAttributes(ctx context.Context, awsClient rdsAPI, instance
 	if !storageGrowth && !otherChange && !groupMissing && !protectionChange {
 		return nil
 	}
-	// An immediate modify also applies every change already pending, so
-	// changes default to the weekly maintenance window. Storage growth alone
-	// causes no downtime and is often urgent, so it goes at once - but only
-	// when nothing else is pending for it to drag along.
+	return sendModify(ctx, awsClient, modify, instance, instanceARN, opts, storageGrowth, otherChange, recordEvent)
+}
+
+// reconcileSizing sets the instance class and Multi-AZ, and reports whether
+// either differs.
+func reconcileSizing(modify *rds.ModifyDBInstanceInput, cur instanceAttributes, opts instanceOptions) (changed bool) {
+	if cur.instanceClass != opts.instanceClass {
+		modify.DBInstanceClass = &opts.instanceClass
+		changed = true
+	}
+	if cur.multiAZ != opts.multiAZ {
+		modify.MultiAZ = aws.Bool(opts.multiAZ)
+		changed = true
+	}
+	return changed
+}
+
+// reconcileBackupRetention only ever raises retention: setting it to 0
+// deletes the instance's automated backups, and lowering it deletes the
+// older ones.
+func reconcileBackupRetention(modify *rds.ModifyDBInstanceInput, cur instanceAttributes, opts instanceOptions, instanceARN string, recordEvent status.EventRecorder) (changed bool) {
+	desired := int32(0)
+	if opts.backupEnabled {
+		desired = defaultBackupRetentionDays
+	}
+	switch {
+	case cur.backupRetention < desired:
+		modify.BackupRetentionPeriod = aws.Int32(desired)
+		return true
+	case cur.backupRetention > 0 && !opts.backupEnabled && recordEvent != nil:
+		recordEvent("Warning", "BackupsLeftEnabled", fmt.Sprintf("RDS instance %s has automated backups but its spec disables them; not turning them off, since that deletes the existing backups - disable them in AWS if intended", instanceARN))
+	}
+	return false
+}
+
+// reconcileStorage sends storage growth only: AWS rejects a decrease
+// outright. A smaller spec still gets here, when the instance has grown on
+// its own or the entry was removed and added back, and is reported.
+func reconcileStorage(modify *rds.ModifyDBInstanceInput, instance types.DBInstance, cur instanceAttributes, opts instanceOptions, instanceARN string, recordEvent status.EventRecorder) (growth bool) {
+	reportStorageLargerThanSpec(instanceARN, cur.allocatedStorage, opts.allocatedStorage, recordEvent)
+	if opts.allocatedStorage <= cur.allocatedStorage {
+		return false
+	}
+	modify.AllocatedStorage = &opts.allocatedStorage
+	// Provisioned-IOPS volumes require Iops alongside a storage change.
+	if st := aws.ToString(instance.StorageType); (st == "io1" || st == "io2") && instance.Iops != nil {
+		modify.Iops = instance.Iops
+	}
+	return true
+}
+
+// reconcileEngineVersion asks for a newer engine version, refusing a major
+// one the spec hasn't allowed.
+func reconcileEngineVersion(ctx context.Context, awsClient rdsAPI, modify *rds.ModifyDBInstanceInput, cur instanceAttributes, opts instanceOptions) (changed bool, err error) {
+	upgrade, major, err := engineVersionUpgrade(ctx, awsClient, opts.engine, cur.engineVersion, opts.engineVersion)
+	if err != nil || !upgrade {
+		return false, err
+	}
+	if major && !opts.allowMajor {
+		return false, fmt.Errorf("engineVersion %q is a major upgrade from %s - set allowMajorVersionUpgrade: true to allow it", opts.engineVersion, cur.engineVersion)
+	}
+	modify.EngineVersion = &opts.engineVersion
+	if major {
+		modify.AllowMajorVersionUpgrade = aws.Bool(true)
+	}
+	return true, nil
+}
+
+// sendModify applies the changes. An immediate modify also applies every
+// change already pending, so changes default to the weekly maintenance
+// window. Storage growth alone causes no downtime and is often urgent, so it
+// goes at once - but only when nothing else is pending for it to drag along.
+func sendModify(ctx context.Context, awsClient rdsAPI, modify *rds.ModifyDBInstanceInput, instance types.DBInstance, instanceARN string, opts instanceOptions, storageGrowth, otherChange bool, recordEvent status.EventRecorder) error {
 	growthOnly := storageGrowth && !otherChange && instance.PendingModifiedValues == nil
 	immediate := opts.applyImmediately || growthOnly
 	modify.ApplyImmediately = aws.Bool(immediate)

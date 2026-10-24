@@ -265,45 +265,12 @@ func ensureSingleQueue(
 	}
 
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, resourceName); existingFound && !status.NeedsRevalidation(existing) {
-		// Still within the trust window - skip re-verifying ownership, but
-		// attribute drift correction is a different concern and must still
-		// run every reconcile regardless of the trust window. Local-only
-		// fields (deletionPolicy/force) can still change from a spec edit
-		// with no AWS call needed, so refresh those against the cached
-		// entry; ARN and LastVerifiedAt stay as they were until the window
-		// actually expires and a real ownership check runs again.
-		updated := existing
-		updated.DeletionPolicy = opts.deletionPolicy
-		updated.Force = opts.force
-		status.UpsertManagedResource(&ledger, updated)
-
-		// Existence is checked on every pass, trust window or not: the
-		// window only exempts the ownership-tag re-check, and a queue
-		// deleted out-of-band must not stay reported Ready until it lapses.
-		queueName, nameErr := queueNameFromARN(existing.ARN)
-		if nameErr != nil {
-			return ledger, "", nameErr
+		trustedLedger, trustedURL, present, trustErr := ensureWithinTrust(ctx, awsClient, existing, opts, ledger, recordEvent)
+		if trustErr != nil || present {
+			return trustedLedger, trustedURL, trustErr
 		}
-		urlOut, err := awsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
-			QueueName: &queueName,
-		})
-		var gone *types.QueueDoesNotExist
-		switch {
-		case errors.As(err, &gone):
-			if recordEvent != nil {
-				recordEvent("Warning", "QueueMissing", fmt.Sprintf("SQS queue %s no longer exists in AWS; recreating it", queueName))
-			}
-			// Falls through to the full path below, which recreates it.
-		case err != nil:
-			return ledger, "", wrapAWSError(err, "resolving queue URL for drift correction")
-		default:
-			if len(desiredAttributes(opts)) > 0 {
-				if err := reconcileAttributes(ctx, awsClient, *urlOut.QueueUrl, opts); err != nil {
-					return ledger, "", wrapAWSError(err, "reconciling queue attributes")
-				}
-			}
-			return ledger, *urlOut.QueueUrl, nil
-		}
+		// The queue is gone; the full path below recreates it.
+		ledger = trustedLedger
 	}
 
 	const sqsNameMaxLen = 80
@@ -323,45 +290,7 @@ func ensureSingleQueue(
 
 	var notFound *types.QueueDoesNotExist
 	if errors.As(err, &notFound) {
-		// Reuses desiredAttributes rather than building a second, separate
-		// map here - FifoQueue is the one attribute desiredAttributes
-		// deliberately excludes (immutable after creation, so it's only
-		// ever relevant on this create path, never drift-corrected).
-		attrs := desiredAttributes(opts)
-		if opts.fifo {
-			attrs["FifoQueue"] = awsAttrTrue
-		}
-
-		createOut, cErr := awsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
-			QueueName:  &queueName,
-			Attributes: attrs,
-			Tags:       ownerTags,
-		})
-		if cErr != nil {
-			var deletedRecently *types.QueueDeletedRecently
-			if errors.As(cErr, &deletedRecently) {
-				return ledger, "", &cloudctlaws.ReconcileError{
-					Err:       fmt.Errorf("queue %q was deleted too recently to recreate yet (AWS enforces a cooldown): %w", queueName, cErr),
-					Retryable: true,
-				}
-			}
-			return ledger, "", wrapAWSError(cErr, "creating queue")
-		}
-		if recordEvent != nil {
-			recordEvent("Normal", "QueueCreated", fmt.Sprintf("Created SQS queue %s", queueName))
-		}
-		// Attributes were just set atomically at creation — nothing to
-		// drift-correct yet.
-		ledger, err = recordVerified(
-			ctx,
-			awsClient,
-			*createOut.QueueUrl,
-			resourceName,
-			opts.deletionPolicy,
-			opts.force,
-			ledger,
-		)
-		return ledger, *createOut.QueueUrl, err
+		return createQueue(ctx, awsClient, queueName, resourceName, ownerTags, opts, ledger, recordEvent)
 	}
 	if err != nil {
 		return ledger, "", wrapAWSError(err, "looking up queue")
@@ -375,41 +304,8 @@ func ensureSingleQueue(
 	}
 
 	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, crUID) {
-		transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "queue", queueName, tagsOut.Tags, namespace, crName, crUID, opts.adopt)
-		if ownErr != nil {
-			return ledger, "", ownErr
-		}
-		if opts.checkAdoptedKey != nil {
-			attrs, aErr := awsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
-				QueueUrl:       &queueURL,
-				AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameKmsMasterKeyId},
-			})
-			if aErr != nil {
-				return ledger, "", wrapAWSError(aErr, "reading the queue's encryption before adopting it")
-			}
-			if err := opts.checkAdoptedKey(ctx, attrs.Attributes[string(types.QueueAttributeNameKmsMasterKeyId)]); err != nil {
-				return ledger, "", fmt.Errorf("queue %q can't be adopted: %w", queueName, err)
-			}
-		}
-
-		merged := cloudctlaws.MergeTags(tagsOut.Tags, ownerTags)
-		if _, tagErr := awsClient.TagQueue(ctx, &sqs.TagQueueInput{
-			QueueUrl: &queueURL,
-			Tags:     merged,
-		}); tagErr != nil {
-			return ledger, "", wrapAWSError(tagErr, "adopting queue (tagging)")
-		}
-		if cloudctlaws.HasReleaseTags(tagsOut.Tags) {
-			if _, untagErr := awsClient.UntagQueue(ctx, &sqs.UntagQueueInput{QueueUrl: &queueURL, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
-				cloudctlaws.ReleaseTagFailed(recordEvent, "queue", queueName, untagErr)
-			}
-		}
-		if recordEvent != nil {
-			if transferred {
-				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SQS queue %s from a previous incarnation of this CR", queueName))
-			} else {
-				recordEvent("Normal", "QueueAdopted", fmt.Sprintf("Adopted existing SQS queue %s under management", queueName))
-			}
+		if err := adoptQueue(ctx, awsClient, namespace, crName, crUID, queueName, queueURL, tagsOut.Tags, ownerTags, opts, recordEvent); err != nil {
+			return ledger, "", err
 		}
 	}
 
@@ -427,6 +323,155 @@ func ensureSingleQueue(
 		ledger,
 	)
 	return ledger, queueURL, err
+}
+
+// ensureWithinTrust handles a queue whose ownership was verified recently.
+// Ownership is not re-checked, but attribute drift correction is a different
+// concern and must still run every reconcile regardless of the trust window.
+// Local-only fields (deletionPolicy/force) can still change from a spec edit
+// with no AWS call needed, so those are refreshed against the cached entry;
+// ARN and LastVerifiedAt stay as they were until the window actually expires
+// and a real ownership check runs again. present is false when the queue no
+// longer exists, and the caller recreates it.
+func ensureWithinTrust(
+	ctx context.Context,
+	awsClient sqsAPI,
+	existing depsv1alpha1.ManagedResource,
+	opts queueOptions,
+	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
+) (updatedLedger []depsv1alpha1.ManagedResource, queueURL string, present bool, err error) {
+	updated := existing
+	updated.DeletionPolicy = opts.deletionPolicy
+	updated.Force = opts.force
+	status.UpsertManagedResource(&ledger, updated)
+
+	// Existence is checked on every pass, trust window or not: the
+	// window only exempts the ownership-tag re-check, and a queue
+	// deleted out-of-band must not stay reported Ready until it lapses.
+	queueName, nameErr := queueNameFromARN(existing.ARN)
+	if nameErr != nil {
+		return ledger, "", false, nameErr
+	}
+	urlOut, urlErr := awsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
+		QueueName: &queueName,
+	})
+	var gone *types.QueueDoesNotExist
+	switch {
+	case errors.As(urlErr, &gone):
+		if recordEvent != nil {
+			recordEvent("Warning", "QueueMissing", fmt.Sprintf("SQS queue %s no longer exists in AWS; recreating it", queueName))
+		}
+		return ledger, "", false, nil
+	case urlErr != nil:
+		return ledger, "", false, wrapAWSError(urlErr, "resolving queue URL for drift correction")
+	}
+	if len(desiredAttributes(opts)) > 0 {
+		if err := reconcileAttributes(ctx, awsClient, *urlOut.QueueUrl, opts); err != nil {
+			return ledger, "", false, wrapAWSError(err, "reconciling queue attributes")
+		}
+	}
+	return ledger, *urlOut.QueueUrl, true, nil
+}
+
+// createQueue creates a queue that does not exist yet.
+func createQueue(
+	ctx context.Context,
+	awsClient sqsAPI,
+	queueName, resourceName string,
+	ownerTags map[string]string,
+	opts queueOptions,
+	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
+) ([]depsv1alpha1.ManagedResource, string, error) {
+	// Reuses desiredAttributes rather than building a second, separate
+	// map here - FifoQueue is the one attribute desiredAttributes
+	// deliberately excludes (immutable after creation, so it's only
+	// ever relevant on this create path, never drift-corrected).
+	attrs := desiredAttributes(opts)
+	if opts.fifo {
+		attrs["FifoQueue"] = awsAttrTrue
+	}
+
+	createOut, cErr := awsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
+		QueueName:  &queueName,
+		Attributes: attrs,
+		Tags:       ownerTags,
+	})
+	if cErr != nil {
+		var deletedRecently *types.QueueDeletedRecently
+		if errors.As(cErr, &deletedRecently) {
+			return ledger, "", &cloudctlaws.ReconcileError{
+				Err:       fmt.Errorf("queue %q was deleted too recently to recreate yet (AWS enforces a cooldown): %w", queueName, cErr),
+				Retryable: true,
+			}
+		}
+		return ledger, "", wrapAWSError(cErr, "creating queue")
+	}
+	if recordEvent != nil {
+		recordEvent("Normal", "QueueCreated", fmt.Sprintf("Created SQS queue %s", queueName))
+	}
+	// Attributes were just set atomically at creation — nothing to
+	// drift-correct yet.
+	ledger, err := recordVerified(
+		ctx,
+		awsClient,
+		*createOut.QueueUrl,
+		resourceName,
+		opts.deletionPolicy,
+		opts.force,
+		ledger,
+	)
+	return ledger, *createOut.QueueUrl, err
+}
+
+// adoptQueue brings an existing queue not tagged as this CR's under
+// management, once the ownership rules allow it.
+func adoptQueue(
+	ctx context.Context,
+	awsClient sqsAPI,
+	namespace, crName, crUID, queueName, queueURL string,
+	currentTags, ownerTags map[string]string,
+	opts queueOptions,
+	recordEvent status.EventRecorder,
+) error {
+	transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "queue", queueName, currentTags, namespace, crName, crUID, opts.adopt)
+	if ownErr != nil {
+		return ownErr
+	}
+	if opts.checkAdoptedKey != nil {
+		attrs, aErr := awsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+			QueueUrl:       &queueURL,
+			AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameKmsMasterKeyId},
+		})
+		if aErr != nil {
+			return wrapAWSError(aErr, "reading the queue's encryption before adopting it")
+		}
+		if err := opts.checkAdoptedKey(ctx, attrs.Attributes[string(types.QueueAttributeNameKmsMasterKeyId)]); err != nil {
+			return fmt.Errorf("queue %q can't be adopted: %w", queueName, err)
+		}
+	}
+
+	merged := cloudctlaws.MergeTags(currentTags, ownerTags)
+	if _, tagErr := awsClient.TagQueue(ctx, &sqs.TagQueueInput{
+		QueueUrl: &queueURL,
+		Tags:     merged,
+	}); tagErr != nil {
+		return wrapAWSError(tagErr, "adopting queue (tagging)")
+	}
+	if cloudctlaws.HasReleaseTags(currentTags) {
+		if _, untagErr := awsClient.UntagQueue(ctx, &sqs.UntagQueueInput{QueueUrl: &queueURL, TagKeys: cloudctlaws.ReleasedTagKeys()}); untagErr != nil {
+			cloudctlaws.ReleaseTagFailed(recordEvent, "queue", queueName, untagErr)
+		}
+	}
+	if recordEvent != nil {
+		if transferred {
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SQS queue %s from a previous incarnation of this CR", queueName))
+		} else {
+			recordEvent("Normal", "QueueAdopted", fmt.Sprintf("Adopted existing SQS queue %s under management", queueName))
+		}
+	}
+	return nil
 }
 
 // checkFIFOUnchanged refuses a queue entry whose type the spec has flipped,

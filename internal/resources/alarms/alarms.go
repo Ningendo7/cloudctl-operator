@@ -346,51 +346,70 @@ func reconcileAlarms(
 		desiredByName[d.name] = struct{}{}
 
 		current, exists := existingByName[d.name]
-		matches := exists && alarmMatches(current, d, alarmActions)
-		// An unchanged alarm is not read, except while taking over: its tags
-		// may still carry the previous UID.
-		if matches && !cloudctlaws.TakingOver(ctx) {
-			continue
-		}
-		if exists {
-			owner, err := alarmOwnership(ctx, cwClient, own, d.name)
-			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				continue
-			}
-			switch {
-			case owner.ours:
-				if matches {
-					continue
-				}
-			case owner.transferable:
-				// CloudWatch tags an alarm only when it is created, so an
-				// alarm left by a previous incarnation of this CR is
-				// replaced: it holds no data.
-				if _, err := cwClient.DeleteAlarms(ctx, &cloudwatch.DeleteAlarmsInput{AlarmNames: []string{d.name}}); err != nil {
-					if firstErr == nil {
-						firstErr = wrapAWSError(err, fmt.Sprintf("replacing alarm %q from a previous incarnation of this CR", d.name))
-					}
-					continue
-				}
-				exists = false
-			default:
-				if firstErr == nil {
-					firstErr = &cloudctlaws.ReconcileError{Err: fmt.Errorf("alarm %q already exists but isn't tagged as owned by this CR — refusing to overwrite it", d.name), Reason: reasons.NameTaken}
-				}
-				continue
-			}
-		}
-
-		if err := putAlarm(ctx, cwClient, own, d, !exists, alarmActions); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
+		if err := reconcileAlarm(ctx, cwClient, own, d, current, exists, alarmActions); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 
+	if err := deleteUndeclaredAlarms(ctx, cwClient, own, existingByName, desiredByName); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// reconcileAlarm creates or updates one declared alarm, leaving it alone when
+// it already matches. An alarm that exists but isn't ours is never touched.
+func reconcileAlarm(
+	ctx context.Context,
+	cwClient cloudctlaws.CloudWatchClient,
+	own ownership,
+	d alarmDef,
+	current types.MetricAlarm,
+	exists bool,
+	alarmActions []string,
+) error {
+	matches := exists && alarmMatches(current, d, alarmActions)
+	// An unchanged alarm is not read, except while taking over: its tags
+	// may still carry the previous UID.
+	if matches && !cloudctlaws.TakingOver(ctx) {
+		return nil
+	}
+	if exists {
+		owner, err := alarmOwnership(ctx, cwClient, own, d.name)
+		if err != nil {
+			return err
+		}
+		switch {
+		case owner.ours:
+			if matches {
+				return nil
+			}
+		case owner.transferable:
+			// CloudWatch tags an alarm only when it is created, so an
+			// alarm left by a previous incarnation of this CR is
+			// replaced: it holds no data.
+			if _, err := cwClient.DeleteAlarms(ctx, &cloudwatch.DeleteAlarmsInput{AlarmNames: []string{d.name}}); err != nil {
+				return wrapAWSError(err, fmt.Sprintf("replacing alarm %q from a previous incarnation of this CR", d.name))
+			}
+			exists = false
+		default:
+			return &cloudctlaws.ReconcileError{Err: fmt.Errorf("alarm %q already exists but isn't tagged as owned by this CR — refusing to overwrite it", d.name), Reason: reasons.NameTaken}
+		}
+	}
+
+	return putAlarm(ctx, cwClient, own, d, !exists, alarmActions)
+}
+
+// deleteUndeclaredAlarms removes the alarms this CR owns that are no longer
+// declared.
+func deleteUndeclaredAlarms(
+	ctx context.Context,
+	cwClient cloudctlaws.CloudWatchClient,
+	own ownership,
+	existingByName map[string]types.MetricAlarm,
+	desiredByName map[string]struct{},
+) error {
+	var firstErr error
 	var toDelete []string
 	for name := range existingByName {
 		if _, stillDesired := desiredByName[name]; stillDesired {
@@ -408,13 +427,10 @@ func reconcileAlarms(
 		}
 	}
 	if len(toDelete) > 0 {
-		if _, err := cwClient.DeleteAlarms(ctx, &cloudwatch.DeleteAlarmsInput{AlarmNames: toDelete}); err != nil {
-			if firstErr == nil {
-				firstErr = wrapAWSError(err, "deleting alarms no longer declared")
-			}
+		if _, err := cwClient.DeleteAlarms(ctx, &cloudwatch.DeleteAlarmsInput{AlarmNames: toDelete}); err != nil && firstErr == nil {
+			firstErr = wrapAWSError(err, "deleting alarms no longer declared")
 		}
 	}
-
 	return firstErr
 }
 
@@ -423,29 +439,45 @@ func reconcileAlarms(
 // putAlarm never sets (metric math, extra actions, a disabled alarm)
 // counts as a mismatch.
 func alarmMatches(current types.MetricAlarm, d alarmDef, actions []string) bool {
-	if len(current.Metrics) > 0 || len(current.InsufficientDataActions) > 0 || current.DatapointsToAlarm != nil ||
-		current.ExtendedStatistic != nil || current.Unit != "" || current.EvaluateLowSampleCountPercentile != nil {
-		return false
-	}
-	if current.ActionsEnabled != nil && !*current.ActionsEnabled {
-		return false
-	}
-	if len(current.Dimensions) != 1 || aws.ToString(current.Dimensions[0].Name) != d.dimensionName || aws.ToString(current.Dimensions[0].Value) != d.dimensionValue {
+	if hasSettingsWeDoNotSet(current) {
 		return false
 	}
 	if d.treatMissingData != "" && aws.ToString(current.TreatMissingData) != d.treatMissingData {
 		return false
 	}
+	return sameMetric(current, d) &&
+		sameEvaluation(current, d) &&
+		slices.Equal(current.AlarmActions, actions) &&
+		slices.Equal(current.OKActions, actions)
+}
+
+// hasSettingsWeDoNotSet reports an alarm carrying anything this operator
+// never configures, so it cannot match what would be written.
+func hasSettingsWeDoNotSet(current types.MetricAlarm) bool {
+	if len(current.Metrics) > 0 || len(current.InsufficientDataActions) > 0 || current.DatapointsToAlarm != nil ||
+		current.ExtendedStatistic != nil || current.Unit != "" || current.EvaluateLowSampleCountPercentile != nil {
+		return true
+	}
+	return current.ActionsEnabled != nil && !*current.ActionsEnabled
+}
+
+// sameMetric compares what the alarm watches.
+func sameMetric(current types.MetricAlarm, d alarmDef) bool {
+	if len(current.Dimensions) != 1 || aws.ToString(current.Dimensions[0].Name) != d.dimensionName || aws.ToString(current.Dimensions[0].Value) != d.dimensionValue {
+		return false
+	}
 	return aws.ToString(current.AlarmDescription) == d.description &&
 		aws.ToString(current.Namespace) == d.namespace &&
 		aws.ToString(current.MetricName) == d.metricName &&
-		current.Statistic == d.statistic &&
-		current.ComparisonOperator == d.comparisonOperator &&
+		current.Statistic == d.statistic
+}
+
+// sameEvaluation compares when the alarm fires.
+func sameEvaluation(current types.MetricAlarm, d alarmDef) bool {
+	return current.ComparisonOperator == d.comparisonOperator &&
 		aws.ToFloat64(current.Threshold) == d.threshold &&
 		aws.ToInt32(current.EvaluationPeriods) == d.evaluationPeriods &&
-		aws.ToInt32(current.Period) == d.period &&
-		slices.Equal(current.AlarmActions, actions) &&
-		slices.Equal(current.OKActions, actions)
+		aws.ToInt32(current.Period) == d.period
 }
 
 // listAlarmsByPrefix paginates through every alarm whose name starts with

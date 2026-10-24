@@ -666,6 +666,16 @@ func TestCleanup_BackInUse_OnlyTouchesItsOwnInstanceSnapshot(t *testing.T) {
 
 // --- Trigger B: superseded-by-a-newer-episode retirement ---
 
+// cleanupPass runs one Cleanup pass for the CR these tests share.
+func cleanupPass(t *testing.T, client *fakeRDS, spec *depsv1alpha1.RDSSpec, ledger []depsv1alpha1.ManagedResource, pass string) []depsv1alpha1.ManagedResource {
+	t.Helper()
+	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
+	if err != nil {
+		t.Fatalf("%s Cleanup() error = %v", pass, err)
+	}
+	return ledger
+}
+
 // TestCleanup_SupersededEpisode_FullLifecycle drives the full, rare
 // overlap scenario end to end: an instance is removed, snapshotted,
 // redeclared while that snapshot is still mid-creation (so trigger A
@@ -690,10 +700,7 @@ func TestCleanup_SupersededEpisode_FullLifecycle(t *testing.T) {
 	// Episode 1: removed, past the quiet window, snapshot requested.
 	ledger = setMarked(t, client, ledger, "orders-db")
 	ledger = setPendingDeletionSince(ledger, "orders-db", episode1Since)
-	ledger, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
-	if err != nil {
-		t.Fatalf("episode-1 Cleanup() error = %v", err)
-	}
+	ledger = cleanupPass(t, client, &depsv1alpha1.RDSSpec{}, ledger, "episode-1")
 	if client.createDBSnapshotCalls != 1 {
 		t.Fatalf("expected one CreateDBSnapshot call for episode 1, got %d", client.createDBSnapshotCalls)
 	}
@@ -703,20 +710,14 @@ func TestCleanup_SupersededEpisode_FullLifecycle(t *testing.T) {
 	// Redeclared while episode 1's snapshot is still mid-creation -
 	// trigger A can't retire it yet, so it stays tracked.
 	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, false, nil)
-	if err != nil {
-		t.Fatalf("redeclare Cleanup() error = %v", err)
-	}
+	ledger = cleanupPass(t, client, spec, ledger, "redeclare")
 	if client.deleteDBSnapshotCalls != 0 {
 		t.Fatalf("expected episode 1's snapshot to survive the redeclare (still creating), got %d deletes", client.deleteDBSnapshotCalls)
 	}
 
 	// Removed again before episode 1's snapshot ever resolved - episode 2
 	// starts, at a distinctly later point in time than episode 1.
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
-	if err != nil {
-		t.Fatalf("episode-2 first-pass Cleanup() error = %v", err)
-	}
+	ledger = cleanupPass(t, client, &depsv1alpha1.RDSSpec{}, ledger, "episode-2 first-pass")
 	if client.createDBSnapshotCalls != 1 {
 		t.Fatalf("expected no new snapshot yet on episode 2's first pass, got %d total CreateDBSnapshot calls", client.createDBSnapshotCalls)
 	}
@@ -726,10 +727,7 @@ func TestCleanup_SupersededEpisode_FullLifecycle(t *testing.T) {
 	// still tracked under a different (older) ID - detects supersession,
 	// but episode 1's snapshot is still "creating", so nothing is deleted
 	// and episode 2's own snapshot does NOT start yet either (serialized).
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
-	if err != nil {
-		t.Fatalf("episode-2 supersede-detect Cleanup() error = %v", err)
-	}
+	ledger = cleanupPass(t, client, &depsv1alpha1.RDSSpec{}, ledger, "episode-2 supersede-detect")
 	if client.createDBSnapshotCalls != 1 {
 		t.Errorf("expected episode 2's snapshot creation to wait for episode 1's retirement, got %d total CreateDBSnapshot calls", client.createDBSnapshotCalls)
 	}
@@ -745,10 +743,7 @@ func TestCleanup_SupersededEpisode_FullLifecycle(t *testing.T) {
 	// it (delete it), but STILL not start episode 2's snapshot in the
 	// same pass.
 	client.setSnapshotStatus(firstSnapshotID, "available")
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
-	if err != nil {
-		t.Fatalf("episode-2 retire-old Cleanup() error = %v", err)
-	}
+	ledger = cleanupPass(t, client, &depsv1alpha1.RDSSpec{}, ledger, "episode-2 retire-old")
 	if client.deleteDBSnapshotCalls != 1 || client.deletedSnapshotIDs[0] != firstSnapshotID {
 		t.Fatalf("expected episode 1's snapshot to be deleted now, got calls=%d ids=%v", client.deleteDBSnapshotCalls, client.deletedSnapshotIDs)
 	}
@@ -761,10 +756,7 @@ func TestCleanup_SupersededEpisode_FullLifecycle(t *testing.T) {
 
 	// Next pass: the slot is free - episode 2's own snapshot finally
 	// starts, under a genuinely different ID than episode 1's.
-	ledger, _, err = Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false, nil)
-	if err != nil {
-		t.Fatalf("episode-2 fresh-snapshot Cleanup() error = %v", err)
-	}
+	ledger = cleanupPass(t, client, &depsv1alpha1.RDSSpec{}, ledger, "episode-2 fresh-snapshot")
 	if client.createDBSnapshotCalls != 2 {
 		t.Errorf("expected episode 2's own CreateDBSnapshot call now, got %d total calls", client.createDBSnapshotCalls)
 	}

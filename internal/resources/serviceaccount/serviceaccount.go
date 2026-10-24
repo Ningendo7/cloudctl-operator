@@ -208,19 +208,12 @@ func Ensure(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDe
 	}
 	// Checked before releasing the previous target, so a refused retarget
 	// leaves the workload's current role in place.
-	switch {
-	case !exists && !defaultedName:
-		return cr.Status.ServiceAccountName, notFoundError(target)
-	case exists:
-		if err := claimError(existing, cr.Namespace, cr.Name, string(cr.UID)); err != nil {
-			return cr.Status.ServiceAccountName, err
-		}
+	if err := checkTarget(cr, existing, exists, defaultedName, target); err != nil {
+		return cr.Status.ServiceAccountName, err
 	}
 
-	if prev := cr.Status.ServiceAccountName; prev != "" && prev != target {
-		if err := release(ctx, k8sClient, cr, prev); err != nil {
-			return prev, err
-		}
+	if err := releasePrevious(ctx, k8sClient, cr, target); err != nil {
+		return cr.Status.ServiceAccountName, err
 	}
 
 	isOwnedByUs := exists && cloudctlaws.IsOwnedBy(existing.Annotations, cr.Namespace, cr.Name, string(cr.UID))
@@ -230,30 +223,67 @@ func Ensure(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDe
 		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(cr.Namespace, cr.Name),
 		cloudctlaws.OwnerUIDTagKey: string(cr.UID),
 	}
-	if exists && hasAnnotations(existing, annotations) && wantOwnerRef == ownedBy(existing, string(cr.UID)) &&
-		status.AppliedBy(existing, string(fieldOwner)) {
+	if exists && upToDate(existing, annotations, wantOwnerRef, string(cr.UID)) {
 		return target, nil
 	}
 
 	apply := applycorev1.ServiceAccount(target, cr.Namespace).WithAnnotations(annotations)
 	if wantOwnerRef {
-		gvk, err := apiutil.GVKForObject(cr, k8sClient.Scheme())
+		apply, err = withOwnerReference(apply, k8sClient, cr)
 		if err != nil {
 			return cr.Status.ServiceAccountName, err
 		}
-		apply = apply.WithOwnerReferences(applymetav1.OwnerReference().
-			WithAPIVersion(gvk.GroupVersion().String()).
-			WithKind(gvk.Kind).
-			WithName(cr.Name).
-			WithUID(cr.UID).
-			WithController(true).
-			WithBlockOwnerDeletion(true))
 	}
 
 	if err := k8sClient.Apply(ctx, apply, fieldOwner, client.ForceOwnership); err != nil {
 		return cr.Status.ServiceAccountName, err
 	}
 	return target, nil
+}
+
+// releasePrevious lets go of the ServiceAccount the CR used before it was
+// retargeted.
+func releasePrevious(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDependencies, target string) error {
+	prev := cr.Status.ServiceAccountName
+	if prev == "" || prev == target {
+		return nil
+	}
+	return release(ctx, k8sClient, cr, prev)
+}
+
+// checkTarget refuses a ServiceAccount this CR may not use: one it was told to
+// use that doesn't exist, or one claimed by someone else.
+func checkTarget(cr *depsv1alpha1.AppDependencies, existing *corev1.ServiceAccount, exists, defaultedName bool, target string) error {
+	switch {
+	case !exists && !defaultedName:
+		return notFoundError(target)
+	case exists:
+		return claimError(existing, cr.Namespace, cr.Name, string(cr.UID))
+	}
+	return nil
+}
+
+// upToDate reports whether the ServiceAccount already carries the annotations
+// and owner reference that applying would set, and was applied by this operator.
+func upToDate(existing *corev1.ServiceAccount, annotations map[string]string, wantOwnerRef bool, crUID string) bool {
+	return hasAnnotations(existing, annotations) &&
+		wantOwnerRef == ownedBy(existing, crUID) &&
+		status.AppliedBy(existing, string(fieldOwner))
+}
+
+// withOwnerReference makes the CR the controller of the ServiceAccount.
+func withOwnerReference(apply *applycorev1.ServiceAccountApplyConfiguration, k8sClient client.Client, cr *depsv1alpha1.AppDependencies) (*applycorev1.ServiceAccountApplyConfiguration, error) {
+	gvk, err := apiutil.GVKForObject(cr, k8sClient.Scheme())
+	if err != nil {
+		return nil, err
+	}
+	return apply.WithOwnerReferences(applymetav1.OwnerReference().
+		WithAPIVersion(gvk.GroupVersion().String()).
+		WithKind(gvk.Kind).
+		WithName(cr.Name).
+		WithUID(cr.UID).
+		WithController(true).
+		WithBlockOwnerDeletion(true)), nil
 }
 
 // ownedBy reports whether crUID is the controller owner of sa.

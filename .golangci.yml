@@ -35,6 +35,10 @@ linters:
         description: Checks Go logging calls for Kubernetes logging conventions.
     exhaustive:
       default-signifies-exhaustive: true
+    gocyclo:
+      # A function above 20 fails lint; aim for 15 in code you write or touch.
+      # A //nolint:gocyclo needs a reason on the same line.
+      min-complexity: 20
     depguard:
       rules:
         forbid-sort-pkg:

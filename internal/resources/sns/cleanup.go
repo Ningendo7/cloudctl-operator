@@ -64,8 +64,6 @@ type CleanupResult struct {
 // since a topic holds no backlog of its own. forceDeleteAll overrides every
 // entry's own Force value - meant only for the finalize path, see the sqs
 // package's Cleanup for why this exists.
-//
-//nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,
 	client snsAPI,
@@ -85,6 +83,7 @@ func Cleanup(
 		}
 	}
 
+	c := &topicCleaner{client: client, namespace: namespace, crName: crName, crUID: crUID, forceDeleteAll: forceDeleteAll, recordEvent: recordEvent}
 	updatedLedger = ledger
 	var firstErr error
 	for _, entry := range ledger {
@@ -92,137 +91,186 @@ func Cleanup(
 			continue
 		}
 
-		if declared[entry.Name] {
-			if entry.PendingDeletionSince != nil {
-				if clearErr := removePendingDeletionDeny(ctx, client, entry.ARN); clearErr != nil {
-					if firstErr == nil {
-						firstErr = clearErr
-					}
-					continue
-				}
-				cleared := entry
-				cleared.PendingDeletionSince = nil
-				cleared.LastEmptyCheckAt = nil
-				status.UpsertManagedResource(&updatedLedger, cleared)
-				if recordEvent != nil {
-					recordEvent("Normal", "TopicDeletionCancelled", fmt.Sprintf("Canceled pending deletion of topic %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
-				}
-			}
-			continue
+		var entryErr error
+		switch {
+		case declared[entry.Name]:
+			updatedLedger, entryErr = c.restoreDeclared(ctx, entry, updatedLedger)
+		case entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete:
+			updatedLedger, results, entryErr = c.retain(ctx, entry, updatedLedger, results)
+		default:
+			updatedLedger, results, entryErr = c.deleteUndeclared(ctx, entry, updatedLedger, results)
 		}
-
-		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			pinsKey := kms.PinsAKey(updatedLedger, resourceType, entry)
-			if entry.State == depsv1alpha1.ManagedResourceStateRelinquished && !pinsKey {
-				// Let go earlier and pins no key: nothing to remember.
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-			} else if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry, recordEvent)
-				if relErr != nil {
-					if firstErr == nil {
-						firstErr = relErr
-					}
-					continue
-				}
-				if gone {
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-					continue
-				}
-				if relinquished && recordEvent != nil {
-					recordEvent("Normal", "TopicOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained topic %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
-				}
-				if pinsKey {
-					status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
-				} else {
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				}
-			}
-			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
-			continue
+		if entryErr != nil && firstErr == nil {
+			firstErr = entryErr
 		}
-
-		// A pending topic waiting out the quiet window or backoff reads nothing;
-		// ownership is re-checked below, before anything changes it.
-		if !entry.Force && !forceDeleteAll && entry.PendingDeletionSince != nil &&
-			(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
-			results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-			continue
-		}
-
-		tagsOut, tErr := client.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{ResourceArn: &entry.ARN})
-		if tErr != nil {
-			// ListTagsForResource raises ResourceNotFoundException, not the
-			// plain NotFoundException other topic operations use.
-			var notFound *types.ResourceNotFoundException
-			if errors.As(tErr, &notFound) {
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				continue
-			}
-			if firstErr == nil {
-				firstErr = wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of topic %q before delete", entry.Name))
-			}
-			continue
-		}
-		if !cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.Tags), namespace, crName, crUID) {
-			if firstErr == nil {
-				firstErr = cloudctlaws.OwnershipLostError("topic", entry.Name, "delete it")
-			}
-			continue
-		}
-
-		if !entry.Force && !forceDeleteAll {
-			if entry.PendingDeletionSince == nil {
-				// First time this topic has come up for deletion. Never
-				// delete on the same pass it's first noticed, even if it
-				// looks empty right now — deny new activity and hold for
-				// the quiet window first.
-				if denyErr := addPendingDeletionDeny(ctx, client, entry.ARN); denyErr != nil {
-					if firstErr == nil {
-						firstErr = wrapAWSError(denyErr, fmt.Sprintf("blocking new activity on topic %q pending deletion", entry.Name))
-					}
-					continue
-				}
-				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
-				if recordEvent != nil {
-					recordEvent("Warning", "TopicDeletionPending", fmt.Sprintf("Topic %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
-				}
-				continue
-			}
-
-			hasSubs, subErr := hasSubscriptions(ctx, client, entry.ARN)
-			if subErr != nil {
-				if firstErr == nil {
-					firstErr = wrapAWSError(subErr, fmt.Sprintf("checking topic %q for active subscriptions", entry.Name))
-				}
-				continue
-			}
-			if hasSubs {
-				// Quiet window elapsed and it's genuinely in use — stays
-				// denied and pending, now under the long human-reaction
-				// grace period rather than the short propagation-safety one.
-				checked := entry
-				now := metav1.Now()
-				checked.LastEmptyCheckAt = &now
-				updatedLedger, results = markPendingDeletion(updatedLedger, results, checked)
-				continue
-			}
-		}
-
-		if _, dErr := client.DeleteTopic(ctx, &sns.DeleteTopicInput{
-			TopicArn: &entry.ARN,
-		}); dErr != nil {
-			if firstErr == nil {
-				firstErr = wrapAWSError(dErr, fmt.Sprintf("deleting topic %q", entry.Name))
-			}
-			continue
-		}
-		if recordEvent != nil {
-			recordEvent("Warning", "TopicDeleted", fmt.Sprintf("Deleted topic %s (%s)", entry.Name, entry.ARN))
-		}
-		status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 	}
 
 	return updatedLedger, results, firstErr
+}
+
+// topicCleaner carries what every entry in one Cleanup pass shares.
+type topicCleaner struct {
+	client                   snsAPI
+	namespace, crName, crUID string
+	forceDeleteAll           bool
+	recordEvent              status.EventRecorder
+}
+
+// restoreDeclared lifts the deny from a topic that is declared again, and
+// cancels its pending deletion.
+func (c *topicCleaner) restoreDeclared(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	if entry.PendingDeletionSince == nil {
+		return ledger, nil
+	}
+	if err := removePendingDeletionDeny(ctx, c.client, entry.ARN); err != nil {
+		return ledger, err
+	}
+	cleared := entry
+	cleared.PendingDeletionSince = nil
+	cleared.LastEmptyCheckAt = nil
+	status.UpsertManagedResource(&ledger, cleared)
+	if c.recordEvent != nil {
+		c.recordEvent("Normal", "TopicDeletionCancelled", fmt.Sprintf("Canceled pending deletion of topic %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
+	}
+	return ledger, nil
+}
+
+// retain lets go of an undeclared topic whose policy is not Delete, and
+// rechecks a relinquished one about daily. An entry is kept only while it
+// pins a KMS key.
+func (c *topicCleaner) retain(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	retained := CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained}
+	pinsKey := kms.PinsAKey(ledger, resourceType, entry)
+	if entry.State == depsv1alpha1.ManagedResourceStateRelinquished {
+		if !pinsKey {
+			// Let go earlier and pins no key: nothing to remember.
+			status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+			return ledger, append(results, retained), nil
+		}
+		if !status.NeedsRelinquishedRecheck(entry) {
+			return ledger, append(results, retained), nil
+		}
+	}
+
+	relinquished, gone, err := relinquishIfStillTagged(ctx, c.client, c.namespace, c.crName, c.crUID, entry, c.recordEvent)
+	if err != nil {
+		return ledger, results, err
+	}
+	if gone {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if relinquished && c.recordEvent != nil {
+		c.recordEvent("Normal", "TopicOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained topic %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+	}
+	if pinsKey {
+		status.UpsertManagedResource(&ledger, status.Relinquished(entry))
+	} else {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+	}
+	return ledger, append(results, retained), nil
+}
+
+// deleteUndeclared deletes an undeclared Delete-policy topic once its quiet
+// window has passed and it has no subscriptions, unless force skips both.
+func (c *topicCleaner) deleteUndeclared(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	forced := entry.Force || c.forceDeleteAll
+
+	// A pending topic waiting out the quiet window or backoff reads nothing;
+	// ownership is re-checked below, before anything changes it.
+	if !forced && entry.PendingDeletionSince != nil &&
+		(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
+		return ledger, append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)}), nil
+	}
+
+	gone, err := c.verifyOwned(ctx, entry)
+	if gone {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if err != nil {
+		return ledger, results, err
+	}
+
+	if !forced {
+		var proceed bool
+		ledger, results, proceed, err = c.gateOnSubscriptions(ctx, entry, ledger, results)
+		if err != nil || !proceed {
+			return ledger, results, err
+		}
+	}
+
+	ledger, err = c.deleteTopic(ctx, entry, ledger)
+	return ledger, results, err
+}
+
+// verifyOwned re-reads the topic's tags before anything acts on the ledger's
+// word. gone is true when the topic no longer exists.
+func (c *topicCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.ManagedResource) (gone bool, err error) {
+	tagsOut, err := c.client.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{ResourceArn: &entry.ARN})
+	if err != nil {
+		// ListTagsForResource raises ResourceNotFoundException, not the
+		// plain NotFoundException other topic operations use.
+		var notFound *types.ResourceNotFoundException
+		if errors.As(err, &notFound) {
+			return true, nil
+		}
+		return false, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of topic %q before delete", entry.Name))
+	}
+	if !cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.Tags), c.namespace, c.crName, c.crUID) {
+		return false, cloudctlaws.OwnershipLostError("topic", entry.Name, "delete it")
+	}
+	return false, nil
+}
+
+// gateOnSubscriptions holds a topic's deletion until it has been pending for
+// the quiet window and has no subscriptions. proceed is false while it must
+// still wait.
+func (c *topicCleaner) gateOnSubscriptions(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) (updated []depsv1alpha1.ManagedResource, updatedResults []CleanupResult, proceed bool, err error) {
+	if entry.PendingDeletionSince == nil {
+		// First time this topic has come up for deletion. Never
+		// delete on the same pass it's first noticed, even if it
+		// looks empty right now — deny new activity and hold for
+		// the quiet window first.
+		if err := addPendingDeletionDeny(ctx, c.client, entry.ARN); err != nil {
+			return ledger, results, false, wrapAWSError(err, fmt.Sprintf("blocking new activity on topic %q pending deletion", entry.Name))
+		}
+		ledger, results = markPendingDeletion(ledger, results, entry)
+		if c.recordEvent != nil {
+			c.recordEvent("Warning", "TopicDeletionPending", fmt.Sprintf("Topic %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
+		}
+		return ledger, results, false, nil
+	}
+
+	hasSubs, err := hasSubscriptions(ctx, c.client, entry.ARN)
+	if err != nil {
+		return ledger, results, false, wrapAWSError(err, fmt.Sprintf("checking topic %q for active subscriptions", entry.Name))
+	}
+	if hasSubs {
+		// Quiet window elapsed and it's genuinely in use — stays
+		// denied and pending, now under the long human-reaction
+		// grace period rather than the short propagation-safety one.
+		checked := entry
+		now := metav1.Now()
+		checked.LastEmptyCheckAt = &now
+		ledger, results = markPendingDeletion(ledger, results, checked)
+		return ledger, results, false, nil
+	}
+	return ledger, results, true, nil
+}
+
+// deleteTopic deletes the topic and drops its ledger entry.
+func (c *topicCleaner) deleteTopic(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	if _, err := c.client.DeleteTopic(ctx, &sns.DeleteTopicInput{
+		TopicArn: &entry.ARN,
+	}); err != nil {
+		return ledger, wrapAWSError(err, fmt.Sprintf("deleting topic %q", entry.Name))
+	}
+	if c.recordEvent != nil {
+		c.recordEvent("Warning", "TopicDeleted", fmt.Sprintf("Deleted topic %s (%s)", entry.Name, entry.ARN))
+	}
+	status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+	return ledger, nil
 }
 
 func hasSubscriptions(ctx context.Context, client snsAPI, topicArn string) (bool, error) {

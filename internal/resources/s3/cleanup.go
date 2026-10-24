@@ -62,8 +62,6 @@ type CleanupResult struct {
 // retains-and-relinquishes them, or marks them pending deletion.
 // forceDeleteAll overrides every entry's own Force value - meant only for
 // the finalize path, see the sqs package's Cleanup for why this exists.
-//
-//nolint:gocyclo // a resource-cleanup state machine (declared/retain/quiet-window/empty-check/force) is inherently branchy; splitting risks correctness bugs in already-verified logic
 func Cleanup(
 	ctx context.Context,
 	client s3API,
@@ -81,6 +79,7 @@ func Cleanup(
 		}
 	}
 
+	c := &bucketCleaner{client: client, namespace: namespace, crName: crName, crUID: crUID, forceDeleteAll: forceDeleteAll, recordEvent: recordEvent}
 	updatedLedger = ledger
 	var firstErr error
 	for _, entry := range ledger {
@@ -88,171 +87,215 @@ func Cleanup(
 			continue
 		}
 
-		if declared[entry.Name] {
-			if entry.PendingDeletionSince != nil {
-				if bucket, nameErr := bucketNameFromARN(entry.ARN); nameErr == nil {
-					if clearErr := removePendingDeletionDeny(ctx, client, bucket); clearErr != nil {
-						if firstErr == nil {
-							firstErr = wrapAWSError(clearErr, fmt.Sprintf("removing pending-deletion deny from bucket %q", entry.Name))
-						}
-						continue
-					}
-				}
-				cleared := entry
-				cleared.PendingDeletionSince = nil
-				cleared.LastEmptyCheckAt = nil
-				status.UpsertManagedResource(&updatedLedger, cleared)
-				if recordEvent != nil {
-					recordEvent("Normal", "BucketDeletionCancelled", fmt.Sprintf("Canceled pending deletion of bucket %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
-				}
-			}
-			continue
+		var entryErr error
+		switch {
+		case declared[entry.Name]:
+			updatedLedger, entryErr = c.restoreDeclared(ctx, entry, updatedLedger)
+		case entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete:
+			updatedLedger, results, entryErr = c.retain(ctx, entry, updatedLedger, results)
+		default:
+			updatedLedger, results, entryErr = c.deleteUndeclared(ctx, entry, updatedLedger, results)
 		}
-
-		if entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete {
-			pinsKey := kms.PinsAKey(updatedLedger, resourceType, entry)
-			if entry.State == depsv1alpha1.ManagedResourceStateRelinquished && !pinsKey {
-				// Let go earlier and pins no key: nothing to remember.
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-			} else if entry.State != depsv1alpha1.ManagedResourceStateRelinquished || status.NeedsRelinquishedRecheck(entry) {
-				relinquished, gone, relErr := relinquishIfStillTagged(ctx, client, namespace, crName, crUID, entry, recordEvent)
-				if relErr != nil {
-					if firstErr == nil {
-						firstErr = relErr
-					}
-					continue
-				}
-				if gone {
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-					continue
-				}
-				if relinquished && recordEvent != nil {
-					recordEvent("Normal", "BucketOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained bucket %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
-				}
-				if pinsKey {
-					status.UpsertManagedResource(&updatedLedger, status.Relinquished(entry))
-				} else {
-					status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				}
-			}
-			results = append(results, CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained})
-			continue
+		if entryErr != nil && firstErr == nil {
+			firstErr = entryErr
 		}
-
-		// A pending bucket waiting out the quiet window or backoff reads nothing;
-		// ownership is re-checked below, before anything changes it.
-		if !entry.Force && !forceDeleteAll && entry.PendingDeletionSince != nil &&
-			(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
-			results = append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)})
-			continue
-		}
-
-		bucket, nameErr := bucketNameFromARN(entry.ARN)
-		if nameErr != nil {
-			if firstErr == nil {
-				firstErr = nameErr
-			}
-			continue
-		}
-
-		tagsOut, tErr := client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
-		currentTags := map[string]string{}
-		if tErr != nil {
-			if isNotFoundError(tErr) {
-				// Already gone - just drop it from the ledger.
-				status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
-				continue
-			}
-			if !isNoSuchTagSet(tErr) {
-				if firstErr == nil {
-					firstErr = wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of bucket %q before delete", entry.Name))
-				}
-				continue
-			}
-			// NoSuchTagSet: bucket exists but is untagged - not owned by
-			// anyone, falls through to the IsOwnedBy check below, which
-			// will correctly refuse to delete it.
-		} else {
-			currentTags = tagsToMap(tagsOut.TagSet)
-		}
-		if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-			if firstErr == nil {
-				firstErr = cloudctlaws.OwnershipLostError("bucket", entry.Name, "delete it")
-			}
-			continue
-		}
-
-		if !entry.Force && !forceDeleteAll {
-			if entry.PendingDeletionSince == nil {
-				// Never delete on the same pass a bucket is first noticed as
-				// eligible, even if it looks empty right now - a moment-old
-				// write might not be reflected yet. Deny new writes and hold
-				// for the quiet window first, the same active-enforcement
-				// mechanism SQS/SNS already use for their own equivalent
-				// window.
-				if denyErr := addPendingDeletionDeny(ctx, client, bucket); denyErr != nil {
-					if firstErr == nil {
-						firstErr = wrapAWSError(denyErr, fmt.Sprintf("blocking new writes to bucket %q pending deletion", entry.Name))
-					}
-					continue
-				}
-				updatedLedger, results = markPendingDeletion(updatedLedger, results, entry)
-				if recordEvent != nil {
-					recordEvent("Warning", "BucketDeletionPending", fmt.Sprintf("Bucket %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
-				}
-				continue
-			}
-			empty, emptyErr := bucketIsEmpty(ctx, client, bucket)
-			if emptyErr != nil {
-				if firstErr == nil {
-					firstErr = wrapAWSError(emptyErr, fmt.Sprintf("checking bucket %q is empty", entry.Name))
-				}
-				continue
-			}
-			if !empty {
-				checked := entry
-				now := metav1.Now()
-				checked.LastEmptyCheckAt = &now
-				updatedLedger, results = markPendingDeletion(updatedLedger, results, checked)
-				continue
-			}
-		}
-
-		// Run the full cleanup sequence even on the "confirmed empty" path:
-		// a bucket can show zero current objects yet still carry delete
-		// markers or old versions (if versioning was ever turned on), and
-		// this is idempotent either way.
-		if err := deleteAllObjectVersions(ctx, client, bucket); err != nil {
-			if firstErr == nil {
-				firstErr = wrapAWSError(err, fmt.Sprintf("deleting objects in bucket %q", entry.Name))
-			}
-			continue
-		}
-		if err := abortMultipartUploads(ctx, client, bucket); err != nil {
-			if firstErr == nil {
-				wrapped := wrapAWSError(err, fmt.Sprintf("aborting multipart uploads in bucket %q", entry.Name))
-				var reconcileErr *cloudctlaws.ReconcileError
-				if errors.As(wrapped, &reconcileErr) && errors.Is(err, errUploadsRemain) {
-					reconcileErr.Retryable = true
-				}
-				firstErr = wrapped
-			}
-			continue
-		}
-		if _, dErr := client.DeleteBucket(ctx, &s3sdk.DeleteBucketInput{Bucket: &bucket}); dErr != nil {
-			if !isNotFoundError(dErr) {
-				if firstErr == nil {
-					firstErr = wrapAWSError(dErr, fmt.Sprintf("deleting bucket %q", entry.Name))
-				}
-				continue
-			}
-		} else if recordEvent != nil {
-			recordEvent("Warning", "BucketDeleted", fmt.Sprintf("Deleted bucket %s (%s)", entry.Name, entry.ARN))
-		}
-		status.RemoveManagedResource(&updatedLedger, resourceType, entry.Name)
 	}
 
 	return updatedLedger, results, firstErr
+}
+
+// bucketCleaner carries what every entry in one Cleanup pass shares.
+type bucketCleaner struct {
+	client                   s3API
+	namespace, crName, crUID string
+	forceDeleteAll           bool
+	recordEvent              status.EventRecorder
+}
+
+// restoreDeclared lifts the write deny from a bucket that is declared again,
+// and cancels its pending deletion.
+func (c *bucketCleaner) restoreDeclared(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	if entry.PendingDeletionSince == nil {
+		return ledger, nil
+	}
+	if bucket, nameErr := bucketNameFromARN(entry.ARN); nameErr == nil {
+		if err := removePendingDeletionDeny(ctx, c.client, bucket); err != nil {
+			return ledger, wrapAWSError(err, fmt.Sprintf("removing pending-deletion deny from bucket %q", entry.Name))
+		}
+	}
+	cleared := entry
+	cleared.PendingDeletionSince = nil
+	cleared.LastEmptyCheckAt = nil
+	status.UpsertManagedResource(&ledger, cleared)
+	if c.recordEvent != nil {
+		c.recordEvent("Normal", "BucketDeletionCancelled", fmt.Sprintf("Canceled pending deletion of bucket %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
+	}
+	return ledger, nil
+}
+
+// retain lets go of an undeclared bucket whose policy is not Delete, and
+// rechecks a relinquished one about daily. An entry is kept only while it
+// pins a KMS key.
+func (c *bucketCleaner) retain(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	retained := CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained}
+	pinsKey := kms.PinsAKey(ledger, resourceType, entry)
+	if entry.State == depsv1alpha1.ManagedResourceStateRelinquished {
+		if !pinsKey {
+			// Let go earlier and pins no key: nothing to remember.
+			status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+			return ledger, append(results, retained), nil
+		}
+		if !status.NeedsRelinquishedRecheck(entry) {
+			return ledger, append(results, retained), nil
+		}
+	}
+
+	relinquished, gone, err := relinquishIfStillTagged(ctx, c.client, c.namespace, c.crName, c.crUID, entry, c.recordEvent)
+	if err != nil {
+		return ledger, results, err
+	}
+	if gone {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if relinquished && c.recordEvent != nil {
+		c.recordEvent("Normal", "BucketOwnershipRelinquished", fmt.Sprintf("Relinquished ownership of retained bucket %s (%s) - no longer declared in spec", entry.Name, entry.ARN))
+	}
+	if pinsKey {
+		status.UpsertManagedResource(&ledger, status.Relinquished(entry))
+	} else {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+	}
+	return ledger, append(results, retained), nil
+}
+
+// deleteUndeclared deletes an undeclared Delete-policy bucket once its quiet
+// window has passed and it is empty, unless force skips both.
+func (c *bucketCleaner) deleteUndeclared(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
+	forced := entry.Force || c.forceDeleteAll
+
+	// A pending bucket waiting out the quiet window or backoff reads nothing;
+	// ownership is re-checked below, before anything changes it.
+	if !forced && entry.PendingDeletionSince != nil &&
+		(time.Since(entry.PendingDeletionSince.Time) < deletionQuietWindow || !status.NeedsEmptyCheck(entry)) {
+		return ledger, append(results, CleanupResult{Name: entry.Name, Reason: pendingDeletionReason(entry.PendingDeletionSince.Time)}), nil
+	}
+
+	bucket, nameErr := bucketNameFromARN(entry.ARN)
+	if nameErr != nil {
+		return ledger, results, nameErr
+	}
+	gone, err := c.verifyOwned(ctx, entry, bucket)
+	if gone {
+		// Already gone - just drop it from the ledger.
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if err != nil {
+		return ledger, results, err
+	}
+
+	if !forced {
+		var proceed bool
+		ledger, results, proceed, err = c.gateOnEmpty(ctx, entry, bucket, ledger, results)
+		if err != nil || !proceed {
+			return ledger, results, err
+		}
+	}
+
+	ledger, err = c.deleteBucket(ctx, entry, bucket, ledger)
+	return ledger, results, err
+}
+
+// verifyOwned re-reads the bucket's tags before anything acts on the
+// ledger's word. gone is true when the bucket no longer exists.
+func (c *bucketCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.ManagedResource, bucket string) (gone bool, err error) {
+	currentTags := map[string]string{}
+	tagsOut, err := c.client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{Bucket: &bucket})
+	switch {
+	case err == nil:
+		currentTags = tagsToMap(tagsOut.TagSet)
+	case isNotFoundError(err):
+		return true, nil
+	case !isNoSuchTagSet(err):
+		return false, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of bucket %q before delete", entry.Name))
+	}
+	// NoSuchTagSet: bucket exists but is untagged - not owned by anyone,
+	// falls through to the IsOwnedBy check below, which will correctly
+	// refuse to delete it.
+	if !cloudctlaws.IsOwnedBy(currentTags, c.namespace, c.crName, c.crUID) {
+		return false, cloudctlaws.OwnershipLostError("bucket", entry.Name, "delete it")
+	}
+	return false, nil
+}
+
+// gateOnEmpty holds a bucket's deletion until it has been pending for the
+// quiet window and is empty. proceed is false while it must still wait.
+func (c *bucketCleaner) gateOnEmpty(ctx context.Context, entry depsv1alpha1.ManagedResource, bucket string, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) (updated []depsv1alpha1.ManagedResource, updatedResults []CleanupResult, proceed bool, err error) {
+	if entry.PendingDeletionSince == nil {
+		// Never delete on the same pass a bucket is first noticed as
+		// eligible, even if it looks empty right now - a moment-old
+		// write might not be reflected yet. Deny new writes and hold
+		// for the quiet window first, the same active-enforcement
+		// mechanism SQS/SNS already use for their own equivalent
+		// window.
+		if err := addPendingDeletionDeny(ctx, c.client, bucket); err != nil {
+			return ledger, results, false, wrapAWSError(err, fmt.Sprintf("blocking new writes to bucket %q pending deletion", entry.Name))
+		}
+		ledger, results = markPendingDeletion(ledger, results, entry)
+		if c.recordEvent != nil {
+			c.recordEvent("Warning", "BucketDeletionPending", fmt.Sprintf("Bucket %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))
+		}
+		return ledger, results, false, nil
+	}
+	empty, err := bucketIsEmpty(ctx, c.client, bucket)
+	if err != nil {
+		return ledger, results, false, wrapAWSError(err, fmt.Sprintf("checking bucket %q is empty", entry.Name))
+	}
+	if !empty {
+		checked := entry
+		now := metav1.Now()
+		checked.LastEmptyCheckAt = &now
+		ledger, results = markPendingDeletion(ledger, results, checked)
+		return ledger, results, false, nil
+	}
+	return ledger, results, true, nil
+}
+
+// deleteBucket empties the bucket and deletes it, dropping its ledger entry.
+// The full sequence runs even on the "confirmed empty" path: a bucket can
+// show zero current objects yet still carry delete markers or old versions
+// (if versioning was ever turned on), and this is idempotent either way.
+func (c *bucketCleaner) deleteBucket(ctx context.Context, entry depsv1alpha1.ManagedResource, bucket string, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+	if err := deleteAllObjectVersions(ctx, c.client, bucket); err != nil {
+		return ledger, wrapAWSError(err, fmt.Sprintf("deleting objects in bucket %q", entry.Name))
+	}
+	if err := abortMultipartUploads(ctx, c.client, bucket); err != nil {
+		return ledger, abortUploadsError(err, entry.Name)
+	}
+	_, err := c.client.DeleteBucket(ctx, &s3sdk.DeleteBucketInput{Bucket: &bucket})
+	switch {
+	case err == nil:
+		if c.recordEvent != nil {
+			c.recordEvent("Warning", "BucketDeleted", fmt.Sprintf("Deleted bucket %s (%s)", entry.Name, entry.ARN))
+		}
+	case !isNotFoundError(err):
+		return ledger, wrapAWSError(err, fmt.Sprintf("deleting bucket %q", entry.Name))
+	}
+	status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+	return ledger, nil
+}
+
+// abortUploadsError wraps a failure to abort multipart uploads. Uploads that
+// remain after the abort are still in flight, so waiting and trying again
+// can succeed.
+func abortUploadsError(err error, name string) error {
+	wrapped := wrapAWSError(err, fmt.Sprintf("aborting multipart uploads in bucket %q", name))
+	var reconcileErr *cloudctlaws.ReconcileError
+	if errors.As(wrapped, &reconcileErr) && errors.Is(err, errUploadsRemain) {
+		reconcileErr.Retryable = true
+	}
+	return wrapped
 }
 
 func pendingDeletionReason(since time.Time) CleanupReason {

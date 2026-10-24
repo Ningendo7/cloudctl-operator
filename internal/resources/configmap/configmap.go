@@ -161,68 +161,77 @@ func buildConnectionData(
 ) (map[string]string, error) {
 	data := rds.NewKeyedData()
 
-	if cr.Spec.SQS != nil {
-		for _, q := range cr.Spec.SQS.Resources {
-			if err := addOwned(data, cr, resourceTypeSQS, q.Name, region, accountID); err != nil {
+	for _, sec := range connectionSections(cr) {
+		for _, name := range sec.owned {
+			if err := addOwned(data, cr, sec.resourceType, name, region, accountID); err != nil {
 				return nil, err
 			}
 		}
-		for _, ref := range cr.Spec.SQS.Consumes {
-			if err := addConsumed(ctx, k8sClient, data, cr, resourceTypeSQS, ref, region, accountID); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if cr.Spec.SNS != nil {
-		for _, t := range cr.Spec.SNS.Resources {
-			if err := addOwned(data, cr, resourceTypeSNS, t.Name, region, accountID); err != nil {
-				return nil, err
-			}
-		}
-		for _, ref := range cr.Spec.SNS.Consumes {
-			if err := addConsumed(ctx, k8sClient, data, cr, resourceTypeSNS, ref, region, accountID); err != nil {
+		for _, ref := range sec.consumes {
+			if err := addConsumed(ctx, k8sClient, data, cr, sec.resourceType, ref, region, accountID); err != nil {
 				return nil, err
 			}
 		}
 	}
-	if cr.Spec.DynamoDB != nil {
-		for _, tbl := range cr.Spec.DynamoDB.Resources {
-			if err := addOwned(data, cr, resourceTypeDynamoDB, tbl.Name, region, accountID); err != nil {
-				return nil, err
-			}
-		}
-		for _, ref := range cr.Spec.DynamoDB.Consumes {
-			if err := addConsumed(ctx, k8sClient, data, cr, resourceTypeDynamoDB, ref, region, accountID); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if cr.Spec.S3 != nil {
-		for _, b := range cr.Spec.S3.Resources {
-			if err := addOwned(data, cr, resourceTypeS3, b.Name, region, accountID); err != nil {
-				return nil, err
-			}
-		}
-		for _, ref := range cr.Spec.S3.Consumes {
-			if err := addConsumed(ctx, k8sClient, data, cr, resourceTypeS3, ref, region, accountID); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if cr.Spec.RDS != nil {
-		for _, r := range cr.Spec.RDS.Resources {
-			if err := addOwnedRDS(ctx, rdsClient, data, cr, r.Name); err != nil {
-				return nil, err
-			}
-		}
-		for _, ref := range cr.Spec.RDS.Consumes {
-			if err := addConsumedRDS(ctx, k8sClient, rdsClient, data, cr, ref); err != nil {
-				return nil, err
-			}
-		}
+	if err := addRDSConnections(ctx, k8sClient, rdsClient, data, cr); err != nil {
+		return nil, err
 	}
 
 	return data.Values(), nil
+}
+
+// connectionSection is what one declared section adds to the ConfigMap: the
+// resources the CR owns and the ones it consumes from other CRs.
+type connectionSection struct {
+	resourceType string
+	owned        []string
+	consumes     []depsv1alpha1.ConsumeRef
+}
+
+// connectionSections lists the declared sections other than RDS, in the
+// order their keys are added.
+func connectionSections(cr *depsv1alpha1.AppDependencies) []connectionSection {
+	var sections []connectionSection
+	if s := cr.Spec.SQS; s != nil {
+		sections = append(sections, connectionSection{resourceTypeSQS, namesOf(s.Resources, func(q depsv1alpha1.SQSQueueSpec) string { return q.Name }), s.Consumes})
+	}
+	if s := cr.Spec.SNS; s != nil {
+		sections = append(sections, connectionSection{resourceTypeSNS, namesOf(s.Resources, func(t depsv1alpha1.SNSTopicSpec) string { return t.Name }), s.Consumes})
+	}
+	if s := cr.Spec.DynamoDB; s != nil {
+		sections = append(sections, connectionSection{resourceTypeDynamoDB, namesOf(s.Resources, func(t depsv1alpha1.DynamoDBTableSpec) string { return t.Name }), s.Consumes})
+	}
+	if s := cr.Spec.S3; s != nil {
+		sections = append(sections, connectionSection{resourceTypeS3, namesOf(s.Resources, func(b depsv1alpha1.S3BucketSpec) string { return b.Name }), s.Consumes})
+	}
+	return sections
+}
+
+func namesOf[T any](items []T, name func(T) string) []string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		names = append(names, name(item))
+	}
+	return names
+}
+
+// addRDSConnections adds the RDS instances, which carry more than a name, so
+// they are read from AWS and not derived like the other sections.
+func addRDSConnections(ctx context.Context, k8sClient client.Client, rdsClient cloudctlaws.RDSClient, data *rds.KeyedData, cr *depsv1alpha1.AppDependencies) error {
+	if cr.Spec.RDS == nil {
+		return nil
+	}
+	for _, r := range cr.Spec.RDS.Resources {
+		if err := addOwnedRDS(ctx, rdsClient, data, cr, r.Name); err != nil {
+			return err
+		}
+	}
+	for _, ref := range cr.Spec.RDS.Consumes {
+		if err := addConsumedRDS(ctx, k8sClient, rdsClient, data, cr, ref); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addOwnedRDS adds this CR's own RDS instance's connection info to data.
