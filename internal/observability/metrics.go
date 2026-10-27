@@ -39,6 +39,7 @@ const (
 	labelSection     = "section"
 	labelResult      = "result"
 	labelReason      = "reason"
+	labelOperation   = "operation"
 )
 
 // Outcomes of one AWS API operation, for AWSRequests.
@@ -66,6 +67,16 @@ var (
 		Namespace: namespace, Subsystem: subsystemAWS, Name: "requests_total",
 		Help: "AWS API operations by service and result (success, throttled, permission_denied, not_found, error).",
 	}, []string{labelService, labelResult})
+
+	// AWSDestructiveRequests counts the operations that remove or disable
+	// something, by operation. Every deletion the operator performs is one of
+	// these, so it is the number to compare against what was expected to be
+	// deleted. The operation is the SDK's name for it (DeleteQueue), a fixed
+	// set, never user input.
+	AWSDestructiveRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemAWS, Name: "destructive_requests_total",
+		Help: "AWS operations that remove or disable something, by service, operation and result.",
+	}, []string{labelService, labelOperation, labelResult})
 
 	// AWSRequestDuration is the wall time of one operation, including any
 	// SDK retries and time spent waiting on this operator's own rate limiter.
@@ -122,7 +133,7 @@ var (
 // that only comes into existence at 1, so these are created at zero on start;
 // without that, the first such event after every restart would never alert.
 var AlertedEventReasons = []string{
-	"InstanceMissing", "KeyMissing", "KeyDisabled", "KeyUnavailable",
+	"InstanceMissing", "TableMissing", "KeyMissing", "KeyDisabled", "KeyUnavailable",
 	"QueueMissing", "TopicMissing", "BucketMissing",
 }
 
@@ -141,6 +152,7 @@ func InitAWSRequests(service string) {
 func init() {
 	metrics.Registry.MustRegister(
 		AWSRequests,
+		AWSDestructiveRequests,
 		AWSRequestDuration,
 		AWSRateLimitWait,
 		SectionReconciles,

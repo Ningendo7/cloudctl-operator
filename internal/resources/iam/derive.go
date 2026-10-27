@@ -278,6 +278,8 @@ func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *deps
 		return nil, prefix + ": resource not declared there yet", nil
 	case ReferenceNotAuthorized:
 		return nil, prefix + ": not authorized - owner hasn't granted this CR in sharedWith", nil
+	default:
+		// Resolved: go on to what the producer has published.
 	}
 	producer, grantedTo, encryption := lookup.producer, lookup.grantedTo, lookup.encryption
 

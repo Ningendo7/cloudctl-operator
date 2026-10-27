@@ -276,3 +276,38 @@ func TestWithObservability_TracesCountsAndLimitsOneOperation(t *testing.T) {
 		t.Errorf("requests{service=obs_all,result=success} = %v, want 1", got)
 	}
 }
+
+func TestIsDestructiveOperation(t *testing.T) {
+	for op, want := range map[string]bool{
+		"DeleteQueue": true, "DeleteObjects": true, "RemovePermission": true, "DetachRolePolicy": true,
+		"RevokeSecurityGroupIngress": true, "Unsubscribe": true, "PurgeQueue": true, "DisableKey": true,
+		"ScheduleKeyDeletion": true, "GetQueueUrl": false, "CreateQueue": false, "PutBucketTagging": false,
+		"DescribeInstances": false, "": false,
+	} {
+		if got := IsDestructiveOperation(op); got != want {
+			t.Errorf("IsDestructiveOperation(%q) = %v, want %v", op, got, want)
+		}
+	}
+}
+
+func TestMetricsMiddleware_CountsOnlyDestructiveOperationsByName(t *testing.T) {
+	stub := &stubHTTP{respond: func(int) (int, string) { return 200, `{}` }}
+	client := sqsClient(stub, aws.NopRetryer{}, MetricsMiddleware("mw_destructive"))
+
+	_, _ = client.GetQueueUrl(context.Background(), &sqs.GetQueueUrlInput{QueueName: aws.String("q")})
+	_, _ = client.DeleteQueue(context.Background(), &sqs.DeleteQueueInput{QueueUrl: aws.String("https://sqs.us-east-1.amazonaws.com/123456789012/q")})
+
+	count := func(op string) float64 {
+		var m dto.Metric
+		if err := observability.AWSDestructiveRequests.WithLabelValues("mw_destructive", op, observability.ResultSuccess).Write(&m); err != nil {
+			t.Fatal(err)
+		}
+		return m.GetCounter().GetValue()
+	}
+	if got := count("DeleteQueue"); got != 1 {
+		t.Errorf("destructive{DeleteQueue} = %v, want 1", got)
+	}
+	if got := count("GetQueueUrl"); got != 0 {
+		t.Errorf("destructive{GetQueueUrl} = %v, want 0: reading is not destructive", got)
+	}
+}

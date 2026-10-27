@@ -61,6 +61,25 @@ func isNotFound(err error) bool {
 	return errors.As(err, &respErr) && respErr.HTTPStatusCode() == 404
 }
 
+// destructiveOperationPrefixes are the verbs of operations that remove or
+// disable something. The SDK names every operation Verb+Noun, so a prefix
+// is enough, and a service's new delete operation is counted without a code
+// change.
+var destructiveOperationPrefixes = []string{
+	"Delete", "Remove", "Detach", "Revoke", "Unsubscribe", "Purge", "Disable", "Terminate", "ScheduleKeyDeletion",
+}
+
+// IsDestructiveOperation reports whether an SDK operation name removes or
+// disables something.
+func IsDestructiveOperation(operation string) bool {
+	for _, prefix := range destructiveOperationPrefixes {
+		if strings.HasPrefix(operation, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // MetricsMiddleware records each AWS operation made through a client:
 // its outcome and its total wall time. It sits in the Initialize step, which
 // runs once per operation outside the SDK's retry loop, so a call the SDK
@@ -78,7 +97,11 @@ func MetricsMiddleware(service string) func(*smithymiddleware.Stack) error {
 				start := time.Now()
 				out, metadata, err := next.HandleInitialize(ctx, in)
 				observability.AWSRequestDuration.WithLabelValues(service).Observe(time.Since(start).Seconds())
-				observability.AWSRequests.WithLabelValues(service, MetricResult(err)).Inc()
+				result := MetricResult(err)
+				observability.AWSRequests.WithLabelValues(service, result).Inc()
+				if op := smithymiddleware.GetOperationName(ctx); IsDestructiveOperation(op) {
+					observability.AWSDestructiveRequests.WithLabelValues(service, op, result).Inc()
+				}
 				return out, metadata, err
 			}),
 			smithymiddleware.Before,

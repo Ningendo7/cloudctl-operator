@@ -47,7 +47,7 @@ func registeredMetricNames(t *testing.T) []string {
 	t.Helper()
 	descs := make(chan *prometheus.Desc, 64)
 	collectors := []prometheus.Collector{
-		AWSRequests, AWSRequestDuration, AWSRateLimitWait, SectionReconciles,
+		AWSRequests, AWSDestructiveRequests, AWSRequestDuration, AWSRateLimitWait, SectionReconciles,
 		SectionReconcileDuration, Events, AWSClientsReady, NewStateCollector(nil, nil),
 	}
 	for _, c := range collectors {
