@@ -9,6 +9,8 @@ name: Release Smoke Test
 # and the GitHub Release), so a broken artifact stops there. Also runnable by
 # hand against any version already published:
 #   Actions -> Release Smoke Test -> Run workflow -> version v0.3.1
+# It also checks the image and chart signatures and the image's attestations,
+# so a version published before they existed (before v0.9.0) fails that step.
 
 on:
   workflow_call:
@@ -59,14 +61,41 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kind
+        run: hack/install-tool.sh kind
 
       - name: Install Helm
-        run: make install-helm
+        run: hack/install-tool.sh helm
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      # Signed by release.yml's own identity for this tag, so a copy pushed
+      # from anywhere else does not pass.
+      - name: Verify the image and chart signatures
+        run: |
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${VERSION}"
+          for ref in "$IMAGE:$VERSION" "${CHART#oci://}:${VERSION#v}"; do
+            cosign verify "$ref" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          done
+
+      # Provenance and an SBOM are attached to the image index as one
+      # attestation manifest per platform.
+      - name: Check the image carries provenance and an SBOM
+        run: |
+          raw=$(docker buildx imagetools inspect --raw "$IMAGE:$VERSION")
+          platforms=$(jq '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == null)] | length' <<<"$raw")
+          attestations=$(jq '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")] | length' <<<"$raw")
+          echo "platforms: $platforms, attestation manifests: $attestations"
+          [[ "$attestations" -ge 1 && "$attestations" -eq "$platforms" ]]
+          for platform in $(jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest' <<<"$raw"); do
+            docker buildx imagetools inspect --raw "$IMAGE@$platform" |
+              jq -e '[.layers[].annotations["in-toto.io/predicate-type"]] | (index("https://spdx.dev/Document") != null) and (any(.[]; . != null and startswith("https://slsa.dev/provenance")))' >/dev/null
+          done
 
       - name: Create kind cluster
         run: kind create cluster

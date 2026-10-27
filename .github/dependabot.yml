@@ -34,8 +34,17 @@ updates:
         patterns:
           - "*"
 
-# Deliberately no "docker" ecosystem entry: the LocalStack image used in
-# CI/testdata is pinned by digest on purpose (see Makefile's LOCALSTACK_IMAGE
-# comment) - an automated bump would fight that, and any version change
-# there needs the same direct-verification treatment a real upgrade already
-# gets, not a drive-by Dependabot PR.
+  # Base images in the Dockerfile are pinned by digest, so a moved tag or a
+  # security fix reaches the repo as a PR instead of silently or never. This
+  # ecosystem reads Dockerfiles only: the LocalStack image used by CI and
+  # testdata is pinned by digest on purpose (see the Makefile's
+  # LOCALSTACK_IMAGE comment), lives in workflow and Makefile text, and is
+  # never touched here.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      base-images:
+        patterns:
+          - "*"

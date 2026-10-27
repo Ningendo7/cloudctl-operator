@@ -116,6 +116,27 @@ var (
 	})
 )
 
+// AlertedEventReasons are the Warning event reasons the shipped alert rules
+// match on. Prometheus' increase() cannot see the first increment of a series
+// that only comes into existence at 1, so these are created at zero on start;
+// without that, the first such event after every restart would never alert.
+var AlertedEventReasons = []string{
+	"InstanceMissing", "KeyMissing", "KeyDisabled", "KeyUnavailable",
+	"QueueMissing", "TopicMissing", "BucketMissing",
+}
+
+// AWSResults is every outcome AWSRequests can carry.
+var AWSResults = []string{ResultSuccess, ResultThrottled, ResultPermissionDenied, ResultNotFound, ResultError}
+
+// InitAWSRequests creates a service's request series at zero, for the same
+// reason as AlertedEventReasons: the first permission_denied or throttled call
+// would otherwise be invisible to the rules that watch them.
+func InitAWSRequests(service string) {
+	for _, result := range AWSResults {
+		AWSRequests.WithLabelValues(service, result).Add(0)
+	}
+}
+
 func init() {
 	metrics.Registry.MustRegister(
 		AWSRequests,
@@ -126,4 +147,7 @@ func init() {
 		Events,
 		AWSClientsReady,
 	)
+	for _, reason := range AlertedEventReasons {
+		Events.WithLabelValues("Warning", reason).Add(0)
+	}
 }

@@ -1,0 +1,361 @@
+# Unit tests for the chart's PrometheusRule, run by hack/test-alert-rules.sh
+# against the rules as the chart renders them.
+#
+# Event counters are written the way the operator exports them: created at 0
+# when it starts, then incremented. A counter that first appears at 1 is
+# invisible to increase(), which is why the operator creates them at zero.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # --- CloudctlOperatorAbsent
+  - name: absent, nothing is scraped
+    interval: 1m
+    input_series:
+      - series: 'up{job="other"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CloudctlOperatorAbsent
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: CloudctlOperatorAbsent
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "No cloudctl-operator metrics are being scraped"
+              description: "The operator is down, or nothing scrapes its /metrics endpoint."
+
+  - name: absent, metrics disappear after a while
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_aws_clients_ready'
+        values: '1 1 1 1 1 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CloudctlOperatorAbsent
+        exp_alerts: []
+      - eval_time: 28m
+        alertname: CloudctlOperatorAbsent
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "No cloudctl-operator metrics are being scraped"
+              description: "The operator is down, or nothing scrapes its /metrics endpoint."
+
+  - name: absent, healthy operator
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_aws_clients_ready'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CloudctlOperatorAbsent
+        exp_alerts: []
+
+  # --- CloudctlAWSClientsNotReady
+  - name: clients not ready on any replica
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_aws_clients_ready{pod="a"}'
+        values: '0+0x30'
+      - series: 'cloudctl_aws_clients_ready{pod="b"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CloudctlAWSClientsNotReady
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CloudctlAWSClientsNotReady
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "cloudctl-operator is running but cannot reach AWS"
+              description: "No replica has initialised its AWS clients for 10 minutes. Check credentials, IRSA and network access to AWS."
+
+  - name: clients not ready on the standby only
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_aws_clients_ready{pod="a"}'
+        values: '1+0x30'
+      - series: 'cloudctl_aws_clients_ready{pod="b"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CloudctlAWSClientsNotReady
+        exp_alerts: []
+
+  # --- CloudctlRDSInstanceNeedsManualDeletion
+  - name: rds instance waiting for a human
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_pending_deletion_resources{type="rds",stuck="true",pod="a"}'
+        values: '2+0x10'
+      - series: 'cloudctl_pending_deletion_resources{type="rds",stuck="true",pod="b"}'
+        values: '2+0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: CloudctlRDSInstanceNeedsManualDeletion
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "An RDS instance removed from spec is waiting for a human"
+              description: "2 RDS instance(s) were removed from spec with deletionPolicy Delete. The operator never deletes a database; a final snapshot has been taken. Billing continues until someone deletes them."
+
+  - name: rds pending but inside its grace period, and a stuck queue
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_pending_deletion_resources{type="rds",stuck="false"}'
+        values: '1+0x10'
+      - series: 'cloudctl_pending_deletion_resources{type="sqs",stuck="true"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CloudctlRDSInstanceNeedsManualDeletion
+        exp_alerts: []
+
+  # --- CloudctlDataResourceMissing
+  - name: database deleted outside the operator
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_events_total{type="Warning",reason="InstanceMissing"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+      - series: 'cloudctl_events_total{type="Warning",reason="QueueMissing"}'
+        values: '0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: CloudctlDataResourceMissing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: CloudctlDataResourceMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, reason: InstanceMissing}
+            exp_annotations:
+              summary: "A database or KMS key the operator manages no longer exists in AWS"
+              description: "InstanceMissing: it was deleted outside the operator and will not be recreated. See the AppDependencies events and conditions for which one."
+
+  - name: key deleted outside the operator
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_events_total{type="Warning",reason="KeyMissing"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CloudctlDataResourceMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, reason: KeyMissing}
+            exp_annotations:
+              summary: "A database or KMS key the operator manages no longer exists in AWS"
+              description: "KeyMissing: it was deleted outside the operator and will not be recreated. See the AppDependencies events and conditions for which one."
+
+  # --- CloudctlKMSKeyUnusable
+  - name: kms key disabled
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_events_total{type="Warning",reason="KeyDisabled"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+      - series: 'cloudctl_events_total{type="Normal",reason="InstanceAdopted"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CloudctlKMSKeyUnusable
+        exp_alerts:
+          - exp_labels: {severity: critical, reason: KeyDisabled}
+            exp_annotations:
+              summary: "A KMS key the operator manages is disabled or unavailable"
+              description: "KeyDisabled: nothing encrypted with it can be read or written. The operator does not re-enable it. See the AppDependencies events for which key."
+
+  - name: kms key unavailable
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_events_total{type="Warning",reason="KeyUnavailable"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CloudctlKMSKeyUnusable
+        exp_alerts:
+          - exp_labels: {severity: critical, reason: KeyUnavailable}
+            exp_annotations:
+              summary: "A KMS key the operator manages is disabled or unavailable"
+              description: "KeyUnavailable: nothing encrypted with it can be read or written. The operator does not re-enable it. See the AppDependencies events for which key."
+
+  # --- CloudctlAppNotReady
+  - name: app not ready for longer than half an hour
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_app_ready{namespace="shop",name="checkout",pod="a"}'
+        values: '0+0x50'
+      - series: 'cloudctl_app_ready{namespace="shop",name="checkout",pod="b"}'
+        values: '0+0x50'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CloudctlAppNotReady
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CloudctlAppNotReady
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: shop, name: checkout}
+            exp_annotations:
+              summary: "AppDependencies shop/checkout has not been Ready for 30 minutes"
+              description: "Check its status conditions; cloudctl_app_section_ready shows which section."
+
+  - name: app that recovers in time
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_app_ready{namespace="shop",name="checkout"}'
+        values: '0+0x20 1+0x40'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: CloudctlAppNotReady
+        exp_alerts: []
+
+  # --- CloudctlAWSPermissionDenied
+  - name: permission denied keeps happening
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_aws_requests_total{service="sqs",result="permission_denied"}'
+        values: '0+1x45'
+      - series: 'cloudctl_aws_requests_total{service="sns",result="throttled"}'
+        values: '0+1x45'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CloudctlAWSPermissionDenied
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CloudctlAWSPermissionDenied
+        exp_alerts:
+          - exp_labels: {severity: warning, service: sqs}
+            exp_annotations:
+              summary: "AWS denies the operator calls to sqs"
+              description: "The operator's IAM role is missing permissions. See docs/threat-model.md for the actions it needs."
+
+  # --- CloudctlAWSThrottling
+  - name: ten percent of calls throttled
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_aws_requests_total{service="sqs",result="throttled"}'
+        values: '0+1x60'
+      - series: 'cloudctl_aws_requests_total{service="sqs",result="success"}'
+        values: '0+9x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CloudctlAWSThrottling
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: CloudctlAWSThrottling
+        exp_alerts:
+          - exp_labels: {severity: warning, service: sqs}
+            exp_annotations:
+              summary: "More than 5% of AWS calls to sqs are throttled"
+              description: "Lower that service's AWS_<SERVICE>_RATE_LIMIT_QPS, or raise the account's quota."
+
+  - name: one percent of calls throttled
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_aws_requests_total{service="sqs",result="throttled"}'
+        values: '0+1x60'
+      - series: 'cloudctl_aws_requests_total{service="sqs",result="success"}'
+        values: '0+99x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: CloudctlAWSThrottling
+        exp_alerts: []
+
+  # --- CloudctlResourceStuckPendingDeletion
+  - name: queue stuck pending deletion
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_pending_deletion_resources{type="sqs",stuck="true"}'
+        values: '1+0x10'
+      - series: 'cloudctl_pending_deletion_resources{type="rds",stuck="true"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CloudctlResourceStuckPendingDeletion
+        exp_alerts:
+          - exp_labels: {severity: warning, type: sqs}
+            exp_annotations:
+              summary: "sqs resources are stuck pending deletion"
+              description: "They were removed from spec but are not empty after the grace period. Drain them, or set force."
+
+  - name: pending but inside the grace period
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_pending_deletion_resources{type="s3",stuck="false"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CloudctlResourceStuckPendingDeletion
+        exp_alerts: []
+
+  # --- CloudctlOutOfBandDeletion
+  - name: queue deleted by hand, then quiet again after the window
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_events_total{type="Warning",reason="QueueMissing"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CloudctlOutOfBandDeletion
+        exp_alerts:
+          - exp_labels: {severity: info, reason: QueueMissing}
+            exp_annotations:
+              summary: "Someone deleted a managed resource outside the operator"
+              description: "QueueMissing: the operator recreated it, empty. Find out who deleted it."
+      - eval_time: 80m
+        alertname: CloudctlOutOfBandDeletion
+        exp_alerts: []
+
+  - name: topic and bucket deleted by hand
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_events_total{type="Warning",reason="TopicMissing"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+      - series: 'cloudctl_events_total{type="Warning",reason="BucketMissing"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CloudctlOutOfBandDeletion
+        exp_alerts:
+          - exp_labels: {severity: info, reason: BucketMissing}
+            exp_annotations:
+              summary: "Someone deleted a managed resource outside the operator"
+              description: "BucketMissing: the operator recreated it, empty. Find out who deleted it."
+          - exp_labels: {severity: info, reason: TopicMissing}
+            exp_annotations:
+              summary: "Someone deleted a managed resource outside the operator"
+              description: "TopicMissing: the operator recreated it, empty. Find out who deleted it."
+
+  # --- CloudctlWorkqueueBacklog
+  - name: reconcile queue backs up
+    interval: 1m
+    input_series:
+      - series: 'workqueue_depth{name="appdependencies"}'
+        values: '60+0x30'
+      - series: 'workqueue_depth{name="other"}'
+        values: '500+0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CloudctlWorkqueueBacklog
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CloudctlWorkqueueBacklog
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "The operator's reconcile queue is backing up"
+              description: "More than 50 AppDependencies have been waiting for 15 minutes. Check AWS throttling and reconcile durations."
+
+  - name: a short burst on the reconcile queue
+    interval: 1m
+    input_series:
+      - series: 'workqueue_depth{name="appdependencies"}'
+        values: '60+0x10 5+0x30'
+      - series: 'workqueue_depth{name="other"}'
+        values: '500+0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CloudctlWorkqueueBacklog
+        exp_alerts: []

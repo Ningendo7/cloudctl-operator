@@ -7,12 +7,18 @@ on:
 
 permissions: {}
 
+# A newer push to the same pull request supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     permissions:
       contents: read
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -27,11 +33,17 @@ jobs:
       - name: Running Tests
         run: make test-race
 
+      # The live tests only run by hand against a real account, so nothing
+      # else would notice one stopped compiling.
+      - name: Live tests still compile
+        run: go vet -tags=live ./...
+
   integration:
     permissions:
       contents: read
     name: Integration Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     services:
       localstack:
@@ -68,6 +80,7 @@ jobs:
       contents: read
     name: CLI Release Archives
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
