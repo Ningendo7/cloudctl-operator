@@ -365,7 +365,7 @@ spec:
 
 	It("handles a burst of CRs without duplicates, leaks, or the manager running out of memory", func() {
 		const burst = 8
-		var manifests []string
+		manifests := make([]string, 0, burst)
 		for i := range burst {
 			manifests = append(manifests, queueCRManifest(resilienceNamespace, fmt.Sprintf("burst-%d", i)))
 		}
@@ -381,7 +381,7 @@ spec:
 		Expect(queueCount(nextAWSPod("burst-queues"), "e2e-resilience-burst-")).To(Equal(burst),
 			"each CR should have exactly one queue")
 
-		var names []string
+		names := make([]string, 0, burst)
 		for i := range burst {
 			names = append(names, fmt.Sprintf("burst-%d", i))
 		}

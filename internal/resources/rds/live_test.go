@@ -721,15 +721,15 @@ func deleteSecurityGroupWithRetry(t *testing.T, ec2Client *ec2.Client, groupID s
 // deleteInstanceWithRetry keeps trying: an instance mid-modification
 // rejects deletion, and a silently failed delete would leave a billing
 // instance behind.
-func deleteInstanceWithRetry(t *testing.T, client *rds.Client, instanceID string) {
+func deleteInstanceWithRetry(t *testing.T, rdsClient *rds.Client, instanceID string) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Minute)
 	for {
 		// The operator creates instances with deletion protection on.
-		_, _ = client.ModifyDBInstance(context.Background(), &rds.ModifyDBInstanceInput{
+		_, _ = rdsClient.ModifyDBInstance(context.Background(), &rds.ModifyDBInstanceInput{
 			DBInstanceIdentifier: &instanceID, DeletionProtection: aws.Bool(false), ApplyImmediately: aws.Bool(true),
 		})
-		_, err := client.DeleteDBInstance(context.Background(), &rds.DeleteDBInstanceInput{
+		_, err := rdsClient.DeleteDBInstance(context.Background(), &rds.DeleteDBInstanceInput{
 			DBInstanceIdentifier: &instanceID, SkipFinalSnapshot: aws.Bool(true),
 		})
 		var notFound *types.DBInstanceNotFoundFault
