@@ -79,9 +79,12 @@ type tableOptions struct {
 	partitionKey   string
 	sortKey        string
 	backupEnabled  bool
-	retentionDays  *int32
-	billingMode    depsv1alpha1.DynamoDBBillingMode
-	kmsKeyARN      *string
+	// backupOff is an explicit backup: {enabled: false}, as opposed to no
+	// backup section at all.
+	backupOff     bool
+	retentionDays *int32
+	billingMode   depsv1alpha1.DynamoDBBillingMode
+	kmsKeyARN     *string
 	// checkAdoptedKey vets the key an existing table is encrypted with
 	// before it is adopted; nil skips the check.
 	checkAdoptedKey func(ctx context.Context, currentKey string) error
@@ -129,6 +132,7 @@ func Ensure(
 		}
 		if t.Backup != nil {
 			opts.backupEnabled = t.Backup.Enabled
+			opts.backupOff = !t.Backup.Enabled
 			opts.retentionDays = t.Backup.RetentionDays
 		}
 		if t.Overrides != nil {
@@ -207,7 +211,7 @@ func ensureTable(
 	}
 
 	table := describeOut.Table
-	if err := tableStatusError(tableName, table.TableStatus, recordEvent); err != nil {
+	if err := checkTableWorkable(tableName, table, opts, recordEvent); err != nil {
 		return ledger, err
 	}
 
@@ -246,7 +250,7 @@ func ensureTable(
 		updated.Force = opts.force
 		status.UpsertManagedResource(&ledger, updated)
 
-		if err := reconcileTableAttributes(ctx, awsClient, tableName, table, opts); err != nil {
+		if err := reconcileTableAttributes(ctx, awsClient, tableName, table, opts, recordEvent); err != nil {
 			return ledger, wrapAWSError(err, "reconciling table attributes")
 		}
 		return ledger, nil
@@ -264,7 +268,7 @@ func ensureTable(
 		}
 	}
 
-	if err := reconcileTableAttributes(ctx, awsClient, tableName, table, opts); err != nil {
+	if err := reconcileTableAttributes(ctx, awsClient, tableName, table, opts, recordEvent); err != nil {
 		return ledger, wrapAWSError(err, "reconciling table attributes")
 	}
 
@@ -336,10 +340,13 @@ func checkKeySchema(table *types.TableDescription, tableName string, opts tableO
 	if actualPartitionKey == opts.partitionKey && actualSortKey == opts.sortKey {
 		return nil
 	}
-	return fmt.Errorf(
-		"table %q has key schema (partitionKey=%q, sortKey=%q) that doesn't match this CR's declared (partitionKey=%q, sortKey=%q); AWS can't change a table's key schema, so set the keys back, or remove the entry, wait for the table to be deleted and add it again",
-		tableName, actualPartitionKey, actualSortKey, opts.partitionKey, opts.sortKey,
-	)
+	return &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf(
+			"table %q has key schema (partitionKey=%q, sortKey=%q) that doesn't match this CR's declared (partitionKey=%q, sortKey=%q); AWS can't change a table's key schema, so set the keys back, or remove the entry, wait for the table to be deleted and add it again",
+			tableName, actualPartitionKey, actualSortKey, opts.partitionKey, opts.sortKey,
+		),
+		Reason: reasons.KeySchemaMismatch,
+	}
 }
 
 // tableKeySchema extracts the partition (HASH) and sort (RANGE) key
@@ -382,6 +389,9 @@ func createTable(
 		KeySchema:            keySchema,
 		BillingMode:          billingModeFor(opts.billingMode),
 		Tags:                 mapToTags(ownerTags(namespace, crName, crUID)),
+		// The operator never recreates a table that disappears, so a delete
+		// made by hand loses the data for good.
+		DeletionProtectionEnabled: aws.Bool(true),
 	}
 	if opts.billingMode == depsv1alpha1.DynamoDBBillingModeProvisioned {
 		input.ProvisionedThroughput = &types.ProvisionedThroughput{
@@ -432,7 +442,7 @@ func createTable(
 // mutable configuration: BillingMode (driven by spec.overrides.billingMode,
 // defaulting to on-demand) and point-in-time recovery (driven by
 // spec.backup.enabled). table is the description the caller just read.
-func reconcileTableAttributes(ctx context.Context, awsClient dynamodbAPI, tableName string, table *types.TableDescription, opts tableOptions) error {
+func reconcileTableAttributes(ctx context.Context, awsClient dynamodbAPI, tableName string, table *types.TableDescription, opts tableOptions, recordEvent status.EventRecorder) error {
 	desiredMode := billingModeFor(opts.billingMode)
 	// A nil BillingModeSummary means this table predates the field's
 	// introduction — every table AWS ever created before PAY_PER_REQUEST
@@ -485,48 +495,7 @@ func reconcileTableAttributes(ctx context.Context, awsClient dynamodbAPI, tableN
 		}
 	}
 
-	// DescribeContinuousBackups/UpdateContinuousBackups raise
-	// TableNotFoundException for a missing table, not the
-	// ResourceNotFoundException DescribeTable and the tagging calls use -
-	// this call site doesn't need to distinguish "not found" from any other
-	// error, but a future change that does should check the right type.
-	backupOut, err := awsClient.DescribeContinuousBackups(ctx, &dynamodb.DescribeContinuousBackupsInput{TableName: &tableName})
-	if err != nil {
-		return fmt.Errorf("reading point-in-time recovery status: %w", err)
-	}
-	var pitrDesc *types.PointInTimeRecoveryDescription
-	if backupOut.ContinuousBackupsDescription != nil {
-		pitrDesc = backupOut.ContinuousBackupsDescription.PointInTimeRecoveryDescription
-	}
-	currentlyEnabled := pitrDesc != nil && pitrDesc.PointInTimeRecoveryStatus == types.PointInTimeRecoveryStatusEnabled
-
-	desiredRetentionDays := defaultPITRRetentionDays
-	if opts.retentionDays != nil {
-		desiredRetentionDays = *opts.retentionDays
-	}
-
-	// RetentionDays only means anything while PITR is actually enabled —
-	// comparing it while disabled risks a perpetual, pointless drift
-	// correction against whatever AWS happens to report for a disabled
-	// table (e.g. a stale value left over from when it was last enabled).
-	needsUpdate := currentlyEnabled != opts.backupEnabled
-	if opts.backupEnabled && currentlyEnabled && (pitrDesc.RecoveryPeriodInDays == nil || *pitrDesc.RecoveryPeriodInDays != desiredRetentionDays) {
-		needsUpdate = true
-	}
-
-	if needsUpdate {
-		if _, err := awsClient.UpdateContinuousBackups(ctx, &dynamodb.UpdateContinuousBackupsInput{
-			TableName: &tableName,
-			PointInTimeRecoverySpecification: &types.PointInTimeRecoverySpecification{
-				PointInTimeRecoveryEnabled: aws.Bool(opts.backupEnabled),
-				RecoveryPeriodInDays:       aws.Int32(desiredRetentionDays),
-			},
-		}); err != nil {
-			return fmt.Errorf("correcting point-in-time recovery: %w", err)
-		}
-	}
-
-	return nil
+	return reconcilePointInTimeRecovery(ctx, awsClient, tableName, aws.ToString(table.TableArn), opts, recordEvent)
 }
 
 func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn string, deletionPolicy depsv1alpha1.DeletionPolicy, force bool) []depsv1alpha1.ManagedResource {
@@ -607,6 +576,87 @@ func wrapAWSError(err error, errContext string) error {
 // DynamoDB can briefly answer "no such table" right after CreateTable.
 const creationVisibilityGrace = 5 * time.Minute
 
+// reconcilePointInTimeRecovery only ever turns point-in-time recovery on or
+// extends its window. Turning it off discards the restore window and
+// shortening it discards the oldest part, and something else may be relying on
+// it (AWS Backup, an organisation rule), so a table that already has more
+// protection than the spec asks for is left as it is.
+func reconcilePointInTimeRecovery(ctx context.Context, awsClient dynamodbAPI, tableName, tableARN string, opts tableOptions, recordEvent status.EventRecorder) error {
+	if !opts.backupEnabled && !opts.backupOff {
+		return nil
+	}
+
+	// DescribeContinuousBackups/UpdateContinuousBackups raise
+	// TableNotFoundException for a missing table, not the
+	// ResourceNotFoundException DescribeTable and the tagging calls use -
+	// this call site doesn't need to distinguish "not found" from any other
+	// error, but a future change that does should check the right type.
+	backupOut, err := awsClient.DescribeContinuousBackups(ctx, &dynamodb.DescribeContinuousBackupsInput{TableName: &tableName})
+	if err != nil {
+		return fmt.Errorf("reading point-in-time recovery status: %w", err)
+	}
+	var pitrDesc *types.PointInTimeRecoveryDescription
+	if backupOut.ContinuousBackupsDescription != nil {
+		pitrDesc = backupOut.ContinuousBackupsDescription.PointInTimeRecoveryDescription
+	}
+	currentlyEnabled := pitrDesc != nil && pitrDesc.PointInTimeRecoveryStatus == types.PointInTimeRecoveryStatusEnabled
+
+	if !opts.backupEnabled {
+		if currentlyEnabled && recordEvent != nil {
+			recordEvent("Warning", "BackupsLeftEnabled", fmt.Sprintf("DynamoDB table %s has point-in-time recovery on but its spec disables it; not turning it off, since that discards the restore window - disable it in AWS if intended", tableARN))
+		}
+		return nil
+	}
+
+	desiredRetentionDays := defaultPITRRetentionDays
+	if opts.retentionDays != nil {
+		desiredRetentionDays = *opts.retentionDays
+	}
+	// RetentionDays only means anything while PITR is actually enabled.
+	if currentlyEnabled && pitrDesc.RecoveryPeriodInDays != nil && *pitrDesc.RecoveryPeriodInDays >= desiredRetentionDays {
+		return nil
+	}
+
+	if _, err := awsClient.UpdateContinuousBackups(ctx, &dynamodb.UpdateContinuousBackupsInput{
+		TableName: &tableName,
+		PointInTimeRecoverySpecification: &types.PointInTimeRecoverySpecification{
+			PointInTimeRecoveryEnabled: aws.Bool(true),
+			RecoveryPeriodInDays:       aws.Int32(desiredRetentionDays),
+		},
+	}); err != nil {
+		return fmt.Errorf("correcting point-in-time recovery: %w", err)
+	}
+	return nil
+}
+
+// checkTableWorkable returns nil for a table that can be worked on, and why not
+// otherwise: its status, and a billing-mode switch the operator cannot do safely.
+func checkTableWorkable(tableName string, table *types.TableDescription, opts tableOptions, recordEvent status.EventRecorder) error {
+	if err := tableStatusError(tableName, table.TableStatus, recordEvent); err != nil {
+		return err
+	}
+	return checkBillingModeSwitch(tableName, table, opts)
+}
+
+// checkBillingModeSwitch refuses to move an on-demand table to provisioned
+// capacity. The only capacity the operator could set is a placeholder of 5
+// read and 5 write units, which would throttle a busy table the moment the
+// change applies. A table created as provisioned, or already provisioned, is
+// fine, and so is the switch to on-demand.
+func checkBillingModeSwitch(tableName string, table *types.TableDescription, opts tableOptions) error {
+	if billingModeFor(opts.billingMode) != types.BillingModeProvisioned {
+		return nil
+	}
+	if table.BillingModeSummary == nil || table.BillingModeSummary.BillingMode != types.BillingModePayPerRequest {
+		return nil
+	}
+	return &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("table %q is on-demand and the spec asks for provisioned capacity; the operator can only set a placeholder of %d read and %d write units, which would throttle a busy table - switch it to provisioned in AWS with the capacity it needs, and the spec will then match",
+			tableName, provisionedDefaultCapacityUnits, provisionedDefaultCapacityUnits),
+		Reason: reasons.ProvisionedCapacityNeeded,
+	}
+}
+
 // tableStatusError returns nil for a table that can be worked on, and why not
 // otherwise. A status added to the SDK later returns nil until the exhaustive
 // linter makes it handled here.
@@ -628,6 +678,14 @@ func tableStatusError(tableName string, tableStatus types.TableStatus, recordEve
 	case types.TableStatusDeleting:
 		return &cloudctlaws.ReconcileError{
 			Err:       fmt.Errorf("table %q is being deleted (by this operator or out-of-band) — refusing to recreate or adopt while DELETING", tableName),
+			Retryable: true,
+		}
+	default:
+		// DynamoDB's statuses are few and stable, but one added later is more
+		// likely a state the table is still passing through than a healthy
+		// one, so wait for a known status instead of assuming it is active.
+		return &cloudctlaws.ReconcileError{
+			Err:       fmt.Errorf("table %q has status %q, which this operator does not recognise yet", tableName, tableStatus),
 			Retryable: true,
 		}
 	}

@@ -18,9 +18,12 @@ package watches
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 )
@@ -105,5 +108,21 @@ func TestSubnetGroupGrantToAffectedCRs_NoMatchingCRs(t *testing.T) {
 	requests := SubnetGroupGrantToAffectedCRs(k8sClient)(context.Background(), grant)
 	if len(requests) != 0 {
 		t.Errorf("expected no requests, got %v", requestedNames(requests))
+	}
+}
+
+func TestSubnetGroupGrantToAffectedCRs_ListFailure_IsLoggedAndReturnsNil(t *testing.T) {
+	grant := &depsv1alpha1.RDSSubnetGroupGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: "prod"},
+		Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "prod-private-data-tier", AllowedNamespaces: []string{"default"}},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build() // unregistered scheme makes List fail
+
+	ctx, logged := capturedLog()
+	if requests := SubnetGroupGrantToAffectedCRs(k8sClient)(ctx, grant); requests != nil {
+		t.Errorf("expected nil requests on a List failure, got %v", requests)
+	}
+	if !strings.Contains(logged(), "Failed to list the CRs affected by a changed subnet group grant") {
+		t.Errorf("expected the dropped wake-up to be logged, got %q", logged())
 	}
 }

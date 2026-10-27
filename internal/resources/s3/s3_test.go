@@ -523,6 +523,61 @@ func TestEnsure_EnablesVersioningWhenBackupEnabled(t *testing.T) {
 	}
 }
 
+func ownedBucketWithVersioning(client *fakeS3, status types.BucketVersioningStatus) string {
+	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
+	client.buckets[bucket] = &fakeBucket{
+		tags:             map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
+		versioningStatus: status,
+	}
+	return bucket
+}
+
+// AWS Backup for S3 requires versioning. A spec that says nothing about it
+// must not suspend what something else turned on.
+func TestEnsure_LeavesVersioningOnWhenTheSpecDoesNotAskForIt(t *testing.T) {
+	client := newFakeS3()
+	bucket := ownedBucketWithVersioning(client, types.BucketVersioningStatusEnabled)
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
+
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if got := client.buckets[bucket].versioningStatus; got != types.BucketVersioningStatusEnabled {
+		t.Errorf("versioning was changed to %q, want it left enabled", got)
+	}
+}
+
+func TestEnsure_SuspendsVersioningWhenTheSpecSaysSoExplicitly(t *testing.T) {
+	client := newFakeS3()
+	bucket := ownedBucketWithVersioning(client, types.BucketVersioningStatusEnabled)
+	off := false
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Overrides: &depsv1alpha1.S3Overrides{VersioningEnabled: &off}},
+	}}
+
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if got := client.buckets[bucket].versioningStatus; got != types.BucketVersioningStatusSuspended {
+		t.Errorf("versioning is %q, want suspended when the spec sets versioningEnabled: false", got)
+	}
+}
+
+func TestEnsure_EnablesVersioningOnABucketThatHasItOff(t *testing.T) {
+	client := newFakeS3()
+	bucket := ownedBucketWithVersioning(client, types.BucketVersioningStatusSuspended)
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
+		{Name: "receipts", Backup: &depsv1alpha1.S3BackupSpec{Enabled: true}},
+	}}
+
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if got := client.buckets[bucket].versioningStatus; got != types.BucketVersioningStatusEnabled {
+		t.Errorf("versioning is %q, want enabled", got)
+	}
+}
+
 func TestEnsure_AppliesDefaultLifecycleWhenBackupEnabledWithNoOverride(t *testing.T) {
 	client := newFakeS3()
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{

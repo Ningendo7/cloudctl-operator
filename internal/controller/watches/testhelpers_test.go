@@ -18,8 +18,11 @@ package watches
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -86,4 +89,12 @@ func (r *listRecorder) List(ctx context.Context, list client.ObjectList, opts ..
 		r.noDeepCopy++
 	}
 	return r.Reader.List(ctx, list, opts...)
+}
+
+// capturedLog returns a context whose logger records what it is given, and a
+// function that returns everything logged so far.
+func capturedLog() (context.Context, func() string) {
+	var lines []string
+	logger := funcr.New(func(prefix, args string) { lines = append(lines, prefix+" "+args) }, funcr.Options{})
+	return logr.NewContext(context.Background(), logger), func() string { return strings.Join(lines, "\n") }
 }

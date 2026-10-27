@@ -19,10 +19,12 @@ package aws
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	smithymiddleware "github.com/aws/smithy-go/middleware"
+	"github.com/go-logr/logr/funcr"
 	"golang.org/x/time/rate"
 )
 
@@ -274,5 +276,30 @@ func TestNewRateLimiters_RespectsEnvOverride(t *testing.T) {
 	}
 	if limiters["sqs"].Burst() != 199 {
 		t.Errorf("expected the env override to set burst to 199, got %d", limiters["sqs"].Burst())
+	}
+}
+
+// An operator who sets AWS_IAM_RATE_LIMIT_QPS=8x believes they tuned it, so
+// ignoring the value must not be silent.
+func TestEnvHelpers_ReportAnUnparseableValue(t *testing.T) {
+	var lines []string
+	previous := rateLimitLog
+	rateLimitLog = funcr.New(func(prefix, args string) { lines = append(lines, prefix+" "+args) }, funcr.Options{})
+	t.Cleanup(func() { rateLimitLog = previous })
+
+	t.Setenv("CLOUDCTL_TEST_LOGGED_FLOAT", "8x")
+	t.Setenv("CLOUDCTL_TEST_LOGGED_INT", "ten")
+	if got := envFloat("CLOUDCTL_TEST_LOGGED_FLOAT", 3); got != 3 {
+		t.Errorf("envFloat = %v, want the fallback", got)
+	}
+	if got := envInt("CLOUDCTL_TEST_LOGGED_INT", 5); got != 5 {
+		t.Errorf("envInt = %v, want the fallback", got)
+	}
+
+	logged := strings.Join(lines, "\n")
+	for _, want := range []string{"CLOUDCTL_TEST_LOGGED_FLOAT", "8x", "CLOUDCTL_TEST_LOGGED_INT", "ten"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("expected the log to mention %q, got %q", want, logged)
+		}
 	}
 }

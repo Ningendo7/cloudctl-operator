@@ -180,8 +180,12 @@ func (e *ensurer) ensureResource(ctx context.Context, r depsv1alpha1.RDSInstance
 	if r.Replication != nil && r.Replication.Enabled {
 		return ledger, fmt.Errorf("instance %q: %w", r.Name, ErrReplicationNotSupported)
 	}
-	if err := e.authorizeSubnetGroup(ctx, r); err != nil {
+	authorized, err := e.subnetGroupAuthorized(ctx, r)
+	if err != nil {
 		return ledger, err
+	}
+	if !authorized {
+		return ledger, e.holdUnauthorized(ctx, r, ledger)
 	}
 	if err := checkAdoptable(ctx, e.awsClient, e.kmsClient, e.namespace, e.crName, r, ledger); err != nil {
 		return ledger, fmt.Errorf("instance %q: %w", r.Name, err)
@@ -207,25 +211,40 @@ func (e *ensurer) ensureResource(ctx context.Context, r depsv1alpha1.RDSInstance
 	return ledger, nil
 }
 
-// authorizeSubnetGroup refuses an instance whose subnet group no
-// RDSSubnetGroupGrant hands to this namespace.
-func (e *ensurer) authorizeSubnetGroup(ctx context.Context, r depsv1alpha1.RDSInstanceSpec) error {
+// subnetGroupAuthorized reports whether an RDSSubnetGroupGrant hands the
+// instance's subnet group to this namespace. A failed read of the grants is an
+// error, never an answer.
+func (e *ensurer) subnetGroupAuthorized(ctx context.Context, r depsv1alpha1.RDSInstanceSpec) (bool, error) {
 	if !e.grantsFetched {
 		e.grants, e.grantsErr = listSubnetGroupGrants(ctx, e.k8sClient)
 		e.grantsFetched = true
 	}
 	if e.grantsErr != nil {
-		return fmt.Errorf("instance %q: checking subnet group authorization: %w", r.Name, e.grantsErr)
+		return false, fmt.Errorf("instance %q: checking subnet group authorization: %w", r.Name, e.grantsErr)
 	}
-	if !isAuthorizedByGrants(e.grants, e.namespace, r.DBSubnetGroupName) {
-		return &cloudctlaws.ReconcileError{
-			Err: fmt.Errorf("instance %q: namespace %q is not authorized to use DB subnet group %q - "+
-				"a platform admin must create an RDSSubnetGroupGrant covering it", r.Name, e.namespace, r.DBSubnetGroupName),
-			Retryable:     true,
-			WakesOnChange: true,
-		}
+	return isAuthorizedByGrants(e.grants, e.namespace, r.DBSubnetGroupName), nil
+}
+
+// holdUnauthorized is what an instance gets when no grant covers its subnet
+// group. Nothing is created or changed, so a new instance is never placed. One
+// that already exists still has its network access narrowed: a consumer the
+// owner has removed must not keep reaching the database because an admin
+// withdrew the grant, and narrowing only ever removes access.
+func (e *ensurer) holdUnauthorized(ctx context.Context, r depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource) error {
+	notAuthorized := &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("instance %q: namespace %q is not authorized to use DB subnet group %q - "+
+			"a platform admin must create an RDSSubnetGroupGrant covering it", r.Name, e.namespace, r.DBSubnetGroupName),
+		Retryable:     true,
+		WakesOnChange: true,
 	}
-	return nil
+	if _, tracked := trackedInstance(ledger, r.Name); !tracked {
+		return notAuthorized
+	}
+	recordedSG, _ := status.FindManagedResource(ledger, podNetworkIdentityResourceType, instanceSecurityGroupLedgerName(r.Name))
+	if err := narrowInstanceIngress(ctx, e.ec2Client, e.k8sClient, e.namespace, e.crName, e.crUID, r.Name, r.Engine, r.SharedWith, recordedSG.ARN); err != nil {
+		return errors.Join(notAuthorized, fmt.Errorf("instance %q: narrowing network access: %w", r.Name, err))
+	}
+	return notAuthorized
 }
 
 // optionsFor translates a declared instance into what the AWS calls need.

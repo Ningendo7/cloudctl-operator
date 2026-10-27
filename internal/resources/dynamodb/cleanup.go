@@ -249,10 +249,34 @@ func (c *tableCleaner) gateOnEmpty(ctx context.Context, entry depsv1alpha1.Manag
 	return ledger, results, true, nil
 }
 
+// releaseDeletionProtection switches deletion protection off just before the
+// operator's own delete, which every gate has already approved. The table is
+// briefly UPDATING afterwards, so the delete may be retried on the next pass.
+func (c *tableCleaner) releaseDeletionProtection(ctx context.Context, entry depsv1alpha1.ManagedResource, tableName string) error {
+	out, err := c.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
+	if err != nil {
+		var notFound *types.ResourceNotFoundException
+		if errors.As(err, &notFound) {
+			return nil
+		}
+		return wrapAWSError(err, fmt.Sprintf("reading table %q before delete", entry.Name))
+	}
+	if out.Table == nil || !aws.ToBool(out.Table.DeletionProtectionEnabled) {
+		return nil
+	}
+	if _, err := c.client.UpdateTable(ctx, &dynamodb.UpdateTableInput{TableName: &tableName, DeletionProtectionEnabled: aws.Bool(false)}); err != nil {
+		return wrapAWSError(err, fmt.Sprintf("turning off deletion protection of table %q", entry.Name))
+	}
+	return nil
+}
+
 // deleteTable deletes the table and drops its ledger entry.
 func (c *tableCleaner) deleteTable(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
 	tableName, err := tableNameFromARN(entry.ARN)
 	if err != nil {
+		return ledger, err
+	}
+	if err := c.releaseDeletionProtection(ctx, entry, tableName); err != nil {
 		return ledger, err
 	}
 	if _, err := c.client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: &tableName}); err != nil {

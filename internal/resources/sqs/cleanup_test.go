@@ -23,9 +23,11 @@ import (
 	"testing"
 	"time"
 
+	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -1011,5 +1013,127 @@ func TestCleanup_PendingDeletion_ReadsNothingWhileWaiting(t *testing.T) {
 		if r := findResult(results, "orders"); r == nil || r.Reason != CleanupReasonPendingDeletion {
 			t.Errorf("%s: expected PendingDeletion, got %+v", phase, results)
 		}
+	}
+}
+
+// subscribedQueue sets up a queue with one authorized SNS subscription and
+// returns what a teardown test needs.
+func subscribedQueue(t *testing.T, deletionPolicy depsv1alpha1.DeletionPolicy, force bool) (*fakeSQS, *fakeSNSSubscriber, client.Client, []depsv1alpha1.ManagedResource, string, depsv1alpha1.ConsumeRef) {
+	t.Helper()
+	sqsClient := newFakeSQS()
+	snsClient := newFakeSNSSubscriber()
+	ledger := setupQueue(t, sqsClient, "default", "checkout-service", "orders", deletionPolicy, force)
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
+	queue := sqsClient.queues[queueName]
+	producer := newAuthorizedTopicProducer("team-b", "platform-service", "events",
+		"arn:aws:sns:us-east-1:123456789012:events", "default", "checkout-service")
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+
+	ref := depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "events"}
+	ledger, err := EnsureSubscriptions(context.Background(), snsClient, sqsClient, k8sClient,
+		"default", "checkout-service", queueName, queue.url, queue.arn,
+		[]depsv1alpha1.ConsumeRef{ref}, ledger, nil)
+	if err != nil {
+		t.Fatalf("EnsureSubscriptions() error = %v", err)
+	}
+	if len(snsClient.subscriptions) != 1 {
+		t.Fatalf("setup: expected one real subscription, got %d", len(snsClient.subscriptions))
+	}
+	return sqsClient, snsClient, k8sClient, ledger, queueName, ref
+}
+
+// SNS keeps a queue's subscriptions after the queue is deleted, and every
+// publish to the topic then fails delivery for them.
+func TestCleanup_QueueDeletedInThisPass_StillTearsDownItsSubscriptions(t *testing.T) {
+	sqsClient, snsClient, k8sClient, ledger, queueName, ref := subscribedQueue(t, depsv1alpha1.DeletionPolicyDelete, true)
+
+	updated, _, err := Cleanup(context.Background(), sqsClient, snsClient, k8sClient,
+		"default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	if _, stillExists := sqsClient.queues[queueName]; stillExists {
+		t.Fatal("setup: expected the forced queue to be deleted in this pass")
+	}
+	if len(snsClient.unsubscribed) != 1 {
+		t.Errorf("expected the subscription to be removed after its queue was deleted, got %d Unsubscribe calls", len(snsClient.unsubscribed))
+	}
+	if status.HasManagedResource(updated, subscriptionResourceType, subscriptionLedgerName(queueName, ref)) {
+		t.Error("expected the subscription ledger entry to be removed")
+	}
+}
+
+func TestCleanup_QueueDeletedByHand_StillTearsDownItsSubscriptions(t *testing.T) {
+	sqsClient, snsClient, k8sClient, ledger, queueName, ref := subscribedQueue(t, depsv1alpha1.DeletionPolicyRetain, false)
+	delete(sqsClient.queues, queueName)
+
+	updated, _, err := Cleanup(context.Background(), sqsClient, snsClient, k8sClient,
+		"default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, true, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	if len(snsClient.unsubscribed) != 1 {
+		t.Errorf("expected the subscription to be removed although its queue is gone, got %d Unsubscribe calls", len(snsClient.unsubscribed))
+	}
+	if status.HasManagedResource(updated, subscriptionResourceType, subscriptionLedgerName(queueName, ref)) {
+		t.Error("expected the subscription ledger entry to be removed, or the CR's deletion would finish with it left behind")
+	}
+}
+
+// A failed lookup says nothing about whether the queue exists, so it must be
+// reported, not skipped. The queue stays declared here so that nothing else in
+// the pass reads it first and reports the same failure.
+func TestCleanup_ThrottledQueueLookup_IsReportedNotSkippedBySubscriptionTeardown(t *testing.T) {
+	sqsClient, snsClient, k8sClient, ledger, queueName, ref := subscribedQueue(t, depsv1alpha1.DeletionPolicyRetain, false)
+	sqsClient.getQueueUrlErr = &fakeAWSError{code: "ThrottlingException", fault: smithy.FaultServer}
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", SubscribesTo: []depsv1alpha1.ConsumeRef{ref}},
+	}}
+
+	updated, _, err := Cleanup(context.Background(), sqsClient, snsClient, k8sClient,
+		"default", "checkout-service", "uid-1", spec, ledger, false, false, nil)
+	if err == nil {
+		t.Fatal("expected the throttled lookup to be reported: swallowing it lets a deletion finish, or a repair be skipped, with no sign of it")
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Errorf("expected a retryable error for a throttle, got %v", err)
+	}
+	if len(snsClient.unsubscribed) != 0 {
+		t.Errorf("expected no Unsubscribe while the queue's state is unknown, got %d", len(snsClient.unsubscribed))
+	}
+	if !status.HasManagedResource(updated, subscriptionResourceType, subscriptionLedgerName(queueName, ref)) {
+		t.Error("expected the subscription entry to be kept for the next pass")
+	}
+}
+
+// A subscription removed elsewhere must not wedge the teardown for ever.
+func TestCleanup_SubscriptionAlreadyRemovedInSNS_IsDroppedFromTheLedger(t *testing.T) {
+	sqsClient, snsClient, k8sClient, ledger, queueName, ref := subscribedQueue(t, depsv1alpha1.DeletionPolicyRetain, false)
+	delete(sqsClient.queues, queueName)
+	snsClient.unsubscribeErr = &snstypes.NotFoundException{}
+
+	updated, _, err := Cleanup(context.Background(), sqsClient, snsClient, k8sClient,
+		"default", "checkout-service", "uid-1", &depsv1alpha1.SQSSpec{}, ledger, true, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v, want an already-removed subscription to count as removed", err)
+	}
+	if status.HasManagedResource(updated, subscriptionResourceType, subscriptionLedgerName(queueName, ref)) {
+		t.Error("expected the ledger entry to be dropped")
+	}
+}
+
+// A ledger entry whose ARN can't be read is damaged. Skipping it would leave its
+// subscriptions in place with nothing to say so.
+func TestCleanup_MalformedQueueARN_IsReportedBySubscriptionTeardown(t *testing.T) {
+	ledger := []depsv1alpha1.ManagedResource{{Type: resourceType, Name: "orders", ARN: "garbage"}}
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+
+	_, _, err := Cleanup(context.Background(), newFakeSQS(), newFakeSNSSubscriber(), nil,
+		"default", "checkout-service", "uid-1", spec, ledger, false, false, nil)
+	if err == nil {
+		t.Fatal("expected the unreadable ARN to be reported")
 	}
 }

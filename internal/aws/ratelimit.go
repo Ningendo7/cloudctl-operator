@@ -26,6 +26,7 @@ import (
 
 	smithymiddleware "github.com/aws/smithy-go/middleware"
 	"golang.org/x/time/rate"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/Ningendo7/cloudctl-operator/internal/observability"
 )
@@ -143,8 +144,13 @@ func RampUp(ctx context.Context, limiter *rate.Limiter, rampDuration time.Durati
 	limiter.SetBurstAt(now, targetBurst)
 }
 
-// envFloat reads name as a float64, returning fallback if unset or
-// unparseable.
+// rateLimitLog reports a setting that was ignored. It is a variable so a test
+// can capture it.
+var rateLimitLog = logf.Log.WithName("rate-limit")
+
+// envFloat reads name as a float64, returning fallback if unset. An
+// unparseable value is reported and the fallback used, so a mistyped setting
+// is not mistaken for a tuned one.
 func envFloat(name string, fallback float64) float64 {
 	v, ok := os.LookupEnv(name)
 	if !ok {
@@ -152,6 +158,7 @@ func envFloat(name string, fallback float64) float64 {
 	}
 	f, err := strconv.ParseFloat(v, 64)
 	if err != nil {
+		rateLimitLog.Info("Ignoring a rate limit setting that is not a number", "env", name, "value", v, "using", fallback)
 		return fallback
 	}
 	return f
@@ -166,6 +173,7 @@ func envInt(name string, fallback int) int {
 	}
 	i, err := strconv.Atoi(v)
 	if err != nil {
+		rateLimitLog.Info("Ignoring a rate limit setting that is not a whole number", "env", name, "value", v, "using", fallback)
 		return fallback
 	}
 	return i

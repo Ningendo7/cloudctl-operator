@@ -21,6 +21,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -47,6 +48,7 @@ func SubnetGroupGrantToAffectedCRs(reader client.Reader) handler.MapFunc {
 		var affected depsv1alpha1.AppDependenciesList
 		// Read-only, so the cache needn't copy what it returns.
 		if err := reader.List(ctx, &affected, client.MatchingFields{IndexRDSSubnetGroup: grant.Spec.DBSubnetGroupName}, client.UnsafeDisableDeepCopy); err != nil {
+			logf.FromContext(ctx).Error(err, "Failed to list the CRs affected by a changed subnet group grant", "subnetGroup", grant.Spec.DBSubnetGroupName)
 			return nil
 		}
 

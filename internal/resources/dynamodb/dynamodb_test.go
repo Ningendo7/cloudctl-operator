@@ -321,7 +321,39 @@ func TestEnsure_DefaultsToThirtyFiveDayRetentionWhenUnset(t *testing.T) {
 	}
 }
 
-func TestEnsure_CorrectsRetentionDaysDriftOnAlreadyEnabledTable(t *testing.T) {
+func TestEnsure_ExtendsPointInTimeRecoveryWhenTheSpecAsksForMore(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	client.tables[tableName] = &fakeTable{
+		arn:           "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:        types.TableStatusActive,
+		billingMode:   types.BillingModePayPerRequest,
+		pitrEnabled:   true,
+		retentionDays: 7,
+		tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-1",
+		},
+	}
+
+	retentionDays := int32(14)
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Backup: &depsv1alpha1.DynamoDBBackupSpec{
+			Enabled: true, RetentionDays: &retentionDays,
+		}},
+	}}
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	if got := client.tables[tableName].retentionDays; got != 14 {
+		t.Errorf("expected the window to be extended to 14 days, got %d", got)
+	}
+}
+
+// Shortening the window discards the oldest part of the restore range, and a
+// table may be protected for a reason the spec doesn't know about.
+func TestEnsure_NeverShortensPointInTimeRecoveryRetention(t *testing.T) {
 	client := newFakeDynamoDB()
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
@@ -336,6 +368,8 @@ func TestEnsure_CorrectsRetentionDaysDriftOnAlreadyEnabledTable(t *testing.T) {
 		},
 	}
 
+	client.updateContinuousBackupsErr = errors.New("should not be called: the table already keeps longer than the spec asks")
+
 	retentionDays := int32(7)
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Backup: &depsv1alpha1.DynamoDBBackupSpec{
@@ -345,9 +379,104 @@ func TestEnsure_CorrectsRetentionDaysDriftOnAlreadyEnabledTable(t *testing.T) {
 	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
+	if got := client.tables[tableName].retentionDays; got != 35 {
+		t.Errorf("expected the 35-day window to be left alone, got %d", got)
+	}
+}
 
-	if got := client.tables[tableName].retentionDays; got != 7 {
-		t.Errorf("expected retention days drift to be corrected to 7, got %d", got)
+// Something else (AWS Backup, an organisation rule) may have turned point-in-
+// time recovery on. A spec that says nothing about backup must not undo it, or
+// the two fight and each round discards the restore window.
+func TestEnsure_LeavesPointInTimeRecoveryOnWhenTheSpecHasNoBackupSection(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	client.tables[tableName] = &fakeTable{
+		arn:           "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:        types.TableStatusActive,
+		billingMode:   types.BillingModePayPerRequest,
+		pitrEnabled:   true,
+		retentionDays: 35,
+		tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-1",
+		},
+	}
+
+	client.updateContinuousBackupsErr = errors.New("should not be called: the spec has no backup section")
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id"},
+	}}
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if !client.tables[tableName].pitrEnabled {
+		t.Error("point-in-time recovery was turned off")
+	}
+	if client.describeBackupCalls != 0 {
+		t.Errorf("expected no read of the backup status when the spec has no backup section, got %d", client.describeBackupCalls)
+	}
+}
+
+func TestEnsure_LeavesPointInTimeRecoveryOnWhenTheSpecDisablesItAndWarns(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	client.tables[tableName] = &fakeTable{
+		arn:           "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:        types.TableStatusActive,
+		billingMode:   types.BillingModePayPerRequest,
+		pitrEnabled:   true,
+		retentionDays: 35,
+		tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-1",
+		},
+	}
+
+	client.updateContinuousBackupsErr = errors.New("should not be called: turning it off discards the restore window")
+	recordEvent, events := newEventCollector()
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Backup: &depsv1alpha1.DynamoDBBackupSpec{Enabled: false}},
+	}}
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, recordEvent); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if !client.tables[tableName].pitrEnabled {
+		t.Error("point-in-time recovery was turned off")
+	}
+	warned := false
+	for _, e := range *events {
+		warned = warned || (e.eventType == "Warning" && e.reason == "BackupsLeftEnabled")
+	}
+	if !warned {
+		t.Errorf("expected a BackupsLeftEnabled warning, got %+v", *events)
+	}
+}
+
+func TestEnsure_EnablesPointInTimeRecoveryOnATableThatHasItOff(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	client.tables[tableName] = &fakeTable{
+		arn:           "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:        types.TableStatusActive,
+		billingMode:   types.BillingModePayPerRequest,
+		pitrEnabled:   false,
+		retentionDays: 0,
+		tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-1",
+		},
+	}
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", Backup: &depsv1alpha1.DynamoDBBackupSpec{Enabled: true}},
+	}}
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if !client.tables[tableName].pitrEnabled {
+		t.Error("expected point-in-time recovery to be turned on")
 	}
 }
 
@@ -450,7 +579,9 @@ func TestEnsure_CreatesTableWithProvisionedBillingModeWhenRequested(t *testing.T
 	}
 }
 
-func TestEnsure_CorrectsBillingModeDriftToProvisionedOnExistingTable(t *testing.T) {
+// The only capacity the operator could set is a placeholder of 5 and 5 units,
+// which would throttle a busy on-demand table the moment it applied.
+func TestEnsure_RefusesSwitchingAnOnDemandTableToProvisioned(t *testing.T) {
 	client := newFakeDynamoDB()
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
 	client.tables[tableName] = &fakeTable{
@@ -462,18 +593,52 @@ func TestEnsure_CorrectsBillingModeDriftToProvisionedOnExistingTable(t *testing.
 			cloudctlaws.OwnerUIDTagKey: "uid-1",
 		},
 	}
+	client.updateTableErr = errors.New("should not be called: the switch is refused")
 
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 		{Name: "sessions", PartitionKey: "id", Overrides: &depsv1alpha1.DynamoDBOverrides{
 			BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned,
 		}},
 	}}
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.ProvisionedCapacityNeeded || reconcileErr.Retryable {
+		t.Fatalf("expected a non-retryable %s refusal, got %v", reasons.ProvisionedCapacityNeeded, err)
+	}
+	if client.tables[tableName].billingMode != types.BillingModePayPerRequest {
+		t.Errorf("billing mode changed to %s, want it left on-demand", client.tables[tableName].billingMode)
+	}
+}
+
+func TestEnsure_NewTablesAreDeletionProtected(t *testing.T) {
+	client := newFakeDynamoDB()
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id"}}}
 	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	if !client.tables[tableName].deletionProtection {
+		t.Error("expected a table the operator creates to be deletion protected: it never recreates one that disappears")
+	}
+}
 
-	if client.tables[tableName].billingMode != types.BillingModeProvisioned {
-		t.Errorf("expected billing mode drift to be corrected to Provisioned, got %s", client.tables[tableName].billingMode)
+func TestEnsure_UnrecognisedTableStatusIsRetriedNotTreatedAsActive(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	client.tables[tableName] = &fakeTable{
+		arn:    "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status: types.TableStatus("SOMETHING_NEW"),
+		tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-1",
+		},
+	}
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id"}}}
+
+	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("expected a retryable error for a status the operator does not know, got %v", err)
 	}
 }
 
@@ -524,7 +689,7 @@ func TestReconcileTableAttributes_TreatsResourceInUseAsRetryable(t *testing.T) {
 	client.tables[tableName] = &fakeTable{
 		arn:         "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
 		status:      types.TableStatusActive,
-		billingMode: types.BillingModePayPerRequest,
+		billingMode: types.BillingModeProvisioned,
 		tags: map[string]string{
 			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
 			cloudctlaws.OwnerUIDTagKey: "uid-1",
@@ -533,9 +698,7 @@ func TestReconcileTableAttributes_TreatsResourceInUseAsRetryable(t *testing.T) {
 	client.updateTableErr = &fakeAWSError{code: "ResourceInUseException", fault: smithy.FaultClient}
 
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
-		{Name: "sessions", PartitionKey: "id", Overrides: &depsv1alpha1.DynamoDBOverrides{
-			BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned,
-		}},
+		{Name: "sessions", PartitionKey: "id"}, // on-demand by default: a provisioned table is switched
 	}}
 	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
@@ -655,6 +818,10 @@ func TestEnsure_RefusesAdoptingTableWithMismatchedKeySchema(t *testing.T) {
 	_, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected adopt:true to still refuse a table whose actual key schema doesn't match spec")
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.KeySchemaMismatch {
+		t.Errorf("expected reason %s, got %v", reasons.KeySchemaMismatch, err)
 	}
 	if cloudctlaws.IsOwnedBy(client.tables[tableName].tags, "default", "checkout-service", "uid-1") {
 		t.Error("expected the mismatched table to not be tagged as owned — adoption must not proceed")

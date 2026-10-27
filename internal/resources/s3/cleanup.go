@@ -118,10 +118,12 @@ func (c *bucketCleaner) restoreDeclared(ctx context.Context, entry depsv1alpha1.
 	if entry.PendingDeletionSince == nil {
 		return ledger, nil
 	}
-	if bucket, nameErr := bucketNameFromARN(entry.ARN); nameErr == nil {
-		if err := removePendingDeletionDeny(ctx, c.client, bucket); err != nil {
-			return ledger, wrapAWSError(err, fmt.Sprintf("removing pending-deletion deny from bucket %q", entry.Name))
-		}
+	bucket, nameErr := bucketNameFromARN(entry.ARN)
+	if nameErr != nil {
+		return ledger, nameErr
+	}
+	if err := removePendingDeletionDeny(ctx, c.client, bucket); err != nil {
+		return ledger, wrapAWSError(err, fmt.Sprintf("removing pending-deletion deny from bucket %q", entry.Name))
 	}
 	cleared := entry
 	cleared.PendingDeletionSince = nil

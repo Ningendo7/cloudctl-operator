@@ -482,6 +482,68 @@ func TestEnsure_SubnetGroupNotAuthorized_IsRetryable(t *testing.T) {
 	}
 }
 
+// Withdrawing a grant stops new placements, but must not freeze access control:
+// a consumer the owner has removed from sharedWith has to lose its network
+// access even then.
+func TestEnsure_WithdrawnGrant_StillRevokesARemovedConsumerAndChangesNothingElse(t *testing.T) {
+	client := newFakeRDS()
+	ec2Client := newFakeEC2()
+	consumer1 := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
+	consumer2 := newConsumerWithPodIdentity("analytics", "analytics-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer2")
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	withGrant := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant, consumer1, consumer2).Build()
+	withoutGrant := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer1, consumer2).Build()
+
+	instance := baseInstanceSpec("orders-db")
+	instance.SharedWith = []depsv1alpha1.SharedWithEntry{
+		{Namespace: "fulfillment", Name: "fulfillment-service"},
+		{Namespace: "analytics", Name: "analytics-service"},
+	}
+	run := func(k8sClient clientpkg.Client, spec depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
+		return Ensure(context.Background(), client, kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012",
+			&depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, ledger, nil, nil)
+	}
+
+	ledger, err := run(withGrant, instance, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	sgID := SecurityGroupIDFromARN(ledger[indexOfLedgerEntry(ledger, podNetworkIdentityResourceType)].ARN)
+	if len(ec2Client.groups[sgID].ingress) != 2 {
+		t.Fatalf("setup: expected both consumers granted, got %+v", ec2Client.groups[sgID].ingress)
+	}
+	modifiesBefore := client.modifyDBInstanceCalls
+	authorizesBefore := ec2Client.authorizeSecurityGroupIngressCalls
+
+	// The admin withdraws the grant, and the owner removes fulfillment from sharedWith.
+	instance.SharedWith = instance.SharedWith[1:]
+	instance.InstanceClass = "db.t4g.large" // a change that would otherwise be applied
+	_, err = run(withoutGrant, instance, ledger)
+
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable || !reconcileErr.WakesOnChange {
+		t.Fatalf("expected the section to keep reporting that the grant is missing, got %v", err)
+	}
+	if rules := ec2Client.groups[sgID].ingress; len(rules) != 1 || rules[0].sourceGroupID != "sg-consumer2" {
+		t.Errorf("expected only sg-consumer2 to keep access, got %+v", rules)
+	}
+	if client.modifyDBInstanceCalls != modifiesBefore {
+		t.Error("the instance was modified although its subnet group is no longer granted")
+	}
+	if ec2Client.authorizeSecurityGroupIngressCalls != authorizesBefore {
+		t.Error("ingress was added although its subnet group is no longer granted: narrowing must only remove access")
+	}
+}
+
+func indexOfLedgerEntry(ledger []depsv1alpha1.ManagedResource, resourceType string) int {
+	for i, e := range ledger {
+		if e.Type == resourceType {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestEnsure_SubnetGroupGrantCoversDifferentNamespace_IsNotAuthorized(t *testing.T) {
 	client := newFakeRDS()
 	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "fulfillment")
