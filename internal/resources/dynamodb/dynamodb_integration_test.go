@@ -39,6 +39,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 )
 
 // newIntegrationClient builds a real DynamoDB client pointed at LocalStack.
@@ -75,7 +76,10 @@ func uniqueSuffix(t *testing.T) string {
 
 func deleteTableIfExists(t *testing.T, client *dynamodb.Client, tableName string) {
 	t.Helper()
-	_, _ = client.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: &tableName})
+	ctx := context.Background()
+	// The tables the operator creates are deletion protected.
+	_, _ = client.UpdateTable(ctx, &dynamodb.UpdateTableInput{TableName: &tableName, DeletionProtectionEnabled: aws.Bool(false)})
+	_, _ = client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: &tableName})
 }
 
 // waitForTableActive polls DescribeTable until the table reports ACTIVE or
@@ -215,20 +219,38 @@ func TestIntegration_Ensure_CorrectsBillingModeDriftOnRealTable(t *testing.T) {
 	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, "sessions", 255)
 	t.Cleanup(func() { deleteTableIfExists(t, client, tableName) })
 
-	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
-		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
-	}}
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{
+		Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true,
+		Overrides: &depsv1alpha1.DynamoDBOverrides{BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned},
+	}}}
 	ledger := ensureUntilActive(t, client, namespace, crName, "uid-1", spec, nil, tableName)
-
-	spec.Resources[0].Overrides = &depsv1alpha1.DynamoDBOverrides{BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned}
-	ensureUntilActive(t, client, namespace, crName, "uid-1", spec, ledger, tableName)
-
-	describeOut, err := client.DescribeTable(context.Background(), &dynamodb.DescribeTableInput{TableName: &tableName})
-	if err != nil {
-		t.Fatalf("real DescribeTable() error = %v", err)
+	billingMode := func() *types.BillingModeSummary {
+		out, err := client.DescribeTable(context.Background(), &dynamodb.DescribeTableInput{TableName: &tableName})
+		if err != nil {
+			t.Fatalf("real DescribeTable() error = %v", err)
+		}
+		return out.Table.BillingModeSummary
 	}
-	if describeOut.Table.BillingModeSummary == nil || describeOut.Table.BillingModeSummary.BillingMode != types.BillingModeProvisioned {
-		t.Errorf("real billing mode after drift correction = %+v, want Provisioned", describeOut.Table.BillingModeSummary)
+	if summary := billingMode(); summary != nil && summary.BillingMode != types.BillingModeProvisioned {
+		t.Fatalf("setup: expected a provisioned table, got %+v", summary)
+	}
+
+	// Moving to on-demand is allowed and needs no capacity.
+	spec.Resources[0].Overrides = nil
+	ledger = ensureUntilActive(t, client, namespace, crName, "uid-1", spec, ledger, tableName)
+	if summary := billingMode(); summary == nil || summary.BillingMode != types.BillingModePayPerRequest {
+		t.Fatalf("real billing mode after drift correction = %+v, want PayPerRequest", summary)
+	}
+
+	// Moving back would set a placeholder capacity on a table that may be busy.
+	spec.Resources[0].Overrides = &depsv1alpha1.DynamoDBOverrides{BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned}
+	_, err := Ensure(context.Background(), client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.ProvisionedCapacityNeeded {
+		t.Fatalf("expected a %s refusal, got %v", reasons.ProvisionedCapacityNeeded, err)
+	}
+	if summary := billingMode(); summary == nil || summary.BillingMode != types.BillingModePayPerRequest {
+		t.Errorf("the refused switch changed the table: %+v", summary)
 	}
 }
 

@@ -27,7 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientpkg "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -1018,7 +1018,7 @@ func TestCleanup_PendingDeletion_ReadsNothingWhileWaiting(t *testing.T) {
 
 // subscribedQueue sets up a queue with one authorized SNS subscription and
 // returns what a teardown test needs.
-func subscribedQueue(t *testing.T, deletionPolicy depsv1alpha1.DeletionPolicy, force bool) (*fakeSQS, *fakeSNSSubscriber, client.Client, []depsv1alpha1.ManagedResource, string, depsv1alpha1.ConsumeRef) {
+func subscribedQueue(t *testing.T, deletionPolicy depsv1alpha1.DeletionPolicy, force bool) (*fakeSQS, *fakeSNSSubscriber, clientpkg.Client, []depsv1alpha1.ManagedResource, string, depsv1alpha1.ConsumeRef) {
 	t.Helper()
 	sqsClient := newFakeSQS()
 	snsClient := newFakeSNSSubscriber()

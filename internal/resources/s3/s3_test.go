@@ -523,11 +523,11 @@ func TestEnsure_EnablesVersioningWhenBackupEnabled(t *testing.T) {
 	}
 }
 
-func ownedBucketWithVersioning(client *fakeS3, status types.BucketVersioningStatus) string {
+func ownedBucketWithVersioning(client *fakeS3, versioning types.BucketVersioningStatus) string {
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	client.buckets[bucket] = &fakeBucket{
 		tags:             map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1"},
-		versioningStatus: status,
+		versioningStatus: versioning,
 	}
 	return bucket
 }

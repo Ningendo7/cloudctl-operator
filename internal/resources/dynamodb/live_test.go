@@ -50,6 +50,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/livetest"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -105,6 +106,10 @@ func deleteTableIfExists(t *testing.T, client *dynamodb.Client, tableName string
 	ctx := context.Background()
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
+		// The tables the operator creates are deletion protected. Turning it
+		// off leaves the table UPDATING for a moment, which the delete below
+		// reports as retryable.
+		_, _ = client.UpdateTable(ctx, &dynamodb.UpdateTableInput{TableName: &tableName, DeletionProtectionEnabled: aws.Bool(false)})
 		_, err := client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: &tableName})
 		if err == nil || !cloudctlaws.IsRetryable(err) {
 			return
@@ -261,16 +266,15 @@ func TestLive_Ensure_MissingTableErrorsUseDifferentExceptionTypesByOperation(t *
 	}
 }
 
-// TestLive_Ensure_TogglingBillingModeToProvisionedAndBackToPayPerRequest
-// guards two things together: UpdateTable's real constraint that
-// ProvisionedThroughput must be present when switching to Provisioned and
-// absent when switching to PayPerRequest (getting this backwards is
-// rejected outright), and the fact that a billing-mode switch is itself
-// asynchronous - the table sits in UPDATING until it completes, exactly
-// like table creation, so a second switch attempted before the first
-// finishes is correctly refused with a retryable "still UPDATING" error
-// rather than silently queued or racing the first change.
-func TestLive_Ensure_TogglingBillingModeToProvisionedAndBackToPayPerRequest(t *testing.T) {
+// TestLive_Ensure_SwitchesAProvisionedTableToPayPerRequestAndRefusesTheWayBack
+// guards UpdateTable's real constraint that ProvisionedThroughput must be
+// absent when switching to PayPerRequest (getting this wrong is rejected
+// outright), that a billing-mode switch is asynchronous - the table sits in
+// UPDATING until it completes, so a second change attempted before then is
+// refused with a retryable "still UPDATING" error - and that a real on-demand
+// table reports the billing mode the refusal of a switch back to provisioned
+// capacity relies on.
+func TestLive_Ensure_SwitchesAProvisionedTableToPayPerRequestAndRefusesTheWayBack(t *testing.T) {
 	cfg := skipUnlessLiveAWSCredentials(t)
 	client := dynamodb.NewFromConfig(cfg)
 	ctx := context.Background()
@@ -278,42 +282,41 @@ func TestLive_Ensure_TogglingBillingModeToProvisionedAndBackToPayPerRequest(t *t
 	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, "sessions", 255)
 	t.Cleanup(func() { deleteTableIfExists(t, client, tableName) })
 
-	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
-		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
-	}}
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{
+		Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true,
+		Overrides: &depsv1alpha1.DynamoDBOverrides{BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned},
+	}}}
 	ledger, _ := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
 	waitForTableActive(t, client, tableName, 3*time.Minute)
 	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil)
 	if err != nil {
-		t.Fatalf("Ensure() (once ACTIVE, on-demand) error = %v", err)
+		t.Fatalf("Ensure() (once ACTIVE, provisioned) error = %v", err)
+	}
+	billingMode := func() *types.BillingModeSummary {
+		out, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
+		if err != nil {
+			t.Fatalf("real DescribeTable() error = %v", err)
+		}
+		return out.Table.BillingModeSummary
 	}
 
-	spec.Resources[0].Overrides = &depsv1alpha1.DynamoDBOverrides{BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned}
-	if _, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil); err != nil {
-		t.Fatalf("Ensure() (switching to Provisioned) error = %v", err)
-	}
-	describeOut, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
-	if err != nil {
-		t.Fatalf("real DescribeTable() error = %v", err)
-	}
-	if describeOut.Table.BillingModeSummary == nil || describeOut.Table.BillingModeSummary.BillingMode != types.BillingModeProvisioned {
-		t.Fatalf("expected real billing mode Provisioned after switching, got %+v", describeOut.Table.BillingModeSummary)
-	}
-	waitForTableActive(t, client, tableName, 3*time.Minute)
-
-	spec.Resources[0].Overrides.BillingMode = depsv1alpha1.DynamoDBBillingModePayPerRequest
+	spec.Resources[0].Overrides = nil
 	if err := retryWhileRetryable(t, 2*time.Minute, func() error {
 		_, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil)
 		return err
 	}); err != nil {
-		t.Fatalf("Ensure() (switching back to PayPerRequest) error = %v", err)
+		t.Fatalf("Ensure() (switching to PayPerRequest) error = %v", err)
 	}
-	describeOut, err = client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
-	if err != nil {
-		t.Fatalf("real DescribeTable() error = %v", err)
+	if summary := billingMode(); summary == nil || summary.BillingMode != types.BillingModePayPerRequest {
+		t.Fatalf("expected real billing mode PayPerRequest after switching, got %+v", summary)
 	}
-	if describeOut.Table.BillingModeSummary == nil || describeOut.Table.BillingModeSummary.BillingMode != types.BillingModePayPerRequest {
-		t.Errorf("expected real billing mode PayPerRequest after switching back, got %+v", describeOut.Table.BillingModeSummary)
+	waitForTableActive(t, client, tableName, 3*time.Minute)
+
+	spec.Resources[0].Overrides = &depsv1alpha1.DynamoDBOverrides{BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned}
+	_, err = Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.ProvisionedCapacityNeeded {
+		t.Fatalf("expected a %s refusal for a real on-demand table, got %v", reasons.ProvisionedCapacityNeeded, err)
 	}
 }
 
