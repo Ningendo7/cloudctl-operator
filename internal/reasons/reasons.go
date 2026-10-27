@@ -163,6 +163,12 @@ var (
 	FIFOChanged = register("FIFOChanged", Failing,
 		"The spec asks for a different queue or topic type than the one that exists; fifo cannot change.",
 		"Set fifo back, or remove the entry, wait for it to be deleted and add it again.")
+	KeySchemaMismatch = register("KeySchemaMismatch", Failing,
+		"The existing DynamoDB table's partition or sort key differs from the spec. AWS cannot change a table's keys.",
+		"Set partitionKey and sortKey to match the table, or remove the entry, wait for the table to be deleted and add it again.")
+	ProvisionedCapacityNeeded = register("ProvisionedCapacityNeeded", Failing,
+		"The spec switches an existing DynamoDB table from on-demand to provisioned capacity. The operator can only set a placeholder of 5 read and 5 write units, which would throttle a busy table.",
+		"Switch the table to provisioned capacity in AWS with the capacity it needs; billingMode: Provisioned then matches.")
 	InstanceMissing = ownEvent(register("InstanceMissing", Failing,
 		"The ledger knows an RDS instance that AWS no longer has. The operator does not create an empty replacement.",
 		"Restore it under the same identifier and set adopt: true, or remove the entry and add it again."))

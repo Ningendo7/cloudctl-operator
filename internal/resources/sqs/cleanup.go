@@ -387,6 +387,9 @@ func cleanupQueueSubscriptions(
 		}
 		queueName, nameErr := queueNameFromARN(entry.ARN)
 		if nameErr != nil {
+			if firstErr == nil {
+				firstErr = nameErr
+			}
 			continue
 		}
 		// Without a tracked subscription there is nothing to tear down, and
@@ -395,10 +398,19 @@ func cleanupQueueSubscriptions(
 			continue
 		}
 		urlOut, uErr := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
-		if uErr != nil {
-			// No subscriptions can meaningfully exist against a queue we
-			// can't resolve a URL for (gone, or not created yet) - leave
-			// it for a future pass once the queue exists again.
+		queueURL := ""
+		var gone *types.QueueDoesNotExist
+		switch {
+		case uErr == nil:
+			queueURL = *urlOut.QueueUrl
+		case errors.As(uErr, &gone):
+			// SNS keeps a queue's subscriptions after the queue is deleted,
+			// and every publish to the topic then fails delivery for them.
+			// They are torn down by ARN, with no queue policy to edit.
+		default:
+			if firstErr == nil {
+				firstErr = wrapAWSError(uErr, fmt.Sprintf("resolving queue URL to tear down the subscriptions of %q", queueName))
+			}
 			continue
 		}
 
@@ -408,7 +420,7 @@ func cleanupQueueSubscriptions(
 		}
 
 		var subErr error
-		ledger, subErr = CleanupSubscriptions(ctx, snsClient, sqsClient, k8sClient, namespace, crName, queueName, *urlOut.QueueUrl, subscribesTo, ledger, recordEvent)
+		ledger, subErr = CleanupSubscriptions(ctx, snsClient, sqsClient, k8sClient, namespace, crName, queueName, queueURL, subscribesTo, ledger, recordEvent)
 		if subErr != nil && firstErr == nil {
 			firstErr = subErr
 		}

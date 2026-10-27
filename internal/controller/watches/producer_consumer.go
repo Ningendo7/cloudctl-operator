@@ -32,6 +32,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -67,6 +68,9 @@ func ProducerToConsumers(reader client.Reader) handler.MapFunc {
 		var consumers depsv1alpha1.AppDependenciesList
 		// Read-only, so the cache needn't copy what it returns.
 		if err := reader.List(ctx, &consumers, client.MatchingFields{IndexConsumesFrom: NamespacedKey(producerNS, producerName)}, client.UnsafeDisableDeepCopy); err != nil {
+			// Dropping the wake-up quietly would leave a revoked grant in place
+			// until the next drift pass, and a missing index would do so for good.
+			logf.FromContext(ctx).Error(err, "Failed to list the consumers of a changed producer", "producer", producerNS+"/"+producerName)
 			return nil
 		}
 

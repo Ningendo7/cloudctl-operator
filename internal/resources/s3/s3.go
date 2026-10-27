@@ -385,9 +385,14 @@ func reconcileBucketAttributes(ctx context.Context, awsClient s3API, bucket stri
 	return reconcileLifecycle(ctx, awsClient, bucket, opts)
 }
 
+// reconcileVersioning turns versioning on when the spec asks for it, and
+// suspends it only when the spec says so explicitly. A spec that is merely
+// silent leaves it alone: something else may have turned it on (AWS Backup for
+// S3 requires it), and suspending it would leave that backup plan failing.
 func reconcileVersioning(ctx context.Context, awsClient s3API, bucket string, opts bucketOptions) error {
 	desiredVersioning := opts.backupEnabled
-	if opts.versioningOverride != nil {
+	explicit := opts.versioningOverride != nil
+	if explicit {
 		desiredVersioning = *opts.versioningOverride
 	}
 
@@ -397,7 +402,8 @@ func reconcileVersioning(ctx context.Context, awsClient s3API, bucket string, op
 	if err != nil {
 		return fmt.Errorf("reading versioning status: %w", err)
 	}
-	if (current.Status == types.BucketVersioningStatusEnabled) == desiredVersioning {
+	enabled := current.Status == types.BucketVersioningStatusEnabled
+	if enabled == desiredVersioning || (enabled && !explicit) {
 		return nil
 	}
 	versioningStatus := types.BucketVersioningStatusSuspended

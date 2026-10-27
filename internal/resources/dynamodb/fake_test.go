@@ -20,6 +20,7 @@ import (
 	"context"
 	"maps"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
@@ -49,6 +50,9 @@ type fakeTable struct {
 	billingMode   types.BillingMode
 	pitrEnabled   bool
 	retentionDays int32
+	// deletionProtection makes DeleteTable fail, as it does on AWS, until it
+	// is switched off with UpdateTable.
+	deletionProtection bool
 	// partitionKey/sortKey back DescribeTable's KeySchema response, so
 	// adopt-path key-schema-mismatch checks are actually exercisable
 	// against a fake table pre-seeded with a different schema than spec
@@ -73,9 +77,10 @@ type fakeDynamoDB struct {
 	updateContinuousBackupsErr error
 	listTagsOfResourceErr      error
 
-	scanCalls     int
-	listTagsCalls int
-	describeCalls int
+	scanCalls           int
+	listTagsCalls       int
+	describeCalls       int
+	describeBackupCalls int
 }
 
 func newFakeDynamoDB() *fakeDynamoDB {
@@ -101,6 +106,8 @@ func (f *fakeDynamoDB) CreateTable(_ context.Context, in *dynamodb.CreateTableIn
 		partitionKey: partitionKey,
 		sortKey:      sortKey,
 		kmsKeyARN:    kmsKeyARN,
+
+		deletionProtection: aws.ToBool(in.DeletionProtectionEnabled),
 	}
 	return &dynamodb.CreateTableOutput{
 		TableDescription: &types.TableDescription{
@@ -144,6 +151,8 @@ func (f *fakeDynamoDB) DescribeTable(_ context.Context, in *dynamodb.DescribeTab
 			BillingModeSummary: billingSummary,
 			KeySchema:          keySchema,
 			SSEDescription:     sseDesc,
+
+			DeletionProtectionEnabled: &t.deletionProtection,
 		},
 	}, nil
 }
@@ -159,6 +168,9 @@ func (f *fakeDynamoDB) UpdateTable(_ context.Context, in *dynamodb.UpdateTableIn
 	if in.BillingMode != "" {
 		t.billingMode = in.BillingMode
 	}
+	if in.DeletionProtectionEnabled != nil {
+		t.deletionProtection = *in.DeletionProtectionEnabled
+	}
 	if in.SSESpecification != nil && in.SSESpecification.KMSMasterKeyId != nil {
 		t.kmsKeyARN = *in.SSESpecification.KMSMasterKeyId
 	}
@@ -166,8 +178,12 @@ func (f *fakeDynamoDB) UpdateTable(_ context.Context, in *dynamodb.UpdateTableIn
 }
 
 func (f *fakeDynamoDB) DeleteTable(_ context.Context, in *dynamodb.DeleteTableInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteTableOutput, error) {
-	if _, ok := f.tables[*in.TableName]; !ok {
+	t, ok := f.tables[*in.TableName]
+	if !ok {
 		return nil, &types.ResourceNotFoundException{}
+	}
+	if t.deletionProtection {
+		return nil, &fakeAWSError{code: "ValidationException", fault: smithy.FaultClient}
 	}
 	delete(f.tables, *in.TableName)
 	return &dynamodb.DeleteTableOutput{}, nil
@@ -226,6 +242,7 @@ func (f *fakeDynamoDB) UpdateContinuousBackups(_ context.Context, in *dynamodb.U
 }
 
 func (f *fakeDynamoDB) DescribeContinuousBackups(_ context.Context, in *dynamodb.DescribeContinuousBackupsInput, _ ...func(*dynamodb.Options)) (*dynamodb.DescribeContinuousBackupsOutput, error) {
+	f.describeBackupCalls++
 	t, ok := f.tables[*in.TableName]
 	if !ok {
 		return nil, &types.ResourceNotFoundException{}

@@ -29,7 +29,7 @@ spec:
 | `force` | Allows deleting a queue that isn't empty (visible, in-flight, *and* delayed message counts are all checked independently). |
 | `adopt` | Required to bring an existing, differently-owned or untagged queue under this CR's management. A resource encrypted with a customer-managed KMS key the spec doesn't name is refused with `AdoptionConflict`: declare that key under `kms.resources` with `adopt: true` and point `encryption.kmsKeyRef` at it. This applies to every resource type. |
 | `sharedWith` | Grants other `AppDependencies` CRs permission to consume this queue (up to 20 entries), and via `access`, how much (see [IAM](#iam) below). |
-| `subscribesTo` | Subscribes this queue to SNS topics (up to 20), each referenced by owner namespace, CR name and topic name. The operator creates the real SNS subscription and the queue policy that lets the topic deliver, and removes both when the entry goes. A subscription removed behind the operator's back is restored. The topic's owner must list this CR in its own `sharedWith`, the same as any cross-CR reference. |
+| `subscribesTo` | Subscribes this queue to SNS topics (up to 20), each referenced by owner namespace, CR name and topic name. The operator creates the real SNS subscription and the queue policy that lets the topic deliver, and removes both when the entry goes. When the queue itself is gone, the subscription is still removed, since SNS keeps it and every publish to the topic would fail delivery. A subscription removed behind the operator's back is restored. The topic's owner must list this CR in its own `sharedWith`, the same as any cross-CR reference. |
 | `overrides.visibilityTimeoutSeconds` | 0–43200. Drift-corrected on every reconcile if it diverges from spec. |
 | `overrides.maxReceiveCount` | 1–1000. Only meaningful with `dlq: true`. |
 | `overrides.contentBasedDeduplication` | Only meaningful with `fifo: true`. |
@@ -84,13 +84,13 @@ spec:
 |---|---|
 | `name` | Required. Same naming scheme as SQS/SNS, with a 255-character limit. |
 | `partitionKey` / `sortKey` | Required / optional table key schema, as attribute names (always typed as string — see the naming section below). **Immutable once set** — AWS doesn't support changing a table's key schema after creation. |
-| `deletionPolicy` | Same semantics as SQS/SNS. A table's "non-empty" equivalent is a real item count, checked via a strongly-consistent count-only `Scan` rather than `DescribeTable`'s `ItemCount` — AWS documents that field as updated only approximately every six hours, which would let a table populated minutes ago sail through as if it were still empty. |
+| `deletionPolicy` | Same semantics as SQS/SNS. New tables are created with deletion protection on, since the operator never recreates one that disappears; its own delete switches the protection off first, and a table that already exists keeps its setting. A table's "non-empty" equivalent is a real item count, checked via a strongly-consistent count-only `Scan` rather than `DescribeTable`'s `ItemCount` — AWS documents that field as updated only approximately every six hours, which would let a table populated minutes ago sail through as if it were still empty. |
 | `force` | Allows deleting a table that isn't empty. Unlike SQS/SNS, `DeleteTable` itself has **no non-empty guard of its own** — this check is the only thing standing between "removed from spec" and irreversible data loss. |
-| `adopt` | Same semantics as SQS/SNS, plus one DynamoDB-specific check: adoption is refused outright if the existing table's actual key schema doesn't match `partitionKey`/`sortKey` — AWS never allows changing a table's key schema, so adopting a mismatched table would otherwise succeed and only fail later, opaquely, at the workload's first `PutItem`/`Query`. |
+| `adopt` | Same semantics as SQS/SNS, plus one DynamoDB-specific check: adoption is refused outright if the existing table's actual key schema doesn't match `partitionKey`/`sortKey` — AWS never allows changing a table's key schema, so adopting a mismatched table would otherwise succeed and only fail later, opaquely, at the workload's first `PutItem`/`Query`. The refusal is `KeySchemaMismatch`. |
 | `sharedWith` | Same semantics as SQS/SNS (see [IAM](#iam)). |
-| `backup.enabled` | Toggles point-in-time recovery (continuous backups). |
-| `backup.retentionDays` | 1–35. Only meaningful with `enabled: true`; AWS's own default (35 days) applies when unset. |
-| `overrides.billingMode` | `PayPerRequest` (default) or `Provisioned`. A decision, not raw throughput config — `Provisioned` tables get AWS's own long-standing default capacity (5/5 RCU/WCU) rather than exposing tunable numbers. |
+| `backup.enabled` | Turns on point-in-time recovery (continuous backups). It is never turned off: `enabled: false` leaves it on and emits a `BackupsLeftEnabled` warning, since turning it off discards the restore window and something else (AWS Backup, an organisation rule) may rely on it. |
+| `backup.retentionDays` | 1–35, a minimum. Only meaningful with `enabled: true`; AWS's own default (35 days) applies when unset. The window is extended to this value and never shortened. |
+| `overrides.billingMode` | `PayPerRequest` (default) or `Provisioned`. A decision, not raw throughput config — a new `Provisioned` table gets AWS's own long-standing default capacity (5/5 RCU/WCU) rather than exposing tunable numbers. An existing on-demand table is not switched to `Provisioned` (`ProvisionedCapacityNeeded`), since that placeholder capacity would throttle it: switch it in AWS with the capacity it needs. |
 | `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. |
 
 **A table deleted out-of-band** is not recreated: an empty replacement would be reported Ready. The CR gets a `TableMissing` warning and error. Restore it from a backup under the same name with `adopt: true` (adopted within one trust window, 10 minutes), or remove the entry from spec and add it again to start fresh.
@@ -137,7 +137,7 @@ spec:
 | `adopt` | Same semantics as the other resources. |
 | `sharedWith` | Same semantics as the other resources (see [IAM](#iam)). |
 | `backup.enabled` | Enables versioning and a lifecycle policy that cleans up superseded (noncurrent) object versions after 30 days by default. Deliberately never expires or transitions the *current* object — backup protects live data, it doesn't put a deletion timer on it. |
-| `overrides.versioningEnabled` | Controls versioning independently of `backup` — useful for a bucket that wants versioning without backup's lifecycle policy, or vice versa. |
+| `overrides.versioningEnabled` | Controls versioning independently of `backup` — useful for a bucket that wants versioning without backup's lifecycle policy, or vice versa. Versioning is turned on by `backup` or by this set to `true`, and suspended only by this set to `false`: a bucket whose spec says nothing keeps whatever it has, since something else (AWS Backup for S3 needs it) may have turned it on. |
 | `overrides.lifecycleRules` | Replaces the default backup lifecycle policy entirely. An explicitly empty list (`[]`) opts out of any lifecycle policy, even with `backup.enabled: true` — it does not fall back to the default. |
 | `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. |
 
@@ -181,7 +181,7 @@ spec:
 
 | Field | Notes |
 |---|---|
-| `dbSubnetGroupName` | An existing DB subnet group, never created by the operator. The CR's namespace must be covered by an `RDSSubnetGroupGrant` (cluster-scoped, created by a platform admin), otherwise the section reports a retryable authorization error. **Immutable.** |
+| `dbSubnetGroupName` | An existing DB subnet group, never created by the operator. The CR's namespace must be covered by an `RDSSubnetGroupGrant` (cluster-scoped, created by a platform admin), otherwise the section reports a retryable authorization error. If the grant is withdrawn later, a new instance is not placed and an existing one is left unchanged, but a consumer removed from `sharedWith` still loses its network access. **Immutable.** |
 | `engine` | `postgres`, `mysql` or `mariadb`. **Immutable.** |
 | `engineVersion` | A *minimum*, as dotted numbers such as `16` or `16.4`. A higher version upgrades the instance; an instance already at or past it, including one AWS minor-upgraded itself, is left alone. A major upgrade is refused unless `allowMajorVersionUpgrade: true`. |
 | `instanceClass`, `highAvailability` | Instance class and Multi-AZ. Changes are drift-corrected (see below). |

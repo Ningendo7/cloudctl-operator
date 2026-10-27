@@ -90,6 +90,13 @@ this operator never sets up) as active. `keyStateError`
 enum values and AWS's documentation; none of these states has been triggered
 against a real account.
 
+### Subscription and deletion-protection calls
+
+- SNS `Unsubscribe` of a subscription that no longer exists returns `NotFoundException`, which `CleanupSubscriptions` counts as already removed.
+- DynamoDB refuses `DeleteTable` on a table with deletion protection. `UpdateTable` with `DeletionProtectionEnabled: false` clears it, and may leave the table `UPDATING` for a moment, so the delete can be retried on the next pass (`ResourceInUseException` counts as retryable).
+
+Neither has been exercised against a real account.
+
 ### Error classification (`internal/aws/errors.go`)
 
 `IsRetryable` treats `smithy.ErrorFault() == FaultServer`, throttling error

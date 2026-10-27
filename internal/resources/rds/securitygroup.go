@@ -81,6 +81,25 @@ func EnsureSecurityGroup(
 	return ensureInstanceSecurityGroup(ctx, rdsClient, ec2Client, k8sClient, namespace, crName, crUID, resourceName, dbSubnetGroupName, engine, region, accountID, adopt, sharedWith, "")
 }
 
+// narrowInstanceIngress removes the rules of consumers that are no longer
+// shared with, and adds nothing, so it can only ever reduce access. It does
+// nothing when the recorded group is missing: there is no rule to remove, and
+// creating a group is not narrowing.
+func narrowInstanceIngress(
+	ctx context.Context,
+	ec2Client cloudctlaws.EC2Client,
+	k8sClient client.Client,
+	namespace, crName, crUID, resourceName, engine string,
+	sharedWith []depsv1alpha1.SharedWithEntry,
+	recordedARN string,
+) error {
+	known, ok := describeOwnedGroup(ctx, ec2Client, recordedARN, namespace, crName, crUID)
+	if !ok {
+		return nil
+	}
+	return reconcileIngress(ctx, ec2Client, k8sClient, aws.ToString(known.GroupId), known.IpPermissions, engine, namespace, crName, resourceName, sharedWith, true)
+}
+
 // ensureInstanceSecurityGroup is EnsureSecurityGroup given the ARN of the
 // group the ledger already records for this instance, if any. A recorded
 // group that still exists and is tagged as ours is used as it is: the
@@ -113,7 +132,7 @@ func ensureInstanceSecurityGroup(
 	}
 	arn := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, groupID)
 
-	if err := reconcileIngress(ctx, ec2Client, k8sClient, groupID, currentIngress, engine, namespace, crName, resourceName, sharedWith); err != nil {
+	if err := reconcileIngress(ctx, ec2Client, k8sClient, groupID, currentIngress, engine, namespace, crName, resourceName, sharedWith, false); err != nil {
 		return arn, err
 	}
 
@@ -336,6 +355,7 @@ func reconcileIngress(
 	current []types.IpPermission,
 	engine, ownerNamespace, ownerName, resourceName string,
 	sharedWith []depsv1alpha1.SharedWithEntry,
+	revokeOnly bool,
 ) error {
 	port := enginePort(engine)
 	have := map[string]bool{}
@@ -373,7 +393,7 @@ func reconcileIngress(
 	}
 
 	var firstErr error
-	if len(missing) > 0 {
+	if len(missing) > 0 && !revokeOnly {
 		_, err := ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 			GroupId: &groupID,
 			IpPermissions: []types.IpPermission{{

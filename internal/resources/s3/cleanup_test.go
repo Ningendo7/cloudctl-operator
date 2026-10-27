@@ -786,3 +786,23 @@ func TestCleanup_PendingDeletion_ReadsNothingWhileWaiting(t *testing.T) {
 		}
 	}
 }
+
+// Lifting the write deny needs the bucket's name. Without it the deny would stay
+// on a bucket that is declared again, so an unreadable ARN has to be reported, not
+// skipped while the pending deletion is cleared.
+func TestCleanup_DeclaredAgain_UnreadableARNIsReportedAndNothingIsCleared(t *testing.T) {
+	pending := metav1.NewTime(time.Now().Add(-time.Hour))
+	ledger := []depsv1alpha1.ManagedResource{{
+		Type: resourceType, Name: "receipts", ARN: "garbage", PendingDeletionSince: &pending,
+		DeletionPolicy: depsv1alpha1.DeletionPolicyDelete,
+	}}
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
+
+	updated, _, err := Cleanup(context.Background(), newFakeS3(), "default", "checkout-service", "uid-1", spec, ledger, false, false, nil)
+	if err == nil {
+		t.Fatal("expected the unreadable ARN to be reported")
+	}
+	if entry, _ := status.FindManagedResource(updated, resourceType, "receipts"); entry.PendingDeletionSince == nil {
+		t.Error("the pending deletion was cleared although the deny could not be lifted")
+	}
+}

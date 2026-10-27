@@ -21,6 +21,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -43,6 +44,7 @@ func ConsumerPodIdentityToRDSProducers(reader client.Reader) handler.MapFunc {
 		var producers depsv1alpha1.AppDependenciesList
 		// Read-only, so the cache needn't copy what it returns.
 		if err := reader.List(ctx, &producers, client.MatchingFields{IndexRDSSharedWith: NamespacedKey(consumerNS, consumerName)}, client.UnsafeDisableDeepCopy); err != nil {
+			logf.FromContext(ctx).Error(err, "Failed to list the producers that share RDS with a changed consumer", "consumer", consumerNS+"/"+consumerName)
 			return nil
 		}
 

@@ -19,12 +19,14 @@ package sqs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -210,17 +212,21 @@ func CleanupSubscriptions(
 		}
 
 		arn := entry.ARN
-		if _, err := snsClient.Unsubscribe(ctx, &sns.UnsubscribeInput{SubscriptionArn: &arn}); err != nil {
+		var notFound *snstypes.NotFoundException
+		if _, err := snsClient.Unsubscribe(ctx, &sns.UnsubscribeInput{SubscriptionArn: &arn}); err != nil && !errors.As(err, &notFound) {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("unsubscribing %q: %w", entry.Name, err)
 			}
 			continue
 		}
-		if err := removeSubscriptionAllow(ctx, sqsClient, queueURL, subscriptionAllowSid(entry.Name)); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("revoking queue policy grant for %q: %w", entry.Name, err)
+		// With the queue gone there is no policy to edit.
+		if queueURL != "" {
+			if err := removeSubscriptionAllow(ctx, sqsClient, queueURL, subscriptionAllowSid(entry.Name)); err != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("revoking queue policy grant for %q: %w", entry.Name, err)
+				}
+				continue
 			}
-			continue
 		}
 		status.RemoveManagedResource(&ledger, subscriptionResourceType, entry.Name)
 		if recordEvent != nil {

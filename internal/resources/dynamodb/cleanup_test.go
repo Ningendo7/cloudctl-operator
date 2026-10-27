@@ -610,3 +610,51 @@ func TestCleanup_PendingDeletion_ReadsNothingWhileWaiting(t *testing.T) {
 		}
 	}
 }
+
+// Tables the operator creates are deletion protected, so its own delete, once
+// every gate has approved it, has to switch the protection off first.
+func TestCleanup_DeletesAProtectedTableAfterTurningOffItsProtection(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+	if !client.tables[tableName].deletionProtection {
+		t.Fatal("setup: expected the created table to be protected")
+	}
+
+	updated, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if _, stillExists := client.tables[tableName]; stillExists {
+		t.Error("expected the protected table to be deleted")
+	}
+	if status.HasManagedResource(updated, resourceType, "sessions") {
+		t.Error("expected the ledger entry to be removed")
+	}
+}
+
+func TestCleanup_DoesNotTurnOffProtectionWhileTheTableIsStillBlocked(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete},
+	}}
+	ledger, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("setup Ensure() error = %v", err)
+	}
+
+	// First pass after removal from spec only marks the table pending.
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if !client.tables[tableName].deletionProtection {
+		t.Error("deletion protection was turned off before the table was approved for deletion")
+	}
+}

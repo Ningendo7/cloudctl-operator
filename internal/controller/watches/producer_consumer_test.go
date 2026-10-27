@@ -18,6 +18,7 @@ package watches
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -139,9 +140,13 @@ func TestProducerToConsumers_ListFailure_ReturnsNilNotPanic(t *testing.T) {
 	// error-injecting fake client just for this package.
 	k8sClient := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
 
-	requests := ProducerToConsumers(k8sClient)(context.Background(), producer)
+	ctx, logged := capturedLog()
+	requests := ProducerToConsumers(k8sClient)(ctx, producer)
 	if requests != nil {
 		t.Errorf("expected nil requests on a List failure, got %v", requests)
+	}
+	if !strings.Contains(logged(), "Failed to list the consumers of a changed producer") {
+		t.Errorf("expected the dropped wake-up to be logged, got %q", logged())
 	}
 }
 

@@ -18,6 +18,7 @@ package watches
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -123,8 +124,12 @@ func TestConsumerPodIdentityToRDSProducers_ListFailure_ReturnsNilNotPanic(t *tes
 	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
 	k8sClient := fake.NewClientBuilder().Build() // unregistered scheme makes List fail
 
-	requests := ConsumerPodIdentityToRDSProducers(k8sClient)(context.Background(), consumer)
+	ctx, logged := capturedLog()
+	requests := ConsumerPodIdentityToRDSProducers(k8sClient)(ctx, consumer)
 	if requests != nil {
 		t.Errorf("expected nil requests on a List failure, got %v", requests)
+	}
+	if !strings.Contains(logged(), "Failed to list the producers that share RDS with a changed consumer") {
+		t.Errorf("expected the dropped wake-up to be logged, got %q", logged())
 	}
 }
