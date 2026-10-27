@@ -22,6 +22,9 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 const pendingDeletionDenySid = "cloudctl-pending-deletion-deny"
@@ -55,21 +58,43 @@ func addPendingDeletionDeny(ctx context.Context, client snsAPI, topicArn string)
 		return err
 	}
 
-	doc.Statement = removeStatementBySid(doc.Statement, pendingDeletionDenySid)
-
-	stmt, err := json.Marshal(denyStatement{
+	statements, changed, err := awspolicy.Upsert(doc.Statement, pendingDeletionDenySid, denyStatement{
 		Sid:       pendingDeletionDenySid,
 		Effect:    "Deny",
 		Principal: "*",
 		Action:    []string{"sns:Publish", "sns:Subscribe"},
 		Resource:  topicArn,
 	})
-	if err != nil {
-		return fmt.Errorf("encoding pending-deletion deny statement: %w", err)
+	if err != nil || !changed {
+		return err
 	}
-	doc.Statement = append(doc.Statement, stmt)
+	doc.Statement = statements
 
 	return writePolicy(ctx, client, topicArn, doc)
+}
+
+// reconcileTransportSecurity makes the topic refuse plain-HTTP requests, by a
+// statement the operator owns in its policy. Other statements, AWS's default
+// one among them, are kept, and nothing is written when the policy already
+// says this.
+func reconcileTransportSecurity(ctx context.Context, client snsAPI, topicArn string, recordEvent status.EventRecorder) error {
+	doc, err := readPolicy(ctx, client, topicArn)
+	if err != nil {
+		return wrapAWSError(err, "reading the topic's policy")
+	}
+	statements, changed, err := awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, awspolicy.DenyInsecureTransport("sns:*", topicArn))
+	if err != nil || !changed {
+		return err
+	}
+	doc.Statement = statements
+	if err := writePolicy(ctx, client, topicArn, doc); err != nil {
+		return wrapAWSError(err, "writing the topic's transport-security policy")
+	}
+	if recordEvent != nil {
+		recordEvent("Normal", "TransportSecurityEnforced", fmt.Sprintf(
+			"SNS topic %s now refuses requests that do not use TLS (policy statement %s)", topicArn, awspolicy.InsecureTransportSid))
+	}
+	return nil
 }
 
 // removePendingDeletionDeny removes exactly the Sid addPendingDeletionDeny
@@ -80,11 +105,11 @@ func removePendingDeletionDeny(ctx context.Context, client snsAPI, topicArn stri
 		return err
 	}
 
-	before := len(doc.Statement)
-	doc.Statement = removeStatementBySid(doc.Statement, pendingDeletionDenySid)
-	if len(doc.Statement) == before {
+	statements, changed := awspolicy.Remove(doc.Statement, pendingDeletionDenySid)
+	if !changed {
 		return nil
 	}
+	doc.Statement = statements
 
 	if len(doc.Statement) == 0 {
 		attrName := policyAttrName
@@ -131,18 +156,4 @@ func writePolicy(ctx context.Context, client snsAPI, topicArn string, doc policy
 		AttributeValue: &attrValue,
 	})
 	return err
-}
-
-func removeStatementBySid(statements []json.RawMessage, sid string) []json.RawMessage {
-	filtered := make([]json.RawMessage, 0, len(statements))
-	for _, s := range statements {
-		var probe struct {
-			Sid string `json:"Sid"`
-		}
-		if err := json.Unmarshal(s, &probe); err == nil && probe.Sid == sid {
-			continue
-		}
-		filtered = append(filtered, s)
-	}
-	return filtered
 }

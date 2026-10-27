@@ -28,6 +28,7 @@ package sqs
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -37,6 +38,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
 )
 
 // newIntegrationClient builds a real SQS client pointed at LocalStack.
@@ -128,6 +130,21 @@ func TestIntegration_Ensure_IsIdempotentAgainstRealAWS(t *testing.T) {
 	}
 	if len(ledger) != 1 {
 		t.Fatalf("expected exactly one ledger entry after two reconciles against real AWS, got %d", len(ledger))
+	}
+
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
+	urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("real GetQueueUrl() error = %v", err)
+	}
+	attrs, err := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl: urlOut.QueueUrl, AttributeNames: []types.QueueAttributeName{types.QueueAttributeNamePolicy},
+	})
+	if err != nil {
+		t.Fatalf("real GetQueueAttributes() error = %v", err)
+	}
+	if policy := attrs.Attributes[string(types.QueueAttributeNamePolicy)]; strings.Count(policy, awspolicy.InsecureTransportSid) != 1 {
+		t.Errorf("expected the transport-security statement exactly once after two passes, got %s", policy)
 	}
 }
 

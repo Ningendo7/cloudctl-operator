@@ -128,6 +128,17 @@ func NeedsRevalidation(entry depsv1alpha1.ManagedResource) bool {
 	return time.Since(entry.LastVerifiedAt.Time) > TrustWindow
 }
 
+// VerifiedSince reports whether after was verified against AWS later than
+// before was: the entry went through a full ownership check in between, as
+// opposed to being trusted from the ledger. Work that only needs doing once
+// per trust window, not on every pass, keys off it.
+func VerifiedSince(before, after depsv1alpha1.ManagedResource) bool {
+	if after.LastVerifiedAt == nil {
+		return false
+	}
+	return before.LastVerifiedAt == nil || after.LastVerifiedAt.After(before.LastVerifiedAt.Time)
+}
+
 // EmptyCheckBackoffStartAfter is how long a resource can sit pending
 // deletion before its emptiness checks start backing off at all - long
 // enough that an actively-managed drain is never affected by it.

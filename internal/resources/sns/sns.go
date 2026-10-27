@@ -98,6 +98,38 @@ func ensureTopic(
 	checkpoint status.Checkpoint,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
+	before, _ := status.FindManagedResource(ledger, resourceType, t.Name)
+	ledger, err := ensureTopicExists(ctx, awsClient, kmsClient, namespace, crName, crUID, region, accountID, t, ledger, checkpoint, recordEvent)
+	if err != nil {
+		return ledger, err
+	}
+	entry, found := status.FindManagedResource(ledger, resourceType, t.Name)
+	if !found {
+		return ledger, fmt.Errorf("expected a ledger entry for topic %q after ensuring it, found none", t.Name)
+	}
+	// Once per trust window, like the other checks that need a read of their
+	// own: a topic trusted from the ledger on this pass is left alone.
+	if !status.VerifiedSince(before, entry) {
+		return ledger, nil
+	}
+	return ledger, reconcileTransportSecurity(ctx, awsClient, entry.ARN, recordEvent)
+}
+
+// ensureTopicExists is ensureTopic without the transport-security statement.
+func ensureTopicExists(
+	ctx context.Context,
+	awsClient snsAPI,
+	kmsClient cloudctlaws.KMSClient,
+	namespace,
+	crName,
+	crUID,
+	region,
+	accountID string,
+	t depsv1alpha1.SNSTopicSpec,
+	ledger []depsv1alpha1.ManagedResource,
+	checkpoint status.Checkpoint,
+	recordEvent status.EventRecorder,
+) ([]depsv1alpha1.ManagedResource, error) {
 	const snsNameMaxLen = 256
 	topicName := cloudctlaws.QueueOrTopicName(namespace, crName, resourceType, t.FIFO, snsNameMaxLen, t.Name)
 	topicArn := cloudctlaws.TopicARN(region, accountID, topicName)

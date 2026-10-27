@@ -547,6 +547,16 @@ func newEventCollector() (status.EventRecorder, *[]recordedEvent) {
 	}, &events
 }
 
+func countEvents(events []recordedEvent, reason string) int {
+	n := 0
+	for _, e := range events {
+		if e.reason == reason {
+			n++
+		}
+	}
+	return n
+}
+
 func TestEnsure_CreatingTopic_EmitsCreatedEvent(t *testing.T) {
 	client := newFakeSNS()
 	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
@@ -556,7 +566,7 @@ func TestEnsure_CreatingTopic_EmitsCreatedEvent(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	if len(*events) != 1 || (*events)[0].reason != "TopicCreated" {
+	if countEvents(*events, "TopicCreated") != 1 {
 		t.Errorf("expected exactly one TopicCreated event, got %+v", *events)
 	}
 }
@@ -573,7 +583,7 @@ func TestEnsure_AdoptingTopic_EmitsAdoptedEvent(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	if len(*events) != 1 || (*events)[0].reason != "TopicAdopted" {
+	if countEvents(*events, "TopicAdopted") != 1 {
 		t.Errorf("expected exactly one TopicAdopted event, got %+v", *events)
 	}
 }

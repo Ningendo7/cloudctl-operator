@@ -203,6 +203,11 @@ var (
 	KeyUnavailable = ownEvent(register("KeyUnavailable", Failing,
 		"The KMS key is in a state that cannot encrypt or decrypt.",
 		"Check the key in AWS."))
+	EncryptionAsDeclared = register("EncryptionAsDeclared", Info,
+		"No resource is encrypted with a KMS key that its spec no longer asks for.", "")
+	EncryptionRemovalIgnored = ownEvent(register("EncryptionRemovalIgnored", Failing,
+		"A queue, topic, table or bucket is still encrypted with a KMS key, but its spec no longer asks for encryption. The operator never removes encryption, so the resource keeps its key and the spec and AWS differ.",
+		"Set encryption back, or remove the entry, wait for it to be deleted and add it again."))
 	KeyMissing = ownEvent(register("KeyMissing", Failing,
 		"The ledger knows a KMS key that AWS no longer has. Everything encrypted under it is unrecoverable, and the operator does not create a replacement.",
 		"Once you have confirmed that is acceptable, remove the entry and add it again to provision a new key."))

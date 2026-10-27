@@ -18,10 +18,8 @@ package sqs
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -34,6 +32,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/iam"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
@@ -273,64 +272,16 @@ func ensureSubscriptionAllows(ctx context.Context, sqsClient sqsAPI, queueURL st
 	}
 	changed := false
 	for _, allow := range allows {
-		stmt, err := json.Marshal(allow)
+		statements, statementChanged, err := awspolicy.Upsert(doc.Statement, allow.Sid, allow)
 		if err != nil {
-			return fmt.Errorf("encoding subscription allow statement: %w", err)
+			return err
 		}
-		if current, ok := statementBySid(doc.Statement, allow.Sid); ok && statementsEquivalent(current, stmt) {
-			continue
-		}
-		doc.Statement = append(removeStatementBySid(doc.Statement, allow.Sid), stmt)
-		changed = true
+		doc.Statement, changed = statements, changed || statementChanged
 	}
 	if !changed {
 		return nil
 	}
 	return writePolicy(ctx, sqsClient, queueURL, doc)
-}
-
-func statementBySid(statements []json.RawMessage, sid string) (json.RawMessage, bool) {
-	for _, s := range statements {
-		var probe struct {
-			Sid string `json:"Sid"`
-		}
-		if err := json.Unmarshal(s, &probe); err == nil && probe.Sid == sid {
-			return s, true
-		}
-	}
-	return nil, false
-}
-
-// statementsEquivalent compares statements as JSON, treating a one-element
-// list as its element, which a stored policy may return.
-func statementsEquivalent(a, b json.RawMessage) bool {
-	var av, bv any
-	if json.Unmarshal(a, &av) != nil || json.Unmarshal(b, &bv) != nil {
-		return false
-	}
-	return reflect.DeepEqual(collapseSingletons(av), collapseSingletons(bv))
-}
-
-func collapseSingletons(v any) any {
-	switch t := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, e := range t {
-			out[k] = collapseSingletons(e)
-		}
-		return out
-	case []any:
-		if len(t) == 1 {
-			return collapseSingletons(t[0])
-		}
-		out := make([]any, len(t))
-		for i, e := range t {
-			out[i] = collapseSingletons(e)
-		}
-		return out
-	default:
-		return v
-	}
 }
 
 // removeSubscriptionAllow removes exactly the Sid addSubscriptionAllow
@@ -341,11 +292,11 @@ func removeSubscriptionAllow(ctx context.Context, sqsClient sqsAPI, queueURL, si
 	if err != nil {
 		return err
 	}
-	before := len(doc.Statement)
-	doc.Statement = removeStatementBySid(doc.Statement, sid)
-	if len(doc.Statement) == before {
+	statements, changed := awspolicy.Remove(doc.Statement, sid)
+	if !changed {
 		return nil
 	}
+	doc.Statement = statements
 	if len(doc.Statement) == 0 {
 		_, err := sqsClient.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
 			QueueUrl:   &queueURL,

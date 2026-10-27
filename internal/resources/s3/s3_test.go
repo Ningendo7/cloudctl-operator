@@ -813,6 +813,16 @@ func newEventCollector() (status.EventRecorder, *[]recordedEvent) {
 	}, &events
 }
 
+func countEvents(events []recordedEvent, reason string) int {
+	n := 0
+	for _, e := range events {
+		if e.reason == reason {
+			n++
+		}
+	}
+	return n
+}
+
 func TestEnsure_CreatingBucket_EmitsCreatedEvent(t *testing.T) {
 	client := newFakeS3()
 	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
@@ -822,7 +832,7 @@ func TestEnsure_CreatingBucket_EmitsCreatedEvent(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	if len(*events) != 1 || (*events)[0].reason != "BucketCreated" {
+	if got := countEvents(*events, "BucketCreated"); got != 1 {
 		t.Errorf("expected exactly one BucketCreated event, got %+v", *events)
 	}
 }
@@ -838,7 +848,7 @@ func TestEnsure_AdoptingBucket_EmitsAdoptedEvent(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	if len(*events) != 1 || (*events)[0].reason != "BucketAdopted" {
+	if got := countEvents(*events, "BucketAdopted"); got != 1 {
 		t.Errorf("expected exactly one BucketAdopted event, got %+v", *events)
 	}
 }

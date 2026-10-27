@@ -92,6 +92,12 @@ type fakeBucket struct {
 	// PutBucketPolicy call has ever been made, matching a real bucket's
 	// NoSuchBucketPolicy response.
 	policy string
+	// website, policyPublic, publicBlock and aclGrants back the exposure
+	// reads. A nil publicBlock is a bucket with none configured.
+	website      bool
+	policyPublic bool
+	publicBlock  *types.PublicAccessBlockConfiguration
+	aclGrants    []types.Grant
 }
 
 type fakeS3 struct {
@@ -103,6 +109,12 @@ type fakeS3 struct {
 	putBucketTaggingErr     error
 	abortMultipartUploadErr error
 	deleteObjectsErr        error
+	getBucketWebsiteErr     error
+	getPublicAccessBlockErr error
+	getBucketAclErr         error
+
+	// policyWrites counts PutBucketPolicy and DeleteBucketPolicy calls.
+	policyWrites int
 
 	// multipartPageSize caps ListMultipartUploads pages (0 = unlimited);
 	// uploadsMu guards uploads and aborts since aborts run concurrently;
@@ -216,6 +228,7 @@ func (f *fakeS3) PutBucketPolicy(_ context.Context, in *s3sdk.PutBucketPolicyInp
 		return nil, &types.NoSuchBucket{}
 	}
 	b.policy = *in.Policy
+	f.policyWrites++
 	return &s3sdk.PutBucketPolicyOutput{}, nil
 }
 
@@ -225,6 +238,7 @@ func (f *fakeS3) DeleteBucketPolicy(_ context.Context, in *s3sdk.DeleteBucketPol
 		return nil, &types.NoSuchBucket{}
 	}
 	b.policy = ""
+	f.policyWrites++
 	return &s3sdk.DeleteBucketPolicyOutput{}, nil
 }
 
@@ -447,4 +461,55 @@ func noSuchTagSetError() error {
 		Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusNotFound}},
 		Err:      &smithy.GenericAPIError{Code: "NoSuchTagSet"},
 	}}
+}
+
+func (f *fakeS3) GetBucketWebsite(_ context.Context, in *s3sdk.GetBucketWebsiteInput, _ ...func(*s3sdk.Options)) (*s3sdk.GetBucketWebsiteOutput, error) {
+	if f.getBucketWebsiteErr != nil {
+		return nil, f.getBucketWebsiteErr
+	}
+	b, ok := f.buckets[*in.Bucket]
+	if !ok {
+		return nil, &types.NoSuchBucket{}
+	}
+	if !b.website {
+		return nil, &fakeAWSError{code: errCodeNoSuchWebsite}
+	}
+	return &s3sdk.GetBucketWebsiteOutput{}, nil
+}
+
+func (f *fakeS3) GetBucketPolicyStatus(_ context.Context, in *s3sdk.GetBucketPolicyStatusInput, _ ...func(*s3sdk.Options)) (*s3sdk.GetBucketPolicyStatusOutput, error) {
+	b, ok := f.buckets[*in.Bucket]
+	if !ok {
+		return nil, &types.NoSuchBucket{}
+	}
+	if b.policy == "" {
+		return nil, &fakeAWSError{code: errCodeNoSuchPolicy}
+	}
+	public := b.policyPublic
+	return &s3sdk.GetBucketPolicyStatusOutput{PolicyStatus: &types.PolicyStatus{IsPublic: &public}}, nil
+}
+
+func (f *fakeS3) GetPublicAccessBlock(_ context.Context, in *s3sdk.GetPublicAccessBlockInput, _ ...func(*s3sdk.Options)) (*s3sdk.GetPublicAccessBlockOutput, error) {
+	if f.getPublicAccessBlockErr != nil {
+		return nil, f.getPublicAccessBlockErr
+	}
+	b, ok := f.buckets[*in.Bucket]
+	if !ok {
+		return nil, &types.NoSuchBucket{}
+	}
+	if b.publicBlock == nil {
+		return nil, &fakeAWSError{code: errCodeNoSuchPublicBlock}
+	}
+	return &s3sdk.GetPublicAccessBlockOutput{PublicAccessBlockConfiguration: b.publicBlock}, nil
+}
+
+func (f *fakeS3) GetBucketAcl(_ context.Context, in *s3sdk.GetBucketAclInput, _ ...func(*s3sdk.Options)) (*s3sdk.GetBucketAclOutput, error) {
+	if f.getBucketAclErr != nil {
+		return nil, f.getBucketAclErr
+	}
+	b, ok := f.buckets[*in.Bucket]
+	if !ok {
+		return nil, &types.NoSuchBucket{}
+	}
+	return &s3sdk.GetBucketAclOutput{Grants: b.aclGrants}, nil
 }

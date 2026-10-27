@@ -288,10 +288,12 @@ A consumer of an encrypted queue, topic or bucket gets the key permissions it ne
 
 **Upgrading from v0.2.0.** v0.3.0 removed the cross-CR `encryption.kmsKeyRef` object and `kms.resources[].sharedWith` / `kms.consumes`. Go straight to v0.3.1 or later, since v0.3.0 cannot decode a CR that still has the object form; from v0.3.1 such a CR fails `KMSReady` with `LegacyKMSKeyRef` until it is edited.
 
-**Known gap:** drift correction only ever moves in the "enable, or point
-at a different key" direction — removing `encryption` from spec doesn't
-proactively revert an already-encrypted resource back to its unencrypted
-(or default SSE-S3, for S3) state.
+**Removing `encryption` is not applied.** Drift correction only ever moves
+in the "enable, or point at a different key" direction: dropping `encryption`
+from an entry leaves the resource encrypted with its key. The CR reports it
+with `EncryptionMatchesSpec: False` (`EncryptionRemovalIgnored`) and a Warning
+event on each pass; `Ready` is unchanged. To get an unencrypted resource, remove
+the entry, wait for it to be deleted, and add it again.
 
 ## Alarms
 
@@ -437,6 +439,20 @@ A move to another **region** is not supported: an operator refuses a CR whose re
 
 ## Shared behavior
 
+- **Plain HTTP is refused.** Every queue, topic and bucket the operator manages
+  gets a policy statement, `cloudctl-deny-insecure-transport`, that denies any
+  request made without TLS. SDKs use TLS by default, so this only affects a
+  client configured for plain HTTP. It is added on the next pass to resources
+  that already exist, adopted ones included (an event, `TransportSecurityEnforced`,
+  says so), and it stays on a resource the operator lets go of. A bucket that
+  hosts a website is exempt, because the website endpoint is HTTP only: it gets a
+  `TransportSecurityNotEnforced` warning instead.
+- **Buckets are private, and the operator does not make one public.** Content
+  for the internet belongs behind CloudFront with origin access control, which
+  the operator leaves alone: it never touches a policy statement it did not
+  write. A bucket that is open to the public through its policy or ACL, after
+  Block Public Access is taken into account, gets a `BucketPubliclyAccessible`
+  warning on each verification. Nothing is changed.
 - **`kubectl get appdeps`** shows `Ready`, and the aggregate condition's
   `Reason`, which is the first section that isn't ready, in its own words
   (`-o wide` adds the message). Every section's condition is under

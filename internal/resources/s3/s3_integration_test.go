@@ -49,6 +49,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -172,6 +173,14 @@ func TestIntegration_Ensure_IsIdempotentAgainstRealAWS(t *testing.T) {
 	}
 	if len(ledger) != 1 {
 		t.Fatalf("expected exactly one ledger entry after two reconciles against real AWS, got %d", len(ledger))
+	}
+
+	policyOut, err := client.GetBucketPolicy(ctx, &s3sdk.GetBucketPolicyInput{Bucket: &bucket})
+	if err != nil {
+		t.Fatalf("real GetBucketPolicy() error = %v — expected the transport-security statement", err)
+	}
+	if policy := aws.ToString(policyOut.Policy); !strings.Contains(policy, awspolicy.InsecureTransportSid) || strings.Count(policy, awspolicy.InsecureTransportSid) != 1 {
+		t.Errorf("expected the transport-security statement exactly once after two passes, got %s", policy)
 	}
 }
 
