@@ -31,6 +31,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/controller/predicates"
 	"github.com/Ningendo7/cloudctl-operator/internal/decisions"
 	"github.com/Ningendo7/cloudctl-operator/internal/observability"
 	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
@@ -66,8 +67,13 @@ func checkpointFor(r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppD
 // earlier write in this pass (the finalizer update, a checkpoint) moves
 // cr's version past original's, and a diff that included it would make the
 // patch fail with a conflict if anything else touched the CR meanwhile.
+//
+// A nil original means there is no baseline, so the whole status is sent.
 func statusPatch(original, cr *depsv1alpha1.AppDependencies) client.Patch {
-	from := original.DeepCopy()
+	from := &depsv1alpha1.AppDependencies{}
+	if original != nil {
+		from = original.DeepCopy()
+	}
 	from.ResourceVersion = cr.ResourceVersion
 	return client.MergeFrom(from)
 }
@@ -91,7 +97,7 @@ func eventRecorderFor(r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependen
 	}
 	return func(eventType, reason, message string) {
 		observability.Events.WithLabelValues(eventType, reason).Inc()
-		r.Recorder.Eventf(cr, nil, eventType, reason, reason, "%s", message)
+		r.Recorder.Eventf(cr, nil, eventType, reason, reason, "%s", status.CapEventNote(message))
 	}
 }
 
@@ -180,7 +186,7 @@ type section struct {
 // here at all), there is no spec field left to flip back to true, so an
 // explicit, CR-level, deliberately-separate escape hatch is the only way
 // back short of stripping the finalizer outright and accepting an orphan.
-const ForceDeleteAllAnnotation = "cloudctl.io/force-delete-all"
+const ForceDeleteAllAnnotation = predicates.ForceDeleteAllAnnotation
 
 // allSections lists every resource-type section this CR reconciles, in
 // dependency order — kmsSection runs first, since other sections' kmsKeyRef
@@ -344,6 +350,8 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 		reason = reconcileErr.Reason
 	case cloudctlaws.IsPermissionDenied(err):
 		reason = reasons.PermissionDenied
+	case cloudctlaws.IsEndpointUnreachable(err):
+		reason = reasons.EndpointUnreachable
 	case isRetryable(err):
 		reason = reasons.TransientError
 	}

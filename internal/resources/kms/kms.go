@@ -351,10 +351,13 @@ func keyMissingError(entry depsv1alpha1.ManagedResource, recordEvent status.Even
 	if recordEvent != nil {
 		recordEvent("Warning", "KeyMissing", fmt.Sprintf("KMS key %s no longer exists in AWS and will not be recreated", entry.ARN))
 	}
-	return fmt.Errorf(
-		"KMS key %q (%s) no longer exists in AWS — it was deleted out-of-band, and everything encrypted under it is unrecoverable; remove and re-add this entry to provision a new key once you've confirmed that's acceptable",
-		entry.Name, entry.ARN,
-	)
+	return &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf(
+			"KMS key %q (%s) no longer exists in AWS — it was deleted out-of-band, and everything encrypted under it is unrecoverable; remove and re-add this entry to provision a new key once you've confirmed that's acceptable",
+			entry.Name, entry.ARN,
+		),
+		Reason: reasons.KeyMissing,
+	}
 }
 
 // verifyOrTakeOverKey re-checks the key's ownership tags. A key left by an
@@ -712,7 +715,10 @@ func ensureAlias(ctx context.Context, kmsClient kmsAPI, alias, arn, keyID string
 		return wrapAWSError(dErr, fmt.Sprintf("verifying existing KMS key alias %q", alias))
 	}
 	if *describeOut.KeyMetadata.Arn != arn {
-		return fmt.Errorf("KMS alias %q already points at a different key (%s) than this CR's own (%s) — naming collision, not correcting", alias, *describeOut.KeyMetadata.Arn, arn)
+		return &cloudctlaws.ReconcileError{
+			Err:    fmt.Errorf("KMS alias %q already points at a different key (%s) than this CR's own (%s) — naming collision, not correcting", alias, *describeOut.KeyMetadata.Arn, arn),
+			Reason: reasons.NameTaken,
+		}
 	}
 	return nil
 }

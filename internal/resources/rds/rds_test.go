@@ -166,8 +166,8 @@ func TestEnsure_ReplicationRequested_ReturnsHardUnsupportedError(t *testing.T) {
 		t.Errorf("expected errors.Is(err, ErrReplicationNotSupported), got %v", err)
 	}
 	var reconcileErr *cloudctlaws.ReconcileError
-	if errors.As(err, &reconcileErr) {
-		t.Errorf("expected a hard, non-retryable error, got a ReconcileError with Retryable=%v", reconcileErr.Retryable)
+	if !errors.As(err, &reconcileErr) || reconcileErr.Retryable || reconcileErr.Reason != reasons.NotSupported {
+		t.Errorf("expected a non-retryable NotSupported error, got %v", err)
 	}
 	instanceID := cloudctlaws.ResourceName("default", "checkout-service", resourceType, "orders-db", 63)
 	if _, created := client.instances[instanceID]; created {

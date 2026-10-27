@@ -45,11 +45,11 @@ spec:
             description: '{{`{{ $value }}`}} RDS instance(s) were removed from spec with deletionPolicy Delete. The operator never deletes a database; a final snapshot has been taken. Billing continues until someone deletes them.'
 
         - alert: CloudctlDataResourceMissing
-          expr: sum by (reason) (increase(cloudctl_events_total{reason=~"InstanceMissing|KeyMissing"}[30m])) > 0
+          expr: sum by (reason) (increase(cloudctl_events_total{reason=~"InstanceMissing|TableMissing|KeyMissing"}[30m])) > 0
           labels:
             severity: critical
           annotations:
-            summary: A database or KMS key the operator manages no longer exists in AWS
+            summary: A database, table or KMS key the operator manages no longer exists in AWS
             description: '{{`{{ $labels.reason }}`}}: it was deleted outside the operator and will not be recreated. See the AppDependencies events and conditions for which one.'
 
         - alert: CloudctlKMSKeyUnusable

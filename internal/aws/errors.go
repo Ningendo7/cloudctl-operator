@@ -18,9 +18,12 @@ package aws
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 	"strings"
+	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -109,7 +112,9 @@ func IsPermissionDenied(err error) bool {
 // Failures that never reached AWS, or that the SDK gave up on, are transient
 // too: a deadline, the operator's own limiter refusing to wait past one, the
 // SDK's retry quota running dry (which drops the original throttling error
-// from the chain), and network errors.
+// from the chain), and network errors that can pass: a timeout, a connection
+// reset or a refused connection. A name that does not resolve or a
+// certificate that is not trusted is a setting that is wrong, so it is not.
 func IsRetryable(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrRateLimitWait) {
 		return true
@@ -120,18 +125,11 @@ func IsRetryable(err error) bool {
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) {
-		return true
+		return !IsEndpointUnreachable(err) && isTransientNetworkError(netErr, err)
 	}
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
-		if apiErr.ErrorFault() == smithy.FaultServer {
-			return true
-		}
-		code := apiErr.ErrorCode()
-		if code == errCodeThrottling || code == errCodeRequestLimitExceeded || code == errCodeTooManyRequestsException || code == errCodeResourceInUseException || code == errCodeConcurrentModification || code == errCodeContinuousBackupsUnavailableException {
-			return true
-		}
-		return strings.Contains(code, "Throttl")
+		return isRetryableAPIError(apiErr)
 	}
 	// See IsPermissionDenied: a bare HTTP-status error (no smithy.APIError)
 	// can't be matched by error code at all. 429 and 5xx are AWS's own
@@ -142,6 +140,43 @@ func IsRetryable(err error) bool {
 		return status == 429 || status >= 500
 	}
 	return false
+}
+
+func isRetryableAPIError(apiErr smithy.APIError) bool {
+	if apiErr.ErrorFault() == smithy.FaultServer {
+		return true
+	}
+	switch code := apiErr.ErrorCode(); code {
+	case errCodeThrottling, errCodeRequestLimitExceeded, errCodeTooManyRequestsException,
+		errCodeResourceInUseException, errCodeConcurrentModification, errCodeContinuousBackupsUnavailableException:
+		return true
+	default:
+		return strings.Contains(code, "Throttl")
+	}
+}
+
+func isTransientNetworkError(netErr net.Error, err error) bool {
+	var dnsErr *net.DNSError
+	return netErr.Timeout() ||
+		(errors.As(err, &dnsErr) && dnsErr.IsTemporary) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// IsEndpointUnreachable reports a failure to reach AWS that waiting will not
+// fix: the endpoint's name does not resolve, or the certificate it presents
+// is not trusted. Typically a mistyped AWS_ENDPOINT_URL, or a proxy.
+func IsEndpointUnreachable(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return true
+	}
+	var verifyErr *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var invalidCert x509.CertificateInvalidError
+	var wrongHost x509.HostnameError
+	return errors.As(err, &verifyErr) || errors.As(err, &unknownAuthority) ||
+		errors.As(err, &invalidCert) || errors.As(err, &wrongHost)
 }
 
 // ReconcileError wraps an AWS-originated error with a hint about whether

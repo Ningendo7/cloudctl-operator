@@ -158,12 +158,13 @@ func TestIAMWorkloadCount(t *testing.T) {
 		S3: &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 			{Name: "bucket", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
 		}},
+		KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "shared"}, {Name: "audit"}}},
 		RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "db"}}},
 	}}
 
 	// 4 queues + 1 consume + 2 encrypted queues, 1 bucket + 1 encrypted
-	// bucket; the RDS instance never feeds IAM.
-	if got, want := iamWorkloadCount(cr), 9; got != want {
+	// bucket, 2 declared keys; the RDS instance never feeds IAM.
+	if got, want := iamWorkloadCount(cr), 11; got != want {
 		t.Errorf("iamWorkloadCount() = %d, want %d", got, want)
 	}
 }

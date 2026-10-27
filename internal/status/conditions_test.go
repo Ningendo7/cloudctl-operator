@@ -220,3 +220,18 @@ func TestSetSectionCondition_ReadyMessageIsCapped(t *testing.T) {
 		t.Errorf("Ready message is %d bytes, over the %d cap", got, MaxMessageLength)
 	}
 }
+
+func TestCapEventNote(t *testing.T) {
+	short := "SQSReady: queue is fine"
+	if got := CapEventNote(short); got != short {
+		t.Errorf("a short note changed: %q", got)
+	}
+	long := strings.Repeat("é", MaxEventNoteLength) // two bytes each, so a naive cut could split one
+	got := CapEventNote(long)
+	if len(got) > MaxEventNoteLength {
+		t.Errorf("capped note is %d bytes, want at most %d", len(got), MaxEventNoteLength)
+	}
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, eventNoteMarker) {
+		t.Errorf("capped note must stay valid UTF-8 and point at the condition: %q", got[len(got)-20:])
+	}
+}

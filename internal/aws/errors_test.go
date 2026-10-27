@@ -18,10 +18,13 @@ package aws
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"syscall"
 	"testing"
 
@@ -104,6 +107,13 @@ func TestIsRetryable(t *testing.T) {
 			ratelimit.QuotaExceededError{Available: 0, Requested: 5}), true},
 		{"network timeout", &net.DNSError{Err: "i/o timeout", IsTimeout: true}, true},
 		{"connection reset", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, true},
+		{"connection refused", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, true},
+		{"temporary DNS failure", &net.DNSError{Err: "server misbehaving", IsTemporary: true}, true},
+		{"name does not resolve", &net.DNSError{Err: "no such host", Name: "sqs.us-east-1.amazonaws.cm", IsNotFound: true}, false},
+		{"name does not resolve, inside an SDK request error", &url.Error{Op: "Post", URL: "https://sqs.us-east-1.amazonaws.cm", Err: &net.DNSError{Err: "no such host", IsNotFound: true}}, false},
+		{"certificate not trusted", &url.Error{Op: "Post", URL: "https://localhost:4566", Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}}, false},
+		{"certificate for another host", &url.Error{Op: "Post", URL: "https://localhost:4566", Err: x509.HostnameError{Host: "localhost"}}, false},
+		{"network unreachable", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ENETUNREACH}, false},
 		{"cancelled, the manager is shutting down", fmt.Errorf("wrapped: %w", context.Canceled), false},
 	}
 	for _, tc := range cases {

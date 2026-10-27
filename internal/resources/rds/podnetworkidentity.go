@@ -107,58 +107,16 @@ func EnsurePodNetworkIdentity(
 		opt(&options)
 	}
 
-	// Sticky VPC resolution: if a pod-identity security group already
-	// exists and at least one of today's consumes entries still resolves
-	// to its VPC, keep using that VPC rather than re-deriving one from
-	// scratch. Re-deriving from scratch every pass would pick whichever
-	// consumes entry resolves *first* in spec order - if an earlier entry
-	// only starts resolving on a later pass (its producer was briefly
-	// unready, say), resolution would flip to a different VPC than the
-	// one already in use, silently orphaning the existing security group
-	// (same name, but findOrCreateSecurityGroup's group-name+vpc-id
-	// filter won't find it under a different VPC, so it just creates a
-	// new one and overwrites the ledger's only record of the old one).
-	//
-	// anyConsumedVPCMatches itself is only re-run once the existing entry's
-	// own trust window expires - re-verifying it every single pass would
-	// mean a DescribeDBSubnetGroups call per consumes entry forever, for an
-	// invariant that's already settled the vast majority of passes.
 	existingEntry, existingEntryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
-	freshlyVerified := false
-	recordedGroup, stickyOK := existingPodIdentityGroup(ctx, ec2Client, ledger, namespace, crName, crUID)
-	vpcID := aws.ToString(recordedGroup.VpcId)
-	if stickyOK && existingEntryFound && !status.NeedsRevalidation(existingEntry) {
-		// Within the trust window - trust the existing VPC as-is.
-	} else if stickyOK {
-		stickyOK = anyConsumedVPCMatches(ctx, rdsClient, k8sClient, consumes, vpcID)
-		freshlyVerified = stickyOK
+	groupID, freshlyVerified, resolved, err := podSecurityGroup(ctx, rdsClient, ec2Client, k8sClient, namespace, crName, crUID, consumes, ledger)
+	if err != nil {
+		return ledger, err
 	}
-	if !stickyOK {
-		dbSubnetGroupName, ok := firstConsumedSubnetGroupName(ctx, k8sClient, consumes)
-		if !ok {
-			// No consumed producer has resolved yet - self-resolves on a
-			// later pass once at least one does, same forward-reference
-			// tolerance as every other cross-CR reference in this project.
-			return ledger, nil
-		}
-		var err error
-		vpcID, err = resolveVPCID(ctx, rdsClient, dbSubnetGroupName)
-		if err != nil {
-			return ledger, err
-		}
-		freshlyVerified = true
-	}
-
-	// The group just described for the sticky VPC is the one wanted, if that
-	// VPC is still kept.
-	groupID := aws.ToString(recordedGroup.GroupId)
-	if !stickyOK {
-		groupName := cloudctlaws.ResourceName(namespace, crName, "rds-pod-sg", "network-identity", 255)
-		var err error
-		groupID, _, err = findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, false)
-		if err != nil {
-			return ledger, err
-		}
+	if !resolved {
+		// No consumed producer has resolved yet - self-resolves on a
+		// later pass once at least one does, same forward-reference
+		// tolerance as every other cross-CR reference in this project.
+		return ledger, nil
 	}
 	arn := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, groupID)
 
@@ -197,6 +155,69 @@ func EnsurePodNetworkIdentity(
 	return ledger, nil
 }
 
+// podSecurityGroup returns the CR's pod security group, creating it if needed.
+//
+// Sticky VPC resolution: if a pod-identity security group already
+// exists and at least one of today's consumes entries still resolves
+// to its VPC, keep using that VPC rather than re-deriving one from
+// scratch. Re-deriving from scratch every pass would pick whichever
+// consumes entry resolves *first* in spec order - if an earlier entry
+// only starts resolving on a later pass (its producer was briefly
+// unready, say), resolution would flip to a different VPC than the
+// one already in use, silently orphaning the existing security group
+// (same name, but findOrCreateSecurityGroup's group-name+vpc-id
+// filter won't find it under a different VPC, so it just creates a
+// new one and overwrites the ledger's only record of the old one).
+//
+// anyConsumedVPCMatches itself is only re-run once the existing entry's
+// own trust window expires - re-verifying it every single pass would
+// mean a DescribeDBSubnetGroups call per consumes entry forever, for an
+// invariant that's already settled the vast majority of passes.
+//
+// resolved is false while no consumed producer has resolved yet.
+func podSecurityGroup(
+	ctx context.Context,
+	rdsClient rdsAPI,
+	ec2Client cloudctlaws.EC2Client,
+	k8sClient client.Client,
+	namespace, crName, crUID string,
+	consumes []depsv1alpha1.ConsumeRef,
+	ledger []depsv1alpha1.ManagedResource,
+) (groupID string, freshlyVerified, resolved bool, err error) {
+	existingEntry, existingEntryFound := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	recordedGroup, stickyOK := existingPodIdentityGroup(ctx, ec2Client, ledger, namespace, crName, crUID)
+	vpcID := aws.ToString(recordedGroup.VpcId)
+	if stickyOK && existingEntryFound && !status.NeedsRevalidation(existingEntry) {
+		// Within the trust window - trust the existing VPC as-is.
+	} else if stickyOK {
+		if stickyOK, err = anyConsumedVPCMatches(ctx, rdsClient, k8sClient, consumes, vpcID); err != nil {
+			return "", false, false, err
+		}
+		freshlyVerified = stickyOK
+	}
+	if !stickyOK {
+		dbSubnetGroupName, ok, err := firstConsumedSubnetGroupName(ctx, k8sClient, consumes)
+		if err != nil || !ok {
+			return "", false, false, err
+		}
+		if vpcID, err = resolveVPCID(ctx, rdsClient, dbSubnetGroupName); err != nil {
+			return "", false, false, err
+		}
+		freshlyVerified = true
+	}
+
+	// The group just described for the sticky VPC is the one wanted, if that
+	// VPC is still kept.
+	groupID = aws.ToString(recordedGroup.GroupId)
+	if !stickyOK {
+		groupName := cloudctlaws.ResourceName(namespace, crName, "rds-pod-sg", "network-identity", 255)
+		if groupID, _, err = findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, false); err != nil {
+			return "", false, false, err
+		}
+	}
+	return groupID, freshlyVerified, true, nil
+}
+
 // firstConsumedSubnetGroupName reads the DB subnet group a pod security
 // group should live in from whichever producer CR in consumes has
 // already declared an rds resource matching the reference. A consuming
@@ -208,22 +229,41 @@ func EnsurePodNetworkIdentity(
 // handled here - a documented limitation, not silently wrong behavior,
 // since every ingress grant this operator derives already assumes one
 // shared network.
-func firstConsumedSubnetGroupName(ctx context.Context, k8sClient client.Client, consumes []depsv1alpha1.ConsumeRef) (string, bool) {
+//
+// A producer that does not exist is skipped; a failed read is an error,
+// since skipping it would read as "no producer yet" and the pass would end
+// without a security group for no visible reason.
+func firstConsumedSubnetGroupName(ctx context.Context, k8sClient client.Client, consumes []depsv1alpha1.ConsumeRef) (string, bool, error) {
 	for _, ref := range consumes {
-		var producer depsv1alpha1.AppDependencies
-		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, &producer); err != nil {
-			continue
+		producer, found, err := getProducer(ctx, k8sClient, ref)
+		if err != nil {
+			return "", false, err
 		}
-		if producer.Spec.RDS == nil {
+		if !found || producer.Spec.RDS == nil {
 			continue
 		}
 		for _, r := range producer.Spec.RDS.Resources {
 			if r.Name == ref.ResourceName {
-				return r.DBSubnetGroupName, true
+				return r.DBSubnetGroupName, true, nil
 			}
 		}
 	}
-	return "", false
+	return "", false, nil
+}
+
+// getProducer reads the CR a consumes entry names. found is false when it
+// does not exist; any other failed read is a retryable error.
+func getProducer(ctx context.Context, k8sClient client.Client, ref depsv1alpha1.ConsumeRef) (depsv1alpha1.AppDependencies, bool, error) {
+	var producer depsv1alpha1.AppDependencies
+	err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, &producer)
+	switch {
+	case err == nil:
+		return producer, true, nil
+	case apierrors.IsNotFound(err):
+		return producer, false, nil
+	default:
+		return producer, false, &cloudctlaws.ReconcileError{Err: fmt.Errorf("reading producer %s/%s: %w", ref.Namespace, ref.Name, err), Retryable: true}
+	}
 }
 
 // existingPodIdentityGroup returns a CR's already-published pod security
@@ -241,22 +281,40 @@ func existingPodIdentityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Clie
 // entries still resolves to wantVPCID - the test for whether an existing
 // pod-identity security group's VPC remains justified, or whether every
 // producer that once backed it is now gone or pointed elsewhere.
-func anyConsumedVPCMatches(ctx context.Context, rdsClient rdsAPI, k8sClient client.Client, consumes []depsv1alpha1.ConsumeRef, wantVPCID string) bool {
+//
+// A producer or subnet group that is gone counts as not matching. A failed
+// read of either is an error: treating it as a mismatch would send the pass
+// looking for a new VPC on a transient failure.
+func anyConsumedVPCMatches(ctx context.Context, rdsClient rdsAPI, k8sClient client.Client, consumes []depsv1alpha1.ConsumeRef, wantVPCID string) (bool, error) {
 	for _, ref := range consumes {
-		var producer depsv1alpha1.AppDependencies
-		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, &producer); err != nil || producer.Spec.RDS == nil {
+		producer, found, err := getProducer(ctx, k8sClient, ref)
+		if err != nil {
+			return false, err
+		}
+		if !found || producer.Spec.RDS == nil {
 			continue
 		}
 		for _, r := range producer.Spec.RDS.Resources {
 			if r.Name != ref.ResourceName {
 				continue
 			}
-			if vpcID, err := resolveVPCID(ctx, rdsClient, r.DBSubnetGroupName); err == nil && vpcID == wantVPCID {
-				return true
+			vpcID, err := resolveVPCID(ctx, rdsClient, r.DBSubnetGroupName)
+			switch {
+			case isSubnetGroupNotFound(err):
+				continue
+			case err != nil:
+				return false, err
+			case vpcID == wantVPCID:
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
+}
+
+func isSubnetGroupNotFound(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == errCodeDBSubnetGroupNotFound
 }
 
 // podGroupIDs is the base groups followed by the database group, without

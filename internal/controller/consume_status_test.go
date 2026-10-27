@@ -46,6 +46,9 @@ func consumerWithDanglingRef() *depsv1alpha1.AppDependencies {
 func TestCheckConsumeReferences_ProducerExists_ReportsTrue(t *testing.T) {
 	producer := &depsv1alpha1.AppDependencies{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "nonexistent-producer"},
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: "orders", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "default", Name: "checkout-service"}}},
+		}}},
 	}
 	c := fake.NewClientBuilder().WithScheme(newSharedWithScheme(t)).WithObjects(producer).Build()
 

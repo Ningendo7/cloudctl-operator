@@ -18,6 +18,7 @@ package predicates
 
 import (
 	"maps"
+	"slices"
 
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -32,10 +33,16 @@ import (
 // controller was waiting on.
 const ForceReconcileAnnotation = "cloudctl.io/force-reconcile"
 
+// ForceDeleteAllAnnotation lets a human override a Delete-policy resource's
+// non-empty guard to unstick a CR's deletion. Setting it wakes the
+// reconciler: the CR is already in deletion, so no spec change will.
+const ForceDeleteAllAnnotation = "cloudctl.io/force-delete-all"
+
 // AppDependenciesPredicate reconciles on spec changes (the standard
 // generation-changed check) or when specifically the force-reconcile
-// annotation's value changes, filtering out everything else — status-only
-// updates, unrelated label/annotation churn.
+// annotation's value changes, or the force-delete-all annotation is set,
+// filtering out everything else — status-only updates, unrelated
+// label/annotation churn.
 func AppDependenciesPredicate() predicate.Predicate {
 	return predicate.Or(
 		predicate.GenerationChangedPredicate{},
@@ -45,13 +52,18 @@ func AppDependenciesPredicate() predicate.Predicate {
 				if oldAnn[ForceReconcileAnnotation] != newAnn[ForceReconcileAnnotation] {
 					return true
 				}
-				// Taking the takeover annotation off changes nothing, so only
-				// setting or changing it reconciles.
-				adopt := newAnn[cloudctlaws.AdoptFromUIDAnnotation]
-				return adopt != "" && adopt != oldAnn[cloudctlaws.AdoptFromUIDAnnotation]
+				// Taking either of these off changes nothing, so only setting
+				// or changing them reconciles.
+				return setOrChanged(oldAnn, newAnn, cloudctlaws.AdoptFromUIDAnnotation) ||
+					setOrChanged(oldAnn, newAnn, ForceDeleteAllAnnotation)
 			},
 		},
 	)
+}
+
+func setOrChanged(oldAnn, newAnn map[string]string, key string) bool {
+	v := newAnn[key]
+	return v != "" && v != oldAnn[key]
 }
 
 // ProducerChangedPredicate is AppDependenciesPredicate plus updates where a
@@ -107,12 +119,13 @@ func AnnotationValueChangedPredicate(key string) predicate.Predicate {
 }
 
 // PodNetworkIdentityPublishedPredicate reconciles only when a CR's own
-// published pod-network-identity ARN actually changes - lets the RDS
+// published pod-network-identity ARN actually changes, when it starts
+// being deleted, or when its rds.consumes list changes - lets the RDS
 // producer-side ingress watch react immediately to a consumer publishing
-// (or losing) its identity, without firing on every unrelated status
-// write. Delete always passes through, so a deleted consumer's ingress
-// rule gets revoked promptly rather than waiting on the producer's next
-// unrelated reconcile.
+// (or losing) its identity, or no longer being entitled to the database,
+// without firing on every unrelated status write. Delete always passes
+// through. Without the last two, the consumer's own security group cannot
+// be deleted until the producer happens to revoke its rule.
 func PodNetworkIdentityPublishedPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc:  func(event.CreateEvent) bool { return true },
@@ -129,7 +142,16 @@ func PodNetworkIdentityPublishedPredicate() predicate.Predicate {
 			}
 			oldARN, _ := rds.PodNetworkIdentityARN(oldCR)
 			newARN, _ := rds.PodNetworkIdentityARN(newCR)
-			return oldARN != newARN
+			return oldARN != newARN ||
+				oldCR.DeletionTimestamp.IsZero() != newCR.DeletionTimestamp.IsZero() ||
+				!slices.Equal(rdsConsumes(oldCR), rdsConsumes(newCR))
 		},
 	}
+}
+
+func rdsConsumes(cr *depsv1alpha1.AppDependencies) []depsv1alpha1.ConsumeRef {
+	if cr.Spec.RDS == nil {
+		return nil
+	}
+	return cr.Spec.RDS.Consumes
 }

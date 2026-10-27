@@ -50,6 +50,7 @@ const (
 	resourceTypeDynamoDB = "dynamodb"
 	resourceTypeS3       = "s3"
 	resourceTypeKMS      = "kms"
+	resourceTypeRDS      = "rds"
 
 	kmsActionDecrypt         = "kms:Decrypt"
 	kmsActionGenerateDataKey = "kms:GenerateDataKey"
@@ -266,30 +267,19 @@ func recordOwned(grants []grant, skipped []string, cr *depsv1alpha1.AppDependenc
 func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) ([]grant, string, error) {
 	prefix := fmt.Sprintf("%s/%s consumes %s/%s's %q", consumer.Namespace, consumer.Name, ref.Namespace, ref.Name, ref.ResourceName)
 
-	var producer depsv1alpha1.AppDependencies
-	key := client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}
-	if err := k8sClient.Get(ctx, key, &producer); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, prefix + ": producer CR not found yet", nil
-		}
-		return nil, "", &cloudctlaws.ReconcileError{Err: fmt.Errorf("reading producer %s/%s: %w", ref.Namespace, ref.Name, err), Retryable: true}
+	lookup, err := lookupConsume(ctx, k8sClient, consumer, resourceType, ref)
+	if err != nil {
+		return nil, "", err
 	}
-
-	sharedWith, encryption, ok := producerResource(&producer, resourceType, ref.ResourceName)
-	if !ok {
+	switch lookup.problem {
+	case ReferenceProducerNotFound:
+		return nil, prefix + ": producer CR not found yet", nil
+	case ReferenceResourceNotDeclared:
 		return nil, prefix + ": resource not declared there yet", nil
-	}
-
-	var grantedTo *depsv1alpha1.SharedWithEntry
-	for i := range sharedWith {
-		if sharedWith[i].Namespace == consumer.Namespace && sharedWith[i].Name == consumer.Name {
-			grantedTo = &sharedWith[i]
-			break
-		}
-	}
-	if grantedTo == nil {
+	case ReferenceNotAuthorized:
 		return nil, prefix + ": not authorized - owner hasn't granted this CR in sharedWith", nil
 	}
+	producer, grantedTo, encryption := lookup.producer, lookup.grantedTo, lookup.encryption
 
 	entry, found := status.FindManagedResource(producer.Status.ManagedResources, resourceType, ref.ResourceName)
 	if !found {
@@ -308,6 +298,68 @@ func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *deps
 		grants = append(grants, grant{resourceType: resourceTypeKMS, arn: key.ARN, readWrite: readWrite})
 	}
 	return grants, "", nil
+}
+
+// ReferenceProblem says why a consumes-style reference does not resolve yet.
+type ReferenceProblem string
+
+const (
+	// ReferenceResolved: the producer exists, declares the resource, and has
+	// granted the consumer in sharedWith.
+	ReferenceResolved ReferenceProblem = ""
+	// ReferenceProducerNotFound: no AppDependencies CR has that namespace and
+	// name.
+	ReferenceProducerNotFound ReferenceProblem = "ProducerNotFound"
+	// ReferenceResourceNotDeclared: the CR exists but declares no such
+	// resource.
+	ReferenceResourceNotDeclared ReferenceProblem = "ResourceNotDeclared"
+	// ReferenceNotAuthorized: the resource exists but its owner has not listed
+	// the consumer in sharedWith.
+	ReferenceNotAuthorized ReferenceProblem = "NotAuthorized"
+)
+
+type consumeLookup struct {
+	problem    ReferenceProblem
+	producer   *depsv1alpha1.AppDependencies
+	grantedTo  *depsv1alpha1.SharedWithEntry
+	encryption *depsv1alpha1.EncryptionSpec
+}
+
+// lookupConsume is the part of resolving a reference that does not depend on
+// the producer having reconciled yet: whether the CR, the resource and the
+// grant exist. Policy derivation and the status condition both go through
+// it, so what status calls authorized is exactly what gets IAM access. A
+// failed read is an error, never a problem: it says nothing about the
+// reference.
+func lookupConsume(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) (consumeLookup, error) {
+	var producer depsv1alpha1.AppDependencies
+	key := client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}
+	if err := k8sClient.Get(ctx, key, &producer); err != nil {
+		if apierrors.IsNotFound(err) {
+			return consumeLookup{problem: ReferenceProducerNotFound}, nil
+		}
+		return consumeLookup{}, &cloudctlaws.ReconcileError{Err: fmt.Errorf("reading producer %s/%s: %w", ref.Namespace, ref.Name, err), Retryable: true}
+	}
+
+	sharedWith, encryption, ok := producerResource(&producer, resourceType, ref.ResourceName)
+	if !ok {
+		return consumeLookup{problem: ReferenceResourceNotDeclared}, nil
+	}
+
+	for i := range sharedWith {
+		if sharedWith[i].Namespace == consumer.Namespace && sharedWith[i].Name == consumer.Name {
+			return consumeLookup{producer: &producer, grantedTo: &sharedWith[i], encryption: encryption}, nil
+		}
+	}
+	return consumeLookup{problem: ReferenceNotAuthorized}, nil
+}
+
+// CheckConsumeReference reports why a reference from consumer to another
+// CR's resource does not resolve, or ReferenceResolved. A failed read of the
+// producer is returned as an error.
+func CheckConsumeReference(ctx context.Context, k8sClient client.Client, consumer *depsv1alpha1.AppDependencies, resourceType string, ref depsv1alpha1.ConsumeRef) (ReferenceProblem, error) {
+	lookup, err := lookupConsume(ctx, k8sClient, consumer, resourceType, ref)
+	return lookup.problem, err
 }
 
 // keyLedgerName is the ledger name of the key a resource is encrypted with,
@@ -346,46 +398,76 @@ func ResolveConsumeARN(ctx context.Context, k8sClient client.Client, consumer *d
 	return grants[0].arn, true, nil
 }
 
+// producerEntry is one resource a CR owns, as far as another CR's access to
+// it is concerned.
+type producerEntry struct {
+	name       string
+	sharedWith []depsv1alpha1.SharedWithEntry
+	encryption *depsv1alpha1.EncryptionSpec
+}
+
+// producerEntries lists, per resource type, what the CR owns of that type.
+var producerEntries = map[string]func(*depsv1alpha1.AppDependenciesSpec) []producerEntry{
+	resourceTypeSQS: func(spec *depsv1alpha1.AppDependenciesSpec) []producerEntry {
+		var entries []producerEntry
+		if spec.SQS != nil {
+			for _, q := range spec.SQS.Resources {
+				entries = append(entries, producerEntry{q.Name, q.SharedWith, q.Encryption})
+			}
+		}
+		return entries
+	},
+	resourceTypeSNS: func(spec *depsv1alpha1.AppDependenciesSpec) []producerEntry {
+		var entries []producerEntry
+		if spec.SNS != nil {
+			for _, t := range spec.SNS.Resources {
+				entries = append(entries, producerEntry{t.Name, t.SharedWith, t.Encryption})
+			}
+		}
+		return entries
+	},
+	resourceTypeDynamoDB: func(spec *depsv1alpha1.AppDependenciesSpec) []producerEntry {
+		var entries []producerEntry
+		if spec.DynamoDB != nil {
+			for _, tbl := range spec.DynamoDB.Resources {
+				entries = append(entries, producerEntry{tbl.Name, tbl.SharedWith, tbl.Encryption})
+			}
+		}
+		return entries
+	},
+	resourceTypeS3: func(spec *depsv1alpha1.AppDependenciesSpec) []producerEntry {
+		var entries []producerEntry
+		if spec.S3 != nil {
+			for _, b := range spec.S3.Resources {
+				entries = append(entries, producerEntry{b.Name, b.SharedWith, b.Encryption})
+			}
+		}
+		return entries
+	},
+	// An instance's access is a network rule, not IAM, so it has no key
+	// grant to derive.
+	resourceTypeRDS: func(spec *depsv1alpha1.AppDependenciesSpec) []producerEntry {
+		var entries []producerEntry
+		if spec.RDS != nil {
+			for _, db := range spec.RDS.Resources {
+				entries = append(entries, producerEntry{db.Name, db.SharedWith, nil})
+			}
+		}
+		return entries
+	},
+}
+
 // producerResource returns the sharedWith list and encryption of one
 // resource entry within the producer's given section, regardless of
 // resource type.
 func producerResource(producer *depsv1alpha1.AppDependencies, resourceType, resourceName string) ([]depsv1alpha1.SharedWithEntry, *depsv1alpha1.EncryptionSpec, bool) {
-	switch resourceType {
-	case resourceTypeSQS:
-		if producer.Spec.SQS == nil {
-			return nil, nil, false
-		}
-		for _, q := range producer.Spec.SQS.Resources {
-			if q.Name == resourceName {
-				return q.SharedWith, q.Encryption, true
-			}
-		}
-	case resourceTypeSNS:
-		if producer.Spec.SNS == nil {
-			return nil, nil, false
-		}
-		for _, t := range producer.Spec.SNS.Resources {
-			if t.Name == resourceName {
-				return t.SharedWith, t.Encryption, true
-			}
-		}
-	case resourceTypeDynamoDB:
-		if producer.Spec.DynamoDB == nil {
-			return nil, nil, false
-		}
-		for _, tbl := range producer.Spec.DynamoDB.Resources {
-			if tbl.Name == resourceName {
-				return tbl.SharedWith, tbl.Encryption, true
-			}
-		}
-	case resourceTypeS3:
-		if producer.Spec.S3 == nil {
-			return nil, nil, false
-		}
-		for _, b := range producer.Spec.S3.Resources {
-			if b.Name == resourceName {
-				return b.SharedWith, b.Encryption, true
-			}
+	entries, ok := producerEntries[resourceType]
+	if !ok {
+		return nil, nil, false
+	}
+	for _, e := range entries(&producer.Spec) {
+		if e.name == resourceName {
+			return e.sharedWith, e.encryption, true
 		}
 	}
 	return nil, nil, false

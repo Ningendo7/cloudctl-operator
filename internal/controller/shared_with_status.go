@@ -61,36 +61,46 @@ type sharedWithRef struct {
 // project's own note on this same tradeoff for what would make it one
 // (recreating an unrelated CR under the exact same namespace+name later).
 func checkSharedWithReferences(ctx context.Context, k8sClient client.Client, cr *depsv1alpha1.AppDependencies) {
-	var stale []string
+	var stale, unreadable []string
 	for _, ref := range allSharedWithRefs(cr) {
 		var consumer depsv1alpha1.AppDependencies
 		key := client.ObjectKey{Namespace: ref.entry.Namespace, Name: ref.entry.Name}
 		err := k8sClient.Get(ctx, key, &consumer)
-		if apierrors.IsNotFound(err) {
+		switch {
+		case apierrors.IsNotFound(err):
 			stale = append(stale, fmt.Sprintf(
 				"%s %q shares with %s/%s, which does not currently exist (not yet created, or was deleted)",
 				ref.resourceType, ref.resourceName, ref.entry.Namespace, ref.entry.Name,
 			))
-			continue
+		case err != nil:
+			// Neither valid nor stale: a failed read says nothing about the
+			// entry, so it is reported as unknown.
+			unreadable = append(unreadable, fmt.Sprintf(
+				"%s %q shares with %s/%s: %v", ref.resourceType, ref.resourceName, ref.entry.Namespace, ref.entry.Name, err,
+			))
 		}
-		// Any other Get error (a transient API-server issue) is skipped
-		// rather than flagged — this check must never report a false
-		// positive just because a single Get hiccuped.
 	}
 
-	if len(stale) == 0 {
+	switch {
+	case len(stale) == 0 && len(unreadable) == 0:
 		status.SetSectionCondition(
 			&cr.Status.Conditions, conditionTypeSharedWithReferences, metav1.ConditionTrue,
 			reasons.AllReferencesValid, "every sharedWith entry resolves to an existing AppDependencies CR",
 			cr.Generation, sectionTypes,
 		)
-		return
+	case len(stale) == 0:
+		status.SetSectionCondition(
+			&cr.Status.Conditions, conditionTypeSharedWithReferences, metav1.ConditionUnknown,
+			reasons.ReferencesUnknown, status.JoinCapped(unreadable, "; "),
+			cr.Generation, sectionTypes,
+		)
+	default:
+		status.SetSectionCondition(
+			&cr.Status.Conditions, conditionTypeSharedWithReferences, metav1.ConditionFalse,
+			reasons.StaleReferencesFound, status.JoinCapped(append(stale, unreadable...), "; "),
+			cr.Generation, sectionTypes,
+		)
 	}
-	status.SetSectionCondition(
-		&cr.Status.Conditions, conditionTypeSharedWithReferences, metav1.ConditionFalse,
-		reasons.StaleReferencesFound, status.JoinCapped(stale, "; "),
-		cr.Generation, sectionTypes,
-	)
 }
 
 // allSharedWithRefs flattens every sharedWith entry across every owned

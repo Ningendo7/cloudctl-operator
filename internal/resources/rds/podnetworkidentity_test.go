@@ -922,3 +922,57 @@ func TestEnsurePodNetworkIdentity_AnExistingGroupIsDescribedOnce(t *testing.T) {
 		t.Errorf("groups = %d, want the existing one reused", len(ec2Client.groups))
 	}
 }
+
+// A producer that cannot be read is not the same as one that does not exist:
+// the pass must fail and be retried, not end quietly without a security group.
+func TestEnsurePodNetworkIdentity_AFailedProducerReadIsAnErrorNotAMissingProducer(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, sa).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, isCR := obj.(*depsv1alpha1.AppDependencies); isCR {
+					return errors.New("etcd request timed out")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
+
+	_, err := EnsurePodNetworkIdentity(context.Background(), rdsClient, ec2Client, k8sClient,
+		"fulfillment", "fulfillment-service", "uid-1", "fulfillment-service", testRegion, testAccountID, consumes, nil)
+
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("EnsurePodNetworkIdentity() error = %v, want a retryable error naming the failed read", err)
+	}
+}
+
+func TestAnyConsumedVPCMatches_OnlyAGoneSubnetGroupCountsAsNoMatch(t *testing.T) {
+	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer).Build()
+	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
+
+	for name, tc := range map[string]struct {
+		describeErr error
+		wantMatch   bool
+		wantErr     bool
+	}{
+		"same VPC":                     {nil, true, false},
+		"subnet group no longer there": {&smithy.GenericAPIError{Code: errCodeDBSubnetGroupNotFound}, false, false},
+		"throttled":                    {&smithy.GenericAPIError{Code: "ThrottlingException", Fault: smithy.FaultClient}, false, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rdsClient := newFakeRDS()
+			rdsClient.describeDBSubnetGroupsErr = tc.describeErr
+
+			got, err := anyConsumedVPCMatches(context.Background(), rdsClient, k8sClient, consumes, "vpc-prod-private-data-tier")
+
+			if (err != nil) != tc.wantErr || got != tc.wantMatch {
+				t.Errorf("anyConsumedVPCMatches() = %v, %v; want match %v, error %v", got, err, tc.wantMatch, tc.wantErr)
+			}
+		})
+	}
+}

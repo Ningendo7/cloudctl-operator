@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -1002,6 +1004,28 @@ func TestSetSectionCondition_AnOwnershipRefusalNamesItsReasonOnTheSectionTheEven
 	}
 	if want := "Warning/AdoptRequired"; !slices.Contains(recorded, want) {
 		t.Errorf("expected the event %s, got %v", want, recorded)
+	}
+}
+
+func TestSetSectionCondition_AWrongEndpointIsNotReportedAsATransientError(t *testing.T) {
+	typo := &url.Error{Op: "Post", URL: "https://sqs.us-east-1.amazonaws.cm", Err: &net.DNSError{Err: "no such host", IsNotFound: true}}
+	blip := &url.Error{Op: "Post", URL: "https://sqs.us-east-1.amazonaws.com", Err: &net.DNSError{Err: "i/o timeout", IsTimeout: true}}
+
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"name that does not resolve": {&cloudctlaws.ReconcileError{Err: fmt.Errorf("creating queue: %w", typo), Retryable: cloudctlaws.IsRetryable(typo)}, reasons.EndpointUnreachable},
+		"timeout":                    {&cloudctlaws.ReconcileError{Err: fmt.Errorf("creating queue: %w", blip), Retryable: cloudctlaws.IsRetryable(blip)}, reasons.TransientError},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cr := &depsv1alpha1.AppDependencies{}
+			setSectionCondition(context.Background(), cr, conditionTypeSQSReady, tc.err, nil)
+			section := apimeta.FindStatusCondition(cr.Status.Conditions, conditionTypeSQSReady)
+			if section == nil || section.Reason != tc.want {
+				t.Errorf("SQSReady = %+v, want reason %s", section, tc.want)
+			}
+		})
 	}
 }
 
