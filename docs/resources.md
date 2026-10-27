@@ -450,6 +450,7 @@ A move to another **region** is not supported: an operator refuses a CR whose re
   just those two. A failure to write them (an S3 bucket allows ten tags) is
   reported as `ReleaseTagFailed` and does not stop the release. Turn them off
   with `--release-tags=false` (chart: `manager.releaseTags: false`).
+- **Cost reporting** — every resource carries `cloudctl.io/owner=<namespace>/<cr>`, and `cloudctl.io/released-from` once the operator has let go of it. Activate both as cost allocation tags in AWS Billing to group spend by CR and to see what abandoned resources cost. The operator computes no prices.
 - **Ownership tagging, adoption, and the trust window** — see
   [architecture.md](architecture.md#ownership-a-resource-is-owned-by-exactly-one-cr).
 - **Deletion safety, the quiet window, and `PendingDeletion`/`StuckPendingDeletion`** —

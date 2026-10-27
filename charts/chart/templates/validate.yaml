@@ -1,0 +1,10 @@
+{{- /*
+  rbac.namespaced would render a Role in the release namespace, but the manager
+  watches AppDependencies, ServiceAccounts, ConfigMaps and Secrets in every
+  namespace, and RDSSubnetGroupGrant is cluster-scoped, so every informer would
+  fail with forbidden. The option is not offered; this stops a release that
+  still sets it.
+*/ -}}
+{{- if .Values.rbac.namespaced }}
+{{- fail "rbac.namespaced is not supported: the manager needs cluster-wide access, so a namespaced Role cannot work. Remove the value." }}
+{{- end }}

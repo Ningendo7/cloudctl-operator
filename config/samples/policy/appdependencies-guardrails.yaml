@@ -2,6 +2,11 @@
 # later (ValidatingAdmissionPolicy); edit the allow-lists to your own. Not part
 # of the install: apply it yourself.
 #
+# Both policies judge a request only when it creates a CR or changes its spec.
+# The operator adds and removes its finalizer with a metadata-only update, so
+# that update is never denied: a CR in a namespace that has lost its label, or
+# one the limits have since been tightened below, can still be deleted.
+#
 # Only namespaces labelled cloudctl.io/enabled=true may hold CRs:
 #   kubectl label namespace checkout cloudctl.io/enabled=true
 apiVersion: admissionregistration.k8s.io/v1
@@ -16,6 +21,9 @@ spec:
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["appdependencies"]
+  matchConditions:
+    - name: creates-and-spec-changes
+      expression: "request.operation == 'CREATE' || object.spec != oldObject.spec"
   validations:
     - expression: "false"
       message: "AppDependencies are only allowed in namespaces labelled cloudctl.io/enabled=true"
@@ -47,6 +55,9 @@ spec:
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["appdependencies"]
+  matchConditions:
+    - name: creates-and-spec-changes
+      expression: "request.operation == 'CREATE' || object.spec != oldObject.spec"
   variables:
     - name: databases
       expression: "has(object.spec.rds) && has(object.spec.rds.resources) ? object.spec.rds.resources : []"

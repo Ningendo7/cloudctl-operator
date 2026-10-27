@@ -67,7 +67,9 @@ your organisation:
 - [config/samples/policy/](../config/samples/policy/appdependencies-guardrails.yaml)
   is a `ValidatingAdmissionPolicy` (Kubernetes 1.30 or later, tried on 1.36)
   that allows CRs only in namespaces labelled `cloudctl.io/enabled=true`,
-  and caps RDS instance classes and storage. Edit its lists to your own.
+  and caps RDS instance classes and storage. Edit its lists to your own. It
+  judges creates and spec changes only, so a CR can always be deleted: the
+  operator's finalizer update changes no spec and is never denied.
 - `ResourceQuota` caps the CRs per namespace:
   `count/appdependencies.deps.cloudctl.io: "10"`.
 - The operator's IAM role can carry conditions, such as
@@ -124,6 +126,8 @@ availability, not confidentiality or integrity. Same severity class as the
 IAM propagation-lag gap below — worth revisiting if it ever causes real
 pain, not worth ledger-state machinery today.
 
+**Grants are by name, not UID.** A `sharedWith` entry names a consumer by namespace and CR name, and is never pruned when that CR is deleted. A CR created later with the same namespace and name is authorized at once. Creating it needs create rights in that namespace, which the producer already trusted by naming it, but remove an entry you no longer want.
+
 **IAM role propagation lag** — see [aws-assumptions.md](aws-assumptions.md);
 unfixable from this operator's own reconcile loop, tracked separately.
 
@@ -140,18 +144,24 @@ conditions (`aws:ResourceTag/cloudctl.io/owner`) are worth adding for the
 destructive ones, so leaked credentials can't touch resources this operator
 didn't create.
 
+These are IAM action names without the service prefix, so `CreateQueue` under
+SQS is `sqs:CreateQueue`. Several S3 actions differ from the API operation
+that needs them (`HeadBucket` needs `s3:ListBucket`, and the lifecycle and
+encryption calls use `...Configuration` action names). A test keeps this table
+in step with the operations the code can call.
+
 | Service | Actions |
 |---|---|
-| STS | `sts:GetCallerIdentity` (startup and periodic credential check) |
+| STS | `GetCallerIdentity` needs no permission |
 | SQS | `CreateQueue`, `GetQueueUrl`, `GetQueueAttributes`, `SetQueueAttributes`, `ListQueueTags`, `TagQueue`, `UntagQueue`, `DeleteQueue` |
 | SNS | `CreateTopic`, `GetTopicAttributes`, `SetTopicAttributes`, `ListTagsForResource`, `TagResource`, `UntagResource`, `DeleteTopic`, `ListSubscriptionsByTopic`, `Subscribe`, `Unsubscribe` |
-| S3 | `HeadBucket`, `CreateBucket`, `DeleteBucket`, `GetBucketTagging`, `PutBucketTagging`, `Get`/`PutBucketVersioning`, `Get`/`PutBucketLifecycleConfiguration`, `DeleteBucketLifecycle`, `Get`/`PutBucketEncryption`, `Get`/`PutBucketPolicy`, `DeleteBucketPolicy`, `ListBucketVersions`, `DeleteObject`/`DeleteObjectVersion` (via `DeleteObjects`), `ListBucketMultipartUploads`, `AbortMultipartUpload` |
+| S3 | `CreateBucket`, `ListBucket`, `DeleteBucket`, `GetBucketTagging`, `PutBucketTagging`, `GetBucketVersioning`, `PutBucketVersioning`, `GetLifecycleConfiguration`, `PutLifecycleConfiguration`, `GetEncryptionConfiguration`, `PutEncryptionConfiguration`, `GetBucketPolicy`, `PutBucketPolicy`, `DeleteBucketPolicy`, `ListBucketVersions`, `DeleteObject`, `DeleteObjectVersion`, `ListBucketMultipartUploads`, `AbortMultipartUpload`, `TagResource` (docs, verify: creating a bucket with tags) |
 | DynamoDB | `DescribeTable`, `CreateTable`, `DeleteTable`, `UpdateTable`, `ListTagsOfResource`, `TagResource`, `UntagResource`, `DescribeContinuousBackups`, `UpdateContinuousBackups`, `Scan` (emptiness check) |
-| KMS | `CreateKey`, `DescribeKey`, `CreateAlias`, `EnableKey`, `EnableKeyRotation`, `GetKeyRotationStatus`, `GetKeyPolicy`, `PutKeyPolicy`, `ListResourceTags`, `TagResource`, `UntagResource`, `ScheduleKeyDeletion`, `CancelKeyDeletion` |
+| KMS | `CreateKey`, `DescribeKey`, `CreateAlias`, `EnableKey`, `EnableKeyRotation`, `GetKeyRotationStatus`, `GetKeyPolicy`, `PutKeyPolicy`, `ListResourceTags`, `TagResource`, `UntagResource`, `ScheduleKeyDeletion`, `CancelKeyDeletion`, `CreateGrant` (docs, verify: RDS and DynamoDB create a grant when encrypting with a customer key) |
 | IAM | `GetRole`, `CreateRole`, `UpdateAssumeRolePolicy`, `ListRoleTags`, `GetRolePolicy`, `PutRolePolicy`, `DeleteRolePolicy`, `DeleteRole`, `ListAttachedRolePolicies`, `ListInstanceProfilesForRole`, `TagRole` |
-| CloudWatch | `DescribeAlarms`, `PutMetricAlarm`, `DeleteAlarms`, `ListTagsForResource` |
+| CloudWatch | `DescribeAlarms`, `PutMetricAlarm`, `DeleteAlarms`, `ListTagsForResource`, `TagResource` (docs, verify: alarms are created with tags) |
 | RDS | `CreateDBInstance`, `ModifyDBInstance`, `DescribeDBInstances`, `DescribeDBSubnetGroups`, `DescribeDBEngineVersions`, `ListTagsForResource`, `AddTagsToResource`, `RemoveTagsFromResource`, `CreateDBSnapshot`, `DescribeDBSnapshots`, `DeleteDBSnapshot` (never `DeleteDBInstance`) |
-| EC2 (RDS security groups) | `CreateSecurityGroup`, `DescribeSecurityGroups`, `AuthorizeSecurityGroupIngress`, `RevokeSecurityGroupIngress`, `DeleteSecurityGroup`, `CreateTags`, `DescribeTags` |
+| EC2 (RDS security groups) | `CreateSecurityGroup`, `DescribeSecurityGroups`, `AuthorizeSecurityGroupIngress`, `RevokeSecurityGroupIngress`, `DeleteSecurityGroup`, `CreateTags` |
 | Secrets Manager (RDS) | `GetSecretValue`, scoped to the `rds!db-*` secrets AWS creates |
 
 The RDS rows were exercised against real AWS with a broadly-privileged
