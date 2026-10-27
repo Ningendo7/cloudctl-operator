@@ -289,6 +289,57 @@ func TestCleanup_RelinquishingRetainedKey_EmitsEvent(t *testing.T) {
 	}
 }
 
+const legacyServicePolicy = `{"Version":"2012-10-17","Statement":[` +
+	`{"Sid":"team-admins","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::123456789012:role/admins"},"Action":"kms:*","Resource":"*"},` +
+	`{"Sid":"cloudctl-sns-delivery","Effect":"Allow","Principal":{"Service":"sns.amazonaws.com"},"Action":["kms:Decrypt"],"Resource":"*"}]}`
+
+// The operator takes its own statements off a key before it stops claiming
+// it: afterwards the key is no longer the operator's to edit.
+func TestCleanup_RelinquishingAKeyRemovesTheOperatorsServiceStatementsFirst(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	client.keys[arn].policy = legacyServicePolicy
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, CreatedAt: metav1.Now()},
+	}
+
+	if _, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	statements := keyPolicyStatements(t, client.keys[arn].policy)
+	if _, ok := statements[sidSNSDelivery]; ok {
+		t.Error("the operator's statement stayed on a key it let go of")
+	}
+	if _, ok := statements["team-admins"]; !ok {
+		t.Error("a statement the operator did not write was removed")
+	}
+	if _, owned := client.keys[arn].tags[cloudctlaws.OwnerTagKey]; owned {
+		t.Error("the key should no longer carry the ownership tag")
+	}
+}
+
+func TestCleanup_AKeyWhosePolicyCannotBeCleanedKeepsItsOwnershipClaim(t *testing.T) {
+	client := newFakeKMS()
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	client.keys[arn] = ownedFakeKey(arn, "id-1")
+	client.keys[arn].policy = legacyServicePolicy
+	client.putKeyPolicyErr = &fakeAWSError{code: "AccessDeniedException"}
+	ledger := []depsv1alpha1.ManagedResource{
+		{Type: resourceType, Name: "primary", ARN: arn, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, CreatedAt: metav1.Now()},
+	}
+
+	_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", nil, nil, ledger, false, nil)
+
+	if err == nil {
+		t.Fatal("Cleanup() should fail when the operator's statements cannot be removed, so it retries")
+	}
+	if _, owned := client.keys[arn].tags[cloudctlaws.OwnerTagKey]; !owned {
+		t.Error("the ownership claim was given up with the operator's statements still on the key, where it can no longer remove them")
+	}
+}
+
 func TestCleanup_FirstNoticedForDeletion_EmitsPendingEvent(t *testing.T) {
 	client := newFakeKMS()
 	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"

@@ -332,6 +332,15 @@ func relinquishIfStillTagged(ctx context.Context, client kmsAPI, namespace, crNa
 		return false, false, nil // already relinquished, or never verified as ours — don't touch it
 	}
 
+	// The operator's service statements go before the ownership claim does:
+	// once the key is released it is no longer the operator's to edit. By
+	// now nothing the operator wired up delivers into or out of what the key
+	// protected, since a released resource's subscriptions are torn down in
+	// the pass that releases it, and the key is released a pass later.
+	if err := SyncServiceGrants(ctx, client, entry.ARN, ServiceGrants{}, recordEvent); err != nil {
+		return false, false, err
+	}
+
 	if released := cloudctlaws.ReleaseTags(ctx, namespace, crName, time.Now()); released != nil {
 		if _, tagErr := client.TagResource(ctx, &kms.TagResourceInput{KeyId: &entry.ARN, Tags: mapToTags(released)}); tagErr != nil {
 			cloudctlaws.ReleaseTagFailed(recordEvent, "KMS key", entry.Name, tagErr)

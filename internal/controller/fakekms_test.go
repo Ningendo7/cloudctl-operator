@@ -37,6 +37,7 @@ type fakeKey struct {
 	keyID    string
 	tags     map[string]string
 	keyState types.KeyState
+	policy   string
 }
 
 type fakeKMSClient struct {
@@ -44,6 +45,9 @@ type fakeKMSClient struct {
 	aliases map[string]string   // alias name -> ARN
 
 	nextKeyNum int
+
+	// policyWrites counts PutKeyPolicy calls.
+	policyWrites int
 }
 
 func newFakeKMSClient() *fakeKMSClient {
@@ -120,16 +124,21 @@ func (f *fakeKMSClient) GetKeyRotationStatus(_ context.Context, in *kms.GetKeyRo
 }
 
 func (f *fakeKMSClient) GetKeyPolicy(_ context.Context, in *kms.GetKeyPolicyInput, _ ...func(*kms.Options)) (*kms.GetKeyPolicyOutput, error) {
-	if f.resolve(*in.KeyId) == "" {
+	arn := f.resolve(*in.KeyId)
+	if arn == "" {
 		return nil, &types.NotFoundException{}
 	}
-	return &kms.GetKeyPolicyOutput{Policy: new(string)}, nil
+	policy := f.keys[arn].policy
+	return &kms.GetKeyPolicyOutput{Policy: &policy}, nil
 }
 
 func (f *fakeKMSClient) PutKeyPolicy(_ context.Context, in *kms.PutKeyPolicyInput, _ ...func(*kms.Options)) (*kms.PutKeyPolicyOutput, error) {
-	if f.resolve(*in.KeyId) == "" {
+	arn := f.resolve(*in.KeyId)
+	if arn == "" {
 		return nil, &types.NotFoundException{}
 	}
+	f.keys[arn].policy = *in.Policy
+	f.policyWrites++
 	return &kms.PutKeyPolicyOutput{}, nil
 }
 

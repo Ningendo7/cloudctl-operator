@@ -65,9 +65,9 @@ func kmsLifecycleSpec() {
 		logs := runAWSCLIPod("verify-key", "kms", "describe-key", "--key-id", alias)
 		Expect(logs).To(ContainSubstring(keyArn), "expected the real key's ARN to match the one recorded in the ownership ledger")
 
-		By("verifying the key policy lets SNS and CloudWatch use the key")
+		By("verifying a key nothing delivers into or publishes through grants no service anything")
 		keyPolicy := runAWSCLIPod(nextAWSPod("key-policy"), "kms", "get-key-policy", "--key-id", keyArn, "--policy-name", "default")
-		Expect(keyPolicy).To(And(ContainSubstring("cloudctl-sns-delivery"), ContainSubstring("cloudctl-cloudwatch-alarms")))
+		Expect(keyPolicy).NotTo(Or(ContainSubstring("cloudctl-sns-delivery"), ContainSubstring("cloudctl-cloudwatch-alarms")))
 
 		By("disabling the key outside the operator")
 		runAWSCLIPod(nextAWSPod("disable-key"), "kms", "disable-key", "--key-id", keyArn)

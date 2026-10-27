@@ -165,7 +165,7 @@ const (
 // section constructor registered there.
 var sectionTypes = []string{
 	conditionTypeSQSReady, conditionTypeSNSReady, conditionTypeDynamoDBReady, conditionTypeS3Ready, conditionTypeRDSReady,
-	conditionTypeKMSReady, conditionTypeAlarmsReady, conditionTypeIAMReady, conditionTypeConnectionInfoReady,
+	conditionTypeKMSReady, conditionTypeAlarmsReady, conditionTypeKeyPolicyReady, conditionTypeIAMReady, conditionTypeConnectionInfoReady,
 }
 
 type section struct {
@@ -204,6 +204,7 @@ func allSections(r *AppDependenciesReconciler, original *depsv1alpha1.AppDepende
 		s3Section(r, original),
 		rdsSection(r, original),
 		alarmsSection(r),
+		keyPolicySection(r),
 		iamSection(r),
 	}
 }

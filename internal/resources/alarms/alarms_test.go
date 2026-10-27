@@ -19,6 +19,7 @@ package alarms
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -570,5 +571,40 @@ func TestEnsure_TakesOverAnUnchangedAlarmWhenToldTo(t *testing.T) {
 	}
 	if client.putCalls != puts {
 		t.Errorf("alarms already owned and unchanged were written again: %d calls", client.putCalls-puts)
+	}
+}
+
+// The key policy of a topic's key lists these ARNs, so they must be exactly
+// the alarms Ensure creates, whatever the spec has in it.
+func TestAlarmARNs_AreTheAlarmsEnsureCreates(t *testing.T) {
+	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DLQ: true}, {Name: "audit", FIFO: true}}}
+	snsSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}}
+	ddbSpec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id"}}}
+	alarmsSpec := &depsv1alpha1.AlarmsSpec{Enabled: true}
+	client := newFakeCloudWatch()
+	if err := ensureAlarms(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
+		alarmsSpec, sqsSpec, snsSpec, ddbSpec); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	var want []string
+	for name := range client.alarms {
+		want = append(want, alarmARN(testRegion, testAccountID, name))
+	}
+	slices.Sort(want)
+
+	got := AlarmARNs(testRegion, testAccountID, "default", "checkout-service", alarmsSpec, sqsSpec, snsSpec, ddbSpec)
+	slices.Sort(got)
+
+	if len(want) == 0 || !slices.Equal(got, want) {
+		t.Errorf("AlarmARNs() = %v, want the ARNs of the alarms Ensure created: %v", got, want)
+	}
+}
+
+func TestAlarmARNs_NoneWhenAlarmsAreNotEnabled(t *testing.T) {
+	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+	for name, spec := range map[string]*depsv1alpha1.AlarmsSpec{"nil": nil, "disabled": {Enabled: false}} {
+		if got := AlarmARNs(testRegion, testAccountID, "default", "checkout-service", spec, sqsSpec, nil, nil); len(got) != 0 {
+			t.Errorf("%s: AlarmARNs() = %v, want none", name, got)
+		}
 	}
 }

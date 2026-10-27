@@ -101,6 +101,21 @@ func ledgerARNs(cr *depsv1alpha1.AppDependencies) map[string]string {
 	return arns
 }
 
+// SpecOrDeletionChangedPredicate passes creates, deletes, spec changes and a
+// CR starting to be deleted, and nothing else. For watches that read a CR's
+// spec to decide what to wake, and must also hear that it is going away.
+func SpecOrDeletionChangedPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return true },
+		DeleteFunc:  func(event.DeleteEvent) bool { return true },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() ||
+				e.ObjectOld.GetDeletionTimestamp().IsZero() != e.ObjectNew.GetDeletionTimestamp().IsZero()
+		},
+	}
+}
+
 // AnnotationValueChangedPredicate reconciles on Create/Delete/Generic
 // events, or an Update where the given annotation's value actually
 // changed — filtering out updates to any other field. Meant for watches on
