@@ -18,15 +18,16 @@ package sqs
 
 import (
 	"context"
-	"github.com/Ningendo7/cloudctl-operator/internal/status"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"strings"
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 func ordersQueue(t *testing.T, client *fakeSQS) *fakeQueue {
