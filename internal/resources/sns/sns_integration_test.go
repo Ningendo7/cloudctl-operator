@@ -38,6 +38,7 @@ package sns
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -46,6 +47,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
 )
 
 const (
@@ -155,6 +157,14 @@ func TestIntegration_Ensure_ReconcilesTagsOnExistingTopic(t *testing.T) {
 	}
 	if !cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.Tags), namespace, crName, "uid-1") {
 		t.Errorf("real topic tags don't satisfy IsOwnedBy: %+v", tagsOut.Tags)
+	}
+
+	attrs, err := client.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
+	if err != nil {
+		t.Fatalf("real GetTopicAttributes() error = %v", err)
+	}
+	if policy := attrs.Attributes["Policy"]; !strings.Contains(policy, awspolicy.InsecureTransportSid) {
+		t.Errorf("expected the transport-security statement in the topic policy, got %s", policy)
 	}
 }
 

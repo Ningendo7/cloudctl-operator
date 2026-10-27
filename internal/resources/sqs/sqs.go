@@ -260,6 +260,36 @@ func ensureSingleQueue(
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, queueURL string, err error) {
+	before, _ := status.FindManagedResource(ledger, resourceType, resourceName)
+	ledger, queueURL, err = ensureQueueExists(ctx, awsClient, namespace, crName, crUID, resourceName, opts, ledger, recordEvent)
+	if err != nil {
+		return ledger, queueURL, err
+	}
+	entry, found := status.FindManagedResource(ledger, resourceType, resourceName)
+	if !found {
+		return ledger, queueURL, fmt.Errorf("expected a ledger entry for queue %q after ensuring it, found none", resourceName)
+	}
+	// Once per trust window, like the other checks that need a read of their
+	// own: a queue trusted from the ledger on this pass is left alone.
+	if !status.VerifiedSince(before, entry) {
+		return ledger, queueURL, nil
+	}
+	return ledger, queueURL, reconcileTransportSecurity(ctx, awsClient, queueURL, entry.ARN, recordEvent)
+}
+
+// ensureQueueExists is ensureSingleQueue without the transport-security
+// statement.
+func ensureQueueExists(
+	ctx context.Context,
+	awsClient sqsAPI,
+	namespace,
+	crName,
+	crUID string,
+	resourceName string,
+	opts queueOptions,
+	ledger []depsv1alpha1.ManagedResource,
+	recordEvent status.EventRecorder,
+) (updatedLedger []depsv1alpha1.ManagedResource, queueURL string, err error) {
 	if err := checkFIFOUnchanged(ledger, resourceName, opts.fifo); err != nil {
 		return ledger, "", err
 	}

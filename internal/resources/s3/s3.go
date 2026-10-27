@@ -62,6 +62,10 @@ type s3API interface {
 	GetBucketPolicy(ctx context.Context, in *s3sdk.GetBucketPolicyInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketPolicyOutput, error)
 	PutBucketPolicy(ctx context.Context, in *s3sdk.PutBucketPolicyInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketPolicyOutput, error)
 	DeleteBucketPolicy(ctx context.Context, in *s3sdk.DeleteBucketPolicyInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketPolicyOutput, error)
+	GetBucketWebsite(ctx context.Context, in *s3sdk.GetBucketWebsiteInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketWebsiteOutput, error)
+	GetBucketPolicyStatus(ctx context.Context, in *s3sdk.GetBucketPolicyStatusInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketPolicyStatusOutput, error)
+	GetPublicAccessBlock(ctx context.Context, in *s3sdk.GetPublicAccessBlockInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetPublicAccessBlockOutput, error)
+	GetBucketAcl(ctx context.Context, in *s3sdk.GetBucketAclInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketAclOutput, error)
 }
 
 const resourceType = "s3"
@@ -231,6 +235,10 @@ func ensureBucket(
 	if err := reconcileBucketAttributes(ctx, awsClient, bucket, opts); err != nil {
 		return ledger, wrapAWSError(err, "reconciling bucket attributes")
 	}
+	if err := reconcileTransportSecurity(ctx, awsClient, bucket, recordEvent); err != nil {
+		return ledger, err
+	}
+	warnIfPublic(ctx, awsClient, bucket, recordEvent)
 
 	return recordVerified(ledger, resourceName, bucketArn, opts.deletionPolicy, opts.force), nil
 }

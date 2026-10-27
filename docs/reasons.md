@@ -36,6 +36,8 @@ the same reason, with the section at the start of its text.
 | `KMSKeyRefNotDeclared` | Failing | encryption.kmsKeyRef names a key that is not declared under kms.resources. | Declare the key, or correct the name. |
 | `KeyDisabled` | Failing | The KMS key is disabled, so nothing encrypted with it can be read or written. The operator does not re-enable it. | Re-enable the key if that is intended, or point the resource at another key. |
 | `KeyUnavailable` | Failing | The KMS key is in a state that cannot encrypt or decrypt. | Check the key in AWS. |
+| `EncryptionAsDeclared` | Info | No resource is encrypted with a KMS key that its spec no longer asks for. | — |
+| `EncryptionRemovalIgnored` | Failing | A queue, topic, table or bucket is still encrypted with a KMS key, but its spec no longer asks for encryption. The operator never removes encryption, so the resource keeps its key and the spec and AWS differ. | Set encryption back, or remove the entry, wait for it to be deleted and add it again. |
 | `KeyMissing` | Failing | The ledger knows a KMS key that AWS no longer has. Everything encrypted under it is unrecoverable, and the operator does not create a replacement. | Once you have confirmed that is acceptable, remove the entry and add it again to provision a new key. |
 | `NotSupported` | Failing | The spec asks for a feature the operator does not implement, such as replication. | Remove the field. |
 | `AllProducersExist` | Info | Every reference to another CR's resource resolves: the CR exists, declares the resource and has listed this CR in sharedWith. | — |

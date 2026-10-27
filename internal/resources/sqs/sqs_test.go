@@ -932,6 +932,16 @@ func newEventCollector() (status.EventRecorder, *[]recordedEvent) {
 	}, &events
 }
 
+func countEvents(events []recordedEvent, reason string) int {
+	n := 0
+	for _, e := range events {
+		if e.reason == reason {
+			n++
+		}
+	}
+	return n
+}
+
 func TestEnsure_CreatingQueue_EmitsCreatedEvent(t *testing.T) {
 	client := newFakeSQS()
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
@@ -941,7 +951,7 @@ func TestEnsure_CreatingQueue_EmitsCreatedEvent(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	if len(*events) != 1 || (*events)[0].reason != "QueueCreated" {
+	if countEvents(*events, "QueueCreated") != 1 {
 		t.Errorf("expected exactly one QueueCreated event, got %+v", *events)
 	}
 }
@@ -978,7 +988,7 @@ func TestEnsure_AdoptingQueue_EmitsAdoptedEvent(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
-	if len(*events) != 1 || (*events)[0].reason != "QueueAdopted" {
+	if countEvents(*events, "QueueAdopted") != 1 {
 		t.Errorf("expected exactly one QueueAdopted event, got %+v", *events)
 	}
 }

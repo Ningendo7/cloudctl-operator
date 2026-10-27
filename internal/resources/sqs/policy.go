@@ -23,6 +23,9 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 const pendingDeletionDenySid = "cloudctl-pending-deletion-deny"
@@ -65,21 +68,43 @@ func addPendingDeletionDeny(ctx context.Context, client sqsAPI, queueURL, queueA
 		return err
 	}
 
-	doc.Statement = removeStatementBySid(doc.Statement, pendingDeletionDenySid)
-
-	stmt, err := json.Marshal(denyStatement{
+	statements, changed, err := awspolicy.Upsert(doc.Statement, pendingDeletionDenySid, denyStatement{
 		Sid:       pendingDeletionDenySid,
 		Effect:    "Deny",
 		Principal: "*",
 		Action:    []string{"sqs:SendMessage"},
 		Resource:  queueArn,
 	})
-	if err != nil {
-		return fmt.Errorf("encoding pending-deletion deny statement: %w", err)
+	if err != nil || !changed {
+		return err
 	}
-	doc.Statement = append(doc.Statement, stmt)
+	doc.Statement = statements
 
 	return writePolicy(ctx, client, queueURL, doc)
+}
+
+// reconcileTransportSecurity makes the queue refuse plain-HTTP requests, by a
+// statement the operator owns in its policy. Other statements, the SNS
+// delivery grants among them, are kept, and nothing is written when the
+// policy already says this.
+func reconcileTransportSecurity(ctx context.Context, client sqsAPI, queueURL, queueARN string, recordEvent status.EventRecorder) error {
+	doc, err := readPolicy(ctx, client, queueURL)
+	if err != nil {
+		return wrapAWSError(err, "reading the queue's policy")
+	}
+	statements, changed, err := awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, awspolicy.DenyInsecureTransport("sqs:*", queueARN))
+	if err != nil || !changed {
+		return err
+	}
+	doc.Statement = statements
+	if err := writePolicy(ctx, client, queueURL, doc); err != nil {
+		return wrapAWSError(err, "writing the queue's transport-security policy")
+	}
+	if recordEvent != nil {
+		recordEvent("Normal", "TransportSecurityEnforced", fmt.Sprintf(
+			"SQS queue %s now refuses requests that do not use TLS (policy statement %s)", queueARN, awspolicy.InsecureTransportSid))
+	}
+	return nil
 }
 
 // removePendingDeletionDeny removes exactly the Sid addPendingDeletionDeny
@@ -92,11 +117,11 @@ func removePendingDeletionDeny(ctx context.Context, client sqsAPI, queueURL stri
 		return err
 	}
 
-	before := len(doc.Statement)
-	doc.Statement = removeStatementBySid(doc.Statement, pendingDeletionDenySid)
-	if len(doc.Statement) == before {
+	statements, changed := awspolicy.Remove(doc.Statement, pendingDeletionDenySid)
+	if !changed {
 		return nil // nothing to do
 	}
+	doc.Statement = statements
 
 	if len(doc.Statement) == 0 {
 		_, err := client.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
@@ -140,18 +165,4 @@ func writePolicy(ctx context.Context, client sqsAPI, queueURL string, doc policy
 		Attributes: map[string]string{string(types.QueueAttributeNamePolicy): string(encoded)},
 	})
 	return err
-}
-
-func removeStatementBySid(statements []json.RawMessage, sid string) []json.RawMessage {
-	filtered := make([]json.RawMessage, 0, len(statements))
-	for _, s := range statements {
-		var probe struct {
-			Sid string `json:"Sid"`
-		}
-		if err := json.Unmarshal(s, &probe); err == nil && probe.Sid == sid {
-			continue
-		}
-		filtered = append(filtered, s)
-	}
-	return filtered
 }

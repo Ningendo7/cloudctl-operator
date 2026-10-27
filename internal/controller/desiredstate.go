@@ -263,6 +263,7 @@ func ensureDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr, o
 	warnIfLedgerLarge(cr, eventRecorderFor(r, cr))
 	checkSharedWithReferences(ctx, r.Client, cr)
 	checkConsumeReferences(ctx, r.Client, cr)
+	checkEncryptionMatchesSpec(cr, eventRecorderFor(r, cr))
 
 	// Runs last, after every section has written this pass's ARNs into the
 	// ledger: the ConfigMap it generates is only as fresh as that ledger

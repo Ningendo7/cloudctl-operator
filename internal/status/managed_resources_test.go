@@ -220,3 +220,28 @@ func TestUpsertManagedResource_KeepsTheStampedDecisionsOfARebuiltEntry(t *testin
 		t.Errorf("a rebuilt entry should keep onDelete and heldBy until they are stamped again, got %+v", ledger[0])
 	}
 }
+
+func TestVerifiedSince(t *testing.T) {
+	now := metav1.Now()
+	earlier := metav1.NewTime(now.Add(-time.Minute))
+	at := func(v *metav1.Time) depsv1alpha1.ManagedResource {
+		return depsv1alpha1.ManagedResource{LastVerifiedAt: v}
+	}
+
+	for name, tc := range map[string]struct {
+		before, after depsv1alpha1.ManagedResource
+		want          bool
+	}{
+		"verified for the first time": {at(nil), at(&now), true},
+		"verified again":              {at(&earlier), at(&now), true},
+		"trusted from the ledger":     {at(&now), at(&now), false},
+		"never verified":              {at(nil), at(nil), false},
+		"verification lost":           {at(&now), at(nil), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := VerifiedSince(tc.before, tc.after); got != tc.want {
+				t.Errorf("VerifiedSince() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

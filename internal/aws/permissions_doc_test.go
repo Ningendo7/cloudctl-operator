@@ -48,6 +48,7 @@ var clientInterfaces = map[string][]struct{ dir, name string }{
 // are the same word; the S3 ones are not.
 var iamActionFor = map[string][]string{
 	"HeadBucket":                      {"ListBucket"},
+	"GetPublicAccessBlock":            {"GetBucketPublicAccessBlock"},
 	"GetBucketLifecycleConfiguration": {"GetLifecycleConfiguration"},
 	"PutBucketLifecycleConfiguration": {"PutLifecycleConfiguration"},
 	"DeleteBucketLifecycle":           {"PutLifecycleConfiguration"},

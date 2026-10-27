@@ -24,6 +24,8 @@ import (
 
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+
+	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
 )
 
 const pendingDeletionDenySid = "cloudctl-pending-deletion-deny"
@@ -63,21 +65,52 @@ func addPendingDeletionDeny(ctx context.Context, client s3API, bucket string) er
 		return err
 	}
 
-	doc.Statement = removeStatementBySid(doc.Statement, pendingDeletionDenySid)
-
-	stmt, err := json.Marshal(denyStatement{
+	statements, changed, err := awspolicy.Upsert(doc.Statement, pendingDeletionDenySid, denyStatement{
 		Sid:       pendingDeletionDenySid,
 		Effect:    "Deny",
 		Principal: "*",
 		Action:    "s3:PutObject",
 		Resource:  "arn:aws:s3:::" + bucket + "/*",
 	})
-	if err != nil {
-		return fmt.Errorf("encoding pending-deletion deny statement: %w", err)
+	if err != nil || !changed {
+		return err
 	}
-	doc.Statement = append(doc.Statement, stmt)
+	doc.Statement = statements
 
 	return writePolicy(ctx, client, bucket, doc)
+}
+
+// syncTransportPolicy makes the bucket policy carry the TLS-only deny when
+// want is true and not carry it when false, leaving every other statement
+// alone, and reports whether it wrote. Nothing is written when the policy
+// already says what is wanted.
+func syncTransportPolicy(ctx context.Context, client s3API, bucket string, want bool) (bool, error) {
+	doc, err := readPolicy(ctx, client, bucket)
+	if err != nil {
+		return false, err
+	}
+
+	var changed bool
+	if want {
+		stmt := awspolicy.DenyInsecureTransport("s3:*", "arn:aws:s3:::"+bucket, "arn:aws:s3:::"+bucket+"/*")
+		doc.Statement, changed, err = awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, stmt)
+		if err != nil {
+			return false, err
+		}
+	} else {
+		doc.Statement, changed = awspolicy.Remove(doc.Statement, awspolicy.InsecureTransportSid)
+	}
+	if !changed {
+		return false, nil
+	}
+
+	if len(doc.Statement) == 0 {
+		if _, err := client.DeleteBucketPolicy(ctx, &s3sdk.DeleteBucketPolicyInput{Bucket: &bucket}); err != nil && !isNotFoundError(err) {
+			return false, err
+		}
+		return true, nil
+	}
+	return true, writePolicy(ctx, client, bucket, doc)
 }
 
 // removePendingDeletionDeny removes exactly the Sid addPendingDeletionDeny
@@ -92,11 +125,11 @@ func removePendingDeletionDeny(ctx context.Context, client s3API, bucket string)
 		return err
 	}
 
-	before := len(doc.Statement)
-	doc.Statement = removeStatementBySid(doc.Statement, pendingDeletionDenySid)
-	if len(doc.Statement) == before {
+	statements, changed := awspolicy.Remove(doc.Statement, pendingDeletionDenySid)
+	if !changed {
 		return nil // nothing to do
 	}
+	doc.Statement = statements
 
 	if len(doc.Statement) == 0 {
 		if _, err := client.DeleteBucketPolicy(ctx, &s3sdk.DeleteBucketPolicyInput{Bucket: &bucket}); err != nil && !isNotFoundError(err) {
@@ -146,18 +179,4 @@ func writePolicy(ctx context.Context, client s3API, bucket string, doc policyDoc
 func isNoSuchBucketPolicy(err error) bool {
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchBucketPolicy"
-}
-
-func removeStatementBySid(statements []json.RawMessage, sid string) []json.RawMessage {
-	filtered := make([]json.RawMessage, 0, len(statements))
-	for _, s := range statements {
-		var probe struct {
-			Sid string `json:"Sid"`
-		}
-		if err := json.Unmarshal(s, &probe); err == nil && probe.Sid == sid {
-			continue
-		}
-		filtered = append(filtered, s)
-	}
-	return filtered
 }
