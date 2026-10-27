@@ -67,6 +67,7 @@ func isNotFound(err error) bool {
 // retried three times is one request, and its duration includes the retries
 // and any time spent waiting on RateLimitMiddleware.
 func MetricsMiddleware(service string) func(*smithymiddleware.Stack) error {
+	observability.InitAWSRequests(service)
 	return func(stack *smithymiddleware.Stack) error {
 		return stack.Initialize.Add(
 			smithymiddleware.InitializeMiddlewareFunc("CloudctlMetrics", func(

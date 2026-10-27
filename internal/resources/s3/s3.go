@@ -88,6 +88,9 @@ type bucketOptions struct {
 // account while remaining fully deterministic (no persisted random state
 // needed to recompute it, which the ownership/ledger model depends on).
 const s3NameMaxLen = 63
+
+// regionUSEast1 is the one region that rejects an explicit LocationConstraint.
+const regionUSEast1 = "us-east-1"
 const accountHashLen = 8
 
 func bucketName(namespace, crName, resourceKey, accountID string) string {
@@ -296,7 +299,7 @@ func createBucketIfMissing(
 			Tags: mapToTags(ownerTags(namespace, crName, crUID)),
 		},
 	}
-	if region != "us-east-1" {
+	if region != regionUSEast1 {
 		// us-east-1 is the one region where an explicit
 		// LocationConstraint is rejected - Tags alone on
 		// CreateBucketConfiguration is fine there.

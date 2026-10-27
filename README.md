@@ -137,6 +137,18 @@ fork the manifest to set them inline before applying).
 Both install paths deploy the same image, built for `linux/amd64`,
 `linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
 
+From v0.9.0 the image and the chart are signed with the same keyless identity
+as the CLI archives below, and the image carries build provenance and an SBOM:
+
+```bash
+VERSION=<release>
+for ref in ghcr.io/ningendo7/cloudctl-operator:$VERSION ghcr.io/ningendo7/charts/cloudctl-operator:${VERSION#v}; do
+  cosign verify $ref \
+    --certificate-identity https://github.com/Ningendo7/cloudctl-operator/.github/workflows/release.yml@refs/tags/$VERSION \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+done
+```
+
 ### The `kubectl appdeps` CLI
 
 A read-only kubectl plugin, also usable as `appdeps`, that explains a CR

@@ -15,12 +15,39 @@ on:
 
 permissions: {}
 
+# A newer push to the same pull request supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  test-e2e:
+  alert-rules:
     permissions:
       contents: read
-    name: Run on Ubuntu
+    name: Alert rules
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Helm
+        run: hack/install-tool.sh helm
+
+      - name: Install promtool
+        run: hack/install-tool.sh promtool
+
+      - name: Unit-test the alert rules the chart renders
+        run: hack/test-alert-rules.sh
+
+  helm-chart:
+    permissions:
+      contents: read
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       IMG: controller:latest
     steps:
@@ -34,11 +61,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kind
+        run: hack/install-tool.sh kind
 
       - name: Verify kind installation
         run: kind version
@@ -49,10 +73,10 @@ jobs:
       - name: Prepare cloudctl-operator
         run: |
           make docker-build
-          kind load docker-image $IMG
+          kind load docker-image "$IMG"
 
       - name: Install Helm
-        run: make install-helm
+        run: hack/install-tool.sh helm
 
       - name: Lint Helm Chart
         run: |
@@ -94,25 +118,6 @@ jobs:
             --set prometheus.rules.enabled=true \
             --set grafana.dashboard.enabled=true \
             | python3 -c 'import sys, yaml; list(yaml.safe_load_all(sys.stdin))'
-
-# TODO: Uncomment if cert-manager is enabled
-#      - name: Install cert-manager via Helm (wait for readiness)
-#        run: |
-#          helm repo add jetstack https://charts.jetstack.io
-#          helm repo update
-#          helm install cert-manager jetstack/cert-manager \
-#            --namespace cert-manager \
-#            --create-namespace \
-#            --set crds.enabled=true \
-#            --wait \
-#            --timeout 300s
-
-# TODO: Uncomment if Prometheus is enabled
-#      - name: Install Prometheus Operator CRDs
-#        run: |
-#          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-#          helm repo update
-#          helm install prometheus-crds prometheus-community/prometheus-operator-crds
 
       # The manager fails its own startup AWS identity check (and so never
       # becomes Ready) without something real to answer it - this cluster

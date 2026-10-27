@@ -161,7 +161,7 @@ var _ = Describe("Operator resilience against LocalStack", Ordered, ContinueOnFa
 		By("deleting the CRs so finalizers run, forcing any that don't finish")
 		_, _ = tryKubectl("delete", "appdependencies", "--all", "-n", resilienceNamespace, "--wait=true", "--timeout=90s")
 		if out, err := tryKubectl("get", "appdependencies", "-n", resilienceNamespace, "-o", "name"); err == nil {
-			for _, name := range strings.Fields(out) {
+			for name := range strings.FieldsSeq(out) {
 				_, _ = tryKubectl("patch", name, "-n", resilienceNamespace, "--type=merge", "-p", `{"metadata":{"finalizers":null}}`)
 			}
 		}
@@ -365,15 +365,15 @@ spec:
 
 	It("handles a burst of CRs without duplicates, leaks, or the manager running out of memory", func() {
 		const burst = 8
-		var manifests []string
-		for i := 0; i < burst; i++ {
+		manifests := make([]string, 0, burst)
+		for i := range burst {
 			manifests = append(manifests, queueCRManifest(resilienceNamespace, fmt.Sprintf("burst-%d", i)))
 		}
 		_, err := kubectlApplyStdin(strings.Join(manifests, "---\n"))
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func(g Gomega) {
-			for i := 0; i < burst; i++ {
+			for i := range burst {
 				crReady(g, resilienceNamespace, fmt.Sprintf("burst-%d", i))
 			}
 		}, 5*time.Minute, 3*time.Second).Should(Succeed())
@@ -381,12 +381,12 @@ spec:
 		Expect(queueCount(nextAWSPod("burst-queues"), "e2e-resilience-burst-")).To(Equal(burst),
 			"each CR should have exactly one queue")
 
-		var names []string
-		for i := 0; i < burst; i++ {
+		names := make([]string, 0, burst)
+		for i := range burst {
 			names = append(names, fmt.Sprintf("burst-%d", i))
 		}
 		mustKubectl(append([]string{"delete", "appdependencies", "-n", resilienceNamespace, "--wait=true", "--timeout=4m"}, names...)...)
-		for i := 0; i < burst; i++ {
+		for i := range burst {
 			name := fmt.Sprintf("burst-%d", i)
 			Eventually(func() error {
 				_, err := tryKubectl("get", "configmap", name+"-connection", "-n", resilienceNamespace)

@@ -16,12 +16,18 @@ on:
 
 permissions: {}
 
+# A newer push to the same pull request supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   drift:
     permissions:
       contents: read
-    name: Run on Ubuntu
+    name: Manifests drift
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,17 +40,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Install kubebuilder
-        run: |
-          # go.kubebuilder.io/dl/... 404s after its own redirect for both a
-          # pinned version and "latest" - confirmed directly, not assumed.
-          # The GitHub release asset download is the reliable path. -f
-          # makes curl fail loudly on a bad response instead of silently
-          # saving an HTML error page as if it were the binary (exactly
-          # what happened here before this fix: "syntax error near
-          # unexpected token `newline'" was curl having saved a 404 page).
-          curl -fL -o kubebuilder "https://github.com/kubernetes-sigs/kubebuilder/releases/download/v4.15.0/kubebuilder_$(go env GOOS)_$(go env GOARCH)"
-          chmod +x kubebuilder
-          sudo mv kubebuilder /usr/local/bin/kubebuilder
+        run: hack/install-tool.sh kubebuilder
 
       - name: Regenerate manifests, deepcopy code, and the Helm chart
         run: make manifests generate helm-generate

@@ -58,11 +58,21 @@ linters:
     rules:
       - linters:
           - lll
-        path: api/*
+        path: ^api/
       - linters:
           - dupl
           - lll
-        path: internal/*
+        path: ^internal/
+      # Ginkgo assertions with their messages run long; the suite was never
+      # held to the line limit.
+      - linters:
+          - lll
+        path: ^test/e2e/
+      # The suite drives kubectl and the aws CLI by design.
+      - linters:
+          - gosec
+        path: ^test/e2e/
+        text: G204
       - linters:
           - goconst
           - unparam

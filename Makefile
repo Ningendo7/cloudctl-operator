@@ -149,9 +149,17 @@ LIVE_TEST_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/sns/... 
 test-live: ## Run live tests against your own real AWS account (costs money, never run in CI)
 	go test -tags=live $(LIVE_TEST_PACKAGES) -v -timeout 45m
 
+# The live, integration and e2e test files sit behind build tags and some of
+# their helpers share names, so each tag set is linted on its own.
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
-	"$(GOLANGCI_LINT)" run
+lint: golangci-lint ## Run golangci-lint linter, then once more for each build tag that gates test files
+	@rc=0; \
+	"$(GOLANGCI_LINT)" run || rc=1; \
+	for tags in live integration e2e; do \
+		echo "golangci-lint run --build-tags=$$tags"; \
+		"$(GOLANGCI_LINT)" run --build-tags=$$tags || rc=1; \
+	done; \
+	exit $$rc
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
@@ -160,6 +168,10 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
+
+.PHONY: test-alerts
+test-alerts: ## Unit-test the chart's alert rules (needs helm, python3 with PyYAML, and promtool on the PATH).
+	hack/test-alert-rules.sh
 
 ##@ Build
 
@@ -189,6 +201,9 @@ docker-push: ## Push docker image with the manager.
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+# BuildKit's SBOM generator, pinned by digest like the base images. Dependabot
+# does not read the Makefile, so bump this one by hand.
+SBOM_SCANNER ?= docker/buildkit-syft-scanner@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
@@ -197,7 +212,11 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name cloudctl-operator-builder
 	$(CONTAINER_TOOL) buildx use cloudctl-operator-builder
-	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	mkdir -p dist
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} \
+		--attest type=provenance,mode=max \
+		--attest type=sbom,generator=$(SBOM_SCANNER) \
+		--metadata-file dist/image-metadata.json -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm cloudctl-operator-builder
 	rm Dockerfile.cross
 
@@ -469,11 +488,8 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
 	sed -i '/^  ## RBAC resource scope$$/,/^$$/d' charts/chart/values.yaml
 
 .PHONY: install-helm
-install-helm: ## Install the latest version of Helm.
-	@command -v $(HELM) >/dev/null 2>&1 || { \
-		echo "Installing Helm..." && \
-		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash; \
-	}
+install-helm: ## Install the pinned, checksum-verified Helm if none is on the PATH.
+	@command -v $(HELM) >/dev/null 2>&1 || hack/install-tool.sh helm
 
 .PHONY: helm-deploy
 helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.

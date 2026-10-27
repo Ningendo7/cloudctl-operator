@@ -1,5 +1,6 @@
-# Build the manager binary
-FROM golang:1.26 AS builder
+# Build the manager binary. Both base images are pinned by digest so two builds
+# of one commit match; Dependabot proposes the new digest.
+FROM golang:1.26@sha256:24a707af49702fa44f02785475d02fb752f6982d3e9c0afb7696e1f0204e7ce9 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -23,7 +24,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532

@@ -7,12 +7,18 @@ on:
 
 permissions: {}
 
+# A newer push to the same pull request supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     permissions:
       contents: read
-    name: Run on Ubuntu
+    name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -29,11 +35,30 @@ jobs:
       - name: Run linter
         run: make lint
 
+  workflows:
+    permissions:
+      contents: read
+    name: Workflow files
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        run: hack/install-tool.sh actionlint
+
+      - name: Check the workflow files
+        run: actionlint
+
   go-mod:
     permissions:
       contents: read
     name: Go Modules
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
