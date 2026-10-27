@@ -73,7 +73,7 @@ jobs:
       - name: Prepare cloudctl-operator
         run: |
           make docker-build
-          kind load docker-image $IMG
+          kind load docker-image "$IMG"
 
       - name: Install Helm
         run: hack/install-tool.sh helm

@@ -38,6 +38,7 @@ const (
 	labelService     = "service"
 	labelSection     = "section"
 	labelResult      = "result"
+	labelReason      = "reason"
 )
 
 // Outcomes of one AWS API operation, for AWSRequests.
@@ -106,7 +107,7 @@ var (
 	Events = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Name: "events_total",
 		Help: "Kubernetes events emitted by the operator, by type (Normal, Warning) and reason.",
-	}, []string{"type", "reason"})
+	}, []string{"type", labelReason})
 
 	// AWSClientsReady is 1 once the AWS clients have initialized, 0 while
 	// the manager is up but cannot reach AWS.

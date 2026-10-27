@@ -83,7 +83,7 @@ func TestAlertRules_EventReasonsStartAtZero(t *testing.T) {
 		t.Fatal("found no reason matchers in the alert rules")
 	}
 	for _, m := range matched {
-		for _, reason := range strings.Split(m[1], "|") {
+		for reason := range strings.SplitSeq(m[1], "|") {
 			if !slices.Contains(AlertedEventReasons, reason) {
 				t.Errorf("alert rules match event reason %q, which is not in AlertedEventReasons", reason)
 			}

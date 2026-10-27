@@ -68,6 +68,11 @@ linters:
       - linters:
           - lll
         path: ^test/e2e/
+      # The suite drives kubectl and the aws CLI by design.
+      - linters:
+          - gosec
+        path: ^test/e2e/
+        text: G204
       - linters:
           - goconst
           - unparam

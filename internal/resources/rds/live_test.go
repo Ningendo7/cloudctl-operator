@@ -110,13 +110,13 @@ func liveUniqueSuffix(t *testing.T) string {
 // status even transitions to "modifying". Not safe to apply
 // unconditionally: the initial post-create wait has no prior "available"
 // to have left, so it would never be satisfied.
-func waitForInstanceStatus(t *testing.T, client *rds.Client, instanceID string, want []string, requireSettled bool, timeout time.Duration) types.DBInstance {
+func waitForInstanceStatus(t *testing.T, rdsClient *rds.Client, instanceID string, want []string, requireSettled bool, timeout time.Duration) types.DBInstance {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	lastStatus := ""
 	leftAvailable := false
 	for {
-		out, err := client.DescribeDBInstances(context.Background(), &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
+		out, err := rdsClient.DescribeDBInstances(context.Background(), &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
 		if err != nil {
 			t.Fatalf("DescribeDBInstances(%q) error = %v", instanceID, err)
 		}
@@ -147,12 +147,12 @@ func waitForInstanceStatus(t *testing.T, client *rds.Client, instanceID string, 
 	}
 }
 
-func waitForSnapshotStatus(t *testing.T, client *rds.Client, snapshotID, want string, timeout time.Duration) {
+func waitForSnapshotStatus(t *testing.T, rdsClient *rds.Client, snapshotID, want string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	lastStatus := ""
 	for {
-		out, err := client.DescribeDBSnapshots(context.Background(), &rds.DescribeDBSnapshotsInput{DBSnapshotIdentifier: &snapshotID})
+		out, err := rdsClient.DescribeDBSnapshots(context.Background(), &rds.DescribeDBSnapshotsInput{DBSnapshotIdentifier: &snapshotID})
 		if err != nil {
 			t.Fatalf("DescribeDBSnapshots(%q) error = %v", snapshotID, err)
 		}
@@ -389,7 +389,7 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		secondGroupID = aws.ToString(secondOut.GroupId)
 		secondGroupARN := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, secondGroupID)
 
-		var shared []depsv1alpha1.SharedWithEntry
+		shared := make([]depsv1alpha1.SharedWithEntry, 0, 2)
 		for i, identity := range []struct{ arn string }{{consumerGroupARN}, {secondGroupARN}} {
 			consumer := &depsv1alpha1.AppDependencies{
 				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: fmt.Sprintf("%s-consumer%d", crName, i+1)},
@@ -511,7 +511,7 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		if !pendingFound || pending.PendingDeletionSince == nil {
 			t.Fatal("expected the instance to be marked pending deletion once removed from spec")
 		}
-		backdated := metav1.NewTime(pending.PendingDeletionSince.Time.Add(-(deletionQuietWindow + time.Minute)))
+		backdated := metav1.NewTime(pending.PendingDeletionSince.Add(-(deletionQuietWindow + time.Minute)))
 		backdatedEntry := pending
 		backdatedEntry.PendingDeletionSince = &backdated
 		status.UpsertManagedResource(&ledger, backdatedEntry)
@@ -652,11 +652,11 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 
 // waitForInstanceGone polls until DescribeDBInstances reports the instance
 // as not found.
-func waitForInstanceGone(t *testing.T, client *rds.Client, instanceID string, timeout time.Duration) {
+func waitForInstanceGone(t *testing.T, rdsClient *rds.Client, instanceID string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		_, err := client.DescribeDBInstances(context.Background(), &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
+		_, err := rdsClient.DescribeDBInstances(context.Background(), &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
 		var notFound *types.DBInstanceNotFoundFault
 		if errors.As(err, &notFound) {
 			return
