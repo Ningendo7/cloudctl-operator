@@ -36,6 +36,10 @@ const DefaultPendingDeletionGrace = 7 * 24 * time.Hour
 const (
 	rdsType         = "rds"
 	scrapeListLimit = 10 * time.Second
+
+	// conditionReady is the aggregate condition; every section's condition
+	// is its name followed by it.
+	conditionReady = "Ready"
 )
 
 // StateCollector reports the operator's view of what it manages, computed
@@ -158,11 +162,11 @@ func (c *StateCollector) Collect(ch chan<- prometheus.Metric) {
 func (c *StateCollector) emitConditions(ch chan<- prometheus.Metric, cr *depsv1alpha1.AppDependencies) {
 	ready, observed := 0.0, int64(0)
 	for _, cond := range cr.Status.Conditions {
-		if cond.Type == "Ready" {
+		if cond.Type == conditionReady {
 			ready, observed = condValue(cond.Status), cond.ObservedGeneration
 			continue
 		}
-		if section, ok := strings.CutSuffix(cond.Type, "Ready"); ok && section != "" {
+		if section, ok := strings.CutSuffix(cond.Type, conditionReady); ok && section != "" {
 			ch <- prometheus.MustNewConstMetric(c.appSectionReady, prometheus.GaugeValue, condValue(cond.Status),
 				cr.Namespace, cr.Name, strings.ToLower(section))
 		}
