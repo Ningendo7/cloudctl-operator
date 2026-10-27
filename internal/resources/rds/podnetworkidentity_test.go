@@ -69,7 +69,7 @@ func TestEnsurePodNetworkIdentity_HappyPath(t *testing.T) {
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()
 	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	sa := consentingServiceAccount()
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, sa).Build()
 	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
 
@@ -165,7 +165,7 @@ func TestEnsurePodNetworkIdentity_UsesFirstResolvedProducer(t *testing.T) {
 	// "checkout-service" exists but has no matching rds resource declared.
 	unresolvedProducer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"}}
 	resolvedProducer := newProducerWithInstance("default", "billing-service", "invoices-db", "prod-private-data-tier")
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	sa := consentingServiceAccount()
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(unresolvedProducer, resolvedProducer, sa).Build()
 	consumes := []depsv1alpha1.ConsumeRef{
 		{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"},
@@ -186,7 +186,7 @@ func TestEnsurePodNetworkIdentity_IsIdempotent(t *testing.T) {
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()
 	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	sa := consentingServiceAccount()
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, sa).Build()
 	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
 
@@ -481,7 +481,7 @@ func setUpPodNetworkIdentity(t *testing.T, rdsClient rdsAPI, ec2Client cloudctla
 	if err := k8sClient.Create(context.Background(), producer); err != nil {
 		t.Fatalf("setup: creating producer: %v", err)
 	}
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	sa := consentingServiceAccount()
 	if err := k8sClient.Create(context.Background(), sa); err != nil {
 		t.Fatalf("setup: creating ServiceAccount: %v", err)
 	}
@@ -808,7 +808,7 @@ func policyGroupIDs(t *testing.T, k8sClient client.Client) []string {
 func ensureWith(t *testing.T, k8sClient client.Client, opts ...PodIdentityOption) []depsv1alpha1.ManagedResource {
 	t.Helper()
 	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	sa := consentingServiceAccount()
 	_ = k8sClient.Create(context.Background(), producer)
 	_ = k8sClient.Create(context.Background(), sa)
 	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
@@ -899,7 +899,7 @@ func TestEnsurePodNetworkIdentity_AnExistingGroupIsDescribedOnce(t *testing.T) {
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()
 	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	sa := consentingServiceAccount()
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, sa).Build()
 	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
 	ensure := func(ledger []depsv1alpha1.ManagedResource) []depsv1alpha1.ManagedResource {
@@ -929,7 +929,7 @@ func TestEnsurePodNetworkIdentity_AFailedProducerReadIsAnErrorNotAMissingProduce
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()
 	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	sa := consentingServiceAccount()
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, sa).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -975,4 +975,13 @@ func TestAnyConsumedVPCMatches_OnlyAGoneSubnetGroupCountsAsNoMatch(t *testing.T)
 			}
 		})
 	}
+}
+
+// consentingServiceAccount is a ServiceAccount the team created and handed to
+// the CR that uses it, as the operator requires for one it did not create.
+func consentingServiceAccount() *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "fulfillment", Name: "fulfillment-service",
+		Annotations: map[string]string{serviceaccount.AllowClaimAnnotation: "fulfillment-service"},
+	}}
 }

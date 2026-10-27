@@ -243,8 +243,8 @@ var (
 		"spec.serviceAccountName names a ServiceAccount that does not exist.",
 		"Create it, or leave the name unset to have one created.")
 	ServiceAccountNotClaimable = register("ServiceAccountNotClaimable", Failing,
-		"The ServiceAccount already has an IAM role set outside this operator.",
-		"Annotate it with cloudctl.io/allow-claim=<cr-name> to hand it over.")
+		"The ServiceAccount was not created by this operator, or it is the namespace's default ServiceAccount. The operator takes over only an existing ServiceAccount whose owner consents, and never the default one, which every pod without a ServiceAccount of its own runs as.",
+		"For an existing ServiceAccount, annotate it with cloudctl.io/allow-claim=<cr-name>. For default, give the CR a ServiceAccount of its own.")
 	ServiceAccountInUse = register("ServiceAccountInUse", Failing,
 		"The ServiceAccount is already claimed by a different CR.",
 		"Use another ServiceAccount.")
