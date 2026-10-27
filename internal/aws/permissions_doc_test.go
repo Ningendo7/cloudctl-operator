@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -124,16 +123,16 @@ func documentedActions(t *testing.T) map[string][]string {
 		t.Fatal("docs/threat-model.md has no AWS actions section")
 	}
 	parenthetical := regexp.MustCompile(`\([^)]*\)`)
-	token := regexp.MustCompile("`([A-Za-z0-9]+)`")
+	backticked := regexp.MustCompile("`([A-Za-z0-9]+)`")
 	rows := map[string][]string{}
-	for _, line := range strings.Split(section, "\n") {
+	for line := range strings.SplitSeq(section, "\n") {
 		cells := strings.Split(line, "|")
 		if len(cells) < 4 || strings.HasPrefix(strings.TrimSpace(cells[1]), "---") {
 			continue
 		}
 		service := strings.TrimSpace(cells[1])
 		// Remarks in brackets may name an action the operator does not need.
-		for _, m := range token.FindAllStringSubmatch(parenthetical.ReplaceAllString(cells[2], ""), -1) {
+		for _, m := range backticked.FindAllStringSubmatch(parenthetical.ReplaceAllString(cells[2], ""), -1) {
 			rows[service] = append(rows[service], m[1])
 		}
 	}
@@ -158,11 +157,11 @@ func TestPermissionsTableMatchesTheClientInterfaces(t *testing.T) {
 			}
 		}
 		want = append(want, extraActions[service]...)
-		sort.Strings(want)
+		slices.Sort(want)
 		want = slices.Compact(want)
 
 		got := slices.Clone(documented[service])
-		sort.Strings(got)
+		slices.Sort(got)
 		got = slices.Compact(got)
 		if len(got) == 0 {
 			t.Errorf("docs/threat-model.md has no row for %q", service)

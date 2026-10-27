@@ -97,7 +97,7 @@ func readDocs(t *testing.T, path string) []*unstructured.Unstructured {
 		t.Fatal(err)
 	}
 	var docs []*unstructured.Unstructured
-	for _, part := range strings.Split(string(raw), "\n---\n") {
+	for part := range strings.SplitSeq(string(raw), "\n---\n") {
 		var obj map[string]any
 		if err := yaml.Unmarshal([]byte(part), &obj); err != nil {
 			t.Fatalf("%s: %v", path, err)
