@@ -79,6 +79,8 @@ whose ServiceAccount is bound to the chart's `metrics-reader` ClusterRole.
 
 The template, [controller-manager-alert-rules.yaml](../charts/chart/templates/prometheus/controller-manager-alert-rules.yaml), is the authoritative list.
 
+Prometheus evaluates these rules and Alertmanager routes them, so route on the `severity` label: `critical` pages someone, `warning` goes to a channel, `info` is for a dashboard. Nothing is deleted when `CloudctlResourceStuckPendingDeletion` or `CloudctlRDSInstanceNeedsManualDeletion` fires: the resource stays in AWS and keeps costing until a person deals with it. The chart renders the rules as a `PrometheusRule`, which needs prometheus-operator's CRDs; without them, write the same expressions in your own rule files, since they only use the metrics above.
+
 ## Dashboard
 
 [charts/chart/dashboards/cloudctl-operator.json](../charts/chart/dashboards/cloudctl-operator.json)

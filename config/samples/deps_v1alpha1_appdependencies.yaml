@@ -1,9 +1,19 @@
+# A queue with a dead-letter queue and its own KMS key, and a versioned bucket
+# with a backup lifecycle policy. The operator also derives an IAM role for the
+# workload and a ConfigMap with the queue URL and bucket name.
 apiVersion: deps.cloudctl.io/v1alpha1
 kind: AppDependencies
 metadata:
-  labels:
-    app.kubernetes.io/name: cloudctl-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: appdependencies-sample
+  name: checkout-service
 spec:
-  # TODO(user): Add fields here
+  sqs:
+    resources:
+      - name: orders
+        dlq: true
+        encryption:
+          enabled: true
+  s3:
+    resources:
+      - name: receipts
+        backup:
+          enabled: true

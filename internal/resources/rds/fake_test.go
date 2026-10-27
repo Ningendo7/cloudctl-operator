@@ -668,10 +668,6 @@ func (f *fakeEC2) CreateTags(_ context.Context, in *ec2.CreateTagsInput, _ ...fu
 	return &ec2.CreateTagsOutput{}, nil
 }
 
-func (f *fakeEC2) DescribeTags(context.Context, *ec2.DescribeTagsInput, ...func(*ec2.Options)) (*ec2.DescribeTagsOutput, error) {
-	panic("not used - this package tags security groups atomically at creation via TagSpecifications")
-}
-
 // fakeSecretsManager is a minimal in-memory stand-in for the real Secrets
 // Manager client, keyed by secret ARN since that's the only identifier
 // this package ever looks a secret up by.

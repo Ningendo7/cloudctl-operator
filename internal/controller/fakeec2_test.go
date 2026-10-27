@@ -180,10 +180,6 @@ func (f *fakeEC2Client) CreateTags(context.Context, *ec2.CreateTagsInput, ...fun
 	panic("not used - this package tags security groups atomically at creation via TagSpecifications")
 }
 
-func (f *fakeEC2Client) DescribeTags(context.Context, *ec2.DescribeTagsInput, ...func(*ec2.Options)) (*ec2.DescribeTagsOutput, error) {
-	panic("not used - this package tags security groups atomically at creation via TagSpecifications")
-}
-
 // groupIDByName and ingressOf let a test read the fake while the reconciler
 // is writing it.
 func (f *fakeEC2Client) groupIDByName(name string) string {

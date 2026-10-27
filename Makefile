@@ -462,6 +462,11 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
 	sed -i -e '/^prometheus:$$/,/^$$/{' -e '/^  enabled: false$$/r hack/helm/values-prometheus-rules.yaml' -e '}' charts/chart/values.yaml
 	cat hack/helm/values-grafana.yaml >> charts/chart/values.yaml
 	cat hack/helm/values-pdb.yaml >> charts/chart/values.yaml
+	@# rbac.namespaced: the plugin offers Role/RoleBinding in place of the
+	@# cluster-wide ones, but the manager watches every namespace and a
+	@# cluster-scoped kind, so that install cannot work. The value is dropped
+	@# from values.yaml; templates/validate.yaml fails a release that sets it.
+	sed -i '/^  ## RBAC resource scope$$/,/^$$/d' charts/chart/values.yaml
 
 .PHONY: install-helm
 install-helm: ## Install the latest version of Helm.
