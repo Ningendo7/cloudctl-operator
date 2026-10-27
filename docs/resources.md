@@ -415,9 +415,13 @@ spec:
   (`Orders` and `orders`, `a-b` and `a_b`), `ConnectionInfoReady` fails with
   `ConnectionKeyCollision` naming both, and nothing is written. A named
   ServiceAccount must already exist
-  (`ServiceAccountNotFound` otherwise), and one carrying an IAM role set
-  outside the operator is only taken over once it's annotated
-  `cloudctl.io/allow-claim: <cr-name>` (`ServiceAccountNotClaimable`). See
+  (`ServiceAccountNotFound` otherwise). One this operator did not create is
+  only taken over once it's annotated `cloudctl.io/allow-claim: <cr-name>`
+  (several CRs: comma separated), whether or not it has a role already, since
+  every pod running as it gets the CR's AWS permissions. Without that,
+  `ServiceAccountNotClaimable`. The namespace's `default` ServiceAccount is
+  never taken, consent or not: every pod that names no ServiceAccount runs as
+  it. See
   [architecture.md](architecture.md#resource-identity-delivery-to-workloads).
 
 ## Moving to a new cluster, or restoring a CR

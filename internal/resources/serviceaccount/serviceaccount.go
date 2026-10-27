@@ -25,6 +25,7 @@ package serviceaccount
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -77,18 +78,41 @@ func networkIdentityFieldOwner(crUID string) client.FieldOwner {
 }
 
 // AllowClaimAnnotation, set on a ServiceAccount to a CR's name, lets that CR
-// take over a ServiceAccount whose IAM role was set outside this operator.
-// Adding it needs write access to the ServiceAccount, which is what proves
-// consent; nothing in the CR itself can, since the CR's author is exactly
-// who may lack that access.
+// take over a ServiceAccount this operator did not create. Several CRs that
+// share one ServiceAccount for the database security group are listed
+// separated by commas. Adding it needs write access to the ServiceAccount,
+// which is what proves consent; nothing in the CR itself can, since the CR's
+// author is exactly who may lack that access.
 const AllowClaimAnnotation = "cloudctl.io/allow-claim"
 
+// defaultServiceAccount is what every pod in a namespace runs as when it names
+// no ServiceAccount, so a role on it would go to workloads that never asked.
+const defaultServiceAccount = "default"
+
+// refuseDefault refuses the namespace's default ServiceAccount outright,
+// whoever asks and whatever it carries: consent from its owner cannot cover
+// the pods that use it without naming it.
+func refuseDefault(name string) error {
+	if name != defaultServiceAccount {
+		return nil
+	}
+	return &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("ServiceAccount %q is what every pod in the namespace runs as unless it names another; "+
+			"give this CR a ServiceAccount of its own with spec.serviceAccountName, or leave the name unset to have one created", name),
+		Reason: reasons.ServiceAccountNotClaimable,
+	}
+}
+
 // claimError says why the CR may not modify an existing ServiceAccount, or
-// nil. One already claimed by another CR is refused, and so is one carrying
-// an IAM role set outside this operator, unless it consents through
-// AllowClaimAnnotation: the operator can edit any ServiceAccount, and must
-// not do for a CR's author what their own access wouldn't allow.
+// nil. One already claimed by another CR is refused, and so is any this
+// operator did not create unless it consents through AllowClaimAnnotation:
+// the operator can edit any ServiceAccount, and must not do for a CR's
+// author what their own access wouldn't allow. A ServiceAccount shared by
+// several workloads would otherwise hand every one of them the role.
 func claimError(sa *corev1.ServiceAccount, namespace, crName, crUID string) error {
+	if err := refuseDefault(sa.Name); err != nil {
+		return err
+	}
 	if cloudctlaws.IsOwnedBy(sa.Annotations, namespace, crName, crUID) {
 		return nil
 	}
@@ -98,14 +122,32 @@ func claimError(sa *corev1.ServiceAccount, namespace, crName, crUID string) erro
 			Reason: reasons.ServiceAccountInUse,
 		}
 	}
-	if role := sa.Annotations[RoleARNAnnotation]; role != "" && sa.Annotations[AllowClaimAnnotation] != crName {
+	if !consents(sa, crName) {
 		return &cloudctlaws.ReconcileError{
-			Err: fmt.Errorf("ServiceAccount %q already has IAM role %s, set outside this operator; to hand it to this CR, annotate it with %s=%s",
-				sa.Name, role, AllowClaimAnnotation, crName),
+			Err: fmt.Errorf("ServiceAccount %q was not created by this operator%s; to hand it to this CR, annotate it with %s=%s",
+				sa.Name, existingRoleNote(sa), AllowClaimAnnotation, crName),
 			Reason: reasons.ServiceAccountNotClaimable,
 		}
 	}
 	return nil
+}
+
+// consents reports whether the ServiceAccount's allow-claim annotation names
+// the CR.
+func consents(sa *corev1.ServiceAccount, crName string) bool {
+	for name := range strings.SplitSeq(sa.Annotations[AllowClaimAnnotation], ",") {
+		if strings.TrimSpace(name) == crName {
+			return true
+		}
+	}
+	return false
+}
+
+func existingRoleNote(sa *corev1.ServiceAccount) string {
+	if role := sa.Annotations[RoleARNAnnotation]; role != "" {
+		return " and already has IAM role " + role
+	}
+	return ""
 }
 
 func notFoundError(name string) error {
@@ -135,6 +177,9 @@ func ownerReference(crName, crUID string) *applymetav1.OwnerReferenceApplyConfig
 // pass claimError, since the label decides which pods the database
 // security group replaces the groups of.
 func EnsureNetworkIdentityLabel(ctx context.Context, k8sClient client.Client, namespace, crName, crUID, name string) error {
+	if err := refuseDefault(name); err != nil {
+		return err
+	}
 	existing, exists, err := getServiceAccount(ctx, k8sClient, namespace, name)
 	if err != nil {
 		return err
@@ -254,6 +299,9 @@ func releasePrevious(ctx context.Context, k8sClient client.Client, cr *depsv1alp
 // checkTarget refuses a ServiceAccount this CR may not use: one it was told to
 // use that doesn't exist, or one claimed by someone else.
 func checkTarget(cr *depsv1alpha1.AppDependencies, existing *corev1.ServiceAccount, exists, defaultedName bool, target string) error {
+	if err := refuseDefault(target); err != nil {
+		return err
+	}
 	switch {
 	case !exists && !defaultedName:
 		return notFoundError(target)

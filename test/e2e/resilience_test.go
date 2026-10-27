@@ -414,6 +414,7 @@ metadata:
     team: payments
   annotations:
     example.com/keep: "yes"
+    cloudctl.io/allow-claim: user-sa
 `, sa, resilienceNamespace))
 		Expect(err).NotTo(HaveOccurred())
 		_, err = kubectlApplyStdin(strings.Replace(queueCRManifest(resilienceNamespace, "user-sa"),

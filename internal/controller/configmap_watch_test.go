@@ -564,7 +564,7 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 					Namespace:   nsA,
 					Name:        "team-sa",
 					Labels:      map[string]string{"team": "payments"},
-					Annotations: map[string]string{"example.com/keep": "yes"},
+					Annotations: map[string]string{"example.com/keep": "yes", serviceaccount.AllowClaimAnnotation: "user-sa"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, sa)).To(Succeed())
@@ -597,7 +597,9 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 		})
 
 		It("is refused when another CR already claimed it", func() {
-			sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: nsA, Name: "shared-sa"}}
+			sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+				Namespace: nsA, Name: "shared-sa", Annotations: map[string]string{serviceaccount.AllowClaimAnnotation: "sa-first"},
+			}}
 			Expect(k8sClient.Create(ctx, sa)).To(Succeed())
 
 			first := queueCR(nsA, "sa-first", func(cr *depsv1alpha1.AppDependencies) { cr.Spec.ServiceAccountName = "shared-sa" })

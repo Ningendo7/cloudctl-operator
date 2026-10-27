@@ -112,7 +112,9 @@ mechanism.
 **The IAM role → a ServiceAccount annotation.** With `spec.serviceAccountName`
 set, the operator merges `eks.amazonaws.com/role-arn` onto that existing
 object through server-side apply, claiming only that field and leaving the
-object and its other annotations alone. Unset, it creates and owns a
+object and its other annotations alone. It does so only for a ServiceAccount
+whose owner consented with `cloudctl.io/allow-claim: <cr-name>`, never for
+`default`, because every pod running as the account gets the role. Unset, it creates and owns a
 ServiceAccount named after the CR, garbage-collected with it. The AWS SDK
 in the pod assumes the role through its projected token, so no credential
 is ever shipped in an env var or ConfigMap, and the role ARN is deliberately
