@@ -37,6 +37,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kmstest"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
@@ -470,8 +471,8 @@ func TestEnsure_RejectsReplicationAsNotYetSupported(t *testing.T) {
 		t.Errorf("expected errors.Is(err, ErrReplicationNotSupported), got %v", err)
 	}
 	var reconcileErr *cloudctlaws.ReconcileError
-	if errors.As(err, &reconcileErr) {
-		t.Errorf("expected a hard, non-retryable error - retrying forever on a feature that can never succeed would look indistinguishable from a slow-but-working reconcile, got a ReconcileError with Retryable=%v", reconcileErr.Retryable)
+	if !errors.As(err, &reconcileErr) || reconcileErr.Retryable || reconcileErr.Reason != reasons.NotSupported {
+		t.Errorf("expected a non-retryable NotSupported error - retrying forever on a feature that can never succeed would look indistinguishable from a slow-but-working reconcile, got %v", err)
 	}
 	bucket := bucketName("default", "checkout-service", "receipts", testAccountID)
 	if _, created := client.buckets[bucket]; created {

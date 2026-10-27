@@ -36,6 +36,10 @@ const DefaultPendingDeletionGrace = 7 * 24 * time.Hour
 const (
 	rdsType         = "rds"
 	scrapeListLimit = 10 * time.Second
+
+	// conditionReady is the aggregate condition; every section's condition
+	// is its name followed by it.
+	conditionReady = "Ready"
 )
 
 // StateCollector reports the operator's view of what it manages, computed
@@ -51,6 +55,8 @@ type StateCollector struct {
 	rdsInstances    *prometheus.Desc
 	appReady        *prometheus.Desc
 	appSectionReady *prometheus.Desc
+	generationLag   *prometheus.Desc
+	verifiedAge     *prometheus.Desc
 }
 
 // NewStateCollector builds the collector. graceByType gives, per ledger
@@ -79,6 +85,12 @@ func NewStateCollector(reader client.Reader, graceByType map[string]time.Duratio
 		appSectionReady: desc("app_section_ready",
 			"1 if a section's Ready condition is True, else 0, per AppDependencies and section.",
 			"namespace", "name", "section"),
+		generationLag: desc("app_generation_lag",
+			"How many spec generations the aggregate Ready condition is behind the CR; 0 once the operator has caught up with the latest spec.",
+			"namespace", "name"),
+		verifiedAge: desc("resource_verified_age_seconds",
+			"Age in seconds of the oldest ownership re-verification among a type's ledger entries.",
+			"type"),
 	}
 }
 
@@ -88,6 +100,8 @@ func (c *StateCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.rdsInstances
 	ch <- c.appReady
 	ch <- c.appSectionReady
+	ch <- c.generationLag
+	ch <- c.verifiedAge
 }
 
 func (c *StateCollector) Collect(ch chan<- prometheus.Metric) {
@@ -107,6 +121,7 @@ func (c *StateCollector) Collect(ch chan<- prometheus.Metric) {
 	managed := map[pair]int{}
 	pending := map[pair]int{}
 	rdsStatus := map[string]int{}
+	oldestVerified := map[string]float64{}
 	now := time.Now()
 
 	for i := range list.Items {
@@ -121,20 +136,11 @@ func (c *StateCollector) Collect(ch chan<- prometheus.Metric) {
 			if r.Type == rdsType && r.ObservedStatus != "" {
 				rdsStatus[r.ObservedStatus]++
 			}
-		}
-
-		ready := 0.0
-		for _, cond := range cr.Status.Conditions {
-			if cond.Type == "Ready" {
-				ready = condValue(cond.Status)
-				continue
-			}
-			if section, ok := strings.CutSuffix(cond.Type, "Ready"); ok && section != "" {
-				ch <- prometheus.MustNewConstMetric(c.appSectionReady, prometheus.GaugeValue, condValue(cond.Status),
-					cr.Namespace, cr.Name, strings.ToLower(section))
+			if r.LastVerifiedAt != nil {
+				oldestVerified[r.Type] = max(oldestVerified[r.Type], now.Sub(r.LastVerifiedAt.Time).Seconds())
 			}
 		}
-		ch <- prometheus.MustNewConstMetric(c.appReady, prometheus.GaugeValue, ready, cr.Namespace, cr.Name)
+		c.emitConditions(ch, cr)
 	}
 
 	for k, n := range managed {
@@ -146,6 +152,28 @@ func (c *StateCollector) Collect(ch chan<- prometheus.Metric) {
 	for status, n := range rdsStatus {
 		ch <- prometheus.MustNewConstMetric(c.rdsInstances, prometheus.GaugeValue, float64(n), status)
 	}
+	for resourceType, age := range oldestVerified {
+		ch <- prometheus.MustNewConstMetric(c.verifiedAge, prometheus.GaugeValue, age, resourceType)
+	}
+}
+
+// emitConditions reports one CR's readiness, its sections', and how far the
+// operator is behind its spec.
+func (c *StateCollector) emitConditions(ch chan<- prometheus.Metric, cr *depsv1alpha1.AppDependencies) {
+	ready, observed := 0.0, int64(0)
+	for _, cond := range cr.Status.Conditions {
+		if cond.Type == conditionReady {
+			ready, observed = condValue(cond.Status), cond.ObservedGeneration
+			continue
+		}
+		if section, ok := strings.CutSuffix(cond.Type, conditionReady); ok && section != "" {
+			ch <- prometheus.MustNewConstMetric(c.appSectionReady, prometheus.GaugeValue, condValue(cond.Status),
+				cr.Namespace, cr.Name, strings.ToLower(section))
+		}
+	}
+	ch <- prometheus.MustNewConstMetric(c.appReady, prometheus.GaugeValue, ready, cr.Namespace, cr.Name)
+	ch <- prometheus.MustNewConstMetric(c.generationLag, prometheus.GaugeValue,
+		float64(max(cr.Generation-observed, 0)), cr.Namespace, cr.Name)
 }
 
 func (c *StateCollector) graceFor(resourceType string) time.Duration {

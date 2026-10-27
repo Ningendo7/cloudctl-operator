@@ -22,6 +22,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierror "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
@@ -121,8 +122,10 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	if refused, err := refuseLegacyKMSKeyRef(ctx, r, cr, original); refused || err != nil {
 		return ctrl.Result{}, err
 	}
-	if refused, err := refuseOtherRegion(ctx, r, cr, original); refused || err != nil {
-		return ctrl.Result{RequeueAfter: jitteredDriftRequeue()}, err
+	if refused, err := refuseOtherRegion(ctx, r, cr, original); err != nil {
+		return ctrl.Result{}, err
+	} else if refused {
+		return ctrl.Result{RequeueAfter: jitteredDriftRequeue()}, nil
 	}
 
 	finalizerCtx, endFinalizer := startSpan(ctx, "ensure finalizer")
@@ -152,7 +155,7 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 		endPatch(statusErr)
 	}
 	if statusErr != nil {
-		log.Error(statusErr, "failed to update status")
+		log.Error(statusErr, "Failed to update status")
 		if err == nil {
 			err = statusErr
 		}
@@ -186,15 +189,26 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 	log.Info("Starting deletion reconcile")
 	original := cr.DeepCopy()
 
-	if refused, err := refuseOtherRegion(ctx, r, cr, original); refused || err != nil {
-		return ctrl.Result{RequeueAfter: jitteredDriftRequeue()}, err
+	if refused, err := refuseOtherRegion(ctx, r, cr, original); err != nil {
+		return ctrl.Result{}, err
+	} else if refused {
+		return ctrl.Result{RequeueAfter: jitteredDriftRequeue()}, nil
 	}
 	done, err := finalizeDesiredState(ctx, r, cr)
 
-	patchCtx, cancelPatch := statusWriteContext(ctx)
-	defer cancelPatch()
-	if statusErr := r.Status().Patch(patchCtx, cr, client.MergeFrom(original)); statusErr != nil {
-		log.Error(statusErr, "failed to update status during deletion")
+	// A pass that changed nothing writes nothing. A failed write is returned
+	// so it is retried, except once everything is gone: the CR is about to
+	// disappear, and a status nobody will read must not hold up the finalizer.
+	if !equality.Semantic.DeepEqual(original.Status, cr.Status) {
+		patchCtx, cancelPatch := statusWriteContext(ctx)
+		statusErr := r.Status().Patch(patchCtx, cr, statusPatch(original, cr))
+		cancelPatch()
+		if statusErr != nil {
+			log.Error(statusErr, "Failed to update status during deletion")
+			if err == nil && !done {
+				err = statusErr
+			}
+		}
 	}
 
 	key := client.ObjectKeyFromObject(cr)

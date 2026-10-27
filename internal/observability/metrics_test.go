@@ -225,6 +225,8 @@ func TestStateCollector_PerAppReadiness_AndNoStaleSeriesAfterDelete(t *testing.T
 		"cloudctl_app_section_ready{name=healthy,namespace=team-a,section=sqs}":            1,
 		"cloudctl_app_section_ready{name=healthy,namespace=team-a,section=iam}":            0,
 		"cloudctl_app_section_ready{name=healthy,namespace=team-a,section=connectioninfo}": 1,
+		"cloudctl_app_generation_lag{name=healthy,namespace=team-a}":                       0,
+		"cloudctl_app_generation_lag{name=new,namespace=team-a}":                           0,
 	}
 	for key, value := range want {
 		if g, ok := got[key]; !ok || g != value {
@@ -286,5 +288,52 @@ func TestStateCollector_ListsWithoutDeepCopying(t *testing.T) {
 	gather(t, NewStateCollector(recorder, nil))
 	if recorder.lists == 0 || recorder.noDeepCopy != recorder.lists {
 		t.Errorf("%d of %d lists opted out of the deep copy, want all of at least one", recorder.noDeepCopy, recorder.lists)
+	}
+}
+
+// A spec change the operator has not reconciled yet shows as lag; a new CR
+// that has not been seen at all is one generation behind.
+func TestStateCollector_GenerationLag(t *testing.T) {
+	caughtUp := appDeps("team-a", "caught-up", depsv1alpha1.AppDependenciesStatus{Conditions: []metav1.Condition{
+		{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 4},
+	}})
+	caughtUp.Generation = 4
+	behind := appDeps("team-a", "behind", depsv1alpha1.AppDependenciesStatus{Conditions: []metav1.Condition{
+		{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 2},
+	}})
+	behind.Generation = 5
+	unseen := appDeps("team-a", "unseen", depsv1alpha1.AppDependenciesStatus{})
+	unseen.Generation = 1
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(caughtUp, behind, unseen).Build()
+
+	got := gather(t, NewStateCollector(c, nil))
+
+	for name, want := range map[string]float64{"caught-up": 0, "behind": 3, "unseen": 1} {
+		key := "cloudctl_app_generation_lag{name=" + name + ",namespace=team-a}"
+		if g, ok := got[key]; !ok || g != want {
+			t.Errorf("%s = %v (present=%v), want %v", key, g, ok, want)
+		}
+	}
+}
+
+// The gauge is the oldest re-verification per type, so one entry that stopped
+// being checked shows even when its neighbours are fresh.
+func TestStateCollector_VerifiedAgeIsTheOldestPerType(t *testing.T) {
+	fresh := ledgerEntry("sqs", "fresh", depsv1alpha1.ManagedResourceStateVerified)
+	fresh.LastVerifiedAt = ago(time.Minute)
+	stale := ledgerEntry("sqs", "stale", depsv1alpha1.ManagedResourceStateVerified)
+	stale.LastVerifiedAt = ago(2 * time.Hour)
+	neverVerified := ledgerEntry("s3", "creating", depsv1alpha1.ManagedResourceStateCreating)
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(
+		appDeps("team-a", "app", depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{fresh, stale, neverVerified}}),
+	).Build()
+
+	got := gather(t, NewStateCollector(c, nil))
+
+	if age := got["cloudctl_resource_verified_age_seconds{type=sqs}"]; age < 7200 || age > 7260 {
+		t.Errorf("sqs verified age = %v, want about 7200 (the stale entry)", age)
+	}
+	if _, ok := got["cloudctl_resource_verified_age_seconds{type=s3}"]; ok {
+		t.Error("a type with no verification time yet should have no series, not a zero age")
 	}
 }

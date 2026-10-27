@@ -159,10 +159,50 @@ func TestAppDependenciesPredicate_ReactsToTheAdoptFromAnnotation(t *testing.T) {
 		"annotation removed":     {map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "a"}, nil, false},
 		"unrelated annotation":   {nil, map[string]string{"example.com/x": "1"}, false},
 		"force-reconcile bumped": {nil, map[string]string{ForceReconcileAnnotation: "1"}, true},
+		"force-delete-all added": {nil, map[string]string{ForceDeleteAllAnnotation: "true"}, true},
+		"force-delete-all taken off": {
+			map[string]string{ForceDeleteAllAnnotation: "true"}, nil, false,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := pred.Update(event.UpdateEvent{ObjectOld: crWithAnnotations(tc.old), ObjectNew: crWithAnnotations(tc.new)})
 			if got != tc.want {
+				t.Errorf("Update() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func consumerOf(deleting bool, consumes ...depsv1alpha1.ConsumeRef) *depsv1alpha1.AppDependencies {
+	cr := &depsv1alpha1.AppDependencies{}
+	if deleting {
+		now := metav1.Now()
+		cr.DeletionTimestamp = &now
+	}
+	if consumes != nil {
+		cr.Spec.RDS = &depsv1alpha1.RDSSpec{Consumes: consumes}
+	}
+	return cr
+}
+
+func TestPodNetworkIdentityPublishedPredicate_WakesProducerWhenConsumerStopsBeingEntitled(t *testing.T) {
+	pred := PodNetworkIdentityPublishedPredicate()
+	orders := depsv1alpha1.ConsumeRef{Namespace: "shop", Name: "checkout", ResourceName: "orders-db"}
+	billing := depsv1alpha1.ConsumeRef{Namespace: "shop", Name: "checkout", ResourceName: "billing-db"}
+
+	for name, tc := range map[string]struct {
+		old, new *depsv1alpha1.AppDependencies
+		want     bool
+	}{
+		"deletion starts":             {consumerOf(false, orders), consumerOf(true, orders), true},
+		"rds.consumes emptied":        {consumerOf(false, orders), consumerOf(false), true},
+		"rds.consumes entry swapped":  {consumerOf(false, orders), consumerOf(false, billing), true},
+		"rds.consumes entry added":    {consumerOf(false, orders), consumerOf(false, orders, billing), true},
+		"nothing changed":             {consumerOf(false, orders), consumerOf(false, orders), false},
+		"already deleting, unchanged": {consumerOf(true, orders), consumerOf(true, orders), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := pred.Update(event.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}); got != tc.want {
 				t.Errorf("Update() = %v, want %v", got, tc.want)
 			}
 		})

@@ -133,7 +133,7 @@ tests:
         exp_alerts:
           - exp_labels: {severity: critical, reason: InstanceMissing}
             exp_annotations:
-              summary: "A database or KMS key the operator manages no longer exists in AWS"
+              summary: "A database, table or KMS key the operator manages no longer exists in AWS"
               description: "InstanceMissing: it was deleted outside the operator and will not be recreated. See the AppDependencies events and conditions for which one."
 
   - name: key deleted outside the operator
@@ -147,8 +147,22 @@ tests:
         exp_alerts:
           - exp_labels: {severity: critical, reason: KeyMissing}
             exp_annotations:
-              summary: "A database or KMS key the operator manages no longer exists in AWS"
+              summary: "A database, table or KMS key the operator manages no longer exists in AWS"
               description: "KeyMissing: it was deleted outside the operator and will not be recreated. See the AppDependencies events and conditions for which one."
+
+  - name: table deleted outside the operator
+    interval: 1m
+    input_series:
+      - series: 'cloudctl_events_total{type="Warning",reason="TableMissing"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CloudctlDataResourceMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, reason: TableMissing}
+            exp_annotations:
+              summary: "A database, table or KMS key the operator manages no longer exists in AWS"
+              description: "TableMissing: it was deleted outside the operator and will not be recreated. See the AppDependencies events and conditions for which one."
 
   # --- CloudctlKMSKeyUnusable
   - name: kms key disabled

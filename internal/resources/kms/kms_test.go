@@ -31,6 +31,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -606,6 +607,31 @@ func TestEnsure_KeyDeletedOutOfBandWithinTrustWindow_IsALoudErrorNotARecreate(t 
 	}
 	if !slices.Contains(events, "KeyMissing") {
 		t.Errorf("expected a KeyMissing warning, got %v", events)
+	}
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.KeyMissing {
+		t.Errorf("the condition reason should be KeyMissing, got %v", err)
+	}
+}
+
+func TestEnsureAlias_AnAliasOnAnotherKeyIsReportedAsNameTaken(t *testing.T) {
+	client := newFakeKMS()
+	other := "arn:aws:kms:us-east-1:123456789012:key/other-id"
+	client.keys[other] = &fakeKey{arn: other, keyID: "other-id", keyState: types.KeyStateEnabled}
+	alias := aliasName("default", "checkout-service", "primary", keyOptions{})
+	client.aliases[alias] = other
+
+	err := ensureAlias(context.Background(), client, alias, "arn:aws:kms:us-east-1:123456789012:key/mine", "mine")
+
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.NameTaken {
+		t.Fatalf("an alias that points at another key should be NameTaken, got %v", err)
+	}
+	if reconcileErr.Retryable {
+		t.Error("a name collision does not fix itself, so it must not be retried")
+	}
+	if client.aliases[alias] != other {
+		t.Error("the other key's alias must be left alone")
 	}
 }
 

@@ -76,6 +76,7 @@ const (
 	errCodeInvalidGroupNotFound       = "InvalidGroup.NotFound"
 	errCodeInvalidPermissionNotFound  = "InvalidPermission.NotFound"
 	errCodeInvalidPermissionDuplicate = "InvalidPermission.Duplicate"
+	errCodeDBSubnetGroupNotFound      = "DBSubnetGroupNotFoundFault"
 )
 
 // defaultBackupRetentionDays is AWS's own long-standing default retention
@@ -178,7 +179,7 @@ type ensurer struct {
 // already naming the instance, and the ledger returned is current even then.
 func (e *ensurer) ensureResource(ctx context.Context, r depsv1alpha1.RDSInstanceSpec, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
 	if r.Replication != nil && r.Replication.Enabled {
-		return ledger, fmt.Errorf("instance %q: %w", r.Name, ErrReplicationNotSupported)
+		return ledger, &cloudctlaws.ReconcileError{Err: fmt.Errorf("instance %q: %w", r.Name, ErrReplicationNotSupported), Reason: reasons.NotSupported}
 	}
 	authorized, err := e.subnetGroupAuthorized(ctx, r)
 	if err != nil {

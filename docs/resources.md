@@ -479,21 +479,27 @@ A move to another **region** is not supported: an operator refuses a CR whose re
   no error or event.
 - **`SharedWithReferencesValid`** — flags any `sharedWith` entry whose
   target consumer CR no longer exists (typically because it was deleted
-  after being granted access). Deliberately excluded from the `Ready`
+  after being granted access). A consumer that could not be read leaves it
+  `Unknown`. Deliberately excluded from the `Ready`
   aggregate — a stale reference grants nothing on its own, so it's a
   cleanliness signal, not a reconcile failure — and deliberately
   status-only: `sharedWith` is user-authored spec, and silently pruning it
   would fight a GitOps-managed manifest on its next sync rather than
   actually resolving anything.
-- **`ConsumeReferencesValid`** — the consumer-side mirror: flags any
-  `consumes` entry whose named producer CR does not currently exist. Also
-  excluded from `Ready` (this entry already keeps `IAMReady` from going
-  `True` on its own, so this condition exists purely for visibility, not as
-  a second gate). A producer CR that's merely been applied out of order
-  resolves on its own within a reconcile or two and reports
-  `ProducerNotFoundYet`; one still missing after 30 minutes escalates to
-  `ProducerLikelyMisconfigured`, since at that point it's more likely a
-  typo in the consumer's `namespace`/`name` than a startup-ordering race.
+- **`ConsumeReferencesValid`** — the consumer-side mirror. It checks every
+  reference this CR makes to another CR's resource: each section's
+  `consumes`, `rds.consumes`, a queue's `subscribesTo` and
+  `alarms.snsTopicRef`. A reference resolves when the CR exists, declares the
+  resource, and lists this CR in that resource's `sharedWith`; the reason says
+  which of the three is missing (`ProducerNotFoundYet`,
+  `ConsumedResourceNotDeclared`, `ConsumeNotAuthorized`) and the message names
+  the field. A CR that could not be read leaves the condition `Unknown`
+  (`ReferencesUnknown`), never `True`. Excluded from `Ready`: a reference to
+  something not yet applied resolves on its own, and an `sqs`, `sns`,
+  `dynamodb` or `s3` entry already keeps `IAMReady` from going `True`, so this
+  condition exists for visibility. A producer still missing after 30 minutes
+  escalates to `ProducerLikelyMisconfigured`, since at that point it is more
+  likely a typo than a startup-ordering race.
 
 ### Lifecycle comparison across resource types
 

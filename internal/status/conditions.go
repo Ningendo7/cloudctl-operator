@@ -47,6 +47,14 @@ const MaxMessageLength = 4096
 
 const truncatedMarker = "… (truncated)"
 
+// MaxEventNoteLength caps an event's note. The events API limits it to 1 KiB,
+// and client-go does not shorten it, so a longer note is rejected and only
+// logged: the longest messages, which carry the most to read, would lose
+// their event.
+const MaxEventNoteLength = 1000
+
+const eventNoteMarker = "… see the condition"
+
 var awsRequestIDs = regexp.MustCompile(`,?\s*(?:RequestID|HostID): [^,\s]+`)
 
 // StripRequestIDs removes the RequestID and HostID AWS adds to SDK errors.
@@ -59,14 +67,24 @@ func StripRequestIDs(msg string) string {
 // CapMessage shortens msg to MaxMessageLength bytes, on a character
 // boundary, saying that it was cut.
 func CapMessage(msg string) string {
-	if len(msg) <= MaxMessageLength {
+	return capBytes(msg, MaxMessageLength, truncatedMarker)
+}
+
+// CapEventNote shortens msg to MaxEventNoteLength bytes, on a character
+// boundary, pointing at the condition that holds the whole message.
+func CapEventNote(msg string) string {
+	return capBytes(msg, MaxEventNoteLength, eventNoteMarker)
+}
+
+func capBytes(msg string, limit int, marker string) string {
+	if len(msg) <= limit {
 		return msg
 	}
-	cut := MaxMessageLength - len(truncatedMarker)
+	cut := limit - len(marker)
 	for cut > 0 && !utf8.RuneStart(msg[cut]) {
 		cut--
 	}
-	return msg[:cut] + truncatedMarker
+	return msg[:cut] + marker
 }
 
 // JoinCapped joins items with sep as long as the result fits, ending with

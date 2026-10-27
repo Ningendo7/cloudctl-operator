@@ -34,9 +34,10 @@ const resourceTypeIAM = "iam"
 // policy involves, for sectionContext's timeout scaling. IAM only ever has
 // one ledger entry (the role), so ledger count alone can't reflect a CR with
 // many resources behind it. Counts each owned resource (a policy statement),
-// each consumes entry (a cross-namespace CR lookup), and each encryption key
-// grant (a ledger lookup, or a CR lookup for a shared key). RDS never feeds
-// IAM policy, so it isn't counted.
+// each consumes entry (a cross-namespace CR lookup), each encryption key
+// grant (a ledger lookup, or a CR lookup for a shared key) and each declared
+// KMS key (a grant of its own). RDS never feeds IAM policy, so it isn't
+// counted.
 func iamWorkloadCount(cr *depsv1alpha1.AppDependencies) int {
 	count := 0
 	encrypted := func(e *depsv1alpha1.EncryptionSpec) {
@@ -67,6 +68,9 @@ func iamWorkloadCount(cr *depsv1alpha1.AppDependencies) int {
 		for _, r := range cr.Spec.S3.Resources {
 			encrypted(r.Encryption)
 		}
+	}
+	if cr.Spec.KMS != nil {
+		count += len(cr.Spec.KMS.Resources)
 	}
 	return count
 }

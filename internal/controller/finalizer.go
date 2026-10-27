@@ -35,8 +35,7 @@ func ensureFinalizer(ctx context.Context, c client.Client, cr *depsv1alpha1.AppD
 	if controllerutil.ContainsFinalizer(cr, finalizerName) {
 		return nil
 	}
-	controllerutil.AddFinalizer(cr, finalizerName)
-	return c.Update(ctx, cr)
+	return patchFinalizers(ctx, c, cr, controllerutil.AddFinalizer)
 }
 
 // removeFinalizer removes finalizerName from cr, persisting the change
@@ -45,8 +44,21 @@ func removeFinalizer(ctx context.Context, c client.Client, cr *depsv1alpha1.AppD
 	if !controllerutil.ContainsFinalizer(cr, finalizerName) {
 		return nil
 	}
-	controllerutil.RemoveFinalizer(cr, finalizerName)
-	return c.Update(ctx, cr)
+	return patchFinalizers(ctx, c, cr, controllerutil.RemoveFinalizer)
+}
+
+// patchFinalizers sends only the finalizer list, not the whole object, so a
+// field this version of the operator does not know about is never written
+// back. A merge patch replaces the list, so it carries the resource version:
+// another writer's finalizer added meanwhile fails the patch instead of being
+// dropped.
+func patchFinalizers(
+	ctx context.Context, c client.Client, cr *depsv1alpha1.AppDependencies,
+	change func(client.Object, string) bool,
+) error {
+	patch := client.MergeFromWithOptions(cr.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	change(cr, finalizerName)
+	return c.Patch(ctx, cr, patch)
 }
 
 // hasFinalizer reports whether cr still carries our finalizer.

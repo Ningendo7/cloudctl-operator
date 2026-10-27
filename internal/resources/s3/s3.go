@@ -34,6 +34,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
@@ -194,7 +195,7 @@ func ensureBucket(
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	if opts.replicationRequested {
-		return ledger, ErrReplicationNotSupported
+		return ledger, &cloudctlaws.ReconcileError{Err: ErrReplicationNotSupported, Reason: reasons.NotSupported}
 	}
 
 	bucket := bucketName(namespace, crName, resourceName, accountID)

@@ -131,6 +131,9 @@ var (
 	PermissionDenied = register("PermissionDenied", Failing,
 		"AWS refused a call made with the operator's credentials.",
 		"Grant the operator's IAM role the action named in the message.")
+	EndpointUnreachable = register("EndpointUnreachable", Failing,
+		"The operator cannot reach AWS and waiting will not help: the endpoint's name does not resolve, or its certificate is not trusted.",
+		"Check AWS_ENDPOINT_URL, any proxy in the way, and the CA bundle the manager trusts.")
 )
 
 // Ownership: a resource exists at the name this CR needs.
@@ -145,7 +148,7 @@ var (
 		"A resource at the needed name exists and is not tagged as owned by anyone.",
 		"Set adopt: true on the entry to bring it under management.")
 	NameTaken = register("NameTaken", Failing,
-		"A ConfigMap, Secret or alarm that this operator did not create sits at the name it needs. It is never overwritten.",
+		"A ConfigMap, Secret, alarm or KMS alias that this operator did not create sits at the name it needs. It is never overwritten.",
 		"Rename or delete the existing object.")
 	OwnershipLost = register("OwnershipLost", Failing,
 		"The ownership tags were re-read before acting and no longer match this CR, so the operator did nothing.",
@@ -200,23 +203,42 @@ var (
 	KeyUnavailable = ownEvent(register("KeyUnavailable", Failing,
 		"The KMS key is in a state that cannot encrypt or decrypt.",
 		"Check the key in AWS."))
+	KeyMissing = ownEvent(register("KeyMissing", Failing,
+		"The ledger knows a KMS key that AWS no longer has. Everything encrypted under it is unrecoverable, and the operator does not create a replacement.",
+		"Once you have confirmed that is acceptable, remove the entry and add it again to provision a new key."))
+)
+
+// Features the operator does not have yet.
+var (
+	NotSupported = register("NotSupported", Failing,
+		"The spec asks for a feature the operator does not implement, such as replication.",
+		"Remove the field.")
 )
 
 // References to other CRs and objects.
 var (
 	AllProducersExist = register("AllProducersExist", Info,
-		"Every consumes entry names a CR that currently exists.", "")
+		"Every reference to another CR's resource resolves: the CR exists, declares the resource and has listed this CR in sharedWith.", "")
 	AllReferencesValid = register("AllReferencesValid", Info,
 		"Every sharedWith entry names a CR that currently exists.", "")
 	StaleReferencesFound = register("StaleReferencesFound", Waiting,
 		"A sharedWith entry names a CR that does not exist, either not created yet or deleted. Nothing is granted to it.",
 		"Create the consumer, or remove the entry from sharedWith.")
 	ProducerNotFoundYet = register("ProducerNotFoundYet", Waiting,
-		"A consumes entry names a CR that does not exist yet. This is normal while a producer and consumer are applied together.",
+		"A reference names a CR that does not exist yet. This is normal while a producer and consumer are applied together.",
 		"Apply the producer. After 30 minutes it is reported as ProducerLikelyMisconfigured.")
 	ProducerLikelyMisconfigured = register("ProducerLikelyMisconfigured", Failing,
-		"A consumes entry has named a CR that does not exist for over 30 minutes.",
-		"Check the namespace and name in the consumes entry.")
+		"A reference has named a CR that does not exist for over 30 minutes.",
+		"Check the namespace and name in the reference.")
+	ConsumedResourceNotDeclared = register("ConsumedResourceNotDeclared", Waiting,
+		"A reference names a CR that exists but does not declare the resource, such as a misspelled resourceName.",
+		"Check the resourceName in the reference, or declare the resource in the producer.")
+	ConsumeNotAuthorized = register("ConsumeNotAuthorized", Waiting,
+		"A reference names a resource that exists, but its owner has not listed this CR in its sharedWith. Nothing is granted.",
+		"Ask the owner to add this CR to the resource's sharedWith.")
+	ReferencesUnknown = register("ReferencesUnknown", Waiting,
+		"A referenced CR could not be read, so whether the references resolve is not known. This is not a finding about the references.",
+		"None, unless it lasts; then read the message.")
 	ServiceAccountNotFound = register("ServiceAccountNotFound", Waiting,
 		"spec.serviceAccountName names a ServiceAccount that does not exist.",
 		"Create it, or leave the name unset to have one created.")
