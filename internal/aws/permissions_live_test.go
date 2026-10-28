@@ -24,7 +24,6 @@ import (
 	"slices"
 	"testing"
 
-	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
@@ -85,5 +84,5 @@ func TestLive_PermissionsTableIsAPolicyAWSRecognises(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("validating %d actions from the permissions table", len(actions))
-	policycheck.ValidatePolicy(t, awssdk.Config(cfg), policycheck.IdentityPolicy, policycheck.NoResourceType, string(document))
+	policycheck.ValidatePolicy(t, cfg, policycheck.IdentityPolicy, policycheck.NoResourceType, string(document))
 }

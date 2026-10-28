@@ -365,7 +365,16 @@ func TestLive_Ensure_PITRRetentionDaysActuallyAppliesAndReportsBack(t *testing.T
 		t.Errorf("real RecoveryPeriodInDays = %v, want %d", pitr.RecoveryPeriodInDays, retention)
 	}
 
-	// Raise-only: the spec never turns recovery off or shortens it, and raises it when asked.
+	assertPITRIsRaiseOnly(t, client, namespace, crName, tableName, spec, ledger, retention)
+}
+
+// assertPITRIsRaiseOnly checks the rule against a real table that already has
+// recovery on for retention days: the spec never turns recovery off or shortens
+// it, and raises it when asked.
+func assertPITRIsRaiseOnly(t *testing.T, client *dynamodb.Client, namespace, crName, tableName string,
+	spec *depsv1alpha1.DynamoDBSpec, ledger []depsv1alpha1.ManagedResource, retention int32) {
+	t.Helper()
+	ctx := context.Background()
 	recoveryDays := func() (enabled bool, days int32) {
 		out, err := client.DescribeContinuousBackups(ctx, &dynamodb.DescribeContinuousBackupsInput{TableName: &tableName})
 		if err != nil {
@@ -700,7 +709,8 @@ func cleanupUntilDone(t *testing.T, cleanup func() error) {
 	for _, err := range failures {
 		t.Logf("Cleanup failed on the way: %v", err)
 		var reconcileErr *cloudctlaws.ReconcileError
-		if !cloudctlaws.IsRetryable(err) && !(errors.As(err, &reconcileErr) && reconcileErr.Retryable) {
+		retried := cloudctlaws.IsRetryable(err) || (errors.As(err, &reconcileErr) && reconcileErr.Retryable)
+		if !retried {
 			t.Errorf("a failure the operator would not retry: %v", err)
 		}
 	}

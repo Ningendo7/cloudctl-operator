@@ -335,7 +335,7 @@ func TestLive_DerivedPoliciesPassAccessAnalyzer(t *testing.T) {
 	arn := func(service, resource string) string {
 		return fmt.Sprintf("arn:aws:%s:us-east-1:123456789012:%s", service, resource)
 	}
-	var grants []grant
+	grants := make([]grant, 0, 20)
 	for _, readWrite := range []bool{true, false} {
 		for _, consumed := range []bool{false, true} {
 			grants = append(grants,
@@ -381,9 +381,7 @@ func TestLive_ConcurrentRoleChangesFailWithRetryableErrors(t *testing.T) {
 	var failures []error
 	var wg sync.WaitGroup
 	for w := range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for r := range rounds {
 				document := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sqs:GetQueueUrl","Resource":"arn:aws:sqs:us-east-1:123456789012:q-%d-%d"}]}`, w, r)
 				_, err := client.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
@@ -395,7 +393,7 @@ func TestLive_ConcurrentRoleChangesFailWithRetryableErrors(t *testing.T) {
 					mu.Unlock()
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

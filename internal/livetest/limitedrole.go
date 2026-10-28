@@ -62,14 +62,11 @@ func LimitedConfig(t *testing.T, cfg aws.Config, actions []string) aws.Config {
 		_, _ = iamClient.DeleteRole(context.Background(), &iam.DeleteRoleInput{RoleName: &name})
 	})
 
-	statementActions := ""
+	quoted := make([]string, len(actions))
 	for i, a := range actions {
-		if i > 0 {
-			statementActions += ","
-		}
-		statementActions += fmt.Sprintf("%q", a)
+		quoted[i] = fmt.Sprintf("%q", a)
 	}
-	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":[%s],"Resource":"*"}]}`, statementActions)
+	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":[%s],"Resource":"*"}]}`, strings.Join(quoted, ","))
 	retryThrottled(t, "real PutRolePolicy() for a limited role", func() error {
 		_, err := iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{RoleName: &name, PolicyName: &policyName, PolicyDocument: &policy})
 		return err

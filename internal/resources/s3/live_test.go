@@ -895,9 +895,9 @@ func TestLive_Ensure_ReportsABucketOpenThroughItsPolicyUnlessBlockPublicAccessIg
 	if _, err := client.PutBucketPolicy(ctx, &s3sdk.PutBucketPolicyInput{Bucket: &bucket, Policy: &public}); err != nil {
 		t.Skipf("the account does not allow a public bucket policy, so there is nothing to detect: %v", err)
 	}
-	status, err := client.GetBucketPolicyStatus(ctx, &s3sdk.GetBucketPolicyStatusInput{Bucket: &bucket})
-	if err != nil || !boolValue(status.PolicyStatus.IsPublic) {
-		t.Fatalf("setup: expected S3 to call the policy public, got %+v, error = %v", status, err)
+	policyStatus, err := client.GetBucketPolicyStatus(ctx, &s3sdk.GetBucketPolicyStatusInput{Bucket: &bucket})
+	if err != nil || !boolValue(policyStatus.PolicyStatus.IsPublic) {
+		t.Fatalf("setup: expected S3 to call the policy public, got %+v, error = %v", policyStatus, err)
 	}
 
 	recordEvent, events := newEventCollector()

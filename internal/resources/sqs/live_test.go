@@ -48,7 +48,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -924,7 +924,7 @@ func newLiveSNSClient(t *testing.T) *sns.Client {
 type liveSubscriptionFixture struct {
 	sqsClient                     *sqs.Client
 	snsClient                     *sns.Client
-	k8sClient                     client.Client
+	k8sClient                     ctrlclient.Client
 	queueName, queueURL, queueARN string
 	topicARN                      string
 	ref                           depsv1alpha1.ConsumeRef
@@ -1262,7 +1262,7 @@ func TestLive_EnsureSubscriptions_TenSubscriptionsFitInTheQueuePolicy(t *testing
 
 	const subscriptions = 10
 	refs := make([]depsv1alpha1.ConsumeRef, 0, subscriptions)
-	producers := make([]client.Object, 0, subscriptions)
+	producers := make([]ctrlclient.Object, 0, subscriptions)
 	for i := range subscriptions {
 		topicName := shortLiveName(t, fmt.Sprintf("t%d", i))
 		created, err := snsClient.CreateTopic(ctx, &sns.CreateTopicInput{Name: &topicName})

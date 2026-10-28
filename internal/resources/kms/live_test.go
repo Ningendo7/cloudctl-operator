@@ -45,6 +45,8 @@ package kms
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +54,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -136,6 +139,125 @@ func (c *countingKMS) PutKeyPolicy(ctx context.Context, in *kms.PutKeyPolicyInpu
 	return c.kmsAPI.PutKeyPolicy(ctx, in, optFns...)
 }
 
+const (
+	rootSid    = "Enable IAM User Permissions"
+	foreignSid = "SomeoneElse"
+
+	// scratchKeyAlias names the one reusable key the tests that rewrite a key's
+	// policy, tags or aliases work on, so they don't each leave a key pending
+	// deletion.
+	scratchKeyAlias = "alias/live-scratch-key-3f9a1c"
+)
+
+// scratchKey returns the reusable scratch key, created on its first use and
+// found by its alias afterwards. When the test ends it is put back as it was
+// found: its original policy, no tags and no other alias. It is never scheduled
+// for deletion; schedule it by hand when the live tests are retired.
+func scratchKey(t *testing.T, client *kms.Client) string {
+	t.Helper()
+	ctx := context.Background()
+	found, findErr := client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: aws.String(scratchKeyAlias)})
+	var notFound *types.NotFoundException
+	var arn string
+	switch {
+	case findErr == nil && found.KeyMetadata.KeyState == types.KeyStateEnabled:
+		arn = aws.ToString(found.KeyMetadata.Arn)
+	case findErr == nil || errors.As(findErr, &notFound):
+		created, err := client.CreateKey(ctx, &kms.CreateKeyInput{Description: aws.String("cloudctl live tests: scratch key")})
+		if err != nil {
+			t.Fatalf("real CreateKey() (scratch key) error = %v", err)
+		}
+		arn = aws.ToString(created.KeyMetadata.Arn)
+		if findErr == nil {
+			_, err = client.UpdateAlias(ctx, &kms.UpdateAliasInput{AliasName: aws.String(scratchKeyAlias), TargetKeyId: &arn})
+		} else {
+			_, err = client.CreateAlias(ctx, &kms.CreateAliasInput{AliasName: aws.String(scratchKeyAlias), TargetKeyId: &arn})
+		}
+		if err != nil {
+			t.Fatalf("pointing %s at the scratch key: %v", scratchKeyAlias, err)
+		}
+	default:
+		t.Fatalf("real DescribeKey(%s) error = %v", scratchKeyAlias, findErr)
+	}
+	original := keyPolicyText(t, client, arn)
+	t.Cleanup(func() { restoreScratchKey(client, arn, original) })
+	return arn
+}
+
+// restoreScratchKey is best effort: a failure leaves the key as the test left
+// it, which the next test's own assertions would show.
+func restoreScratchKey(client *kms.Client, arn, policy string) {
+	ctx := context.Background()
+	_, _ = client.PutKeyPolicy(ctx, &kms.PutKeyPolicyInput{KeyId: &arn, PolicyName: aws.String(keyPolicyName), Policy: &policy})
+	if aliases, err := client.ListAliases(ctx, &kms.ListAliasesInput{KeyId: &arn}); err == nil {
+		for _, a := range aliases.Aliases {
+			if name := aws.ToString(a.AliasName); name != scratchKeyAlias {
+				_, _ = client.DeleteAlias(ctx, &kms.DeleteAliasInput{AliasName: &name})
+			}
+		}
+	}
+	if tags, err := client.ListResourceTags(ctx, &kms.ListResourceTagsInput{KeyId: &arn}); err == nil && len(tags.Tags) > 0 {
+		keys := make([]string, len(tags.Tags))
+		for i, tag := range tags.Tags {
+			keys[i] = aws.ToString(tag.TagKey)
+		}
+		_, _ = client.UntagResource(ctx, &kms.UntagResourceInput{KeyId: &arn, TagKeys: keys})
+	}
+}
+
+func requireIn(t *testing.T, policy string, wanted ...string) {
+	t.Helper()
+	for _, want := range wanted {
+		if !strings.Contains(policy, want) {
+			t.Errorf("expected %q in the key policy, got %s", want, policy)
+		}
+	}
+}
+
+func requireNotIn(t *testing.T, policy string, unwanted ...string) {
+	t.Helper()
+	for _, not := range unwanted {
+		if strings.Contains(policy, not) {
+			t.Errorf("did not expect %q in the key policy, got %s", not, policy)
+		}
+	}
+}
+
+// putLegacyKeyPolicy leaves the key as earlier releases did: service
+// statements any topic or alarm in the account satisfies, and a statement of
+// someone else's, next to the account root statement.
+func putLegacyKeyPolicy(t *testing.T, client *kms.Client, keyARN, account string) {
+	t.Helper()
+	doc := map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(keyPolicyText(t, client, keyARN)), &doc); err != nil {
+		t.Fatalf("parsing the key's policy: %v", err)
+	}
+	statements, err := statementList(doc["Statement"])
+	if err != nil {
+		t.Fatalf("reading the key's statements: %v", err)
+	}
+	accountWide := func(sid, service string) json.RawMessage {
+		return json.RawMessage(fmt.Sprintf(
+			`{"Sid":%q,"Effect":"Allow","Principal":{"Service":%q},"Action":["kms:GenerateDataKey*","kms:Decrypt"],"Resource":"*","Condition":{"StringEquals":{"aws:SourceAccount":%q}}}`,
+			sid, service, account))
+	}
+	foreign := json.RawMessage(fmt.Sprintf(
+		`{"Sid":%q,"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"kms:DescribeKey","Resource":"*"}`,
+		foreignSid, account))
+	statements = append(statements, accountWide(sidSNSDelivery, "sns.amazonaws.com"), accountWide(sidCloudWatchAlarms, "cloudwatch.amazonaws.com"), foreign)
+	if doc["Statement"], err = json.Marshal(statements); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := string(legacy)
+	if _, err := client.PutKeyPolicy(context.Background(), &kms.PutKeyPolicyInput{KeyId: &keyARN, PolicyName: aws.String(keyPolicyName), Policy: &policy}); err != nil {
+		t.Fatalf("real PutKeyPolicy() (setup, legacy statements) error = %v", err)
+	}
+}
+
 func TestLive_Ensure_CreatesRealKeyWithAliasTagsAndRotation(t *testing.T) {
 	client := newLiveClient(t)
 	ctx := context.Background()
@@ -204,11 +326,7 @@ func TestLive_Ensure_AdoptsRealUntaggedKeyWhenRequested(t *testing.T) {
 	ctx := context.Background()
 	namespace, crName := "live", liveUniqueSuffix(t)
 
-	createOut, err := client.CreateKey(ctx, &kms.CreateKeyInput{})
-	if err != nil {
-		t.Fatalf("real CreateKey() (setup, unowned) error = %v", err)
-	}
-	keyARN := aws.ToString(createOut.KeyMetadata.Arn)
+	keyARN := scratchKey(t, client)
 	wantAlias := aliasName(namespace, crName, "primary", keyOptions{})
 	if _, err := client.CreateAlias(ctx, &kms.CreateAliasInput{AliasName: &wantAlias, TargetKeyId: &keyARN}); err != nil {
 		t.Fatalf("real CreateAlias() (setup, unowned) error = %v", err)
@@ -226,7 +344,6 @@ func TestLive_Ensure_AdoptsRealUntaggedKeyWhenRequested(t *testing.T) {
 	if _, err := Ensure(ctx, client, namespace, crName, "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() with adopt:true error = %v", err)
 	}
-	t.Cleanup(func() { deleteRealKeyDirectly(t, client, keyARN) })
 	if policyAfter := keyPolicyText(t, client, keyARN); policyAfter != policyBefore {
 		t.Errorf("adopting a key changed its policy:\nbefore %s\nafter  %s", policyBefore, policyAfter)
 	}
@@ -331,13 +448,12 @@ func TestLive_Cleanup_ReleasingAKeyLeavesProvenanceAndAdoptingTakesItBack(t *tes
 }
 
 // TestLive_SyncServiceGrants_NarrowsRetiresAndLeavesOthersStatementsAlone
-// starts from a key as earlier releases left it (service statements that any
-// topic or alarm in the account satisfies, and a statement of someone else's)
-// and confirms, against real KMS, that the scoped statements are accepted and
-// pass Access Analyzer, that the account-wide ones are narrowed or retired,
-// that nothing else in the policy is touched, that a pass with nothing to
-// change writes nothing (KMS hands the policy back reformatted), and that
-// taking the grants away removes the operator's statements only.
+// starts from a key as earlier releases left it and confirms, against real KMS,
+// that the scoped statements are accepted and pass Access Analyzer, that the
+// account-wide ones are narrowed or retired, that nothing else in the policy is
+// touched, that a pass with nothing to change writes nothing (KMS hands the
+// policy back reformatted), and that taking the grants away removes the
+// operator's statements only.
 func TestLive_SyncServiceGrants_NarrowsRetiresAndLeavesOthersStatementsAlone(t *testing.T) {
 	cfg := skipUnlessLiveAWSCredentials(t)
 	client := kms.NewFromConfig(cfg)
@@ -347,101 +463,42 @@ func TestLive_SyncServiceGrants_NarrowsRetiresAndLeavesOthersStatementsAlone(t *
 		t.Fatalf("GetCallerIdentity() error = %v", err)
 	}
 	account, region := aws.ToString(identity.Account), cfg.Region
-
-	created, err := client.CreateKey(ctx, &kms.CreateKeyInput{})
-	if err != nil {
-		t.Fatalf("real CreateKey() (setup) error = %v", err)
-	}
-	keyARN := aws.ToString(created.KeyMetadata.Arn)
-	t.Cleanup(func() { deleteRealKeyDirectly(t, client, keyARN) })
-
-	doc := map[string]json.RawMessage{}
-	if err := json.Unmarshal([]byte(keyPolicyText(t, client, keyARN)), &doc); err != nil {
-		t.Fatalf("parsing the new key's policy: %v", err)
-	}
-	statements, err := statementList(doc["Statement"])
-	if err != nil {
-		t.Fatalf("reading the new key's statements: %v", err)
-	}
-	accountWide := func(sid, service string) map[string]any {
-		return map[string]any{
-			"Sid": sid, "Effect": "Allow", "Principal": map[string]any{"Service": service},
-			"Action": []any{"kms:GenerateDataKey*", "kms:Decrypt"}, "Resource": "*",
-			"Condition": map[string]any{"StringEquals": map[string]any{"aws:SourceAccount": account}},
-		}
-	}
-	foreign := map[string]any{
-		"Sid": "SomeoneElse", "Effect": "Allow", "Principal": map[string]any{"AWS": "arn:aws:iam::" + account + ":root"},
-		"Action": "kms:DescribeKey", "Resource": "*",
-	}
-	for _, stmt := range []map[string]any{accountWide(sidSNSDelivery, "sns.amazonaws.com"), accountWide(sidCloudWatchAlarms, "cloudwatch.amazonaws.com"), foreign} {
-		raw, err := json.Marshal(stmt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		statements = append(statements, raw)
-	}
-	encoded, err := json.Marshal(statements)
-	if err != nil {
-		t.Fatal(err)
-	}
-	doc["Statement"] = encoded
-	legacy, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyPolicy := string(legacy)
-	if _, err := client.PutKeyPolicy(ctx, &kms.PutKeyPolicyInput{KeyId: &keyARN, PolicyName: aws.String(keyPolicyName), Policy: &legacyPolicy}); err != nil {
-		t.Fatalf("real PutKeyPolicy() (setup, legacy statements) error = %v", err)
-	}
+	keyARN := scratchKey(t, client)
+	putLegacyKeyPolicy(t, client, keyARN, account)
 
 	topics := []string{"arn:aws:sns:" + region + ":" + account + ":live-b", "arn:aws:sns:" + region + ":" + account + ":live-a"}
 	alarm := "arn:aws:cloudwatch:" + region + ":" + account + ":alarm:live-alarm"
 	recordEvent, events := newEventCollector()
 	counted := &countingKMS{kmsAPI: client}
-
-	if err := SyncServiceGrants(ctx, counted, keyARN, ServiceGrants{SNSTopicARNs: topics}, recordEvent); err != nil {
-		t.Fatalf("SyncServiceGrants() error = %v", err)
-	}
-	policy := waitForKeyPolicy(t, client, keyARN, func(p string) bool { return !strings.Contains(p, sidCloudWatchAlarms) })
-	for _, want := range []string{"SomeoneElse", "Enable IAM User Permissions", sidSNSDelivery, "ArnEquals", topics[0], topics[1]} {
-		if !strings.Contains(policy, want) {
-			t.Errorf("expected %q in the policy after narrowing, got %s", want, policy)
+	sync := func(grants ServiceGrants) {
+		t.Helper()
+		if err := SyncServiceGrants(ctx, counted, keyARN, grants, recordEvent); err != nil {
+			t.Fatalf("SyncServiceGrants(%+v) error = %v", grants, err)
 		}
 	}
-	if strings.Contains(policy, sidCloudWatchAlarms) {
-		t.Errorf("the account-wide CloudWatch statement was not retired: %s", policy)
-	}
+
+	sync(ServiceGrants{SNSTopicARNs: topics})
+	policy := waitForKeyPolicy(t, client, keyARN, func(p string) bool { return !strings.Contains(p, sidCloudWatchAlarms) })
+	requireIn(t, policy, foreignSid, rootSid, sidSNSDelivery, "ArnEquals", topics[0], topics[1])
+	requireNotIn(t, policy, sidCloudWatchAlarms)
 	policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
 	if len(*events) != 1 || (*events)[0].reason != "KeyPolicyUpdated" {
 		t.Errorf("expected one KeyPolicyUpdated event, got %v", *events)
 	}
 
 	writes := counted.puts
-	if err := SyncServiceGrants(ctx, counted, keyARN, ServiceGrants{SNSTopicARNs: topics}, recordEvent); err != nil {
-		t.Fatalf("second SyncServiceGrants() error = %v", err)
-	}
+	sync(ServiceGrants{SNSTopicARNs: topics})
 	if counted.puts != writes {
 		t.Errorf("a pass with nothing to change wrote the key policy %d more time(s): the stored policy reads as different from the desired one", counted.puts-writes)
 	}
 
-	if err := SyncServiceGrants(ctx, counted, keyARN, ServiceGrants{SNSTopicARNs: topics, AlarmARNs: []string{alarm}}, recordEvent); err != nil {
-		t.Fatalf("SyncServiceGrants() with an alarm error = %v", err)
-	}
+	sync(ServiceGrants{SNSTopicARNs: topics, AlarmARNs: []string{alarm}})
 	policy = waitForKeyPolicy(t, client, keyARN, func(p string) bool { return strings.Contains(p, sidCloudWatchAlarms) })
-	if !strings.Contains(policy, alarm) || !strings.Contains(policy, sidSNSDelivery) {
-		t.Errorf("expected both scoped statements, got %s", policy)
-	}
+	requireIn(t, policy, alarm, sidSNSDelivery)
 	policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
 
-	if err := SyncServiceGrants(ctx, counted, keyARN, ServiceGrants{}, recordEvent); err != nil {
-		t.Fatalf("SyncServiceGrants() with no grants error = %v", err)
-	}
+	sync(ServiceGrants{})
 	policy = waitForKeyPolicy(t, client, keyARN, func(p string) bool { return !strings.Contains(p, sidSNSDelivery) })
-	if strings.Contains(policy, sidSNSDelivery) || strings.Contains(policy, sidCloudWatchAlarms) {
-		t.Errorf("the operator's statements were not removed: %s", policy)
-	}
-	if !strings.Contains(policy, "SomeoneElse") || !strings.Contains(policy, "Enable IAM User Permissions") {
-		t.Errorf("removing the operator's statements took others with it: %s", policy)
-	}
+	requireNotIn(t, policy, sidSNSDelivery, sidCloudWatchAlarms)
+	requireIn(t, policy, foreignSid, rootSid)
 }
