@@ -282,6 +282,9 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		if !aws.ToBool(instance.DeletionProtection) {
 			t.Error("expected the real instance to have deletion protection on")
 		}
+		if !aws.ToBool(instance.CopyTagsToSnapshot) {
+			t.Error("expected the real instance to copy its tags to snapshots")
+		}
 		if aws.ToString(instance.KmsKeyId) == "" {
 			t.Error("expected the real instance to report the KMS key it is encrypted with")
 		}

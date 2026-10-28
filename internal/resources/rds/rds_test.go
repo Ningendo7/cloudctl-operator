@@ -2391,3 +2391,119 @@ func TestCleanup_LeavesNoReleasedTagsWhenTurnedOff(t *testing.T) {
 		t.Errorf("no released tags expected when turned off, got %v", client.findByARN(entry.ARN).tags)
 	}
 }
+
+func TestEnsure_NewInstanceCopiesItsTagsToSnapshotsAndAutoscalesOnlyWhenAsked(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ceiling *int32
+	}{"no ceiling": {nil}, "ceiling": {aws.Int32(100)}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeRDS()
+			spec := baseInstanceSpec("orders-db")
+			spec.MaxAllocatedStorage = tc.ceiling
+			if _, err := ensureOnce(t, client, spec, nil); err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			in := client.lastCreateDBInstanceInput
+			if !aws.ToBool(in.CopyTagsToSnapshot) {
+				t.Error("CopyTagsToSnapshot = false, want true")
+			}
+			if aws.ToInt32(in.MaxAllocatedStorage) != aws.ToInt32(tc.ceiling) {
+				t.Errorf("MaxAllocatedStorage = %v, want %v", in.MaxAllocatedStorage, tc.ceiling)
+			}
+		})
+	}
+}
+
+func TestEnsure_TurnsTagCopyingBackOnForAnInstanceItCreatedButNotForAnAdoptedOne(t *testing.T) {
+	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, "default", "checkout-service", resourceType, "orders-db", 63)
+	t.Run("created", func(t *testing.T) {
+		client := newFakeRDS()
+		spec := baseInstanceSpec("orders-db")
+		ledger, err := ensureOnce(t, client, spec, nil)
+		if err != nil {
+			t.Fatalf("first Ensure() error = %v", err)
+		}
+		client.instances[instanceID].copyTagsToSnapshot = false
+		if _, err := ensureOnce(t, client, spec, ledger); err != nil {
+			t.Fatalf("second Ensure() error = %v", err)
+		}
+		if !client.instances[instanceID].copyTagsToSnapshot {
+			t.Error("expected tag copying to be turned back on")
+		}
+	})
+	t.Run("adopted", func(t *testing.T) {
+		client := newFakeRDS()
+		spec := baseInstanceSpec("orders-db")
+		spec.Adopt = true
+		client.instances[instanceID] = existingInstanceMatching(instanceID, spec)
+		if _, err := ensureOnce(t, client, spec, nil); err != nil {
+			t.Fatalf("Ensure() error = %v", err)
+		}
+		if client.instances[instanceID].copyTagsToSnapshot {
+			t.Error("an adopted instance's own setting must be left alone")
+		}
+	})
+}
+
+func TestEnsure_AppliesTheAutoscalingCeilingOnlyWhenTheSpecNamesOne(t *testing.T) {
+	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, "default", "checkout-service", resourceType, "orders-db", 63)
+	for name, tc := range map[string]struct {
+		specCeiling, have *int32
+		want              *int32
+		wantModify        bool
+	}{
+		"added to a running instance": {aws.Int32(100), nil, aws.Int32(100), true},
+		"raised":                      {aws.Int32(200), aws.Int32(100), aws.Int32(200), true},
+		"already as declared":         {aws.Int32(100), aws.Int32(100), aws.Int32(100), false},
+		"removed from the spec":       {nil, aws.Int32(100), aws.Int32(100), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeRDS()
+			spec := baseInstanceSpec("orders-db")
+			ledger, err := ensureOnce(t, client, spec, nil)
+			if err != nil {
+				t.Fatalf("first Ensure() error = %v", err)
+			}
+			client.instances[instanceID].maxAllocatedStorage = tc.have
+			spec.MaxAllocatedStorage = tc.specCeiling
+			modifies := client.modifyDBInstanceCalls
+			if _, err := ensureOnce(t, client, spec, ledger); err != nil {
+				t.Fatalf("second Ensure() error = %v", err)
+			}
+			if got := aws.ToInt32(client.instances[instanceID].maxAllocatedStorage); got != aws.ToInt32(tc.want) {
+				t.Errorf("ceiling = %d, want %d", got, aws.ToInt32(tc.want))
+			}
+			if got := client.modifyDBInstanceCalls != modifies; got != tc.wantModify {
+				t.Errorf("modify sent = %v, want %v", got, tc.wantModify)
+			}
+		})
+	}
+}
+
+// RDS growing an instance within its ceiling is what autoscaling is for, so
+// it is not a spec out of date.
+func TestEnsure_DoesNotReportStorageAutoscalingMadeLargerThanTheSpec(t *testing.T) {
+	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, "default", "checkout-service", resourceType, "orders-db", 63)
+	for name, tc := range map[string]struct {
+		actual      int32
+		wantWarning bool
+	}{"within the ceiling": {70, false}, "past the ceiling": {120, true}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeRDS()
+			spec := baseInstanceSpec("orders-db")
+			spec.MaxAllocatedStorage = aws.Int32(100)
+			ledger, err := ensureOnce(t, client, spec, nil)
+			if err != nil {
+				t.Fatalf("first Ensure() error = %v", err)
+			}
+			client.instances[instanceID].allocatedStorage = tc.actual
+			var recorded []string
+			if _, err := ensureRecording(t, client, spec, ledger, &recorded); err != nil {
+				t.Fatalf("second Ensure() error = %v", err)
+			}
+			if got := slices.Contains(recorded, "StorageLargerThanSpec"); got != tc.wantWarning {
+				t.Errorf("StorageLargerThanSpec = %v, want %v (events %v)", got, tc.wantWarning, recorded)
+			}
+		})
+	}
+}

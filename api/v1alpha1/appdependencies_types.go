@@ -654,6 +654,7 @@ type RDSReplicationSpec struct {
 // it): doing so would mean re-resolving the instance's VPC and moving its
 // dedicated security group, which this design doesn't attempt yet.
 // +kubebuilder:validation:XValidation:rule="self.dbSubnetGroupName == oldSelf.dbSubnetGroupName",message="dbSubnetGroupName is immutable on an RDS instance for now - moving VPCs isn't supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.maxAllocatedStorage) || self.maxAllocatedStorage > self.allocatedStorage",message="maxAllocatedStorage must be larger than allocatedStorage"
 type RDSInstanceSpec struct {
 	// name of the instance, used to derive the actual AWS DB instance
 	// identifier.
@@ -698,6 +699,15 @@ type RDSInstanceSpec struct {
 	// +kubebuilder:validation:Maximum=65536
 	// +kubebuilder:validation:XValidation:rule="self >= oldSelf",message="allocatedStorage cannot be decreased"
 	AllocatedStorage int32 `json:"allocatedStorage"`
+
+	// maxAllocatedStorage turns on storage autoscaling: RDS grows the
+	// instance on its own, up to this many GiB, when it runs low on space.
+	// Off unless set, because growth is billed. Removing it leaves
+	// autoscaling as it is.
+	// +optional
+	// +kubebuilder:validation:Minimum=21
+	// +kubebuilder:validation:Maximum=65536
+	MaxAllocatedStorage *int32 `json:"maxAllocatedStorage,omitempty"`
 
 	// +optional
 	// +kubebuilder:default=Retain
