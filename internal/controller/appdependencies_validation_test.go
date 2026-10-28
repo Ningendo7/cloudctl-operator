@@ -134,7 +134,7 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Expect(err.Error()).To(ContainSubstring("region is required when replication is enabled"))
 		})
 
-		It("accepts replication enabled with a region set", func() {
+		It("rejects replication enabled even with a region set, since replication does not exist yet", func() {
 			obj := &depsv1alpha1.AppDependencies{
 				ObjectMeta: metav1.ObjectMeta{
 					GenerateName: "validation-s3-withregion-",
@@ -154,7 +154,9 @@ var _ = Describe("AppDependencies CRD validation", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("replication is not implemented yet"))
 		})
 
 		It("accepts replication disabled with no region set", func() {
@@ -650,6 +652,25 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Entry("a ServiceAccount name with an underscore", saCR(func(c *depsv1alpha1.AppDependencies) { c.Spec.ServiceAccountName = "team_sa" }), "should match"),
 			Entry("a ServiceAccount name ending in a hyphen", saCR(func(c *depsv1alpha1.AppDependencies) { c.Spec.ServiceAccountName = "team-" }), "should match"),
 			Entry("an uppercase network ServiceAccount name", saCR(func(c *depsv1alpha1.AppDependencies) { c.Spec.NetworkServiceAccountName = "DB-Client" }), "should match"),
+			Entry("S3 replication that would have a region", s3CR(func(b *depsv1alpha1.S3BucketSpec) {
+				b.Replication = &depsv1alpha1.S3ReplicationSpec{Enabled: true, Region: "us-west-2"}
+			}), "replication is not implemented yet"),
+			Entry("RDS replication that would have a region", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) {
+				i.Replication = &depsv1alpha1.RDSReplicationSpec{Enabled: true, Region: "us-west-2"}
+			}), "replication is not implemented yet"),
+			Entry("a lifecycle rule with an empty id", s3CR(func(b *depsv1alpha1.S3BucketSpec) {
+				b.Overrides = &depsv1alpha1.S3Overrides{LifecycleRules: []depsv1alpha1.S3LifecycleRule{{ID: "", ExpirationAfterDays: func() *int32 { d := int32(30); return &d }()}}}
+			}), "at least 1 chars long"),
+			Entry("a sharedWith namespace that cannot be a namespace", sqsCR(func(q *depsv1alpha1.SQSQueueSpec) {
+				q.SharedWith = []depsv1alpha1.SharedWithEntry{{Namespace: "Team_A", Name: "consumer"}}
+			}), "should match"),
+			Entry("a consumes namespace that cannot be a namespace", saCR(func(c *depsv1alpha1.AppDependencies) {
+				c.Spec.SQS.Consumes = []depsv1alpha1.ConsumeRef{{Namespace: "-team", Name: "producer", ResourceName: "orders"}}
+			}), "should match"),
+			Entry("a CR name so long that the names generated from it are refused", saCR(func(c *depsv1alpha1.AppDependencies) {
+				c.GenerateName = ""
+				c.Name = strings.Repeat("a", 238)
+			}), "limited to 237 characters"),
 			Entry("S3 replication without a region", s3CR(func(b *depsv1alpha1.S3BucketSpec) {
 				b.Replication = &depsv1alpha1.S3ReplicationSpec{Enabled: true}
 			}), "region is required"),
@@ -671,6 +692,19 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Entry("an empty RDS subnet group name", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) { i.DBSubnetGroupName = "" }), "at least 1 chars long"),
 			Entry("an empty DynamoDB partition key", ddbCR(func(t *depsv1alpha1.DynamoDBTableSpec) { t.PartitionKey = "" }), "at least 1 chars long"),
 		)
+
+		It("accepts a CR name at the limit, a DynamoDB deletionProtection setting and a real namespace in a reference", func() {
+			Expect(k8sClient.Create(ctx, saCR(func(c *depsv1alpha1.AppDependencies) {
+				c.GenerateName = ""
+				c.Name = strings.Repeat("b", 237)
+			}))).To(Succeed())
+			Expect(k8sClient.Create(ctx, ddbCR(func(t *depsv1alpha1.DynamoDBTableSpec) {
+				t.DeletionProtection = func() *bool { off := false; return &off }()
+			}))).To(Succeed())
+			Expect(k8sClient.Create(ctx, saCR(func(c *depsv1alpha1.AppDependencies) {
+				c.Spec.SQS.Consumes = []depsv1alpha1.ConsumeRef{{Namespace: "team-a1", Name: "producer", ResourceName: "orders"}}
+			}))).To(Succeed())
+		})
 
 		It("accepts the same specs once they're valid, so the table is rejecting the right thing", func() {
 			Expect(k8sClient.Create(ctx, rdsCR(func(*depsv1alpha1.RDSInstanceSpec) {}))).To(Succeed())

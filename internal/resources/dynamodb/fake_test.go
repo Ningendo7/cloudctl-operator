@@ -18,6 +18,7 @@ package dynamodb
 
 import (
 	"context"
+	"fmt"
 	"maps"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -53,6 +54,11 @@ type fakeTable struct {
 	// deletionProtection makes DeleteTable fail, as it does on AWS, until it
 	// is switched off with UpdateTable.
 	deletionProtection bool
+	// policy and policyRevision back the resource-policy calls, with the
+	// revision handling the real ones have: a write names the revision it
+	// read, or NO_POLICY.
+	policy         string
+	policyRevision int
 	// partitionKey/sortKey back DescribeTable's KeySchema response, so
 	// adopt-path key-schema-mismatch checks are actually exercisable
 	// against a fake table pre-seeded with a different schema than spec
@@ -76,6 +82,11 @@ type fakeDynamoDB struct {
 	updateTableErr             error
 	updateContinuousBackupsErr error
 	listTagsOfResourceErr      error
+
+	policyWrites    int
+	putPolicyErr    error
+	getPolicyErr    error
+	deletePolicyErr error
 
 	scanCalls           int
 	listTagsCalls       int
@@ -284,4 +295,77 @@ func (f *fakeDynamoDB) findByARN(arn string) *fakeTable {
 		}
 	}
 	return nil
+}
+
+func (f *fakeDynamoDB) tableByARN(arn string) *fakeTable {
+	for _, t := range f.tables {
+		if t.arn == arn {
+			return t
+		}
+	}
+	return nil
+}
+
+func (f *fakeDynamoDB) GetResourcePolicy(_ context.Context, in *dynamodb.GetResourcePolicyInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetResourcePolicyOutput, error) {
+	if f.getPolicyErr != nil {
+		return nil, f.getPolicyErr
+	}
+	t := f.tableByARN(*in.ResourceArn)
+	if t == nil {
+		return nil, &types.ResourceNotFoundException{}
+	}
+	if t.policy == "" {
+		return nil, &types.PolicyNotFoundException{}
+	}
+	revision := fmt.Sprint(t.policyRevision)
+	return &dynamodb.GetResourcePolicyOutput{Policy: aws.String(t.policy), RevisionId: &revision}, nil
+}
+
+// checkRevision mirrors ExpectedRevisionId: NO_POLICY means "only if there is
+// none", anything else must be the current revision, and a mismatch is a
+// PolicyNotFoundException.
+func (t *fakeTable) checkRevision(expected *string) error {
+	switch {
+	case expected == nil:
+		return nil
+	case *expected == noPolicyRevision && t.policy == "":
+		return nil
+	case *expected == fmt.Sprint(t.policyRevision) && t.policy != "":
+		return nil
+	}
+	return &types.PolicyNotFoundException{}
+}
+
+func (f *fakeDynamoDB) PutResourcePolicy(_ context.Context, in *dynamodb.PutResourcePolicyInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutResourcePolicyOutput, error) {
+	if f.putPolicyErr != nil {
+		return nil, f.putPolicyErr
+	}
+	t := f.tableByARN(*in.ResourceArn)
+	if t == nil {
+		return nil, &types.ResourceNotFoundException{}
+	}
+	if err := t.checkRevision(in.ExpectedRevisionId); err != nil {
+		return nil, err
+	}
+	t.policy = *in.Policy
+	t.policyRevision++
+	f.policyWrites++
+	revision := fmt.Sprint(t.policyRevision)
+	return &dynamodb.PutResourcePolicyOutput{RevisionId: &revision}, nil
+}
+
+func (f *fakeDynamoDB) DeleteResourcePolicy(_ context.Context, in *dynamodb.DeleteResourcePolicyInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteResourcePolicyOutput, error) {
+	if f.deletePolicyErr != nil {
+		return nil, f.deletePolicyErr
+	}
+	t := f.tableByARN(*in.ResourceArn)
+	if t == nil {
+		return nil, &types.ResourceNotFoundException{}
+	}
+	if err := t.checkRevision(in.ExpectedRevisionId); err != nil {
+		return nil, err
+	}
+	t.policy = ""
+	f.policyWrites++
+	return &dynamodb.DeleteResourcePolicyOutput{}, nil
 }

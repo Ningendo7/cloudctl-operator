@@ -154,12 +154,13 @@ func TestAppDependenciesPredicate_ReactsToTheAdoptFromAnnotation(t *testing.T) {
 		old, new map[string]string
 		want     bool
 	}{
-		"annotation added":       {nil, map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "old-uid"}, true},
-		"annotation changed":     {map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "a"}, map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "b"}, true},
-		"annotation removed":     {map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "a"}, nil, false},
-		"unrelated annotation":   {nil, map[string]string{"example.com/x": "1"}, false},
-		"force-reconcile bumped": {nil, map[string]string{ForceReconcileAnnotation: "1"}, true},
-		"force-delete-all added": {nil, map[string]string{ForceDeleteAllAnnotation: "true"}, true},
+		"annotation added":           {nil, map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "old-uid"}, true},
+		"annotation changed":         {map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "a"}, map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "b"}, true},
+		"annotation removed":         {map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "a"}, nil, false},
+		"unrelated annotation":       {nil, map[string]string{"example.com/x": "1"}, false},
+		"force-reconcile bumped":     {nil, map[string]string{ForceReconcileAnnotation: "1"}, true},
+		"force-delete-all added":     {nil, map[string]string{ForceDeleteAllAnnotation: "true"}, true},
+		"abandon-other-region added": {nil, map[string]string{AbandonOtherRegionAnnotation: "true"}, true},
 		"force-delete-all taken off": {
 			map[string]string{ForceDeleteAllAnnotation: "true"}, nil, false,
 		},

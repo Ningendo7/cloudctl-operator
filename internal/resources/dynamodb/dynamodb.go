@@ -43,6 +43,9 @@ type dynamodbAPI interface {
 	CreateTable(ctx context.Context, in *dynamodb.CreateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.CreateTableOutput, error)
 	DeleteTable(ctx context.Context, in *dynamodb.DeleteTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteTableOutput, error)
 	UpdateTable(ctx context.Context, in *dynamodb.UpdateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTableOutput, error)
+	GetResourcePolicy(ctx context.Context, in *dynamodb.GetResourcePolicyInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetResourcePolicyOutput, error)
+	PutResourcePolicy(ctx context.Context, in *dynamodb.PutResourcePolicyInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutResourcePolicyOutput, error)
+	DeleteResourcePolicy(ctx context.Context, in *dynamodb.DeleteResourcePolicyInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteResourcePolicyOutput, error)
 	ListTagsOfResource(ctx context.Context, in *dynamodb.ListTagsOfResourceInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ListTagsOfResourceOutput, error)
 	TagResource(ctx context.Context, in *dynamodb.TagResourceInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TagResourceOutput, error)
 	UntagResource(ctx context.Context, in *dynamodb.UntagResourceInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UntagResourceOutput, error)
@@ -85,6 +88,9 @@ type tableOptions struct {
 	retentionDays *int32
 	billingMode   depsv1alpha1.DynamoDBBillingMode
 	kmsKeyARN     *string
+	// deletionProtection is the spec's explicit setting. nil leaves a table
+	// alone after creation, where it is created protected.
+	deletionProtection *bool
 	// checkAdoptedKey vets the key an existing table is encrypted with
 	// before it is adopted; nil skips the check.
 	checkAdoptedKey func(ctx context.Context, currentKey string) error
@@ -129,6 +135,8 @@ func Ensure(
 			adopt:          t.Adopt,
 			partitionKey:   t.PartitionKey,
 			sortKey:        t.SortKey,
+
+			deletionProtection: t.DeletionProtection,
 		}
 		if t.Backup != nil {
 			opts.backupEnabled = t.Backup.Enabled
@@ -391,7 +399,7 @@ func createTable(
 		Tags:                 mapToTags(ownerTags(namespace, crName, crUID)),
 		// The operator never recreates a table that disappears, so a delete
 		// made by hand loses the data for good.
-		DeletionProtectionEnabled: aws.Bool(true),
+		DeletionProtectionEnabled: aws.Bool(opts.deletionProtection == nil || *opts.deletionProtection),
 	}
 	if opts.billingMode == depsv1alpha1.DynamoDBBillingModeProvisioned {
 		input.ProvisionedThroughput = &types.ProvisionedThroughput{
@@ -469,6 +477,14 @@ func reconcileTableAttributes(ctx context.Context, awsClient dynamodbAPI, tableN
 		}
 		if _, err := awsClient.UpdateTable(ctx, updateInput); err != nil {
 			return fmt.Errorf("correcting billing mode: %w", err)
+		}
+	}
+
+	// Only an explicit setting is kept in line; unset leaves the table as it
+	// is, adopted ones included.
+	if want := opts.deletionProtection; want != nil && aws.ToBool(table.DeletionProtectionEnabled) != *want {
+		if _, err := awsClient.UpdateTable(ctx, &dynamodb.UpdateTableInput{TableName: &tableName, DeletionProtectionEnabled: want}); err != nil {
+			return fmt.Errorf("correcting deletion protection: %w", err)
 		}
 	}
 

@@ -60,12 +60,10 @@ type CleanupResult struct {
 // spec (or every dynamodb entry, if deleting is true) and either deletes
 // them, retains-and-relinquishes them, or marks them pending deletion.
 //
-// Known gap, deliberately deferred: unlike sqs/sns, this doesn't attach a
-// resource policy denying new writes while a table sits in PendingDeletion.
-// DynamoDB resource-based policies are a newer, less battle-tested feature
-// than SQS/SNS's, and the quiet window plus the 7-day grace period already
-// cover the realistic risk window without it. Revisit if that turns out
-// insufficient in practice.
+// A table waiting to be emptied gets a resource policy that denies the writes
+// that add data, so it can be drained but not refilled; see
+// addPendingDeletionDeny. The policy goes when the table is declared again or
+// retained instead.
 //
 // forceDeleteAll overrides every entry's own Force value - meant only for
 // the finalize path, see the sqs package's Cleanup for why this exists.
@@ -99,7 +97,7 @@ func Cleanup(
 		var entryErr error
 		switch {
 		case declared[entry.Name]:
-			updatedLedger = c.restoreDeclared(entry, updatedLedger)
+			updatedLedger, entryErr = c.restoreDeclared(ctx, entry, updatedLedger)
 		case entry.DeletionPolicy != depsv1alpha1.DeletionPolicyDelete:
 			updatedLedger, results, entryErr = c.retain(ctx, entry, updatedLedger, results)
 		default:
@@ -121,10 +119,14 @@ type tableCleaner struct {
 	recordEvent              status.EventRecorder
 }
 
-// restoreDeclared cancels a pending deletion for a table that is declared again.
-func (c *tableCleaner) restoreDeclared(entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) []depsv1alpha1.ManagedResource {
+// restoreDeclared cancels a pending deletion for a table that is declared
+// again, and lifts the write-blocking policy from it.
+func (c *tableCleaner) restoreDeclared(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource) ([]depsv1alpha1.ManagedResource, error) {
 	if entry.PendingDeletionSince == nil {
-		return ledger
+		return ledger, nil
+	}
+	if err := removePendingDeletionDeny(ctx, c.client, entry.ARN); err != nil {
+		return ledger, err
 	}
 	cleared := entry
 	cleared.PendingDeletionSince = nil
@@ -133,7 +135,7 @@ func (c *tableCleaner) restoreDeclared(entry depsv1alpha1.ManagedResource, ledge
 	if c.recordEvent != nil {
 		c.recordEvent("Normal", "TableDeletionCancelled", fmt.Sprintf("Canceled pending deletion of table %s (%s); resource reappeared in spec", entry.Name, entry.ARN))
 	}
-	return ledger
+	return ledger, nil
 }
 
 // retain lets go of an undeclared table whose policy is not Delete, and
@@ -141,6 +143,12 @@ func (c *tableCleaner) restoreDeclared(entry depsv1alpha1.ManagedResource, ledge
 // pins a KMS key.
 func (c *tableCleaner) retain(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
 	retained := CleanupResult{Name: entry.Name, Reason: CleanupReasonRetained}
+	// Retained after waiting to be deleted: it is no longer being emptied.
+	if entry.PendingDeletionSince != nil {
+		if err := removePendingDeletionDeny(ctx, c.client, entry.ARN); err != nil {
+			return ledger, results, err
+		}
+	}
 	pinsKey := kms.PinsAKey(ledger, resourceType, entry)
 	if entry.State == depsv1alpha1.ManagedResourceStateRelinquished {
 		if !pinsKey {
@@ -229,6 +237,12 @@ func (c *tableCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.Manag
 // quiet window and is empty. proceed is false while it must still wait.
 func (c *tableCleaner) gateOnEmpty(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) (updated []depsv1alpha1.ManagedResource, updatedResults []CleanupResult, proceed bool, err error) {
 	if entry.PendingDeletionSince == nil {
+		// Never delete on the same pass a table is first noticed. Deny the
+		// writes that add data first, so what is emptied stays empty, and hold
+		// for the quiet window.
+		if err := addPendingDeletionDeny(ctx, c.client, entry.ARN); err != nil {
+			return ledger, results, false, err
+		}
 		ledger, results = markPendingDeletion(ledger, results, entry)
 		if c.recordEvent != nil {
 			c.recordEvent("Warning", "TableDeletionPending", fmt.Sprintf("Table %s (%s) is no longer declared and will be deleted in %s unless it reappears in spec", entry.Name, entry.ARN, deletionQuietWindow))

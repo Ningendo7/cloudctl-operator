@@ -135,9 +135,8 @@ var _ = Describe("AppDependencies watches on its generated ConfigMap", Ordered, 
 		Eventually(mgrDone, 10*time.Second).Should(BeClosed())
 	})
 
-	// Every CR here declares one owned SQS queue: an empty ConfigMap is
-	// deliberately deleted rather than created (see configmap.Ensure), so
-	// there must be real connection data for there to be anything to watch.
+	// Every CR here declares one owned SQS queue, so there is real
+	// connection data to watch.
 	newWatchTestCR := func(generateName string) *depsv1alpha1.AppDependencies {
 		return &depsv1alpha1.AppDependencies{
 			ObjectMeta: metav1.ObjectMeta{

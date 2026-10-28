@@ -38,6 +38,12 @@ const ForceReconcileAnnotation = "cloudctl.io/force-reconcile"
 // reconciler: the CR is already in deletion, so no spec change will.
 const ForceDeleteAllAnnotation = "cloudctl.io/force-delete-all"
 
+// AbandonOtherRegionAnnotation lets a human release a CR in deletion whose
+// resources are in another region than this operator's, which otherwise can
+// never be deleted from here. Setting it wakes the reconciler for the same
+// reason ForceDeleteAllAnnotation does.
+const AbandonOtherRegionAnnotation = "cloudctl.io/abandon-other-region"
+
 // AppDependenciesPredicate reconciles on spec changes (the standard
 // generation-changed check) or when specifically the force-reconcile
 // annotation's value changes, or the force-delete-all annotation is set,
@@ -55,7 +61,8 @@ func AppDependenciesPredicate() predicate.Predicate {
 				// Taking either of these off changes nothing, so only setting
 				// or changing them reconciles.
 				return setOrChanged(oldAnn, newAnn, cloudctlaws.AdoptFromUIDAnnotation) ||
-					setOrChanged(oldAnn, newAnn, ForceDeleteAllAnnotation)
+					setOrChanged(oldAnn, newAnn, ForceDeleteAllAnnotation) ||
+					setOrChanged(oldAnn, newAnn, AbandonOtherRegionAnnotation)
 			},
 		},
 	)

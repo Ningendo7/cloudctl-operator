@@ -52,7 +52,7 @@ the same reason, with the section at the start of its text.
 | `ServiceAccountNotClaimable` | Failing | The ServiceAccount was not created by this operator, or it is the namespace's default ServiceAccount. The operator takes over only an existing ServiceAccount whose owner consents, and never the default one, which every pod without a ServiceAccount of its own runs as. | For an existing ServiceAccount, annotate it with cloudctl.io/allow-claim=<cr-name>. For default, give the CR a ServiceAccount of its own. |
 | `ServiceAccountInUse` | Failing | The ServiceAccount is already claimed by a different CR. | Use another ServiceAccount. |
 | `ConnectionKeyCollision` | Failing | Two sources map to one ConfigMap or Secret key once upper-cased with other characters turned into underscores. | Rename one of the resources. |
-| `RegionChanged` | Failing | The CR has resources in a different region than this operator's. Nothing was touched. | Run an operator in that region for it. |
+| `RegionChanged` | Failing | The CR has resources in a different region than this operator's. Nothing was touched. | Run an operator in that region for it. To delete the CR from here, leaving its resources in AWS as they are, annotate it with cloudctl.io/abandon-other-region=true. |
 | `WaitingForRuleRelease` | Waiting | A security group cannot be deleted yet because another group's rule or a running pod still uses it. | None; it is retried. |
 | `ResourcesNotDrained` | Waiting | Deletion of the CR has not finished: a resource is waiting on its non-empty check or its quiet window. | Empty the resource, or set force: true on it. |
 | `DeletionBlocked` | Waiting | Ready is false because deletion of the CR has not finished. | See the DeletionBlocked condition for what is waiting. |

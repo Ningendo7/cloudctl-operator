@@ -58,6 +58,7 @@ type SharedWithEntry struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Namespace string `json:"namespace"`
 
 	// name of the consuming AppDependencies CR.
@@ -84,6 +85,7 @@ type ConsumeRef struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Namespace string `json:"namespace"`
 
 	// name of the AppDependencies CR that owns the resource.
@@ -357,6 +359,7 @@ type S3BackupSpec struct {
 // configuration this object can't see, so that one is enforced at reconcile
 // time instead, not here.
 // +kubebuilder:validation:XValidation:rule="!self.enabled || size(self.region) > 0",message="region is required when replication is enabled"
+// +kubebuilder:validation:XValidation:rule="!self.enabled",message="replication is not implemented yet: it needs a bucket and a role in a second region, which the operator cannot create"
 type S3ReplicationSpec struct {
 	// +optional
 	// +kubebuilder:default=false
@@ -372,6 +375,7 @@ type S3ReplicationSpec struct {
 type S3LifecycleRule struct {
 	// id is a human-readable identifier for this rule.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=255
 	ID string `json:"id"`
 
@@ -569,6 +573,14 @@ type DynamoDBTableSpec struct {
 	// +optional
 	Adopt bool `json:"adopt,omitempty"`
 
+	// deletionProtection makes AWS refuse to delete the table until it is
+	// turned off. Unset means on for a table this operator creates, and the
+	// table is left as it is afterwards, adopted ones included; set, the
+	// table is kept in line with it while declared. The operator turns it off
+	// itself just before deleting a table it has decided to delete.
+	// +optional
+	DeletionProtection *bool `json:"deletionProtection,omitempty"`
+
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	// +listType=map
@@ -629,6 +641,7 @@ type RDSBackupSpec struct {
 // recovery. Region is required when enabled: this is a self-contained
 // check, enforced here rather than at reconcile time.
 // +kubebuilder:validation:XValidation:rule="!self.enabled || size(self.region) > 0",message="region is required when replication is enabled"
+// +kubebuilder:validation:XValidation:rule="!self.enabled",message="replication is not implemented yet: it needs clients in a second region, which the operator does not have"
 type RDSReplicationSpec struct {
 	// +optional
 	// +kubebuilder:default=false
@@ -1060,6 +1073,7 @@ type AppDependenciesStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=appdeps
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 237",message="metadata.name is limited to 237 characters, so that the names generated from it, such as <name>-rds-credentials, fit in 253"
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Message",type=string,priority=1,JSONPath=`.status.conditions[?(@.type=="Ready")].message`
