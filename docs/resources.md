@@ -29,7 +29,7 @@ spec:
 | `force` | Allows deleting a queue that isn't empty (visible, in-flight, *and* delayed message counts are all checked independently). |
 | `adopt` | Required to bring an existing, differently-owned or untagged queue under this CR's management. A resource encrypted with a customer-managed KMS key the spec doesn't name is refused with `AdoptionConflict`: declare that key under `kms.resources` with `adopt: true` and point `encryption.kmsKeyRef` at it. This applies to every resource type. |
 | `sharedWith` | Grants other `AppDependencies` CRs permission to consume this queue (up to 20 entries), and via `access`, how much (see [IAM](#iam) below). |
-| `subscribesTo` | Subscribes this queue to SNS topics (up to 20), each referenced by owner namespace, CR name and topic name. The operator creates the real SNS subscription and the queue policy that lets the topic deliver, and removes both when the entry goes. When the queue itself is gone, the subscription is still removed, since SNS keeps it and every publish to the topic would fail delivery. A subscription removed behind the operator's back is restored. The topic's owner must list this CR in its own `sharedWith`, the same as any cross-CR reference. |
+| `subscribesTo` | Subscribes this queue to SNS topics (up to 10; each takes one of the 20 statements SQS allows in a queue policy), each referenced by owner namespace, CR name and topic name. The operator creates the real SNS subscription and the queue policy that lets the topic deliver, and removes both when the entry goes. When the queue itself is gone, the subscription is still removed, since SNS keeps it and every publish to the topic would fail delivery. A subscription removed behind the operator's back is restored. The topic's owner must list this CR in its own `sharedWith`, the same as any cross-CR reference. |
 | `overrides.visibilityTimeoutSeconds` | 0–43200. Drift-corrected on every reconcile if it diverges from spec. |
 | `overrides.maxReceiveCount` | 1–1000. Only meaningful with `dlq: true`. |
 | `overrides.contentBasedDeduplication` | Only meaningful with `fifo: true`. |
@@ -87,6 +87,7 @@ spec:
 | `deletionPolicy` | Same semantics as SQS/SNS. New tables are created with deletion protection on, since the operator never recreates one that disappears; its own delete switches the protection off first, and a table that already exists keeps its setting. A table's "non-empty" equivalent is a real item count, checked via a strongly-consistent count-only `Scan` rather than `DescribeTable`'s `ItemCount` — AWS documents that field as updated only approximately every six hours, which would let a table populated minutes ago sail through as if it were still empty. |
 | `force` | Allows deleting a table that isn't empty. Unlike SQS/SNS, `DeleteTable` itself has **no non-empty guard of its own** — this check is the only thing standing between "removed from spec" and irreversible data loss. |
 | `adopt` | Same semantics as SQS/SNS, plus one DynamoDB-specific check: adoption is refused outright if the existing table's actual key schema doesn't match `partitionKey`/`sortKey` — AWS never allows changing a table's key schema, so adopting a mismatched table would otherwise succeed and only fail later, opaquely, at the workload's first `PutItem`/`Query`. The refusal is `KeySchemaMismatch`. |
+| `deletionProtection` | Makes AWS refuse to delete the table until it is turned off. Unset: on for a table the operator creates, and left as it is afterwards, adopted tables included. Set: kept in line while the table is declared, so `false` makes a table deletable by spec and `true` puts protection back if someone removes it. The operator still turns it off itself just before deleting a table it has decided to delete. |
 | `sharedWith` | Same semantics as SQS/SNS (see [IAM](#iam)). |
 | `backup.enabled` | Turns on point-in-time recovery (continuous backups). It is never turned off: `enabled: false` leaves it on and emits a `BackupsLeftEnabled` warning, since turning it off discards the restore window and something else (AWS Backup, an organisation rule) may rely on it. |
 | `backup.retentionDays` | 1–35, a minimum. Only meaningful with `enabled: true`; AWS's own default (35 days) applies when unset. The window is extended to this value and never shortened. |
@@ -106,10 +107,15 @@ check, which has to be fresh before anything else can proceed. A table in
 `INACCESSIBLE_ENCRYPTION_CREDENTIALS`, `ARCHIVING` or `ARCHIVED` fails
 `DynamoDBReady` with `KeyUnavailable`, since its KMS key can't be used.
 
-**Not yet built:** a deny-policy blocking new writes while a table sits in
-`PendingDeletion` (SQS/SNS/S3 all have this; DynamoDB resource-based
-policies are newer and less battle-tested, and the quiet window plus the
-7-day grace period already cover the realistic risk without it).
+**Writes are blocked while a table waits to be deleted.** From the pass a table
+is first noticed as removed from spec, a resource policy statement denies the
+writes that add data (`PutItem`, `UpdateItem`, `BatchWriteItem`,
+`PartiQLInsert`, `PartiQLUpdate`) on the table and its indexes, so it can be
+emptied but not refilled. `DeleteItem` and reads stay open so it can be drained
+(or left to TTL), and `force` skips the wait. The statement is removed if the
+table is declared again or retained instead, and any other statement in the
+table's policy is left alone. DynamoDB refuses a second change to a table's
+policy for a few seconds after the first, which the operator retries.
 
 ## S3
 
@@ -149,8 +155,8 @@ are skipped, but versioning, encryption and lifecycle are still reconciled on
 every pass, so a bucket deleted out-of-band is noticed and recreated on that
 same pass.
 
-**Not yet built:** `replication` (the CRD field exists but is explicitly
-rejected at reconcile time) — cross-region replication needs a bucket and
+**Not yet built:** `replication` (the CRD field exists but `enabled: true` is
+rejected at admission) — cross-region replication needs a bucket and
 IAM role in a different region, which needs real multi-region client
 support this operator doesn't have yet. Same limitation as DynamoDB's
 Global Tables.
@@ -190,7 +196,7 @@ spec:
 | `encryption` | `enabled: true` provisions a dedicated key, or `kmsKeyRef` names a key under this CR's `kms.resources` (see [KMS](#kms)). **Immutable once set.** |
 | `applyImmediately` | See "Changing a running instance". |
 | `deletionPolicy`, `adopt`, `sharedWith` | See below. |
-| `replication` | Not implemented; setting it is a permanent error. |
+| `replication` | Not implemented; the CRD rejects `replication.enabled: true`. |
 
 **Credentials.** The operator never sets or generates a password. RDS creates and rotates the master user's password in Secrets Manager, and the operator mirrors it into a Secret named `<cr>-rds-credentials` in the *owning* CR's namespace only. Rotation reaches the Secret within one drift-detection interval, but never a running pod's environment. For credentials that must follow rotation, restart the pods when the Secret changes (for example with Stakater Reloader's `reloader.stakater.com/auto: "true"` annotation on the Deployment), or read the RDS-managed secret directly with External Secrets or the Secrets Store CSI driver. The master user can do anything in the database, so consumers never receive it: the owner creates per-app database users and hands the credentials to each team.
 
@@ -287,6 +293,8 @@ the CR declares or provisions.
 A consumer of an encrypted queue, topic or bucket gets the key permissions it needs too. A key that is disabled or unavailable fails `KMSReady` (`KeyDisabled`, `KeyUnavailable`) and is never re-enabled by the operator. AWS services are not IAM identities in the account, so only a key's own policy can let SNS deliver into an encrypted queue, or let CloudWatch alarms publish to an encrypted topic. The operator writes those statements, `cloudctl-sns-delivery` and `cloudctl-cloudwatch-alarms`, and only for what needs them: SNS may use a queue's key for the topics the queue subscribes to, and CloudWatch may use a topic's key for the alarms that notify it, including alarms in other CRs the topic is shared with. Each statement names those exact ARNs, so no other topic or alarm in the account can use the key. A key nothing delivers into or publishes through has neither. They follow the resources: added when a subscription or alarm appears, narrowed or removed when it goes, and removed when the operator lets go of the key. Every change, including to a key you adopted, is announced with a `KeyPolicyUpdated` event, and any other statement in the policy is left as it is. The `KeyPolicyReady` condition reports a failure to update them. Encrypted S3 buckets use an S3 Bucket Key, which cuts KMS requests; KMS then sees the bucket ARN as the encryption context instead of each object's.
 
 **Upgrading from v0.2.0.** v0.3.0 removed the cross-CR `encryption.kmsKeyRef` object and `kms.resources[].sharedWith` / `kms.consumes`. Go straight to v0.3.1 or later, since v0.3.0 cannot decode a CR that still has the object form; from v0.3.1 such a CR fails `KMSReady` with `LegacyKMSKeyRef` until it is edited.
+
+**Upgrading from before v0.4.0.** Releases from v0.4.0 record which key each resource is encrypted with. A resource that used `kmsKeyRef` and was already removed from spec before then has no recorded key, so removing its key could schedule the key for deletion while data encrypted with it remains. Upgrade to any release from v0.4.0 on and let each CR reconcile once before removing encrypted resources and their keys.
 
 **Removing `encryption` is not applied.** Drift correction only ever moves
 in the "enable, or point at a different key" direction: dropping `encryption`
@@ -413,7 +421,9 @@ spec:
   `spec.serviceAccountName`, or on an operator-owned ServiceAccount named
   after the CR (`status.serviceAccountName` says which), and
   `<cr-name>-connection` carries env-var-shaped keys for every owned and
-  authorized consumed resource; if two resources would map to the same key
+  authorized consumed resource (it exists for as long as the CR does, empty when
+  there is nothing to report, so a pod that reads it never fails to start for lack
+  of it; a CR name is limited to 237 characters so the generated names fit); if two resources would map to the same key
   (`Orders` and `orders`, `a-b` and `a_b`), `ConnectionInfoReady` fails with
   `ConnectionKeyCollision` naming both, and nothing is written. A named
   ServiceAccount must already exist
@@ -435,7 +445,7 @@ A recreated CR gets a new UID, and its resources still carry the old one, so eve
 
 Never run two operators against the same resources: after the transfer, the old operator fails its own ownership check and stops touching them, but until then they would fight.
 
-A move to another **region** is not supported: an operator refuses a CR whose resources are in a different region (`RegionChanged`) and touches nothing, so run an operator in the CR's own region.
+A move to another **region** is not supported: an operator refuses a CR whose resources are in a different region (`RegionChanged`) and touches nothing, so run an operator in the CR's own region. A CR in deletion that cannot be reached that way is released, with its resources left in AWS as they are and listed in a `ResourcesAbandoned` event, by annotating it `cloudctl.io/abandon-other-region: "true"`.
 
 ## Shared behavior
 
@@ -529,6 +539,6 @@ A move to another **region** is not supported: an operator refuses a CR whose re
 | "Non-empty" signal | message count (3 counters) | active subscriptions | item count (count-only `Scan`) | any object version/delete marker | *(no concept — see below)* | *(none — the operator never deletes an instance)* |
 | Async create lifecycle | No | No | Yes (`Creating`→`Active`) | No | No | Yes (minutes; status-driven) |
 | `force` bypasses non-empty guard | Yes | Yes | Yes | Yes | No — deletion is irreversible for anyone else still using the key, so there's nothing to force | No — there is no delete to force |
-| Deny-policy on `PendingDeletion` | Yes | Yes | No (see DynamoDB section) | Yes | N/A — uses `ScheduleKeyDeletion`'s own AWS-side wait instead | No |
+| Deny-policy on `PendingDeletion` | Yes | Yes | Yes (writes that add data; `DeleteItem` stays open to drain it) | Yes | N/A — uses `ScheduleKeyDeletion`'s own AWS-side wait instead | N/A — the operator never deletes an instance |
 | `StuckPendingDeletion` escalation (7-day grace) | Yes | Yes | Yes | Yes | No — no self-imposed grace period; AWS's own 30-day `ScheduleKeyDeletion` window is the wait | Yes, after 1 hour, and it is permanent: the operator never deletes |
 | Emptiness-check backoff applies | Yes | Yes | Yes | Yes | No (nothing to back off) | No |

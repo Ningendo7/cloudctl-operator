@@ -71,8 +71,12 @@ func ConfigMapName(crName string) string {
 }
 
 // Ensure regenerates this CR's connection ConfigMap from its current
-// owned-resource ledger and authorized consumes, deleting it once there's
-// nothing left to report. Refuses to touch a same-named ConfigMap this CR
+// owned-resource ledger and authorized consumes. The ConfigMap exists for as
+// long as the CR does, empty when there is nothing to report: a pod that
+// reads it with envFrom and no optional: true would otherwise fail with
+// CreateContainerConfigError whenever it restarted while the data was gone
+// (before the first resource is ready, or while a consume is revoked). It is
+// removed with the CR, by its owner reference. Refuses to touch a same-named ConfigMap this CR
 // doesn't already own (checked via its owner reference) - the same
 // name-match-isn't-ownership rule every AWS resource here follows.
 // rdsClient is only ever touched when cr declares an rds resource or
@@ -107,12 +111,6 @@ func Ensure(ctx context.Context, k8sClient client.Client, apiReader client.Reade
 		}
 	}
 
-	if len(data) == 0 {
-		if !exists {
-			return nil
-		}
-		return client.IgnoreNotFound(k8sClient.Delete(ctx, existing))
-	}
 	// Ownership was checked above. An apply that changes nothing still runs
 	// every admission webhook in the cluster and writes an audit entry.
 	if exists && maps.Equal(existing.Data, data) &&

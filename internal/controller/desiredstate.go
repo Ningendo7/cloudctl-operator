@@ -441,6 +441,47 @@ func sectionForEntryType(entryType string) string {
 	return conditionTypeKMSReady
 }
 
+// AbandonOtherRegionAnnotation releases a CR in deletion whose resources are in
+// another region, leaving them in AWS. See abandonOtherRegion.
+const AbandonOtherRegionAnnotation = predicates.AbandonOtherRegionAnnotation
+
+// abandonOtherRegion lets a CR in deletion go when its resources are in another
+// region and cannot be reached from here: a restored CR in a cluster whose
+// operator runs elsewhere, or an operator moved to another region. Without it
+// the only way out is stripping the finalizer by hand. Everything the CR
+// created is left in AWS exactly as it is, and an event lists it, so nothing
+// is lost silently. It only acts on the annotation: abandoning is a decision
+// for a person, and force-delete-all means something else (delete what is not
+// empty).
+func abandonOtherRegion(ctx context.Context, r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependencies) (bool, error) {
+	if cr.Annotations[AbandonOtherRegionAnnotation] == "" || !hasResourceInOtherRegion(cr, r.AWSClients.Region) {
+		return false, nil
+	}
+	var left []string
+	for _, entry := range cr.Status.ManagedResources {
+		if entry.ARN != "" {
+			left = append(left, entry.ARN)
+		}
+	}
+	if record := eventRecorderFor(r, cr); record != nil {
+		record("Warning", "ResourcesAbandoned", fmt.Sprintf(
+			"Released the CR without touching its resources, which stay in AWS as they are: %s", strings.Join(left, ", ")))
+	}
+	return true, removeFinalizer(ctx, r.Client, cr)
+}
+
+func hasResourceInOtherRegion(cr *depsv1alpha1.AppDependencies, region string) bool {
+	if region == "" {
+		return false
+	}
+	for _, entry := range cr.Status.ManagedResources {
+		if other := arnRegion(entry.ARN); other != "" && other != region {
+			return true
+		}
+	}
+	return false
+}
+
 // refuseOtherRegion refuses a CR whose ledger names a resource in another
 // region than this operator's. Resources do not move between regions, and
 // looking for them here would find some missing and recreate or forget them.

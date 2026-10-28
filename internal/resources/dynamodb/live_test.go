@@ -37,6 +37,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -489,6 +490,79 @@ func TestLive_Cleanup_BlocksDeletingTableWithARealItemThenSucceedsOnceEmpty(t *t
 	// keeps finding it for a while, so "gone" has to be waited for rather
 	// than checked once immediately after.
 	waitForTableGone(t, client, tableName, 3*time.Minute)
+}
+
+// TestLive_Cleanup_APendingTableRefusesNewItemsButCanBeDrained confirms, on a
+// real table, what the pending-deletion policy exists for: new items are
+// refused, existing ones can still be deleted, and the table accepts writes
+// again when its entry comes back. DynamoDB applies a policy eventually and
+// refuses a second change to it for a few seconds, so each step waits.
+func TestLive_Cleanup_APendingTableRefusesNewItemsButCanBeDrained(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := dynamodb.NewFromConfig(cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, "sessions", 255)
+	t.Cleanup(func() { deleteTableIfExists(t, client, tableName) })
+
+	tableSpec := depsv1alpha1.DynamoDBTableSpec{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete}
+	declared := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{tableSpec}}
+	ledger, _ := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", declared, nil, nil, nil)
+	waitForTableActive(t, client, tableName, 3*time.Minute)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", declared, ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() (once ACTIVE) error = %v", err)
+	}
+	item := func(id string) map[string]types.AttributeValue {
+		return map[string]types.AttributeValue{"id": &types.AttributeValueMemberS{Value: id}}
+	}
+	if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &tableName, Item: item("old")}); err != nil {
+		t.Fatalf("real PutItem() before the table is pending error = %v", err)
+	}
+
+	ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	denied := func() bool {
+		_, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &tableName, Item: item("new")})
+		return err != nil && strings.Contains(err.Error(), "AccessDenied")
+	}
+	if !waitFor(denied, 2*time.Minute) {
+		t.Fatal("a new item was still accepted by a table waiting to be deleted: the policy did not take effect")
+	}
+	if _, err := client.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &tableName, Key: item("old")}); err != nil {
+		t.Fatalf("real DeleteItem() on a pending table error = %v: it must stay possible to drain it", err)
+	}
+
+	// Declared again: the policy goes, and writes work again.
+	if !waitFor(func() bool {
+		var cleanupErr error
+		ledger, _, cleanupErr = Cleanup(ctx, client, namespace, crName, "uid-1", declared, ledger, false, false, nil)
+		return cleanupErr == nil
+	}, 2*time.Minute) {
+		t.Fatal("the policy could not be removed after the table was declared again")
+	}
+	accepted := func() bool {
+		_, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &tableName, Item: item("new")})
+		return err == nil
+	}
+	if !waitFor(accepted, 2*time.Minute) {
+		t.Fatal("the table still refuses new items after it was declared again")
+	}
+}
+
+// waitFor polls until check is true or the time is up.
+func waitFor(check func() bool, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if check() {
+			return true
+		}
+		time.Sleep(5 * time.Second)
+	}
+	return false
 }
 
 // TestLive_Ensure_RefusesTableOwnedByADifferentRealCR confirms the

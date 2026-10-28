@@ -257,13 +257,12 @@ func TestEnsure_OmitsUnauthorizedConsumedResource(t *testing.T) {
 		t.Fatalf("Ensure: %v", err)
 	}
 
-	// Nothing owned and nothing authorized to consume - no ConfigMap
-	// should even be created, same "no pointless empty artifact"
-	// philosophy as IAM skipping an empty role.
-	cm := &corev1.ConfigMap{}
-	err := c.Get(context.Background(), client.ObjectKey{Namespace: "team-a", Name: ConfigMapName("checkout-service")}, cm)
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("expected no ConfigMap to be created for an unauthorized consume, got err=%v", err)
+	// Nothing owned and nothing authorized to consume: the ConfigMap exists
+	// and is empty, so a pod that reads it starts and gets no values, rather
+	// than failing to start.
+	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
+	if len(cm.Data) != 0 {
+		t.Fatalf("an unauthorized consume must not leak a value, got %v", cm.Data)
 	}
 }
 
@@ -347,7 +346,7 @@ func TestEnsure_SanitizesKeysForEnvVarCompatibility(t *testing.T) {
 	}
 }
 
-func TestEnsure_DeletesConfigMapWhenNothingRemainsToReport(t *testing.T) {
+func TestEnsure_KeepsAnEmptyConfigMapWhenNothingRemainsToReport(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	cr := &depsv1alpha1.AppDependencies{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
@@ -372,10 +371,29 @@ func TestEnsure_DeletesConfigMapWhenNothingRemainsToReport(t *testing.T) {
 		t.Fatalf("Ensure (now empty): %v", err)
 	}
 
-	cm := &corev1.ConfigMap{}
-	err := c.Get(context.Background(), client.ObjectKey{Namespace: "team-a", Name: ConfigMapName("checkout-service")}, cm)
-	if !apierrors.IsNotFound(err) {
-		t.Errorf("expected the ConfigMap to be deleted once nothing remains to report, got err=%v", err)
+	// Kept, empty: deleting it would make a pod that reads it with envFrom
+	// fail with CreateContainerConfigError at its next restart.
+	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
+	if len(cm.Data) != 0 {
+		t.Errorf("expected the ConfigMap to be emptied, got %v", cm.Data)
+	}
+}
+
+func TestEnsure_ACRWithNothingToReportYetStillGetsAConfigMap(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	cr := &depsv1alpha1.AppDependencies{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Spec:       depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}},
+		// No ledger entry yet: the queue is not created.
+	}
+
+	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	cm := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service"))
+	if owner := metav1.GetControllerOf(cm); owner == nil || owner.UID != cr.UID {
+		t.Errorf("the empty ConfigMap must be owned by the CR so it goes with it, got %+v", owner)
 	}
 }
 

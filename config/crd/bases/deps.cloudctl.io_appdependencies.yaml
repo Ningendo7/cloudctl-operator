@@ -84,6 +84,7 @@ spec:
                           the resource.
                         maxLength: 63
                         minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       resourceName:
                         description: |-
@@ -118,6 +119,7 @@ spec:
                             the resource.
                           maxLength: 63
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceName:
                           description: |-
@@ -170,6 +172,14 @@ spec:
                           - Retain
                           - Delete
                           type: string
+                        deletionProtection:
+                          description: |-
+                            deletionProtection makes AWS refuse to delete the table until it is
+                            turned off. Unset means on for a table this operator creates, and the
+                            table is left as it is afterwards, adopted ones included; set, the
+                            table is kept in line with it while declared. The operator turns it off
+                            itself just before deleting a table it has decided to delete.
+                          type: boolean
                         encryption:
                           description: |-
                             encryption enables server-side encryption with a KMS key. See
@@ -250,6 +260,7 @@ spec:
                                   CR.
                                 maxLength: 63
                                 minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
                             required:
                             - name
@@ -360,6 +371,7 @@ spec:
                             the resource.
                           maxLength: 63
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceName:
                           description: |-
@@ -542,6 +554,10 @@ spec:
                           x-kubernetes-validations:
                           - message: region is required when replication is enabled
                             rule: '!self.enabled || size(self.region) > 0'
+                          - message: 'replication is not implemented yet: it needs
+                              clients in a second region, which the operator does
+                              not have'
+                            rule: '!self.enabled'
                         sharedWith:
                           description: |-
                             sharedWith grants other AppDependencies CRs network access to this
@@ -579,6 +595,7 @@ spec:
                                   CR.
                                 maxLength: 63
                                 minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
                             required:
                             - name
@@ -634,6 +651,7 @@ spec:
                             the resource.
                           maxLength: 63
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceName:
                           description: |-
@@ -736,6 +754,7 @@ spec:
                                     description: id is a human-readable identifier
                                       for this rule.
                                     maxLength: 255
+                                    minLength: 1
                                     type: string
                                   noncurrentVersionExpirationAfterDays:
                                     description: |-
@@ -804,6 +823,10 @@ spec:
                           x-kubernetes-validations:
                           - message: region is required when replication is enabled
                             rule: '!self.enabled || size(self.region) > 0'
+                          - message: 'replication is not implemented yet: it needs
+                              a bucket and a role in a second region, which the operator
+                              cannot create'
+                            rule: '!self.enabled'
                         sharedWith:
                           items:
                             description: |-
@@ -834,6 +857,7 @@ spec:
                                   CR.
                                 maxLength: 63
                                 minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
                             required:
                             - name
@@ -884,6 +908,7 @@ spec:
                             the resource.
                           maxLength: 63
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceName:
                           description: |-
@@ -998,6 +1023,7 @@ spec:
                                   CR.
                                 maxLength: 63
                                 minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
                             required:
                             - name
@@ -1041,6 +1067,7 @@ spec:
                             the resource.
                           maxLength: 63
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceName:
                           description: |-
@@ -1187,6 +1214,7 @@ spec:
                                   CR.
                                 maxLength: 63
                                 minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
                             required:
                             - name
@@ -1203,7 +1231,8 @@ spec:
                             subscribesTo creates a real SNS subscription (and the matching
                             queue resource-policy grant) from each referenced topic into this
                             queue. Each reference must be authorized via the topic's own
-                            sharedWith, the same as any other cross-CR reference.
+                            sharedWith, the same as any other cross-CR reference. Each entry takes
+                            one statement of the queue policy, which SQS limits to 20 in all.
                           items:
                             description: |-
                               ConsumeRef references a resource owned by another AppDependencies CR. The
@@ -1221,6 +1250,7 @@ spec:
                                   owns the resource.
                                 maxLength: 63
                                 minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
                               resourceName:
                                 description: |-
@@ -1234,7 +1264,7 @@ spec:
                             - namespace
                             - resourceName
                             type: object
-                          maxItems: 20
+                          maxItems: 10
                           type: array
                           x-kubernetes-list-map-keys:
                           - namespace
@@ -1467,6 +1497,10 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name is limited to 237 characters, so that the names generated
+            from it, such as <name>-rds-credentials, fit in 253
+          rule: size(self.metadata.name) <= 237
     served: true
     storage: true
     subresources:

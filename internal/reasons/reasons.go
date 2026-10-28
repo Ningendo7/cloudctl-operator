@@ -258,7 +258,7 @@ var (
 		"Rename one of the resources.")
 	RegionChanged = register("RegionChanged", Failing,
 		"The CR has resources in a different region than this operator's. Nothing was touched.",
-		"Run an operator in that region for it.")
+		"Run an operator in that region for it. To delete the CR from here, leaving its resources in AWS as they are, annotate it with cloudctl.io/abandon-other-region=true.")
 	WaitingForRuleRelease = register("WaitingForRuleRelease", Waiting,
 		"A security group cannot be deleted yet because another group's rule or a running pod still uses it.",
 		"None; it is retried.")

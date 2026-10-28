@@ -273,6 +273,11 @@ func (in *DynamoDBTableSpec) DeepCopyInto(out *DynamoDBTableSpec) {
 		*out = new(DynamoDBBackupSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.DeletionProtection != nil {
+		in, out := &in.DeletionProtection, &out.DeletionProtection
+		*out = new(bool)
+		**out = **in
+	}
 	if in.SharedWith != nil {
 		in, out := &in.SharedWith, &out.SharedWith
 		*out = make([]SharedWithEntry, len(*in))

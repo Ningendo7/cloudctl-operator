@@ -189,6 +189,10 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 	log.Info("Starting deletion reconcile")
 	original := cr.DeepCopy()
 
+	if abandoned, err := abandonOtherRegion(ctx, r, cr); err != nil || abandoned {
+		return ctrl.Result{}, err
+	}
+
 	if refused, err := refuseOtherRegion(ctx, r, cr, original); err != nil {
 		return ctrl.Result{}, err
 	} else if refused {

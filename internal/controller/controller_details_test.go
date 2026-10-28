@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -183,5 +184,76 @@ func TestReconcileDelete_AnUnchangedStatusIsNotWritten(t *testing.T) {
 	}
 	if hasFinalizer(cr) {
 		t.Error("with nothing to delete the finalizer should be removed")
+	}
+}
+
+// --- a CR in deletion whose resources are in another region ---
+
+func deletingCRIn(region string) *depsv1alpha1.AppDependencies {
+	cr := newStuckDeletionCR()
+	cr.Status.ManagedResources[0].ARN = "arn:aws:sqs:" + region + ":123456789012:orders"
+	return cr
+}
+
+func TestReconcileDelete_AnOtherRegionCRIsRefusedWithoutTheAnnotation(t *testing.T) {
+	cr := deletingCRIn("eu-west-1")
+	patchCount := 0
+	r := newCountingReconciler(t, &patchCount, cr)
+
+	result, err := r.reconcileDelete(context.Background(), cr)
+
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("reconcileDelete() = %+v, %v; want a requeue and no error", result, err)
+	}
+	if !hasFinalizer(cr) {
+		t.Error("the finalizer must stay: nothing says the resources may be left behind")
+	}
+}
+
+func TestReconcileDelete_AbandonOtherRegionReleasesTheCRAndLeavesTheResources(t *testing.T) {
+	cr := deletingCRIn("eu-west-1")
+	cr.Annotations = map[string]string{AbandonOtherRegionAnnotation: "true"}
+	patchCount := 0
+	r := newCountingReconciler(t, &patchCount, cr)
+	recorder := events.NewFakeRecorder(5)
+	r.Recorder = recorder
+	fakeSQS := r.AWSClients.SQS.(*fakeSQSClient)
+	seedOwnedNonEmptyQueue(fakeSQS, cr)
+
+	result, err := r.reconcileDelete(context.Background(), cr)
+
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("reconcileDelete() = %+v, %v; want it to finish", result, err)
+	}
+	if hasFinalizer(cr) {
+		t.Error("the finalizer should be released")
+	}
+	if _, stillThere := fakeSQS.queues["orders"]; !stillThere {
+		t.Error("abandoning must not touch the resources")
+	}
+	select {
+	case got := <-recorder.Events:
+		if !strings.Contains(got, "ResourcesAbandoned") || !strings.Contains(got, "arn:aws:sqs:eu-west-1:123456789012:orders") {
+			t.Errorf("the event should name what is left behind, got %q", got)
+		}
+	default:
+		t.Error("no event says what was left in AWS")
+	}
+}
+
+// The annotation is only for resources the operator cannot reach. It is not a
+// way around the non-empty guard for resources it can.
+func TestReconcileDelete_AbandonOtherRegionDoesNotBypassTheGuardInTheOperatorsRegion(t *testing.T) {
+	cr := deletingCRIn("us-east-1")
+	cr.Annotations = map[string]string{AbandonOtherRegionAnnotation: "true"}
+	patchCount := 0
+	r := newCountingReconciler(t, &patchCount, cr)
+	seedOwnedNonEmptyQueue(r.AWSClients.SQS.(*fakeSQSClient), cr)
+
+	if _, err := r.reconcileDelete(context.Background(), cr); err != nil {
+		t.Fatalf("reconcileDelete() error = %v", err)
+	}
+	if !hasFinalizer(cr) {
+		t.Error("a non-empty queue in this region must still hold the deletion")
 	}
 }
