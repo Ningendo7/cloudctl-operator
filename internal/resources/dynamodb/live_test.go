@@ -364,6 +364,111 @@ func TestLive_Ensure_PITRRetentionDaysActuallyAppliesAndReportsBack(t *testing.T
 	if pitr.RecoveryPeriodInDays == nil || *pitr.RecoveryPeriodInDays != retention {
 		t.Errorf("real RecoveryPeriodInDays = %v, want %d", pitr.RecoveryPeriodInDays, retention)
 	}
+
+	// Raise-only: the spec never turns recovery off or shortens it, and raises it when asked.
+	recoveryDays := func() (enabled bool, days int32) {
+		out, err := client.DescribeContinuousBackups(ctx, &dynamodb.DescribeContinuousBackupsInput{TableName: &tableName})
+		if err != nil {
+			t.Fatalf("real DescribeContinuousBackups() error = %v", err)
+		}
+		d := out.ContinuousBackupsDescription.PointInTimeRecoveryDescription
+		if d == nil {
+			return false, 0
+		}
+		return d.PointInTimeRecoveryStatus == types.PointInTimeRecoveryStatusEnabled, aws.ToInt32(d.RecoveryPeriodInDays)
+	}
+	ensure := func(step string, recordEvent status.EventRecorder) {
+		t.Helper()
+		if err := retryWhileRetryable(t, 2*time.Minute, func() error {
+			_, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, recordEvent)
+			return err
+		}); err != nil {
+			t.Fatalf("Ensure() %s error = %v", step, err)
+		}
+	}
+
+	recordEvent, events := newEventCollector()
+	spec.Resources[0].Backup = &depsv1alpha1.DynamoDBBackupSpec{Enabled: false}
+	ensure("with backup turned off", recordEvent)
+	if on, days := recoveryDays(); !on || days != retention {
+		t.Errorf("after backup was turned off, PITR enabled = %v for %d days, want it left on for %d", on, days, retention)
+	}
+	warned := false
+	for _, e := range *events {
+		warned = warned || e.reason == "BackupsLeftEnabled"
+	}
+	if !warned {
+		t.Errorf("expected a BackupsLeftEnabled warning, got %v", *events)
+	}
+
+	shorter := int32(7)
+	spec.Resources[0].Backup = &depsv1alpha1.DynamoDBBackupSpec{Enabled: true, RetentionDays: &shorter}
+	ensure("with a shorter retention", nil)
+	if on, days := recoveryDays(); !on || days != retention {
+		t.Errorf("after asking for %d days, PITR enabled = %v for %d days, want %d kept", shorter, on, days, retention)
+	}
+
+	longer := int32(30)
+	spec.Resources[0].Backup = &depsv1alpha1.DynamoDBBackupSpec{Enabled: true, RetentionDays: &longer}
+	ensure("with a longer retention", nil)
+	if on, days := recoveryDays(); !on || days != longer {
+		t.Errorf("after asking for %d days, PITR enabled = %v for %d days", longer, on, days)
+	}
+
+	spec.Resources[0].Backup = nil
+	ensure("with backup dropped", nil)
+	if on, days := recoveryDays(); !on || days != longer {
+		t.Errorf("after backup was dropped, PITR enabled = %v for %d days, want it left on for %d", on, days, longer)
+	}
+}
+
+// TestLive_Ensure_NewTableIsDeletionProtectedAndCleanupLiftsItBeforeDeleting
+// confirms what the operator assumes of a real table: a new one is created
+// deletion protected, a plain DeleteTable is refused with an error the
+// operator does not retry forever, and the operator's own delete lifts the
+// protection first and finishes even though the delete right behind it can be
+// refused once while the table is UPDATING.
+func TestLive_Ensure_NewTableIsDeletionProtectedAndCleanupLiftsItBeforeDeleting(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := dynamodb.NewFromConfig(cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, "sessions", 255)
+	t.Cleanup(func() { deleteTableIfExists(t, client, tableName) })
+
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	ledger, _ := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, nil, nil, nil)
+	waitForTableActive(t, client, tableName, 3*time.Minute)
+	ledger, err := Ensure(ctx, client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() (once ACTIVE) error = %v", err)
+	}
+
+	described, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
+	if err != nil {
+		t.Fatalf("real DescribeTable() error = %v", err)
+	}
+	if !aws.ToBool(described.Table.DeletionProtectionEnabled) {
+		t.Fatal("a table the operator created is not deletion protected")
+	}
+
+	_, err = client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: &tableName})
+	if err == nil {
+		t.Fatal("DeleteTable succeeded on a deletion protected table")
+	}
+	t.Logf("DeleteTable on a protected table is refused with: %v", err)
+	if cloudctlaws.IsRetryable(err) {
+		t.Errorf("the refusal of a protected delete is classified as retryable, so it would be retried forever: %v", err)
+	}
+
+	cleanupUntilDone(t, func() error {
+		var cleanupErr error
+		ledger, _, cleanupErr = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, true, false, nil)
+		return cleanupErr
+	})
+	waitForTableGone(t, client, tableName, 3*time.Minute)
 }
 
 // TestLive_Ensure_SharedKMSKeyEncryptsRealTable confirms a KMS key applies
@@ -482,9 +587,11 @@ func TestLive_Cleanup_BlocksDeletingTableWithARealItemThenSucceedsOnceEmpty(t *t
 	if _, err := client.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &tableName, Key: itemKey}); err != nil {
 		t.Fatalf("real DeleteItem() error = %v", err)
 	}
-	if _, _, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil); err != nil {
-		t.Fatalf("third Cleanup() error = %v", err)
-	}
+	cleanupUntilDone(t, func() error {
+		var err error
+		ledger, _, err = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
+		return err
+	})
 	// DeleteTable is itself asynchronous, like every other DynamoDB
 	// control-plane call here - the table enters DELETING and DescribeTable
 	// keeps finding it for a while, so "gone" has to be waited for rather
@@ -525,14 +632,23 @@ func TestLive_Cleanup_APendingTableRefusesNewItemsButCanBeDrained(t *testing.T) 
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 
+	// New connections for the writes that probe the policy: one already open
+	// keeps being served under the policy it last saw.
+	writer := dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) { o.HTTPClient = livetest.FreshConnections() })
+	var putErr error
 	denied := func() bool {
-		_, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &tableName, Item: item("new")})
-		return err != nil && strings.Contains(err.Error(), "AccessDenied")
+		_, putErr = writer.PutItem(ctx, &dynamodb.PutItemInput{TableName: &tableName, Item: item("new")})
+		return putErr != nil && strings.Contains(putErr.Error(), "AccessDenied")
 	}
 	if !waitFor(denied, 2*time.Minute) {
-		t.Fatal("a new item was still accepted by a table waiting to be deleted: the policy did not take effect")
+		policy, policyErr := client.GetResourcePolicy(ctx, &dynamodb.GetResourcePolicyInput{ResourceArn: aws.String(describedTableARN(t, client, tableName))})
+		policyText := ""
+		if policy != nil {
+			policyText = aws.ToString(policy.Policy)
+		}
+		t.Fatalf("a new item was still accepted by a table waiting to be deleted (last PutItem error: %v); the table's policy reads %q (error %v)", putErr, policyText, policyErr)
 	}
-	if _, err := client.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &tableName, Key: item("old")}); err != nil {
+	if _, err := writer.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &tableName, Key: item("old")}); err != nil {
 		t.Fatalf("real DeleteItem() on a pending table error = %v: it must stay possible to drain it", err)
 	}
 
@@ -545,11 +661,51 @@ func TestLive_Cleanup_APendingTableRefusesNewItemsButCanBeDrained(t *testing.T) 
 		t.Fatal("the policy could not be removed after the table was declared again")
 	}
 	accepted := func() bool {
-		_, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &tableName, Item: item("new")})
+		_, err := writer.PutItem(ctx, &dynamodb.PutItemInput{TableName: &tableName, Item: item("new")})
 		return err == nil
 	}
 	if !waitFor(accepted, 2*time.Minute) {
 		t.Fatal("the table still refuses new items after it was declared again")
+	}
+
+	// Pending again and declared again straight away: the second policy change
+	// lands inside the few seconds DynamoDB refuses it for.
+	cleanupUntilDone(t, func() error {
+		var cleanupErr error
+		ledger, _, cleanupErr = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
+		return cleanupErr
+	})
+	cleanupUntilDone(t, func() error {
+		var cleanupErr error
+		ledger, _, cleanupErr = Cleanup(ctx, client, namespace, crName, "uid-1", declared, ledger, false, false, nil)
+		return cleanupErr
+	})
+}
+
+// cleanupUntilDone runs cleanup until it stops failing. Lifting deletion
+// protection leaves the table UPDATING for a moment and DynamoDB refuses a
+// second change to a table's policy for a few seconds, so a pass can fail on
+// the way; every such failure must be one the operator retries rather than
+// reports as an error.
+func cleanupUntilDone(t *testing.T, cleanup func() error) {
+	t.Helper()
+	var failures []error
+	done := waitFor(func() bool {
+		err := cleanup()
+		if err != nil {
+			failures = append(failures, err)
+		}
+		return err == nil
+	}, 3*time.Minute)
+	for _, err := range failures {
+		t.Logf("Cleanup failed on the way: %v", err)
+		var reconcileErr *cloudctlaws.ReconcileError
+		if !cloudctlaws.IsRetryable(err) && !(errors.As(err, &reconcileErr) && reconcileErr.Retryable) {
+			t.Errorf("a failure the operator would not retry: %v", err)
+		}
+	}
+	if !done {
+		t.Fatal("Cleanup never succeeded")
 	}
 }
 
@@ -620,10 +776,12 @@ func TestLive_Cleanup_RetainedTableIsLetGoAndAMissingOneIsGone(t *testing.T) {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
-	ledger, results, err := Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
-	if err != nil {
-		t.Fatalf("Cleanup() error = %v", err)
-	}
+	var results []CleanupResult
+	cleanupUntilDone(t, func() error {
+		var cleanupErr error
+		ledger, results, cleanupErr = Cleanup(ctx, client, namespace, crName, "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
+		return cleanupErr
+	})
 	if len(results) != 1 || results[0].Reason != CleanupReasonRetained {
 		t.Errorf("expected one Retained result, got %+v", results)
 	}
@@ -695,4 +853,47 @@ func TestLive_Ensure_TakesOverATableFromAPreviousUID(t *testing.T) {
 			t.Fatal("the table never got the new UID's tags")
 		}
 	}
+}
+
+// TestLive_EncryptingATableWithACustomerKeyNeedsCreateGrant checks the
+// permissions table's "docs, verify" entry for kms:CreateGrant on a role that
+// has only what CreateTable and describing the key need, with and without it.
+func TestLive_EncryptingATableWithACustomerKeyNeedsCreateGrant(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	admin := dynamodb.NewFromConfig(cfg)
+	ctx := context.Background()
+	key := livetest.SharedKey(t, cfg)
+
+	create := func(actions []string, label string) error {
+		limited := dynamodb.NewFromConfig(livetest.LimitedConfig(t, cfg, actions))
+		if !waitFor(func() bool {
+			_, err := limited.ListTables(ctx, &dynamodb.ListTablesInput{Limit: aws.Int32(1)})
+			return err == nil
+		}, 90*time.Second) {
+			t.Fatalf("the limited role's policy never took effect")
+		}
+		name := fmt.Sprintf("cloudctl-live-grant-%s-%d", label, time.Now().UnixNano()%1_000_000_000)
+		t.Cleanup(func() { deleteTableIfExists(t, admin, name) })
+		_, err := limited.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName: &name, BillingMode: types.BillingModePayPerRequest,
+			AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("id"), AttributeType: types.ScalarAttributeTypeS}},
+			KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("id"), KeyType: types.KeyTypeHash}},
+			SSESpecification:     &types.SSESpecification{Enabled: aws.Bool(true), SSEType: types.SSETypeKms, KMSMasterKeyId: &key.ARN},
+			Tags:                 []types.Tag{{Key: aws.String("cloudctl.io/owner"), Value: aws.String("live/test")}},
+		})
+		return err
+	}
+	base := []string{"dynamodb:CreateTable", "dynamodb:TagResource", "dynamodb:ListTables", "kms:DescribeKey"}
+	with := create(append(append([]string{}, base...), "kms:CreateGrant"), "with")
+	without := create(base, "without")
+	livetest.CheckActionNeeded(t, "kms:CreateGrant", with, without)
+}
+
+func describedTableARN(t *testing.T, client *dynamodb.Client, tableName string) string {
+	t.Helper()
+	out, err := client.DescribeTable(context.Background(), &dynamodb.DescribeTableInput{TableName: &tableName})
+	if err != nil {
+		t.Fatalf("real DescribeTable() error = %v", err)
+	}
+	return aws.ToString(out.Table.TableArn)
 }

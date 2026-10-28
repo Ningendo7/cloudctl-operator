@@ -61,7 +61,7 @@ var iamActionFor = map[string][]string{
 
 // extraActions are listed in the table for a reason no interface method shows:
 // AWS authorizes a tag on create, or a service acting on the caller's behalf,
-// with a separate action. Each is marked "docs, verify" in the table.
+// with a separate action. Each has a remark in the table.
 var extraActions = map[string][]string{
 	"S3":         {"TagResource"},
 	"KMS":        {"CreateGrant"},

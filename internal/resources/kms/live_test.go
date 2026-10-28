@@ -44,6 +44,8 @@ package kms
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +56,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/policycheck"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -96,6 +99,41 @@ func deleteRealKeyDirectly(t *testing.T, client *kms.Client, keyARN string) {
 	}); err != nil {
 		t.Logf("key cleanup warning: %v", err)
 	}
+}
+
+func keyPolicyText(t *testing.T, client *kms.Client, keyARN string) string {
+	t.Helper()
+	out, err := client.GetKeyPolicy(context.Background(), &kms.GetKeyPolicyInput{KeyId: &keyARN, PolicyName: aws.String(keyPolicyName)})
+	if err != nil {
+		t.Fatalf("real GetKeyPolicy() error = %v", err)
+	}
+	return aws.ToString(out.Policy)
+}
+
+// waitForKeyPolicy polls until check accepts the key's policy: KMS applies a
+// policy change eventually.
+func waitForKeyPolicy(t *testing.T, client *kms.Client, keyARN string, check func(policy string) bool) string {
+	t.Helper()
+	var policy string
+	deadline := time.Now().Add(time.Minute)
+	for {
+		policy = keyPolicyText(t, client, keyARN)
+		if check(policy) || time.Now().After(deadline) {
+			return policy
+		}
+		time.Sleep(3 * time.Second)
+	}
+}
+
+// countingKMS counts the key policy writes SyncServiceGrants makes.
+type countingKMS struct {
+	kmsAPI
+	puts int
+}
+
+func (c *countingKMS) PutKeyPolicy(ctx context.Context, in *kms.PutKeyPolicyInput, optFns ...func(*kms.Options)) (*kms.PutKeyPolicyOutput, error) {
+	c.puts++
+	return c.kmsAPI.PutKeyPolicy(ctx, in, optFns...)
 }
 
 func TestLive_Ensure_CreatesRealKeyWithAliasTagsAndRotation(t *testing.T) {
@@ -151,6 +189,14 @@ func TestLive_Ensure_CreatesRealKeyWithAliasTagsAndRotation(t *testing.T) {
 	if !rotationOut.KeyRotationEnabled {
 		t.Error("expected automatic key rotation to be enabled on a newly created real key")
 	}
+
+	// A new key carries the account root statement only: which services may
+	// use it depends on what is encrypted with it, decided later.
+	policy := keyPolicyText(t, client, entry.ARN)
+	if strings.Contains(policy, sidSNSDelivery) || strings.Contains(policy, sidCloudWatchAlarms) {
+		t.Errorf("a new key was given service statements: %s", policy)
+	}
+	policycheck.ValidatePolicy(t, skipUnlessLiveAWSCredentials(t), policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
 }
 
 func TestLive_Ensure_AdoptsRealUntaggedKeyWhenRequested(t *testing.T) {
@@ -175,11 +221,15 @@ func TestLive_Ensure_AdoptsRealUntaggedKeyWhenRequested(t *testing.T) {
 		t.Fatal("expected Ensure to refuse a real untagged key/alias without adopt:true")
 	}
 
+	policyBefore := keyPolicyText(t, client, keyARN)
 	spec.Resources[0].Adopt = true
 	if _, err := Ensure(ctx, client, namespace, crName, "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() with adopt:true error = %v", err)
 	}
 	t.Cleanup(func() { deleteRealKeyDirectly(t, client, keyARN) })
+	if policyAfter := keyPolicyText(t, client, keyARN); policyAfter != policyBefore {
+		t.Errorf("adopting a key changed its policy:\nbefore %s\nafter  %s", policyBefore, policyAfter)
+	}
 
 	tagsOut, err := client.ListResourceTags(ctx, &kms.ListResourceTagsInput{KeyId: &keyARN})
 	if err != nil {
@@ -277,5 +327,121 @@ func TestLive_Cleanup_ReleasingAKeyLeavesProvenanceAndAdoptingTakesItBack(t *tes
 	got = tagsToMap(tags)
 	if cloudctlaws.HasReleaseTags(got) || !cloudctlaws.IsOwnedBy(got, namespace, crName, uid) {
 		t.Errorf("expected ownership back and the released tags gone, got %v", got)
+	}
+}
+
+// TestLive_SyncServiceGrants_NarrowsRetiresAndLeavesOthersStatementsAlone
+// starts from a key as earlier releases left it (service statements that any
+// topic or alarm in the account satisfies, and a statement of someone else's)
+// and confirms, against real KMS, that the scoped statements are accepted and
+// pass Access Analyzer, that the account-wide ones are narrowed or retired,
+// that nothing else in the policy is touched, that a pass with nothing to
+// change writes nothing (KMS hands the policy back reformatted), and that
+// taking the grants away removes the operator's statements only.
+func TestLive_SyncServiceGrants_NarrowsRetiresAndLeavesOthersStatementsAlone(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := kms.NewFromConfig(cfg)
+	ctx := context.Background()
+	identity, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		t.Fatalf("GetCallerIdentity() error = %v", err)
+	}
+	account, region := aws.ToString(identity.Account), cfg.Region
+
+	created, err := client.CreateKey(ctx, &kms.CreateKeyInput{})
+	if err != nil {
+		t.Fatalf("real CreateKey() (setup) error = %v", err)
+	}
+	keyARN := aws.ToString(created.KeyMetadata.Arn)
+	t.Cleanup(func() { deleteRealKeyDirectly(t, client, keyARN) })
+
+	doc := map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(keyPolicyText(t, client, keyARN)), &doc); err != nil {
+		t.Fatalf("parsing the new key's policy: %v", err)
+	}
+	statements, err := statementList(doc["Statement"])
+	if err != nil {
+		t.Fatalf("reading the new key's statements: %v", err)
+	}
+	accountWide := func(sid, service string) map[string]any {
+		return map[string]any{
+			"Sid": sid, "Effect": "Allow", "Principal": map[string]any{"Service": service},
+			"Action": []any{"kms:GenerateDataKey*", "kms:Decrypt"}, "Resource": "*",
+			"Condition": map[string]any{"StringEquals": map[string]any{"aws:SourceAccount": account}},
+		}
+	}
+	foreign := map[string]any{
+		"Sid": "SomeoneElse", "Effect": "Allow", "Principal": map[string]any{"AWS": "arn:aws:iam::" + account + ":root"},
+		"Action": "kms:DescribeKey", "Resource": "*",
+	}
+	for _, stmt := range []map[string]any{accountWide(sidSNSDelivery, "sns.amazonaws.com"), accountWide(sidCloudWatchAlarms, "cloudwatch.amazonaws.com"), foreign} {
+		raw, err := json.Marshal(stmt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		statements = append(statements, raw)
+	}
+	encoded, err := json.Marshal(statements)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc["Statement"] = encoded
+	legacy, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPolicy := string(legacy)
+	if _, err := client.PutKeyPolicy(ctx, &kms.PutKeyPolicyInput{KeyId: &keyARN, PolicyName: aws.String(keyPolicyName), Policy: &legacyPolicy}); err != nil {
+		t.Fatalf("real PutKeyPolicy() (setup, legacy statements) error = %v", err)
+	}
+
+	topics := []string{"arn:aws:sns:" + region + ":" + account + ":live-b", "arn:aws:sns:" + region + ":" + account + ":live-a"}
+	alarm := "arn:aws:cloudwatch:" + region + ":" + account + ":alarm:live-alarm"
+	recordEvent, events := newEventCollector()
+	counted := &countingKMS{kmsAPI: client}
+
+	if err := SyncServiceGrants(ctx, counted, keyARN, ServiceGrants{SNSTopicARNs: topics}, recordEvent); err != nil {
+		t.Fatalf("SyncServiceGrants() error = %v", err)
+	}
+	policy := waitForKeyPolicy(t, client, keyARN, func(p string) bool { return !strings.Contains(p, sidCloudWatchAlarms) })
+	for _, want := range []string{"SomeoneElse", "Enable IAM User Permissions", sidSNSDelivery, "ArnEquals", topics[0], topics[1]} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("expected %q in the policy after narrowing, got %s", want, policy)
+		}
+	}
+	if strings.Contains(policy, sidCloudWatchAlarms) {
+		t.Errorf("the account-wide CloudWatch statement was not retired: %s", policy)
+	}
+	policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
+	if len(*events) != 1 || (*events)[0].reason != "KeyPolicyUpdated" {
+		t.Errorf("expected one KeyPolicyUpdated event, got %v", *events)
+	}
+
+	writes := counted.puts
+	if err := SyncServiceGrants(ctx, counted, keyARN, ServiceGrants{SNSTopicARNs: topics}, recordEvent); err != nil {
+		t.Fatalf("second SyncServiceGrants() error = %v", err)
+	}
+	if counted.puts != writes {
+		t.Errorf("a pass with nothing to change wrote the key policy %d more time(s): the stored policy reads as different from the desired one", counted.puts-writes)
+	}
+
+	if err := SyncServiceGrants(ctx, counted, keyARN, ServiceGrants{SNSTopicARNs: topics, AlarmARNs: []string{alarm}}, recordEvent); err != nil {
+		t.Fatalf("SyncServiceGrants() with an alarm error = %v", err)
+	}
+	policy = waitForKeyPolicy(t, client, keyARN, func(p string) bool { return strings.Contains(p, sidCloudWatchAlarms) })
+	if !strings.Contains(policy, alarm) || !strings.Contains(policy, sidSNSDelivery) {
+		t.Errorf("expected both scoped statements, got %s", policy)
+	}
+	policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
+
+	if err := SyncServiceGrants(ctx, counted, keyARN, ServiceGrants{}, recordEvent); err != nil {
+		t.Fatalf("SyncServiceGrants() with no grants error = %v", err)
+	}
+	policy = waitForKeyPolicy(t, client, keyARN, func(p string) bool { return !strings.Contains(p, sidSNSDelivery) })
+	if strings.Contains(policy, sidSNSDelivery) || strings.Contains(policy, sidCloudWatchAlarms) {
+		t.Errorf("the operator's statements were not removed: %s", policy)
+	}
+	if !strings.Contains(policy, "SomeoneElse") || !strings.Contains(policy, "Enable IAM User Permissions") {
+		t.Errorf("removing the operator's statements took others with it: %s", policy)
 	}
 }

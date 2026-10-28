@@ -37,6 +37,7 @@ package sns
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,9 +46,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sns/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
+	"github.com/Ningendo7/cloudctl-operator/internal/livetest"
+	"github.com/Ningendo7/cloudctl-operator/internal/policycheck"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 // skipUnlessLiveAWSCredentials skips the calling test unless the standard
@@ -378,4 +384,141 @@ func TestLive_Ensure_AdoptingAgainRemovesOnlyTheReleasedTags(t *testing.T) {
 	if cloudctlaws.HasReleaseTags(got) || got["team"] != "payments" || !cloudctlaws.IsOwnedBy(got, namespace, crName, "uid-1") {
 		t.Errorf("expected ownership back, the released tags gone and the other tag kept, got %v", got)
 	}
+}
+
+func waitUntil(within time.Duration, check func() bool) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if check() {
+			return true
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return false
+}
+
+// countingSNS counts the topic policy writes Ensure makes.
+type countingSNS struct {
+	snsAPI
+	policyWrites int
+}
+
+func (c *countingSNS) SetTopicAttributes(ctx context.Context, in *sns.SetTopicAttributesInput, optFns ...func(*sns.Options)) (*sns.SetTopicAttributesOutput, error) {
+	if aws.ToString(in.AttributeName) == policyAttrName {
+		c.policyWrites++
+	}
+	return c.snsAPI.SetTopicAttributes(ctx, in, optFns...)
+}
+
+func topicPolicyText(t *testing.T, client *sns.Client, topicArn string) string {
+	t.Helper()
+	out, err := client.GetTopicAttributes(context.Background(), &sns.GetTopicAttributesInput{TopicArn: &topicArn})
+	if err != nil {
+		t.Fatalf("real GetTopicAttributes() error = %v", err)
+	}
+	return out.Attributes[policyAttrName]
+}
+
+// TestLive_Ensure_TopicsRefuseHTTPAndTheStatementIsNotRewritten confirms SNS
+// accepts `sns:*` as the action of the transport statement and Access
+// Analyzer finds nothing wrong with it, that a publish over plain HTTP is
+// refused with an error the operator classifies as a permission problem while
+// HTTPS is not, that a second pass writes nothing (SNS hands the policy back
+// reformatted, next to its own default statement, which must still compare
+// equal), that the pending-deletion statement joins it and leaves it when
+// removed, and that taking the statement away lets HTTP through, so the
+// refusal was the statement's.
+func TestLive_Ensure_TopicsRefuseHTTPAndTheStatementIsNotRewritten(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := sns.NewFromConfig(cfg)
+	region, accountID := liveRegionAndAccount(t, cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	topicArn := cloudctlaws.TopicARN(region, accountID, cloudctlaws.ResourceName(namespace, crName, "sns", "events", 256))
+	t.Cleanup(func() { deleteTopicIfExists(t, client, topicArn) })
+
+	spec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
+		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	recordEvent, events := newEventCollector()
+	counted := &countingSNS{snsAPI: client}
+	ledger, err := Ensure(ctx, counted, nil, namespace, crName, "uid-1", region, accountID, spec, nil, nil, recordEvent)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if countEvents(*events, "TransportSecurityEnforced") != 1 {
+		t.Errorf("expected one TransportSecurityEnforced event, got %v", *events)
+	}
+	policy := topicPolicyText(t, client, topicArn)
+	if got := strings.Count(policy, awspolicy.InsecureTransportSid); got != 1 {
+		t.Fatalf("expected the transport statement once in the topic policy, found %d in %s", got, policy)
+	}
+	policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
+
+	publish := func(c *sns.Client) error {
+		_, err := c.Publish(ctx, &sns.PublishInput{TopicArn: &topicArn, Message: aws.String("hello")})
+		return err
+	}
+	if err := publish(client); err != nil {
+		t.Fatalf("real Publish over HTTPS error = %v: the statement must not refuse TLS", err)
+	}
+	plain := sns.NewFromConfig(cfg, func(o *sns.Options) {
+		o.BaseEndpoint = aws.String("http://sns." + region + ".amazonaws.com")
+		o.HTTPClient = livetest.FreshConnections()
+	})
+	var refusal error
+	if !waitUntil(3*time.Minute, func() bool {
+		refusal = publish(plain)
+		return refusal != nil && cloudctlaws.IsPermissionDenied(refusal)
+	}) {
+		t.Fatalf("a publish over plain HTTP was not refused as a permission error: %v", refusal)
+	}
+
+	writes := counted.policyWrites
+	if _, err := Ensure(ctx, counted, nil, namespace, crName, "uid-1", region, accountID, spec, withTrustExpired(ledger), nil, recordEvent); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if counted.policyWrites != writes {
+		t.Errorf("the second pass wrote the topic policy %d more time(s): the stored policy reads as different from the desired one", counted.policyWrites-writes)
+	}
+
+	if err := addPendingDeletionDeny(ctx, client, topicArn); err != nil {
+		t.Fatalf("addPendingDeletionDeny() error = %v", err)
+	}
+	policy = topicPolicyText(t, client, topicArn)
+	if !strings.Contains(policy, pendingDeletionDenySid) || !strings.Contains(policy, awspolicy.InsecureTransportSid) {
+		t.Errorf("expected both statements after the pending-deletion deny, got %s", policy)
+	}
+	policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
+	if err := removePendingDeletionDeny(ctx, client, topicArn); err != nil {
+		t.Fatalf("removePendingDeletionDeny() error = %v", err)
+	}
+	policy = topicPolicyText(t, client, topicArn)
+	if strings.Contains(policy, pendingDeletionDenySid) || !strings.Contains(policy, awspolicy.InsecureTransportSid) {
+		t.Errorf("expected only the transport statement left, got %s", policy)
+	}
+
+	doc, err := readPolicy(ctx, client, topicArn)
+	if err != nil {
+		t.Fatalf("readPolicy() error = %v", err)
+	}
+	doc.Statement, _ = awspolicy.Remove(doc.Statement, awspolicy.InsecureTransportSid)
+	if err := writePolicy(ctx, client, topicArn, doc); err != nil {
+		t.Fatalf("writePolicy() without the statement error = %v", err)
+	}
+	if !waitUntil(3*time.Minute, func() bool { return publish(plain) == nil }) {
+		t.Error("plain HTTP is still refused after the statement was removed: something else refuses it")
+	}
+}
+
+// withTrustExpired returns the ledger as it would be after the trust window has
+// passed, so the next Ensure verifies everything instead of only what is
+// checked within the window.
+func withTrustExpired(ledger []depsv1alpha1.ManagedResource) []depsv1alpha1.ManagedResource {
+	past := metav1.NewTime(time.Now().Add(-(status.TrustWindow + time.Minute)))
+	out := append([]depsv1alpha1.ManagedResource{}, ledger...)
+	for i := range out {
+		out[i].LastVerifiedAt = &past
+	}
+	return out
 }

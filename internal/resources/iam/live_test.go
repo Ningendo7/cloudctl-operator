@@ -37,6 +37,7 @@ package iam
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,6 +49,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/policycheck"
 )
 
 const (
@@ -319,5 +322,91 @@ func TestLive_Ensure_MeasuresRolePropagationLag(t *testing.T) {
 	t.Logf("IAM role propagation: assumable after %s (%d attempt(s))", firstSuccessAfter, attempts)
 	if attempts == 1 {
 		t.Logf("note: succeeded on the very first attempt - this run didn't observe the gap, it just confirms one exists somewhere under %s", ceiling)
+	}
+}
+
+// TestLive_DerivedPoliciesPassAccessAnalyzer builds the policy a CR gets for
+// every kind of resource it can own or consume, and the trust policy of its
+// role, and has Access Analyzer check them. IAM stores an action name it does
+// not know without complaint, so a misspelt action in the derived policy would
+// grant nothing and only show up as an application error.
+func TestLive_DerivedPoliciesPassAccessAnalyzer(t *testing.T) {
+	cfg, _ := skipUnlessLiveAWSCredentials(t)
+	arn := func(service, resource string) string {
+		return fmt.Sprintf("arn:aws:%s:us-east-1:123456789012:%s", service, resource)
+	}
+	var grants []grant
+	for _, readWrite := range []bool{true, false} {
+		for _, consumed := range []bool{false, true} {
+			grants = append(grants,
+				grant{resourceType: resourceTypeSQS, arn: arn("sqs", "orders"), readWrite: readWrite, consumed: consumed},
+				grant{resourceType: resourceTypeSNS, arn: arn("sns", "events"), readWrite: readWrite, consumed: consumed},
+				grant{resourceType: resourceTypeDynamoDB, arn: arn("dynamodb", "table/sessions"), readWrite: readWrite, consumed: consumed},
+				grant{resourceType: resourceTypeS3, arn: "arn:aws:s3:::receipts", readWrite: readWrite, consumed: consumed},
+				grant{resourceType: resourceTypeKMS, arn: arn("kms", "key/1234abcd-12ab-34cd-56ef-1234567890ab"), readWrite: readWrite, consumed: consumed},
+			)
+		}
+	}
+	document, err := buildPolicyDocument(grants)
+	if err != nil {
+		t.Fatalf("buildPolicyDocument() error = %v", err)
+	}
+	policycheck.ValidatePolicy(t, cfg, policycheck.IdentityPolicy, policycheck.NoResourceType, document)
+
+	trust, err := buildTrustPolicy(liveOIDCProviderARN, liveOIDCProviderURL, "live", "checkout-service")
+	if err != nil {
+		t.Fatalf("buildTrustPolicy() error = %v", err)
+	}
+	policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.RoleTrustPolicy, trust)
+}
+
+// TestLive_ConcurrentRoleChangesFailWithRetryableErrors changes one role's
+// inline policy from several goroutines at once, the way two reconciles of
+// CRs sharing a role could, and requires every failure to be one the operator
+// retries. Whether IAM answers with ConcurrentModification depends on timing,
+// so a run that sees none passes and says so.
+func TestLive_ConcurrentRoleChangesFailWithRetryableErrors(t *testing.T) {
+	client, _ := newLiveClient(t)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	cr := crWithOneOwnedQueue(namespace, crName, "uid-1")
+	name := roleName(namespace, crName)
+	t.Cleanup(func() { deleteRoleIfExists(t, client, name) })
+	if _, _, err := Ensure(ctx, client, nil, liveOIDCProviderARN, liveOIDCProviderURL, cr, cr.Status.ManagedResources); err != nil {
+		t.Fatalf("Ensure() (setup) error = %v", err)
+	}
+
+	const workers, rounds = 12, 4
+	var mu sync.Mutex
+	var failures []error
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := range rounds {
+				document := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sqs:GetQueueUrl","Resource":"arn:aws:sqs:us-east-1:123456789012:q-%d-%d"}]}`, w, r)
+				_, err := client.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
+					RoleName: &name, PolicyName: aws.String("cloudctl-concurrency-probe"), PolicyDocument: &document,
+				})
+				if err != nil {
+					mu.Lock()
+					failures = append(failures, err)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if len(failures) == 0 {
+		t.Logf("%d concurrent policy writes all succeeded: this run did not provoke ConcurrentModification", workers*rounds)
+		return
+	}
+	for _, err := range failures {
+		t.Logf("concurrent write failed: %v", err)
+		if !cloudctlaws.IsRetryable(err) {
+			t.Errorf("the operator would not retry this failure: %v", err)
+		}
 	}
 }
