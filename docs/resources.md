@@ -115,7 +115,10 @@ emptied but not refilled. `DeleteItem` and reads stay open so it can be drained
 (or left to TTL), and `force` skips the wait. The statement is removed if the
 table is declared again or retained instead, and any other statement in the
 table's policy is left alone. DynamoDB refuses a second change to a table's
-policy for a few seconds after the first, which the operator retries.
+policy for a few seconds after the first, which the operator retries. The
+policy reaches a new connection within seconds, but a client already holding a
+connection open can keep writing under the policy it last saw, for more than two
+minutes in testing, so treat it as a safety net rather than an instant block.
 
 ## S3
 
@@ -191,7 +194,7 @@ spec:
 | `engine` | `postgres`, `mysql` or `mariadb`. **Immutable.** |
 | `engineVersion` | A *minimum*, as dotted numbers such as `16` or `16.4`. A higher version upgrades the instance; an instance already at or past it, including one AWS minor-upgraded itself, is left alone. A major upgrade is refused unless `allowMajorVersionUpgrade: true`. |
 | `instanceClass`, `highAvailability` | Instance class and Multi-AZ. Changes are drift-corrected (see below). |
-| `allocatedStorage` | GiB, 20–65536. Can only grow; AWS rounds a growth up to at least 10% more. |
+| `allocatedStorage` | GiB, 20–65536. Can only grow; AWS rounds a growth up to at least 10% more. A new instance uses gp3 storage; an existing or adopted one keeps the storage type it has. |
 | `maxAllocatedStorage` | Turns on storage autoscaling up to this many GiB, which must be above `allocatedStorage`. Off unless set, since growth is billed. An instance RDS has grown within the ceiling is not reported as larger than the spec. Removing the field leaves autoscaling as it is. |
 | `backup` | Automated backups with AWS's default 7-day retention. Only ever turned on or extended: omitting it or disabling it on an instance that has backups leaves them on and emits a `BackupsLeftEnabled` warning, since turning them off deletes the existing backups. |
 | `encryption` | `enabled: true` provisions a dedicated key, or `kmsKeyRef` names a key under this CR's `kms.resources` (see [KMS](#kms)). **Immutable once set.** |

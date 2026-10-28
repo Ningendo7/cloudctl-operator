@@ -26,8 +26,8 @@ any vulnerability details in it.
 
 ## Supported Versions
 
-This project has not yet made a tagged release. Until it does, only the
-latest commit on `main` is supported.
+Only the latest release, and `main`, are supported. A fix ships in a new
+release; it is not backported to older ones.
 
 ## Response
 

@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
@@ -341,5 +342,15 @@ func TestEnsure_AnAdoptedTableKeepsItsDeletionProtectionUnlessTheSpecSetsIt(t *t
 				t.Errorf("deletion protection = %v, want %v", table.deletionProtection, tc.want)
 			}
 		})
+	}
+}
+
+// DynamoDB refuses a resource policy whose statement ID has anything but
+// letters and digits, which no fake would notice.
+func TestPendingDeletionDenySid_HasOnlyLettersAndDigits(t *testing.T) {
+	for _, r := range pendingDeletionDenySid {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			t.Fatalf("statement ID %q has %q, which DynamoDB does not accept", pendingDeletionDenySid, r)
+		}
 	}
 }

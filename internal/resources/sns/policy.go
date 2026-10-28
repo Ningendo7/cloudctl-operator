@@ -73,6 +73,20 @@ func addPendingDeletionDeny(ctx context.Context, client snsAPI, topicArn string)
 	return writePolicy(ctx, client, topicArn, doc)
 }
 
+// topicActions are the actions a topic policy governs. SNS refuses a wildcard
+// in a policy statement ("action out of service scope"), so the transport
+// statement names them.
+var topicActions = []string{
+	"sns:GetTopicAttributes",
+	"sns:SetTopicAttributes",
+	"sns:AddPermission",
+	"sns:RemovePermission",
+	"sns:DeleteTopic",
+	"sns:Subscribe",
+	"sns:ListSubscriptionsByTopic",
+	"sns:Publish",
+}
+
 // reconcileTransportSecurity makes the topic refuse plain-HTTP requests, by a
 // statement the operator owns in its policy. Other statements, AWS's default
 // one among them, are kept, and nothing is written when the policy already
@@ -82,7 +96,7 @@ func reconcileTransportSecurity(ctx context.Context, client snsAPI, topicArn str
 	if err != nil {
 		return wrapAWSError(err, "reading the topic's policy")
 	}
-	statements, changed, err := awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, awspolicy.DenyInsecureTransport("sns:*", topicArn))
+	statements, changed, err := awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, awspolicy.DenyInsecureTransportActions(topicActions, topicArn))
 	if err != nil || !changed {
 		return err
 	}

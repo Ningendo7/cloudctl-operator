@@ -155,6 +155,11 @@ func TestLive_AlarmReachesAnEncryptedTopic(t *testing.T) {
 	snsSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "alerts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: livetest.SharedKeyName}},
 	}}
+	// Registered before Ensure, which creates the topic before it can fail.
+	topicARN := cloudctlaws.TopicARN(region, accountID, cloudctlaws.ResourceName(namespace, crName, "sns", "alerts", 256))
+	t.Cleanup(func() {
+		_, _ = snsClient.DeleteTopic(context.Background(), &snssdk.DeleteTopicInput{TopicArn: &topicARN})
+	})
 	ledger, err := snspkg.Ensure(ctx, snsClient, nil, namespace, crName, "uid-1", region, accountID, snsSpec, []depsv1alpha1.ManagedResource{key}, nil, nil)
 	if err != nil {
 		t.Fatalf("sns Ensure() error = %v", err)
@@ -163,9 +168,6 @@ func TestLive_AlarmReachesAnEncryptedTopic(t *testing.T) {
 	if !topicFound {
 		t.Fatal("expected a ledger entry for the topic")
 	}
-	t.Cleanup(func() {
-		_, _ = snsClient.DeleteTopic(context.Background(), &snssdk.DeleteTopicInput{TopicArn: &topic.ARN})
-	})
 
 	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "inbox", 80)
 	queueOut, err := sqsClient.CreateQueue(ctx, &sqssdk.CreateQueueInput{QueueName: &queueName})
@@ -263,5 +265,57 @@ func TestLive_Ensure_TakesOverAnAlarmFromAPreviousUID(t *testing.T) {
 	}
 	if !cloudctlaws.IsOwnedBy(tags, namespace, crName, "uid-2") {
 		t.Errorf("expected the alarm to be tagged with the new UID, got %+v", tags)
+	}
+}
+
+// TestLive_CreatingATaggedAlarmNeedsTagResource checks the permissions
+// table's "docs, verify" entry for cloudwatch:TagResource on a role that has
+// only what PutMetricAlarm itself needs, with and without it.
+func TestLive_CreatingATaggedAlarmNeedsTagResource(t *testing.T) {
+	cfg, _ := skipUnlessLiveAWSCredentials(t)
+	admin := cloudwatch.NewFromConfig(cfg)
+	ctx := context.Background()
+
+	tagged := map[string]bool{}
+	put := func(actions []string, label string) error {
+		limited := cloudwatch.NewFromConfig(livetest.LimitedConfig(t, cfg, actions))
+		if !livetest.WaitUntil(90*time.Second, func() bool {
+			_, err := limited.DescribeAlarms(ctx, &cloudwatch.DescribeAlarmsInput{MaxRecords: aws.Int32(1)})
+			return err == nil
+		}) {
+			t.Fatalf("the limited role's policy never took effect")
+		}
+		name := fmt.Sprintf("cloudctl-live-tagged-%s-%d", label, time.Now().UnixNano()%1_000_000_000)
+		t.Cleanup(func() {
+			_, _ = admin.DeleteAlarms(context.Background(), &cloudwatch.DeleteAlarmsInput{AlarmNames: []string{name}})
+		})
+		_, err := limited.PutMetricAlarm(ctx, &cloudwatch.PutMetricAlarmInput{
+			AlarmName: &name, Namespace: aws.String("cloudctl/live"), MetricName: aws.String("probe"),
+			Statistic: cwtypes.StatisticSum, Period: aws.Int32(300), EvaluationPeriods: aws.Int32(1), Threshold: aws.Float64(1),
+			ComparisonOperator: cwtypes.ComparisonOperatorGreaterThanThreshold,
+			Tags:               []cwtypes.Tag{{Key: aws.String("cloudctl.io/owner"), Value: aws.String("live/test")}},
+		})
+		if err == nil {
+			described, descErr := admin.DescribeAlarms(ctx, &cloudwatch.DescribeAlarmsInput{AlarmNames: []string{name}})
+			if descErr != nil || len(described.MetricAlarms) != 1 {
+				t.Fatalf("describing the alarm just created: %v", descErr)
+			}
+			tags, tagErr := admin.ListTagsForResource(ctx, &cloudwatch.ListTagsForResourceInput{ResourceARN: described.MetricAlarms[0].AlarmArn})
+			if tagErr != nil {
+				t.Fatalf("listing the alarm's tags: %v", tagErr)
+			}
+			tagged[label] = len(tags.Tags) > 0
+		}
+		return err
+	}
+	base := []string{"cloudwatch:PutMetricAlarm", "cloudwatch:DescribeAlarms"}
+	with := put(append(append([]string{}, base...), "cloudwatch:TagResource"), "with")
+	without := put(base, "without")
+	livetest.CheckActionNeeded(t, "cloudwatch:TagResource", with, without)
+	if with == nil && !tagged["with"] {
+		t.Error("an alarm created with cloudwatch:TagResource allowed has no tags")
+	}
+	if without == nil && !tagged["without"] {
+		t.Error("PutMetricAlarm without cloudwatch:TagResource succeeds but drops the tags, so the operator would lose its ownership tag on an alarm")
 	}
 }

@@ -55,10 +55,13 @@ func TestEnsure_ATopicRefusesPlainHTTP(t *testing.T) {
 	ensureEvents(t, client, recordEvent)
 
 	topic := eventsTopic(t, client)
-	for _, want := range []string{`"Effect":"Deny"`, `"Action":"sns:*"`, `"aws:SecureTransport":"false"`, topic.arn} {
+	for _, want := range []string{`"Effect":"Deny"`, `"sns:Publish"`, `"sns:Subscribe"`, `"aws:SecureTransport":"false"`, topic.arn} {
 		if !strings.Contains(topic.policy, want) {
 			t.Errorf("the topic policy should contain %s, got %s", want, topic.policy)
 		}
+	}
+	if strings.Contains(topic.policy, "sns:*") {
+		t.Errorf("SNS refuses a wildcard action in a topic policy, got %s", topic.policy)
 	}
 	if countEvents(*events, "TransportSecurityEnforced") != 1 {
 		t.Errorf("expected one TransportSecurityEnforced event, got %+v", *events)

@@ -53,6 +53,7 @@ const (
 	errCodeAuthorizationError    = "AuthorizationError"
 
 	errCodeThrottling                            = "ThrottlingException"
+	errCodeLimitExceeded                         = "LimitExceededException"
 	errCodeRequestLimitExceeded                  = "RequestLimitExceeded"
 	errCodeTooManyRequestsException              = "TooManyRequestsException"
 	errCodeResourceInUseException                = "ResourceInUseException"
@@ -142,9 +143,22 @@ func IsRetryable(err error) bool {
 	return false
 }
 
+// isTransientLimit reports the two DynamoDB limits that clear on their own: a
+// change to the table's tags is still in flight, and too many control-plane
+// operations are running at once. Other services answer the same code for a
+// quota that retrying never fixes (a key, alias or grant limit in KMS), so
+// only these messages count.
+func isTransientLimit(message string) bool {
+	return strings.Contains(message, "Table tags are being updated") ||
+		strings.Contains(message, "can be created, updated, or deleted simultaneously")
+}
+
 func isRetryableAPIError(apiErr smithy.APIError) bool {
 	if apiErr.ErrorFault() == smithy.FaultServer {
 		return true
+	}
+	if apiErr.ErrorCode() == errCodeLimitExceeded {
+		return isTransientLimit(apiErr.ErrorMessage())
 	}
 	switch code := apiErr.ErrorCode(); code {
 	case errCodeThrottling, errCodeRequestLimitExceeded, errCodeTooManyRequestsException,

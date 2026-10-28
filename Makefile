@@ -442,6 +442,15 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
   ## ownership. Set false to leave no tag.\
   ##\
   releaseTags: true' charts/chart/values.yaml
+	@# manager.extraEnv in values.yaml: the template reads it (see above), and
+	@# the tracing docs tell users to set it, so it has to be declared where
+	@# values.yaml says every field is.
+	sed -i '/^  releaseTags: true$$/a\
+\
+  ## Extra environment variables for the manager container, as Kubernetes env\
+  ## entries, for example OTEL_EXPORTER_OTLP_ENDPOINT to turn on tracing.\
+  ##\
+  extraEnv: []' charts/chart/values.yaml
 	@# Default pod anti-affinity (the plugin emits an empty one), used only
 	@# when manager.affinity is unset and replicas > 1.
 	sed -i '/^      affinity: {{ toYaml \. | nindent 10 }}$$/a\

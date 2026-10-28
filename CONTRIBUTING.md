@@ -18,14 +18,15 @@ keep the Helm chart (`charts/chart/`) in sync - see its own comment in the
 Makefile for two known, harmless side effects it cleans up automatically,
 and one (hand-tuned `values.yaml` entries) it doesn't.
 
-See [`docs/testing.md`](docs/testing.md) for the full three-tier test
-breakdown (unit / LocalStack integration / E2E in a real kind cluster) and
-how to run each locally.
+See [`docs/testing.md`](docs/testing.md) for the test tiers (unit, LocalStack
+integration, E2E in a real kind cluster, and live against real AWS) and how
+to run each locally.
 
 ## CI Is the Gate, Not a Suggestion
 
-Every PR runs Lint, Tests, Integration Tests, E2E Tests, and Manifests
-Drift. **All of them must pass before merge** - this isn't optional for
+Every PR runs Tests (unit and LocalStack integration), Lint, E2E Tests,
+Helm Chart Test, Manifests Drift and a Vulnerability Scan. **All of them
+must pass before merge** - this isn't optional for
 contributors, and it isn't something you're expected to pre-verify
 perfectly before opening a PR either. In particular:
 

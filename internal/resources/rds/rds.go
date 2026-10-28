@@ -531,7 +531,11 @@ func createInstance(
 		// whose they were.
 		CopyTagsToSnapshot:  aws.Bool(true),
 		MaxAllocatedStorage: opts.maxAllocatedStorage,
-		Tags:                mapToTags(ownerTags(namespace, crName, crUID)),
+		// The API's own default is gp2, whose baseline on a small volume is
+		// a fraction of gp3's at about the same price. Only a new instance
+		// gets it; an existing or adopted one keeps the storage it has.
+		StorageType: aws.String("gp3"),
+		Tags:        mapToTags(ownerTags(namespace, crName, crUID)),
 	}
 	if opts.backupEnabled {
 		input.BackupRetentionPeriod = aws.Int32(defaultBackupRetentionDays)

@@ -93,18 +93,19 @@ Fixed by stamping the same `cloudctl.io/owner`/`cloudctl.io/owner-uid`
 markers AWS resources already carry as tags, as plain annotations on the
 ServiceAccount, and refusing to overwrite `RoleARNAnnotation` when an
 existing marker doesn't match the calling CR's `(namespace, name, UID)`.
-A ServiceAccount with no marker yet (human-created, or newly seen) is
-still claimable on first use — see `internal/resources/serviceaccount/serviceaccount_test.go`
-for the regression coverage, including the "deleted-and-recreated CR reuses
-the same name" case (name matches, UID doesn't → still refused).
+A ServiceAccount the operator did not create is taken over only with the
+owner's consent (`cloudctl.io/allow-claim`), and `default` never is; see
+`internal/resources/serviceaccount/serviceaccount_test.go` for the regression
+coverage, including the "deleted-and-recreated CR reuses the same name" case
+(name matches, UID doesn't → still refused).
 
 **ConfigMap overwrite/delete of a foreign object.** `configmap.Ensure`
 used `client.ForceOwnership` unconditionally with no check on the existing
 object's owner reference — a human-created ConfigMap coincidentally named
-`<cr-name>-connection` would get silently overwritten, or deleted outright
-if this CR's own connection data was empty. Fixed by checking
-`metav1.GetControllerOf` against `cr.UID` before either writing or
-deleting, refusing both when it doesn't match. See
+`<cr-name>-connection` would get silently overwritten. Fixed by checking
+`metav1.GetControllerOf` against `cr.UID` before writing, refusing with
+`NameTaken` when it doesn't match. The operator no longer deletes the
+ConfigMap itself; it goes with the CR through its owner reference. See
 `internal/resources/configmap/configmap_test.go`'s
 `TestEnsure_PreExistingForeignConfigMap_*` tests.
 
@@ -156,11 +157,11 @@ in step with the operations the code can call.
 | STS | `GetCallerIdentity` needs no permission |
 | SQS | `CreateQueue`, `GetQueueUrl`, `GetQueueAttributes`, `SetQueueAttributes`, `ListQueueTags`, `TagQueue`, `UntagQueue`, `DeleteQueue` |
 | SNS | `CreateTopic`, `GetTopicAttributes`, `SetTopicAttributes`, `ListTagsForResource`, `TagResource`, `UntagResource`, `DeleteTopic`, `ListSubscriptionsByTopic`, `Subscribe`, `Unsubscribe` |
-| S3 | `CreateBucket`, `ListBucket`, `DeleteBucket`, `GetBucketTagging`, `PutBucketTagging`, `GetBucketVersioning`, `PutBucketVersioning`, `GetLifecycleConfiguration`, `PutLifecycleConfiguration`, `GetEncryptionConfiguration`, `PutEncryptionConfiguration`, `GetBucketPolicy`, `PutBucketPolicy`, `DeleteBucketPolicy`, `GetBucketWebsite`, `GetBucketPolicyStatus`, `GetBucketPublicAccessBlock`, `GetBucketAcl`, `ListBucketVersions`, `DeleteObject`, `DeleteObjectVersion`, `ListBucketMultipartUploads`, `AbortMultipartUpload`, `TagResource` (docs, verify: creating a bucket with tags) |
+| S3 | `CreateBucket`, `ListBucket`, `DeleteBucket`, `GetBucketTagging`, `PutBucketTagging`, `GetBucketVersioning`, `PutBucketVersioning`, `GetLifecycleConfiguration`, `PutLifecycleConfiguration`, `GetEncryptionConfiguration`, `PutEncryptionConfiguration`, `GetBucketPolicy`, `PutBucketPolicy`, `DeleteBucketPolicy`, `GetBucketWebsite`, `GetBucketPolicyStatus`, `GetBucketPublicAccessBlock`, `GetBucketAcl`, `ListBucketVersions`, `DeleteObject`, `DeleteObjectVersion`, `ListBucketMultipartUploads`, `AbortMultipartUpload`, `TagResource` (creating a bucket with tags) |
 | DynamoDB | `DescribeTable`, `CreateTable`, `DeleteTable`, `UpdateTable`, `ListTagsOfResource`, `TagResource`, `UntagResource`, `DescribeContinuousBackups`, `UpdateContinuousBackups`, `Scan` (emptiness check), `GetResourcePolicy`, `PutResourcePolicy`, `DeleteResourcePolicy` (the write-blocking policy on a table waiting to be deleted) |
-| KMS | `CreateKey`, `DescribeKey`, `CreateAlias`, `EnableKey`, `EnableKeyRotation`, `GetKeyRotationStatus`, `GetKeyPolicy`, `PutKeyPolicy`, `ListResourceTags`, `TagResource`, `UntagResource`, `ScheduleKeyDeletion`, `CancelKeyDeletion`, `CreateGrant` (docs, verify: RDS and DynamoDB create a grant when encrypting with a customer key) |
+| KMS | `CreateKey`, `DescribeKey`, `CreateAlias`, `EnableKey`, `EnableKeyRotation`, `GetKeyRotationStatus`, `GetKeyPolicy`, `PutKeyPolicy`, `ListResourceTags`, `TagResource`, `UntagResource`, `ScheduleKeyDeletion`, `CancelKeyDeletion`, `CreateGrant` (RDS and DynamoDB create a grant when encrypting with a customer key) |
 | IAM | `GetRole`, `CreateRole`, `UpdateAssumeRolePolicy`, `ListRoleTags`, `GetRolePolicy`, `PutRolePolicy`, `DeleteRolePolicy`, `DeleteRole`, `ListAttachedRolePolicies`, `ListInstanceProfilesForRole`, `TagRole` |
-| CloudWatch | `DescribeAlarms`, `PutMetricAlarm`, `DeleteAlarms`, `ListTagsForResource`, `TagResource` (docs, verify: alarms are created with tags) |
+| CloudWatch | `DescribeAlarms`, `PutMetricAlarm`, `DeleteAlarms`, `ListTagsForResource`, `TagResource` (alarms are created with tags; AWS documents it as required, though a call without it worked in a live check, so grant it) |
 | RDS | `CreateDBInstance`, `ModifyDBInstance`, `DescribeDBInstances`, `DescribeDBSubnetGroups`, `DescribeDBEngineVersions`, `ListTagsForResource`, `AddTagsToResource`, `RemoveTagsFromResource`, `CreateDBSnapshot`, `DescribeDBSnapshots`, `DeleteDBSnapshot` (never `DeleteDBInstance`) |
 | EC2 (RDS security groups) | `CreateSecurityGroup`, `DescribeSecurityGroups`, `AuthorizeSecurityGroupIngress`, `RevokeSecurityGroupIngress`, `DeleteSecurityGroup`, `CreateTags` |
 | Secrets Manager (RDS) | `GetSecretValue`, scoped to the `rds!db-*` secrets AWS creates |

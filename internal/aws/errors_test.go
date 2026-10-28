@@ -144,3 +144,24 @@ func TestReconcileError_WrapsAndUnwraps(t *testing.T) {
 		t.Error("expected Retryable to survive being wrapped further")
 	}
 }
+
+func TestIsRetryable_LimitExceededOnlyForLimitsThatClear(t *testing.T) {
+	limit := func(message string) error {
+		return &smithy.GenericAPIError{Code: "LimitExceededException", Message: message, Fault: smithy.FaultClient}
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"DynamoDB, tags still being updated":   {limit("Subscriber limit exceeded: Table tags are being updated: sessions"), true},
+		"DynamoDB, too many table operations":  {limit("Subscriber limit exceeded: Only 10 tables can be created, updated, or deleted simultaneously"), true},
+		"DynamoDB, daily throughput decreases": {limit("Subscriber limit exceeded: Provisioned throughput decreases are limited within a given UTC calendar day"), false},
+		"KMS, key quota":                       {limit("1000 keys were found; the limit is 1000"), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := IsRetryable(tc.err); got != tc.want {
+				t.Errorf("IsRetryable() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

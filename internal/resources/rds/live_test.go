@@ -285,6 +285,9 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		if !aws.ToBool(instance.CopyTagsToSnapshot) {
 			t.Error("expected the real instance to copy its tags to snapshots")
 		}
+		if got := aws.ToString(instance.StorageType); got != "gp3" {
+			t.Errorf("real instance storage type = %q, want gp3", got)
+		}
 		if aws.ToString(instance.KmsKeyId) == "" {
 			t.Error("expected the real instance to report the KMS key it is encrypted with")
 		}
@@ -364,6 +367,75 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		}
 		if got := aws.ToInt32(describeOut.DBInstances[0].BackupRetentionPeriod); got != defaultBackupRetentionDays {
 			t.Errorf("omitting backup from spec must not turn backups off, retention is now %d", got)
+		}
+	})
+
+	t.Run("tag copying is restored and the storage ceiling is applied", func(t *testing.T) {
+		// These settings apply without the instance leaving "available", so
+		// the checks poll for the value rather than for a status change.
+		reconcile := func(step string) {
+			t.Helper()
+			if ledger, err = Ensure(ctx, rdsClient, kmsClient, ec2Client, k8sClient, namespace, crName, "uid-1", region, accountID, spec, ledger, nil, nil); err != nil && !isRetryableStillProvisioning(err) {
+				t.Fatalf("Ensure() (%s) error = %v", step, err)
+			}
+		}
+		eventually := func(what string, holds func(types.DBInstance) bool) {
+			t.Helper()
+			var last types.DBInstance
+			deadline := time.Now().Add(3 * time.Minute)
+			for time.Now().Before(deadline) {
+				out, err := rdsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
+				if err != nil {
+					t.Fatalf("DescribeDBInstances() error = %v", err)
+				}
+				last = out.DBInstances[0]
+				if holds(last) {
+					return
+				}
+				time.Sleep(5 * time.Second)
+			}
+			t.Errorf("%s: copyTags=%v ceiling=%d status=%s", what, aws.ToBool(last.CopyTagsToSnapshot), aws.ToInt32(last.MaxAllocatedStorage), aws.ToString(last.DBInstanceStatus))
+		}
+
+		// Someone turns tag copying off by hand; the instance is the operator's, so it comes back on.
+		if _, err := rdsClient.ModifyDBInstance(ctx, &rds.ModifyDBInstanceInput{
+			DBInstanceIdentifier: &instanceID, CopyTagsToSnapshot: aws.Bool(false), ApplyImmediately: aws.Bool(true),
+		}); err != nil {
+			t.Fatalf("ModifyDBInstance() (turn tag copying off) error = %v", err)
+		}
+		eventually("setup: tag copying did not turn off", func(i types.DBInstance) bool { return !aws.ToBool(i.CopyTagsToSnapshot) })
+		reconcile("restore tag copying")
+		eventually("the operator did not turn tag copying back on for an instance it created", func(i types.DBInstance) bool {
+			return aws.ToBool(i.CopyTagsToSnapshot)
+		})
+
+		// Storage autoscaling is off until the spec names a ceiling, then follows it.
+		out, err := rdsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
+		if err != nil {
+			t.Fatalf("DescribeDBInstances() error = %v", err)
+		}
+		if got := aws.ToInt32(out.DBInstances[0].MaxAllocatedStorage); got != 0 {
+			t.Errorf("storage autoscaling was on (ceiling %d) although the spec never asked for it", got)
+		}
+		ceiling := int32(40)
+		spec.Resources[0].MaxAllocatedStorage = &ceiling
+		reconcile("set the storage ceiling")
+		eventually("the storage ceiling was not applied", func(i types.DBInstance) bool { return aws.ToInt32(i.MaxAllocatedStorage) == ceiling })
+		raised := int32(50)
+		spec.Resources[0].MaxAllocatedStorage = &raised
+		reconcile("raise the storage ceiling")
+		eventually("the raised storage ceiling was not applied", func(i types.DBInstance) bool { return aws.ToInt32(i.MaxAllocatedStorage) == raised })
+
+		// Dropping the field leaves autoscaling as it is.
+		spec.Resources[0].MaxAllocatedStorage = nil
+		reconcile("drop the storage ceiling")
+		time.Sleep(20 * time.Second)
+		out, err = rdsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
+		if err != nil {
+			t.Fatalf("DescribeDBInstances() error = %v", err)
+		}
+		if got := aws.ToInt32(out.DBInstances[0].MaxAllocatedStorage); got != raised {
+			t.Errorf("dropping maxAllocatedStorage changed the ceiling to %d, want %d left in place", got, raised)
 		}
 	})
 

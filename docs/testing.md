@@ -1,6 +1,7 @@
 # Testing
 
-Three tiers, each catching a different class of bug.
+Four tiers (unit, integration, live and e2e), each catching a different class
+of bug, plus two suites that check what ships with the chart.
 
 ## Unit (`go test ./...`, always runs)
 
@@ -25,6 +26,11 @@ relinquish, delete safety, pending-deletion cancellation) is defined once in
 `internal/resources/lifecycletest` and run by each resource package through
 its own `TestSharedLifecycleScenarios`, so their coverage of it can't drift
 apart.
+
+Two further suites run with the unit tier. `test/policy` renders the chart's
+admission policies and the shipped samples and applies them to a real API
+server (envtest), so it needs `helm` and skips without it. `test/alerts` runs
+the Prometheus alert rules through `promtool` in CI.
 
 **What this can't catch:** a fake only ever encodes our own belief about
 how an AWS API behaves. If that belief is wrong — a misread error code, a
@@ -125,6 +131,12 @@ test-live` allows 45 minutes for the package. It needs a
 pre-existing DB subnet group (`RDS_LIVE_TEST_SUBNET_GROUP`) and optionally an
 existing enabled KMS key (`RDS_LIVE_TEST_KMS_KEY_ARN`, never modified by the
 test); it skips if the subnet group isn't set.
+
+Some live tests need more than the operator's own permissions. The policy
+checks call `access-analyzer:ValidatePolicy` (free, skipped when denied), and
+the tests that find out whether an action in the permissions table is really
+needed create a temporary role with `iam:CreateRole`, `iam:PutRolePolicy` and
+`sts:AssumeRole`, and delete it afterwards.
 
 Run it locally with whatever already authenticates your AWS CLI:
 

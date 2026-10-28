@@ -72,6 +72,57 @@ attempts `sts:AssumeRole` against it until it succeeds, against a generous
 isn't guaranteed to be stable run to run). One real measurement: assumable
 after ~9.1 seconds, 9 attempts.
 
+### What each service accepts in a policy, and what the operator's permissions need
+
+**Verified 2026-10-28**, by the live tests and by calling the services directly.
+
+- SNS refuses a wildcard in the action of a topic policy statement
+  (`InvalidParameter: Policy statement action out of service scope!`, for
+  `sns:*` and `SNS:*` alike), so the transport statement names the topic
+  actions. Explicit actions in either case are accepted.
+- DynamoDB accepts only letters and digits in the ID of a resource policy
+  statement. A deny on writes took effect within about ten seconds. A second
+  change within fifteen seconds of the last is refused with
+  `ThrottlingException`, and `DeleteTable` right after a policy change fails
+  with `ResourceInUseException` ("has a pending resource-based policy update");
+  both are retried.
+- DynamoDB answers a change to a table's tags made while another is in flight
+  with `LimitExceededException: Subscriber limit exceeded: Table tags are being
+  updated`. It clears on its own and is retried. Other services use the same
+  code for quotas that never clear, so only this message and the one for too many
+  simultaneous table operations count as retryable.
+- DynamoDB refuses `DeleteTable` on a protected table with a
+  `ValidationException`, which is not retried. `UpdateTable` clears the
+  protection, after which the delete goes through.
+- SQS accepts 20 statements in a queue policy and refuses 21 (`OverLimit`). Ten
+  subscriptions plus the operator's two statements come to about 5 KB of the
+  8,192 bytes allowed. SQS also refuses plain HTTP on every queue itself
+  (`InvalidSecurity: All requests to this queue must use HTTPS and SigV4`), so
+  the transport statement cannot be seen doing anything there.
+- `CreateBucket` with tags needs `s3:TagResource`, and `CreateTable` with a
+  customer key needs `kms:CreateGrant`; both are refused without them.
+  `PutMetricAlarm` with tags worked, and applied the tags, without
+  `cloudwatch:TagResource`, so that entry is kept only because AWS documents it.
+- Every action in the permissions table is one Access Analyzer recognises.
+  `dynamodb:TransactGetItems` and `dynamodb:TransactWriteItems` are not IAM
+  actions: transactions are authorised by the item actions they contain.
+- SNS delivery into a queue encrypted with a customer key, and a CloudWatch
+  alarm into an encrypted topic, both work under key policy statements scoped
+  by `aws:SourceArn`.
+- `CleanupSubscriptions` finishes without error for a subscription SNS no
+  longer has, and for a queue that is gone.
+- `CreateDBInstance` without a `StorageType` produces gp2 storage (measured on
+  a 20 GiB PostgreSQL instance), so the operator asks for gp3, which a real
+  instance then reports.
+- S3 and DynamoDB judge a request on an open connection by the policy that
+  connection last saw. A client that opens a new connection per request saw a
+  policy added or deleted within seconds (S3) or about ten (DynamoDB), while a
+  client reusing one kept being served under the old policy for more than two
+  minutes. The deny statements are therefore a safety net, not an instant
+  block, for an application with connections already open.
+- An RDS instance's `CopyTagsToSnapshot` and `MaxAllocatedStorage` apply
+  without the instance leaving `available`.
+
 ## Assumed from documentation, not independently verified
 
 These are used throughout the code but have only ever been checked against
@@ -90,13 +141,6 @@ this operator never sets up) as active. `keyStateError`
 enum values and AWS's documentation; none of these states has been triggered
 against a real account.
 
-### Subscription and deletion-protection calls
-
-- SNS `Unsubscribe` of a subscription that no longer exists returns `NotFoundException`, which `CleanupSubscriptions` counts as already removed.
-- DynamoDB refuses `DeleteTable` on a table with deletion protection. `UpdateTable` with `DeletionProtectionEnabled: false` clears it, and may leave the table `UPDATING` for a moment, so the delete can be retried on the next pass (`ResourceInUseException` counts as retryable).
-
-Neither has been exercised against a real account.
-
 ### Error classification (`internal/aws/errors.go`)
 
 `IsRetryable` treats `smithy.ErrorFault() == FaultServer`, throttling error
@@ -107,7 +151,7 @@ treats `AccessDenied`/`AccessDeniedException`/`UnauthorizedException`/
 403 for calls that don't implement `smithy.APIError`, e.g. S3's
 `HeadBucket`) as permission gaps. Both lists are built from AWS's published
 exception docs per service, not from having actually triggered each one for
-real. `ResourceInUseException` and `ConcurrentModification` in particular
-are worth a real verification pass at some point, since they're the two
-that most directly gate whether a reconcile gets retried automatically
-versus surfaced as a hard failure.
+real. `ResourceInUseException` has since been seen and is retried (above).
+`ConcurrentModification` has not: forty-eight concurrent role-policy writes all
+succeeded, so it still gates retry-versus-failure without ever having been
+observed.

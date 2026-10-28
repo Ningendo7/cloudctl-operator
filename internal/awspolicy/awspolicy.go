@@ -34,6 +34,16 @@ const InsecureTransportSid = "cloudctl-deny-insecure-transport"
 // DenyInsecureTransport is a statement refusing every action of a service on
 // the given resources unless the request used TLS.
 func DenyInsecureTransport(action string, resources ...string) map[string]any {
+	return denyInsecureTransport(action, resources)
+}
+
+// DenyInsecureTransportActions is DenyInsecureTransport for a service whose
+// policies refuse a wildcard action, so the actions have to be named.
+func DenyInsecureTransportActions(actions []string, resources ...string) map[string]any {
+	return denyInsecureTransport(actions, resources)
+}
+
+func denyInsecureTransport(action any, resources []string) map[string]any {
 	return map[string]any{
 		"Sid":       InsecureTransportSid,
 		"Effect":    "Deny",

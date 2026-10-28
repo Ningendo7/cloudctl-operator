@@ -34,20 +34,30 @@ package sqs
 import (
 	"context"
 	"errors"
+	"fmt"
+	"hash/fnv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
 	"github.com/Ningendo7/cloudctl-operator/internal/livetest"
+	"github.com/Ningendo7/cloudctl-operator/internal/policycheck"
+	kmspkg "github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
+	snspkg "github.com/Ningendo7/cloudctl-operator/internal/resources/sns"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -730,4 +740,631 @@ func TestLive_Ensure_TakesOverAQueueFromAPreviousUID(t *testing.T) {
 	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, "uid-2") {
 		t.Errorf("expected the queue to be tagged with the new UID, got %+v", tagsOut.Tags)
 	}
+}
+
+func waitUntil(within time.Duration, check func() bool) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if check() {
+			return true
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return false
+}
+
+// countingSQS counts the queue policy writes Ensure makes.
+type countingSQS struct {
+	sqsAPI
+	policyWrites int
+}
+
+func (c *countingSQS) SetQueueAttributes(ctx context.Context, in *sqs.SetQueueAttributesInput, optFns ...func(*sqs.Options)) (*sqs.SetQueueAttributesOutput, error) {
+	if _, ok := in.Attributes[string(types.QueueAttributeNamePolicy)]; ok {
+		c.policyWrites++
+	}
+	return c.sqsAPI.SetQueueAttributes(ctx, in, optFns...)
+}
+
+// queuePolicyText reads the policy as SQS hands it back, empty when there is none.
+func queuePolicyText(t *testing.T, client *sqs.Client, queueURL string) string {
+	t.Helper()
+	out, err := client.GetQueueAttributes(context.Background(), &sqs.GetQueueAttributesInput{
+		QueueUrl: &queueURL, AttributeNames: []types.QueueAttributeName{types.QueueAttributeNamePolicy},
+	})
+	if err != nil {
+		t.Fatalf("real GetQueueAttributes(Policy) error = %v", err)
+	}
+	return out.Attributes[string(types.QueueAttributeNamePolicy)]
+}
+
+// TestLive_Ensure_QueuesCarryTheTransportStatementAndItIsNotRewritten confirms
+// SQS accepts the transport statement on a queue and its dead-letter queue and
+// Access Analyzer finds nothing wrong with it, that HTTPS still works, that a
+// second pass writes nothing (SQS hands the policy back reformatted, which
+// must still compare equal), and that the pending-deletion statement joins it
+// and leaves it when removed. Whether a plain-HTTP request is refused cannot be
+// shown here: SQS now refuses one on every queue ("All requests to this queue
+// must use HTTPS and SigV4"), policy or not, so the statement is there for the
+// compliance checks that look for it.
+func TestLive_Ensure_QueuesCarryTheTransportStatementAndItIsNotRewritten(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := sqs.NewFromConfig(cfg)
+	ctx := context.Background()
+	namespace, crName := "live", liveUniqueSuffix(t)
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
+	dlqName := cloudctlaws.DerivedResourceName(namespace, crName, "sqs", 80, "orders", "dlq")
+	t.Cleanup(func() {
+		deleteQueueIfExists(t, client, namespace, crName, "orders")
+		if out, err := client.GetQueueUrl(context.Background(), &sqs.GetQueueUrlInput{QueueName: &dlqName}); err == nil {
+			_, _ = client.DeleteQueue(context.Background(), &sqs.DeleteQueueInput{QueueUrl: out.QueueUrl})
+		}
+	})
+
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", DLQ: true, DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	recordEvent, events := newEventCollector()
+	counted := &countingSQS{sqsAPI: client}
+	ledger, err := Ensure(ctx, counted, nil, nil, nil, namespace, crName, "uid-1", spec, nil, nil, recordEvent)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if countEvents(*events, "TransportSecurityEnforced") != 2 {
+		t.Errorf("expected the statement on the queue and its dead-letter queue, got events %v", *events)
+	}
+
+	urls := map[string]string{}
+	for _, name := range []string{queueName, dlqName} {
+		out, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &name})
+		if err != nil {
+			t.Fatalf("real GetQueueUrl(%s) error = %v", name, err)
+		}
+		urls[name] = *out.QueueUrl
+		policy := queuePolicyText(t, client, *out.QueueUrl)
+		if got := strings.Count(policy, awspolicy.InsecureTransportSid); got != 1 {
+			t.Fatalf("expected the transport statement once on %s, found %d in %s", name, got, policy)
+		}
+		policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
+	}
+
+	url := urls[queueName]
+	send := func(c *sqs.Client) error {
+		_, err := c.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: &url, MessageBody: aws.String("hello")})
+		return err
+	}
+	if err := send(client); err != nil {
+		t.Fatalf("real SendMessage over HTTPS error = %v: the statement must not refuse TLS", err)
+	}
+	writes := counted.policyWrites
+	if _, err := Ensure(ctx, counted, nil, nil, nil, namespace, crName, "uid-1", spec, withTrustExpired(ledger), nil, recordEvent); err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if counted.policyWrites != writes {
+		t.Errorf("the second pass wrote a queue policy %d more time(s): the stored policy reads as different from the desired one", counted.policyWrites-writes)
+	}
+
+	entry := findEntry(ledger, "orders")
+	if entry == nil {
+		t.Fatal("expected a ledger entry for orders")
+	}
+	if err := addPendingDeletionDeny(ctx, client, url, entry.ARN); err != nil {
+		t.Fatalf("addPendingDeletionDeny() error = %v", err)
+	}
+	policy := queuePolicyText(t, client, url)
+	if !strings.Contains(policy, pendingDeletionDenySid) || !strings.Contains(policy, awspolicy.InsecureTransportSid) {
+		t.Errorf("expected both statements after the pending-deletion deny, got %s", policy)
+	}
+	policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
+	if err := removePendingDeletionDeny(ctx, client, url); err != nil {
+		t.Fatalf("removePendingDeletionDeny() error = %v", err)
+	}
+	policy = queuePolicyText(t, client, url)
+	if strings.Contains(policy, pendingDeletionDenySid) || !strings.Contains(policy, awspolicy.InsecureTransportSid) {
+		t.Errorf("expected only the transport statement left, got %s", policy)
+	}
+}
+
+// TestLive_QueuePolicyAcceptsTwentyStatementsAndRefusesMore checks the limit
+// behind the cap on subscriptions per queue: every subscription takes one
+// statement of the queue policy, next to the operator's two.
+func TestLive_QueuePolicyAcceptsTwentyStatementsAndRefusesMore(t *testing.T) {
+	cfg := skipUnlessLiveAWSCredentials(t)
+	client := sqs.NewFromConfig(cfg)
+	ctx := context.Background()
+	queueName := shortLiveName(t, "limit")
+	out, err := client.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("real CreateQueue() (setup) error = %v", err)
+	}
+	t.Cleanup(func() { _, _ = client.DeleteQueue(context.Background(), &sqs.DeleteQueueInput{QueueUrl: out.QueueUrl}) })
+	attrs, err := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl: out.QueueUrl, AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		t.Fatalf("real GetQueueAttributes() (setup) error = %v", err)
+	}
+	queueARN := attrs.Attributes[string(types.QueueAttributeNameQueueArn)]
+	topicPrefix := strings.Replace(queueARN[:strings.LastIndex(queueARN, ":")], ":sqs:", ":sns:", 1)
+
+	policyOf := func(n int) string {
+		statements := make([]string, n)
+		for i := range statements {
+			statements[i] = fmt.Sprintf(`{"Sid":"s%d","Effect":"Allow","Principal":{"Service":"sns.amazonaws.com"},"Action":"sqs:SendMessage","Resource":%q,"Condition":{"ArnEquals":{"aws:SourceArn":"%s:topic-%d"}}}`,
+				i, queueARN, topicPrefix, i)
+		}
+		return `{"Version":"2012-10-17","Statement":[` + strings.Join(statements, ",") + `]}`
+	}
+	set := func(n int) error {
+		_, err := client.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
+			QueueUrl: out.QueueUrl, Attributes: map[string]string{string(types.QueueAttributeNamePolicy): policyOf(n)},
+		})
+		return err
+	}
+	if err := set(20); err != nil {
+		t.Errorf("a queue policy with 20 statements was refused: %v", err)
+	}
+	if err := set(21); err == nil {
+		t.Error("a queue policy with 21 statements was accepted: the documented limit of 20 does not hold, so the cap on subscriptions could be raised")
+	} else {
+		t.Logf("21 statements are refused with: %v", err)
+	}
+}
+
+func newLiveSNSClient(t *testing.T) *sns.Client {
+	t.Helper()
+	return sns.NewFromConfig(skipUnlessLiveAWSCredentials(t))
+}
+
+// liveSubscriptionFixture mirrors subscriptionFixture from the integration
+// tier, but against real AWS: a real queue, a real topic, and an
+// authorized producer CR resolved through a fake controller-runtime
+// client (that resolution logic has no AWS dependency to verify here
+// either).
+type liveSubscriptionFixture struct {
+	sqsClient                     *sqs.Client
+	snsClient                     *sns.Client
+	k8sClient                     ctrlclient.Client
+	queueName, queueURL, queueARN string
+	topicARN                      string
+	ref                           depsv1alpha1.ConsumeRef
+}
+
+// shortLiveName fits SQS's 80 character limit, which the test name alone can
+// exceed.
+func shortLiveName(t *testing.T, kind string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(t.Name()))
+	return fmt.Sprintf("live-%08x-%s-%s", h.Sum32(), time.Now().UTC().Format("150405"), kind)
+}
+
+func setupLiveSubscriptionFixture(t *testing.T) liveSubscriptionFixture {
+	t.Helper()
+	ctx := context.Background()
+	sqsClient := newLiveClient(t)
+	snsClient := newLiveSNSClient(t)
+
+	queueName := shortLiveName(t, "orders")
+	createQueueOut, err := sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("real CreateQueue() (setup) error = %v", err)
+	}
+	queueURL := *createQueueOut.QueueUrl
+	t.Cleanup(func() { _, _ = sqsClient.DeleteQueue(context.Background(), &sqs.DeleteQueueInput{QueueUrl: &queueURL}) })
+
+	attrsOut, err := sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl:       &queueURL,
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		t.Fatalf("real GetQueueAttributes() (setup) error = %v", err)
+	}
+	queueARN := attrsOut.Attributes[string(types.QueueAttributeNameQueueArn)]
+
+	topicName := shortLiveName(t, "events")
+	createTopicOut, err := snsClient.CreateTopic(ctx, &sns.CreateTopicInput{Name: &topicName})
+	if err != nil {
+		t.Fatalf("real CreateTopic() (setup) error = %v", err)
+	}
+	topicARN := *createTopicOut.TopicArn
+	t.Cleanup(func() { _, _ = snsClient.DeleteTopic(context.Background(), &sns.DeleteTopicInput{TopicArn: &topicARN}) })
+
+	ref := depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "events"}
+	producer := newAuthorizedTopicProducer("team-b", "platform-service", "events", topicARN, "default", "checkout-service")
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+
+	return liveSubscriptionFixture{
+		sqsClient: sqsClient,
+		snsClient: snsClient,
+		k8sClient: k8sClient,
+		queueName: queueName,
+		queueURL:  queueURL,
+		queueARN:  queueARN,
+		topicARN:  topicARN,
+		ref:       ref,
+	}
+}
+
+func TestLive_EnsureSubscriptions_RealSubscribeAndQueuePolicyGrant(t *testing.T) {
+	ctx := context.Background()
+	f := setupLiveSubscriptionFixture(t)
+
+	ledger, err := EnsureSubscriptions(ctx, f.snsClient, f.sqsClient, f.k8sClient,
+		"default", "checkout-service", f.queueName, f.queueURL, f.queueARN,
+		[]depsv1alpha1.ConsumeRef{f.ref}, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsureSubscriptions() error = %v", err)
+	}
+	ledgerName := subscriptionLedgerName(f.queueName, f.ref)
+	entry, entryFound := status.FindManagedResource(ledger, subscriptionResourceType, ledgerName)
+	if !entryFound {
+		t.Fatal("expected a ledger entry for the new subscription")
+	}
+
+	subsOut, err := f.snsClient.ListSubscriptionsByTopic(ctx, &sns.ListSubscriptionsByTopicInput{TopicArn: &f.topicARN})
+	if err != nil {
+		t.Fatalf("real ListSubscriptionsByTopic() error = %v", err)
+	}
+	if len(subsOut.Subscriptions) != 1 {
+		t.Fatalf("expected exactly one real subscription on the topic, got %d", len(subsOut.Subscriptions))
+	}
+	if *subsOut.Subscriptions[0].SubscriptionArn != entry.ARN {
+		t.Errorf("ledger ARN %q doesn't match the real subscription's ARN %q", entry.ARN, *subsOut.Subscriptions[0].SubscriptionArn)
+	}
+
+	policyOut, err := f.sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl:       &f.queueURL,
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNamePolicy},
+	})
+	if err != nil {
+		t.Fatalf("real GetQueueAttributes(Policy) error = %v", err)
+	}
+	policy := policyOut.Attributes[string(types.QueueAttributeNamePolicy)]
+	if policy == "" {
+		t.Fatal("expected a real queue policy granting the topic send access, got none")
+	}
+	if !strings.Contains(policy, f.topicARN) {
+		t.Errorf("expected the queue policy to scope the grant to topic ARN %q, got: %s", f.topicARN, policy)
+	}
+}
+
+// SNS isn't an IAM identity in the account, so delivery into a queue
+// encrypted with an operator-managed key works only if the key's own policy
+// lets SNS use it. Only real AWS enforces key policies.
+func TestLive_EnsureSubscriptions_DeliversIntoAQueueEncryptedWithTheSharedKey(t *testing.T) {
+	ctx := context.Background()
+	f := setupLiveSubscriptionFixture(t)
+	cfg := skipUnlessLiveAWSCredentials(t)
+	key := livetest.SharedKey(t, cfg)
+	// What the key policy sync grants: SNS may use the key for this topic only.
+	livetest.GrantServices(t, cfg, key, kmspkg.ServiceGrants{SNSTopicARNs: []string{f.topicARN}})
+	namespace, crName := "live", liveUniqueSuffix(t)
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: livetest.SharedKeyName}},
+	}}
+
+	_, err := Ensure(ctx, f.sqsClient, nil, nil, nil, namespace, crName, "uid-1", spec, []depsv1alpha1.ManagedResource{key}, nil, nil)
+	t.Cleanup(func() { deleteQueueIfExists(t, f.sqsClient, namespace, crName, "orders") })
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
+	urlOut, err := f.sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("real GetQueueUrl() error = %v", err)
+	}
+	attrsOut, err := f.sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl: urlOut.QueueUrl, AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		t.Fatalf("real GetQueueAttributes() error = %v", err)
+	}
+	queueARN := attrsOut.Attributes[string(types.QueueAttributeNameQueueArn)]
+
+	if _, err := EnsureSubscriptions(ctx, f.snsClient, f.sqsClient, f.k8sClient,
+		"default", "checkout-service", "orders", *urlOut.QueueUrl, queueARN,
+		[]depsv1alpha1.ConsumeRef{f.ref}, nil, nil); err != nil {
+		t.Fatalf("EnsureSubscriptions() error = %v", err)
+	}
+
+	const message = "cloudctl-live-encrypted-delivery"
+	if _, err := f.snsClient.Publish(ctx, &sns.PublishInput{TopicArn: &f.topicARN, Message: aws.String(message)}); err != nil {
+		t.Fatalf("real Publish() error = %v", err)
+	}
+	deadline := time.Now().Add(time.Minute)
+	for time.Now().Before(deadline) {
+		out, err := f.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+			QueueUrl: urlOut.QueueUrl, WaitTimeSeconds: 10, MaxNumberOfMessages: 10,
+		})
+		if err != nil {
+			t.Fatalf("real ReceiveMessage() error = %v", err)
+		}
+		for _, m := range out.Messages {
+			if strings.Contains(aws.ToString(m.Body), message) {
+				return
+			}
+		}
+	}
+	t.Fatal("the message published to the topic never reached the encrypted queue: SNS could not use its key")
+}
+
+func TestLive_CleanupSubscriptions_RealUnsubscribeAndPolicyRevoke(t *testing.T) {
+	ctx := context.Background()
+	f := setupLiveSubscriptionFixture(t)
+
+	ledger, err := EnsureSubscriptions(ctx, f.snsClient, f.sqsClient, f.k8sClient,
+		"default", "checkout-service", f.queueName, f.queueURL, f.queueARN,
+		[]depsv1alpha1.ConsumeRef{f.ref}, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsureSubscriptions() (setup) error = %v", err)
+	}
+
+	// subscribesTo is now empty - the ref was removed from spec.
+	ledger, err = CleanupSubscriptions(ctx, f.snsClient, f.sqsClient, f.k8sClient,
+		"default", "checkout-service", f.queueName, f.queueURL,
+		nil, ledger, nil)
+	if err != nil {
+		t.Fatalf("CleanupSubscriptions() error = %v", err)
+	}
+
+	ledgerName := subscriptionLedgerName(f.queueName, f.ref)
+	if status.HasManagedResource(ledger, subscriptionResourceType, ledgerName) {
+		t.Error("expected the ledger entry to be removed")
+	}
+
+	// Real SNS unsubscribe is asynchronous - poll briefly rather than
+	// asserting immediately, the same pattern used elsewhere in this
+	// tier for other eventually-consistent AWS behavior.
+	var subsOut *sns.ListSubscriptionsByTopicOutput
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var listErr error
+		subsOut, listErr = f.snsClient.ListSubscriptionsByTopic(ctx, &sns.ListSubscriptionsByTopicInput{TopicArn: &f.topicARN})
+		if listErr != nil {
+			t.Fatalf("real ListSubscriptionsByTopic() error = %v", listErr)
+		}
+		if len(subsOut.Subscriptions) == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(3 * time.Second)
+	}
+	if len(subsOut.Subscriptions) != 0 {
+		t.Errorf("expected the real subscription to be gone, got %d still on the topic", len(subsOut.Subscriptions))
+	}
+
+	policyOut, err := f.sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl:       &f.queueURL,
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNamePolicy},
+	})
+	if err != nil {
+		t.Fatalf("real GetQueueAttributes(Policy) error = %v", err)
+	}
+	if policy := policyOut.Attributes[string(types.QueueAttributeNamePolicy)]; policy != "" && strings.Contains(policy, f.topicARN) {
+		t.Errorf("expected the queue policy grant for %q to be revoked, got: %s", f.topicARN, policy)
+	}
+}
+
+// TestLive_EnsureSubscriptions_DeliversThroughATopicAndQueueThatRefuseHTTP
+// puts the two transport statements on the path a message takes: the topic
+// refuses plain HTTP for every SNS action and so does the queue for every SQS
+// action, and SNS must still subscribe the queue and deliver into it. That
+// depends on SNS reaching SQS over TLS, which only real AWS decides.
+func TestLive_EnsureSubscriptions_DeliversThroughATopicAndQueueThatRefuseHTTP(t *testing.T) {
+	ctx := context.Background()
+	cfg := skipUnlessLiveAWSCredentials(t)
+	sqsClient := sqs.NewFromConfig(cfg)
+	snsClient := sns.NewFromConfig(cfg)
+	identity, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		t.Fatalf("GetCallerIdentity() error = %v", err)
+	}
+	namespace, crName := "live", liveUniqueSuffix(t)
+
+	topicSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
+		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	// Registered before Ensure, which creates the topic before it can fail.
+	topicARN := cloudctlaws.TopicARN(cfg.Region, *identity.Account, cloudctlaws.ResourceName(namespace, crName, "sns", "events", 256))
+	t.Cleanup(func() { _, _ = snsClient.DeleteTopic(context.Background(), &sns.DeleteTopicInput{TopicArn: &topicARN}) })
+	topicLedger, err := snspkg.Ensure(ctx, snsClient, nil, namespace, crName, "uid-1", cfg.Region, *identity.Account, topicSpec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("sns Ensure() error = %v", err)
+	}
+	if entry := findEntry(topicLedger, "events"); entry == nil || entry.ARN != topicARN {
+		t.Fatalf("expected a ledger entry for the topic at %s, got %+v", topicARN, topicLedger)
+	}
+	topicAttrs, err := snsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicARN})
+	if err != nil {
+		t.Fatalf("real GetTopicAttributes() error = %v", err)
+	}
+	if !strings.Contains(topicAttrs.Attributes["Policy"], "cloudctl-deny-insecure-transport") {
+		t.Fatalf("expected the topic to carry the transport statement, got %s", topicAttrs.Attributes["Policy"])
+	}
+
+	queueSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	t.Cleanup(func() { deleteQueueIfExists(t, sqsClient, namespace, crName, "orders") })
+	queueLedger, err := Ensure(ctx, sqsClient, nil, nil, nil, namespace, crName, "uid-1", queueSpec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("sqs Ensure() error = %v", err)
+	}
+	queueEntry := findEntry(queueLedger, "orders")
+	if queueEntry == nil {
+		t.Fatal("expected a ledger entry for the queue")
+	}
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
+	urlOut, err := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("real GetQueueUrl() error = %v", err)
+	}
+
+	producer := newAuthorizedTopicProducer("team-b", "platform-service", "events", topicARN, "default", "checkout-service")
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producer).Build()
+	ref := depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: "platform-service", ResourceName: "events"}
+	if _, err := EnsureSubscriptions(ctx, snsClient, sqsClient, k8sClient, "default", "checkout-service",
+		queueName, *urlOut.QueueUrl, queueEntry.ARN, []depsv1alpha1.ConsumeRef{ref}, nil, nil); err != nil {
+		t.Fatalf("EnsureSubscriptions() error = %v", err)
+	}
+	policy := queuePolicyText(t, sqsClient, *urlOut.QueueUrl)
+	if !strings.Contains(policy, topicARN) || !strings.Contains(policy, "cloudctl-deny-insecure-transport") {
+		t.Errorf("expected the queue policy to carry the topic's grant and the transport statement, got %s", policy)
+	}
+	policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
+
+	const message = "cloudctl-live-delivery-over-tls-only"
+	if _, err := snsClient.Publish(ctx, &sns.PublishInput{TopicArn: &topicARN, Message: aws.String(message)}); err != nil {
+		t.Fatalf("real Publish() to the topic over HTTPS error = %v", err)
+	}
+	deadline := time.Now().Add(time.Minute)
+	for time.Now().Before(deadline) {
+		out, err := sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: urlOut.QueueUrl, WaitTimeSeconds: 10, MaxNumberOfMessages: 10})
+		if err != nil {
+			t.Fatalf("real ReceiveMessage() error = %v", err)
+		}
+		for _, m := range out.Messages {
+			if strings.Contains(aws.ToString(m.Body), message) {
+				return
+			}
+		}
+	}
+	t.Fatal("the message never reached the queue: SNS is refused by the queue's or the topic's transport statement")
+}
+
+// TestLive_EnsureSubscriptions_TenSubscriptionsFitInTheQueuePolicy fills a
+// queue policy as far as the cap on subscriptions allows: ten grants, the
+// transport statement and the pending-deletion deny, which has to stay below
+// the statement limit SQS enforces.
+func TestLive_EnsureSubscriptions_TenSubscriptionsFitInTheQueuePolicy(t *testing.T) {
+	ctx := context.Background()
+	cfg := skipUnlessLiveAWSCredentials(t)
+	sqsClient := sqs.NewFromConfig(cfg)
+	snsClient := sns.NewFromConfig(cfg)
+	namespace, crName := "live", liveUniqueSuffix(t)
+
+	queueSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
+		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
+	}}
+	t.Cleanup(func() { deleteQueueIfExists(t, sqsClient, namespace, crName, "orders") })
+	queueLedger, err := Ensure(ctx, sqsClient, nil, nil, nil, namespace, crName, "uid-1", queueSpec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("sqs Ensure() error = %v", err)
+	}
+	queueEntry := findEntry(queueLedger, "orders")
+	if queueEntry == nil {
+		t.Fatal("expected a ledger entry for the queue")
+	}
+	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "orders", 80)
+	urlOut, err := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
+	if err != nil {
+		t.Fatalf("real GetQueueUrl() error = %v", err)
+	}
+
+	const subscriptions = 10
+	refs := make([]depsv1alpha1.ConsumeRef, 0, subscriptions)
+	producers := make([]ctrlclient.Object, 0, subscriptions)
+	for i := range subscriptions {
+		topicName := shortLiveName(t, fmt.Sprintf("t%d", i))
+		created, err := snsClient.CreateTopic(ctx, &sns.CreateTopicInput{Name: &topicName})
+		if err != nil {
+			t.Fatalf("real CreateTopic() (setup) error = %v", err)
+		}
+		topicARN := *created.TopicArn
+		t.Cleanup(func() { _, _ = snsClient.DeleteTopic(context.Background(), &sns.DeleteTopicInput{TopicArn: &topicARN}) })
+		producerName := fmt.Sprintf("platform-%d", i)
+		producers = append(producers, newAuthorizedTopicProducer("team-b", producerName, "events", topicARN, "default", "checkout-service"))
+		refs = append(refs, depsv1alpha1.ConsumeRef{Namespace: "team-b", Name: producerName, ResourceName: "events"})
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(newSchemeForKMSKeyRefTest(t)).WithObjects(producers...).Build()
+
+	ledger, err := EnsureSubscriptions(ctx, snsClient, sqsClient, k8sClient, "default", "checkout-service",
+		queueName, *urlOut.QueueUrl, queueEntry.ARN, refs, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsureSubscriptions() with %d topics error = %v", subscriptions, err)
+	}
+	if got := len(ledger); got != subscriptions {
+		t.Errorf("expected %d subscription entries, got %d", subscriptions, got)
+	}
+	if err := addPendingDeletionDeny(ctx, sqsClient, *urlOut.QueueUrl, queueEntry.ARN); err != nil {
+		t.Fatalf("addPendingDeletionDeny() on a queue with %d subscriptions error = %v", subscriptions, err)
+	}
+
+	doc, err := readPolicy(ctx, sqsClient, *urlOut.QueueUrl)
+	if err != nil {
+		t.Fatalf("readPolicy() error = %v", err)
+	}
+	if want := subscriptions + 2; len(doc.Statement) != want {
+		t.Errorf("expected %d statements (the grants, the transport statement and the deny), got %d", want, len(doc.Statement))
+	}
+	policy := queuePolicyText(t, sqsClient, *urlOut.QueueUrl)
+	t.Logf("a queue policy with %d subscriptions is %d bytes (SQS allows 8192)", subscriptions, len(policy))
+	policycheck.ValidatePolicy(t, cfg, policycheck.ResourcePolicy, policycheck.NoResourceType, policy)
+}
+
+// TestLive_CleanupSubscriptions_UnsubscribesAfterTheQueueIsGone is the
+// teardown that used to leak: the queue is deleted first, so there is no
+// policy to edit, and the subscription must still be removed or SNS keeps
+// failing deliveries to it. Running the cleanup a second time with the
+// ledger entry still in place covers SNS answering for a subscription that no
+// longer exists, which the operator counts as already removed.
+func TestLive_CleanupSubscriptions_UnsubscribesAfterTheQueueIsGone(t *testing.T) {
+	ctx := context.Background()
+	f := setupLiveSubscriptionFixture(t)
+	ledger, err := EnsureSubscriptions(ctx, f.snsClient, f.sqsClient, f.k8sClient,
+		"default", "checkout-service", f.queueName, f.queueURL, f.queueARN,
+		[]depsv1alpha1.ConsumeRef{f.ref}, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsureSubscriptions() (setup) error = %v", err)
+	}
+	ledgerName := subscriptionLedgerName(f.queueName, f.ref)
+	entry, found := status.FindManagedResource(ledger, subscriptionResourceType, ledgerName)
+	if !found {
+		t.Fatal("expected a ledger entry for the subscription")
+	}
+
+	if _, err := f.sqsClient.DeleteQueue(ctx, &sqs.DeleteQueueInput{QueueUrl: &f.queueURL}); err != nil {
+		t.Fatalf("real DeleteQueue() error = %v", err)
+	}
+	if !waitUntil(2*time.Minute, func() bool {
+		_, err := f.sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &f.queueName})
+		return err != nil
+	}) {
+		t.Fatal("the queue still resolves after being deleted")
+	}
+
+	cleaned, err := CleanupSubscriptions(ctx, f.snsClient, f.sqsClient, f.k8sClient,
+		"default", "checkout-service", f.queueName, "", nil, ledger, nil)
+	if err != nil {
+		t.Fatalf("CleanupSubscriptions() after the queue was deleted error = %v", err)
+	}
+	if status.HasManagedResource(cleaned, subscriptionResourceType, ledgerName) {
+		t.Error("expected the ledger entry to be removed although the queue is gone")
+	}
+	if !waitUntil(time.Minute, func() bool {
+		out, err := f.snsClient.ListSubscriptionsByTopic(ctx, &sns.ListSubscriptionsByTopicInput{TopicArn: &f.topicARN})
+		return err == nil && len(out.Subscriptions) == 0
+	}) {
+		t.Error("the subscription is still on the topic")
+	}
+
+	again, err := CleanupSubscriptions(ctx, f.snsClient, f.sqsClient, f.k8sClient,
+		"default", "checkout-service", f.queueName, "", nil, []depsv1alpha1.ManagedResource{entry}, nil)
+	if err != nil {
+		t.Fatalf("CleanupSubscriptions() of a subscription SNS no longer has error = %v: the not-found answer is not recognised", err)
+	}
+	if status.HasManagedResource(again, subscriptionResourceType, ledgerName) {
+		t.Error("expected the entry to be dropped when SNS no longer has the subscription")
+	}
+}
+
+// withTrustExpired returns the ledger as it would be after the trust window has
+// passed, so the next Ensure verifies everything instead of only what is
+// checked within the window.
+func withTrustExpired(ledger []depsv1alpha1.ManagedResource) []depsv1alpha1.ManagedResource {
+	past := metav1.NewTime(time.Now().Add(-(status.TrustWindow + time.Minute)))
+	out := append([]depsv1alpha1.ManagedResource{}, ledger...)
+	for i := range out {
+		out[i].LastVerifiedAt = &past
+	}
+	return out
 }

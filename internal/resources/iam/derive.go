@@ -75,8 +75,8 @@ var actionSets = map[string]actionSet{
 		readWrite: []string{"sns:Publish"},
 	},
 	resourceTypeDynamoDB: {
-		baseline:  []string{"dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem", "dynamodb:TransactGetItems"},
-		readWrite: []string{"dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:TransactWriteItems", "dynamodb:ConditionCheckItem"},
+		baseline:  []string{"dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem"},
+		readWrite: []string{"dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:ConditionCheckItem"},
 	},
 	// kms grants are for a resource's own encryption key (dedicated or
 	// shared via kmsKeyRef), never a standalone kms.resources entry

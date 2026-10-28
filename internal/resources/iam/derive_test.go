@@ -768,7 +768,10 @@ func TestEnsureRole_TakesOverARoleFromTheUIDItWasTold(t *testing.T) {
 	}
 }
 
-func TestBuildPolicyDocument_DynamoDBCoversIndexesAndTransactions(t *testing.T) {
+// Transactions are authorized by the item actions they contain: IAM has no
+// TransactGetItems or TransactWriteItems action, and a policy that names them
+// grants nothing.
+func TestBuildPolicyDocument_DynamoDBCoversIndexesAndLeavesOutActionsIAMDoesNotHave(t *testing.T) {
 	const table = "arn:aws:dynamodb:us-east-1:123456789012:table/sessions"
 	statementFor := func(readWrite bool) policyStatement {
 		t.Helper()
@@ -787,10 +790,14 @@ func TestBuildPolicyDocument_DynamoDBCoversIndexesAndTransactions(t *testing.T) 
 	if !slices.Equal(readOnly.Resource, []string{table, table + "/index/*"}) {
 		t.Errorf("Resource = %v, want the table and its indexes", readOnly.Resource)
 	}
-	if !containsAction(readOnly.Action, "dynamodb:TransactGetItems") {
-		t.Error("expected a read-only grant to allow TransactGetItems")
+	for _, notAnAction := range []string{"dynamodb:TransactGetItems", "dynamodb:TransactWriteItems"} {
+		for _, readWrite := range []bool{false, true} {
+			if containsAction(statementFor(readWrite).Action, notAnAction) {
+				t.Errorf("%s is not an IAM action, but the grant (readWrite=%v) names it", notAnAction, readWrite)
+			}
+		}
 	}
-	for _, write := range []string{"dynamodb:TransactWriteItems", "dynamodb:ConditionCheckItem"} {
+	for _, write := range []string{"dynamodb:ConditionCheckItem", "dynamodb:PutItem"} {
 		if containsAction(readOnly.Action, write) {
 			t.Errorf("a read-only grant must not allow %s", write)
 		}

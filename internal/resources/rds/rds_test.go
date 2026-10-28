@@ -2414,6 +2414,18 @@ func TestEnsure_NewInstanceCopiesItsTagsToSnapshotsAndAutoscalesOnlyWhenAsked(t 
 	}
 }
 
+// The API's default storage type is gp2, which on a small volume has a small
+// fraction of gp3's baseline performance for about the same price.
+func TestEnsure_NewInstanceUsesGp3Storage(t *testing.T) {
+	client := newFakeRDS()
+	if _, err := ensureOnce(t, client, baseInstanceSpec("orders-db"), nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if got := aws.ToString(client.lastCreateDBInstanceInput.StorageType); got != "gp3" {
+		t.Errorf("StorageType = %q, want gp3", got)
+	}
+}
+
 func TestEnsure_TurnsTagCopyingBackOnForAnInstanceItCreatedButNotForAnAdoptedOne(t *testing.T) {
 	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, "default", "checkout-service", resourceType, "orders-db", 63)
 	t.Run("created", func(t *testing.T) {
