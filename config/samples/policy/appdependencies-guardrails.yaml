@@ -222,4 +222,3 @@ metadata:
 spec:
   policyName: cloudctl-operator-require-encryption
   validationActions: [Deny, Audit]
-

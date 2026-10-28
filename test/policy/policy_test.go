@@ -150,7 +150,8 @@ func deniedFor(err error, reason string) bool {
 // policy and its binding.
 func sampleDocs(t *testing.T, names ...string) []*unstructured.Unstructured {
 	t.Helper()
-	return pick(t, readDocs(t, filepath.Join(repoRoot, "config", "samples", "policy", "appdependencies-guardrails.yaml")), names...)
+	sample := filepath.Join(repoRoot, "config", "samples", "policy", "appdependencies-guardrails.yaml")
+	return pick(t, readDocs(t, sample), names...)
 }
 
 // chartDocs renders the chart with the policies on and returns the objects
@@ -161,7 +162,10 @@ func chartDocs(t *testing.T, templates []string, set map[string]string, names ..
 	if err != nil {
 		t.Skip("helm is not on the PATH; skipping the tests that render the chart")
 	}
-	args := []string{"template", "cloudctl-operator", filepath.Join(repoRoot, "charts", "chart"), "--namespace", policyNamespace, "--set", "policies.enabled=true"}
+	chart := filepath.Join(repoRoot, "charts", "chart")
+	args := []string{
+		"template", "cloudctl-operator", chart, "--namespace", policyNamespace, "--set", "policies.enabled=true",
+	}
 	for k, v := range set {
 		args = append(args, "--set", k+"="+v)
 	}
@@ -432,7 +436,9 @@ func bare(ns, name string) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
 }
 
-func withQueue(cr *depsv1alpha1.AppDependencies, mutate func(*depsv1alpha1.SQSQueueSpec)) *depsv1alpha1.AppDependencies {
+func withQueue(
+	cr *depsv1alpha1.AppDependencies, mutate func(*depsv1alpha1.SQSQueueSpec),
+) *depsv1alpha1.AppDependencies {
 	queue := depsv1alpha1.SQSQueueSpec{Name: "orders"}
 	mutate(&queue)
 	cr.Spec.SQS = &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{queue}}
@@ -449,11 +455,17 @@ func TestProductionPolicy_RefusesForceAndDeleteOnlyInProductionNamespaces(t *tes
 
 	force := func(q *depsv1alpha1.SQSQueueSpec) { q.Force = true }
 	deleteIt := func(q *depsv1alpha1.SQSQueueSpec) { q.DeletionPolicy = depsv1alpha1.DeletionPolicyDelete }
-	for name, mutate := range map[string]func(*depsv1alpha1.SQSQueueSpec){"force": force, "deletionPolicy Delete": deleteIt} {
-		if err := admin.Create(ctx, withQueue(bare("policy-prod", "refused-"+strings.ToLower(strings.ReplaceAll(name, " ", "-"))), mutate)); !denied(err) {
+	for name, mutate := range map[string]func(*depsv1alpha1.SQSQueueSpec){
+		"force":                 force,
+		"deletionPolicy Delete": deleteIt,
+	} {
+		slug := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+		refused := withQueue(bare("policy-prod", "refused-"+slug), mutate)
+		if err := admin.Create(ctx, refused); !denied(err) {
 			t.Errorf("%s in a production namespace: expected the CR to be denied, got %v", name, err)
 		}
-		if err := admin.Create(ctx, withQueue(bare("policy-dev", "fine-"+strings.ToLower(strings.ReplaceAll(name, " ", "-"))), mutate)); err != nil {
+		allowed := withQueue(bare("policy-dev", "fine-"+slug), mutate)
+		if err := admin.Create(ctx, allowed); err != nil {
 			t.Errorf("%s outside production: expected the CR to be allowed, got %v", name, err)
 		}
 	}
@@ -496,7 +508,8 @@ func TestEncryptionPolicy_RequiresEncryptionAndRefusesAnRDSOptOut(t *testing.T) 
 	}, "")
 
 	encrypted := func(q *depsv1alpha1.SQSQueueSpec) { q.Encryption = &depsv1alpha1.EncryptionSpec{Enabled: true} }
-	if err := admin.Create(ctx, withQueue(bare("policy-encryption", "plain"), func(*depsv1alpha1.SQSQueueSpec) {})); !denied(err) {
+	plain := withQueue(bare("policy-encryption", "plain"), func(*depsv1alpha1.SQSQueueSpec) {})
+	if err := admin.Create(ctx, plain); !denied(err) {
 		t.Errorf("expected a queue without encryption to be denied, got %v", err)
 	}
 	if err := admin.Create(ctx, withQueue(bare("policy-encryption", "sealed"), encrypted)); err != nil {
@@ -517,43 +530,48 @@ func TestEncryptionPolicy_RequiresEncryptionAndRefusesAnRDSOptOut(t *testing.T) 
 // defaults, and a cap the profile leaves out stays the default's.
 func TestLimitsPolicy_AProfileReplacesTheCapsOfItsNamespaces(t *testing.T) {
 	needCluster(t)
-	namespace(t, "policy-profile-default", true)
-	labelledNamespace(t, "policy-profile-large", map[string]string{"cloudctl.io/policy-profile": "large"})
+	const defaultNS, largeNS = "policy-profile-default", "policy-profile-large"
+	namespace(t, defaultNS, true)
+	labelledNamespace(t, largeNS, map[string]string{"cloudctl.io/policy-profile": "large"})
 	docs := chartDocs(t, []string{"limits"}, map[string]string{
 		"policies.action": "Deny",
 		"policies.limits.profiles.large.rds.maxStorage": "2000",
 	}, limitsPolicy, limitsPolicy+"-large")
 	install(t, docs, func() error {
-		return dryRun(withDatabase(appDeps("policy-profile-default", "probe"), "db.t4g.small", 501))
+		return dryRun(withDatabase(appDeps(defaultNS, "probe"), "db.t4g.small", 501))
 	}, "allocatedStorage")
 	waitFor(t, "the profile binding to start judging requests", func() bool {
-		return deniedFor(dryRun(withDatabase(appDeps("policy-profile-large", "probe"), "db.t4g.small", 2001)), "allocatedStorage")
+		cr := withDatabase(appDeps(largeNS, "probe"), "db.t4g.small", 2001)
+		return deniedFor(dryRun(cr), "allocatedStorage")
 	})
 
+	const small = "db.t4g.small"
 	for name, tc := range map[string]struct {
-		ns            string
-		class         string
-		storage       int32
-		ceiling       *int32
-		wantDenied    bool
-		wantDescribed string
+		ns         string
+		class      string
+		storage    int32
+		ceiling    *int32
+		wantDenied string // empty when the CR is allowed
 	}{
-		"default namespace, over the default cap":    {"policy-profile-default", "db.t4g.small", 1000, nil, true, "allocatedStorage"},
-		"profile namespace, inside its own cap":      {"policy-profile-large", "db.t4g.small", 1000, nil, false, ""},
-		"profile namespace, over its own cap":        {"policy-profile-large", "db.t4g.small", 2500, nil, true, "allocatedStorage"},
-		"profile namespace, a class not in the list": {"policy-profile-large", "db.m5.large", 100, nil, true, "instanceClass"},
-		"autoscaling ceiling over the cap":           {"policy-profile-default", "db.t4g.small", 100, new(int32(600)), true, "maxAllocatedStorage"},
-		"autoscaling ceiling inside the cap":         {"policy-profile-default", "db.t4g.small", 100, new(int32(400)), false, ""},
+		"default namespace, over the default cap": {defaultNS, small, 1000, nil, "allocatedStorage"},
+		"profile namespace, inside its own cap":   {largeNS, small, 1000, nil, ""},
+		"profile namespace, over its own cap":     {largeNS, small, 2500, nil, "allocatedStorage"},
+		"profile namespace, class not listed":     {largeNS, "db.m5.large", 100, nil, "instanceClass"},
+		"autoscaling ceiling over the cap":        {defaultNS, small, 100, new(int32(600)), "maxAllocatedStorage"},
+		"autoscaling ceiling inside the cap":      {defaultNS, small, 100, new(int32(400)), ""},
 	} {
 		cr := withDatabase(bare(tc.ns, ""), tc.class, tc.storage)
 		cr.GenerateName = "profile-"
 		cr.Spec.RDS.Resources[0].MaxAllocatedStorage = tc.ceiling
 		err := admin.Create(ctx, cr)
-		if got := denied(err); got != tc.wantDenied {
-			t.Errorf("%s: denied = %v, want %v (%v)", name, got, tc.wantDenied, err)
+		if tc.wantDenied == "" {
+			if err != nil {
+				t.Errorf("%s: expected the CR to be allowed, got %v", name, err)
+			}
+			continue
 		}
-		if tc.wantDenied && err != nil && !strings.Contains(err.Error(), tc.wantDescribed) {
-			t.Errorf("%s: expected the message to mention %q, got %v", name, tc.wantDescribed, err)
+		if !deniedFor(err, tc.wantDenied) {
+			t.Errorf("%s: expected a denial mentioning %q, got %v", name, tc.wantDenied, err)
 		}
 	}
 }

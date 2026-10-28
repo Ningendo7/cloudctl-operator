@@ -498,7 +498,7 @@ policy-sample: install-helm ## Render the chart's admission policies, every rule
 		--set policies.enabled=true --set policies.action=Deny --set policies.encryption.enabled=true \
 		-s templates/policy/enabled-namespaces.yaml -s templates/policy/limits.yaml \
 		-s templates/policy/protect-production.yaml -s templates/policy/require-encryption.yaml \
-		| sed '/^# Source:/d'; } > $(POLICY_SAMPLE)
+		| sed -e '/^# Source:/d' -e '/^$$/d'; } > $(POLICY_SAMPLE)
 
 .PHONY: install-helm
 install-helm: ## Install the pinned, checksum-verified Helm if none is on the PATH.
