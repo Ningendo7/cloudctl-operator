@@ -1234,7 +1234,8 @@ spec:
                             subscribesTo creates a real SNS subscription (and the matching
                             queue resource-policy grant) from each referenced topic into this
                             queue. Each reference must be authorized via the topic's own
-                            sharedWith, the same as any other cross-CR reference.
+                            sharedWith, the same as any other cross-CR reference. Each entry takes
+                            one statement of the queue policy, which SQS limits to 20 in all.
                           items:
                             description: |-
                               ConsumeRef references a resource owned by another AppDependencies CR. The
@@ -1266,7 +1267,7 @@ spec:
                             - namespace
                             - resourceName
                             type: object
-                          maxItems: 20
+                          maxItems: 10
                           type: array
                           x-kubernetes-list-map-keys:
                           - namespace

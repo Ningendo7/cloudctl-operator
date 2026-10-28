@@ -238,9 +238,10 @@ type SQSQueueSpec struct {
 	// subscribesTo creates a real SNS subscription (and the matching
 	// queue resource-policy grant) from each referenced topic into this
 	// queue. Each reference must be authorized via the topic's own
-	// sharedWith, the same as any other cross-CR reference.
+	// sharedWith, the same as any other cross-CR reference. Each entry takes
+	// one statement of the queue policy, which SQS limits to 20 in all.
 	// +optional
-	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:MaxItems=10
 	// +listType=map
 	// +listMapKey=namespace
 	// +listMapKey=name

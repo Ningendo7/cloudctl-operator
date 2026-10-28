@@ -644,7 +644,12 @@ var _ = Describe("AppDependencies CRD validation", func() {
 					i.SharedWith = append(i.SharedWith, depsv1alpha1.SharedWithEntry{Namespace: "team", Name: fmt.Sprintf("consumer-%d", n)})
 				}
 			}), "Too many"),
-			Entry("an SQS name with a space", sqsCR(func(q *depsv1alpha1.SQSQueueSpec) { q.Name = "my orders" }), "should match"),
+			Entry("more subscriptions than a queue policy has room for", sqsCR(func(q *depsv1alpha1.SQSQueueSpec) {
+				for n := range 11 {
+					q.SubscribesTo = append(q.SubscribesTo, depsv1alpha1.ConsumeRef{Namespace: "team", Name: "producer", ResourceName: fmt.Sprintf("topic-%d", n)})
+				}
+			}), "Too many"),
+			Entry("an SQS name with a space",sqsCR(func(q *depsv1alpha1.SQSQueueSpec) { q.Name = "my orders" }), "should match"),
 			Entry("an SQS name over 80 characters", sqsCR(func(q *depsv1alpha1.SQSQueueSpec) { q.Name = strings.Repeat("a", 81) }), "Too long"),
 			Entry("an unknown deletion policy", sqsCR(func(q *depsv1alpha1.SQSQueueSpec) { q.DeletionPolicy = "Purge" }), "Unsupported value"),
 			Entry("an uppercase S3 bucket name", s3CR(func(b *depsv1alpha1.S3BucketSpec) { b.Name = "Receipts" }), "should match"),
