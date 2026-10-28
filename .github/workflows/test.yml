@@ -30,6 +30,10 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The admission policy tests render the chart with it.
+      - name: Install Helm
+        run: hack/install-tool.sh helm
+
       - name: Running Tests
         run: make test-race
 

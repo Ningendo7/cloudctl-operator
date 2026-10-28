@@ -64,12 +64,13 @@ operator's AWS credentials:
 Bound these with what Kubernetes already provides, since the limits depend on
 your organisation:
 
-- [config/samples/policy/](../config/samples/policy/appdependencies-guardrails.yaml)
-  is a `ValidatingAdmissionPolicy` (Kubernetes 1.30 or later, tried on 1.36)
-  that allows CRs only in namespaces labelled `cloudctl.io/enabled=true`,
-  and caps RDS instance classes and storage. Edit its lists to your own. It
-  judges creates and spec changes only, so a CR can always be deleted: the
-  operator's finalizer update changes no spec and is never denied.
+- [The chart's admission policies](admission-policies.md)
+  (`ValidatingAdmissionPolicy`, Kubernetes 1.30 or later, tried on 1.36)
+  allow CRs only in labelled namespaces, cap RDS instance classes and
+  storage, refuse `force` and `deletionPolicy: Delete` in production
+  namespaces, and can require encryption. They judge creates and spec
+  changes only, so a CR can always be deleted: the operator's finalizer
+  update changes no spec and is never denied.
 - `ResourceQuota` caps the CRs per namespace:
   `count/appdependencies.deps.cloudctl.io: "10"`.
 - The operator's IAM role can carry conditions, such as

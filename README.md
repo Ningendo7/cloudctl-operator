@@ -176,6 +176,7 @@ kubectl appdeps version
 - [Resources](docs/resources.md) — field-by-field behavior and known gaps for every resource type.
 - [Condition reasons](docs/reasons.md) — every status reason, what it means and what to do.
 - [Threat model](docs/threat-model.md) — what a multi-tenant fleet of CRs can and can't make the operator do, and how to limit who may create them.
+- [Admission policies](docs/admission-policies.md) — optional chart rules that refuse risky CRs before anything reaches AWS.
 - [Observability](docs/observability.md) — Prometheus metrics, alerts, the Grafana dashboard and opt-in tracing.
 - [Testing](docs/testing.md) — the unit, integration (LocalStack) and live (real AWS) tiers, and what each can't catch.
 - [AWS assumptions](docs/aws-assumptions.md) — which AWS behaviors are verified against a real account and which are assumed from documentation.

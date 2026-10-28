@@ -481,11 +481,24 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
 	sed -i -e '/^prometheus:$$/,/^$$/{' -e '/^  enabled: false$$/r hack/helm/values-prometheus-rules.yaml' -e '}' charts/chart/values.yaml
 	cat hack/helm/values-grafana.yaml >> charts/chart/values.yaml
 	cat hack/helm/values-pdb.yaml >> charts/chart/values.yaml
+	cat hack/helm/values-policies.yaml >> charts/chart/values.yaml
 	@# rbac.namespaced: the plugin offers Role/RoleBinding in place of the
 	@# cluster-wide ones, but the manager watches every namespace and a
 	@# cluster-scoped kind, so that install cannot work. The value is dropped
 	@# from values.yaml; templates/validate.yaml fails a release that sets it.
 	sed -i '/^  ## RBAC resource scope$$/,/^$$/d' charts/chart/values.yaml
+	$(MAKE) policy-sample
+
+POLICY_SAMPLE := config/samples/policy/appdependencies-guardrails.yaml
+
+.PHONY: policy-sample
+policy-sample: install-helm ## Render the chart's admission policies, every rule on and refusing, into config/samples/policy for people who do not use the chart.
+	@{ cat hack/policy-sample-header.txt; \
+	$(HELM) template cloudctl-operator charts/chart --namespace cloudctl-system \
+		--set policies.enabled=true --set policies.action=Deny --set policies.encryption.enabled=true \
+		-s templates/policy/enabled-namespaces.yaml -s templates/policy/limits.yaml \
+		-s templates/policy/protect-production.yaml -s templates/policy/require-encryption.yaml \
+		| sed -e '/^# Source:/d' -e '/^$$/d'; } > $(POLICY_SAMPLE)
 
 .PHONY: install-helm
 install-helm: ## Install the pinned, checksum-verified Helm if none is on the PATH.

@@ -1,18 +1,21 @@
-# Example admission guardrails for AppDependencies. Needs Kubernetes 1.30 or
-# later (ValidatingAdmissionPolicy); edit the allow-lists to your own. Not part
-# of the install: apply it yourself.
+# Admission guardrails for AppDependencies, rendered from the Helm chart's
+# policies (charts/chart/templates/policy) with every rule on and refusing. Do
+# not edit it: change the chart, then run `make policy-sample`. Needs
+# Kubernetes 1.30 or later (ValidatingAdmissionPolicy). Not part of the
+# install: apply it yourself, or set policies.enabled in the chart instead.
 #
-# Both policies judge a request only when it creates a CR or changes its spec.
-# The operator adds and removes its finalizer with a metadata-only update, so
-# that update is never denied: a CR in a namespace that has lost its label, or
-# one the limits have since been tightened below, can still be deleted.
-#
-# Only namespaces labelled cloudctl.io/enabled=true may hold CRs:
-#   kubectl label namespace checkout cloudctl.io/enabled=true
+# The ConfigMap holds the limits; the namespace labels each rule reads are in
+# the chart's values.
+---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: appdependencies-enabled-namespaces
+  name: cloudctl-operator-enabled-namespaces
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: cloudctl-operator
+    helm.sh/chart: cloudctl-operator-0.1.0
+    app.kubernetes.io/instance: cloudctl-operator
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -31,10 +34,15 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: appdependencies-enabled-namespaces
+  name: cloudctl-operator-enabled-namespaces
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: cloudctl-operator
+    helm.sh/chart: cloudctl-operator-0.1.0
+    app.kubernetes.io/instance: cloudctl-operator
 spec:
-  policyName: appdependencies-enabled-namespaces
-  validationActions: [Deny]
+  policyName: cloudctl-operator-enabled-namespaces
+  validationActions: [Deny, Audit]
   matchResources:
     namespaceSelector:
       matchExpressions:
@@ -42,11 +50,15 @@ spec:
           operator: NotIn
           values: ["true"]
 ---
-# Caps on what a CR can ask for.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: appdependencies-limits
+  name: cloudctl-operator-limits
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: cloudctl-operator
+    helm.sh/chart: cloudctl-operator-0.1.0
+    app.kubernetes.io/instance: cloudctl-operator
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -62,15 +74,151 @@ spec:
     - name: databases
       expression: "has(object.spec.rds) && has(object.spec.rds.resources) ? object.spec.rds.resources : []"
   validations:
-    - expression: "variables.databases.all(d, d.instanceClass in ['db.t4g.micro', 'db.t4g.small', 'db.t4g.medium'])"
+    - expression: >-
+        variables.databases.all(d, d.instanceClass in ["db.t4g.micro","db.t4g.small","db.t4g.medium"])
       message: "rds instanceClass must be one of db.t4g.micro, db.t4g.small, db.t4g.medium"
-    - expression: "variables.databases.all(d, d.allocatedStorage <= 500)"
+    - expression: >-
+        variables.databases.all(d, d.allocatedStorage <= 500)
       message: "rds allocatedStorage is limited to 500 GiB"
+    - expression: >-
+        variables.databases.all(d, !has(d.maxAllocatedStorage) || d.maxAllocatedStorage <= 500)
+      message: "rds maxAllocatedStorage is limited to 500 GiB"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: appdependencies-limits
+  name: cloudctl-operator-limits
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: cloudctl-operator
+    helm.sh/chart: cloudctl-operator-0.1.0
+    app.kubernetes.io/instance: cloudctl-operator
 spec:
-  policyName: appdependencies-limits
-  validationActions: [Deny]
+  policyName: cloudctl-operator-limits
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: cloudctl-operator-protect-production
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: cloudctl-operator
+    helm.sh/chart: cloudctl-operator-0.1.0
+    app.kubernetes.io/instance: cloudctl-operator
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["deps.cloudctl.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["appdependencies"]
+  matchConditions:
+    - name: creates-and-spec-changes
+      expression: "request.operation == 'CREATE' || object.spec != oldObject.spec"
+  variables:
+    
+    - name: sqs
+      expression: "has(object.spec.sqs) && has(object.spec.sqs.resources) ? object.spec.sqs.resources : []"
+    - name: sns
+      expression: "has(object.spec.sns) && has(object.spec.sns.resources) ? object.spec.sns.resources : []"
+    - name: s3
+      expression: "has(object.spec.s3) && has(object.spec.s3.resources) ? object.spec.s3.resources : []"
+    - name: dynamodb
+      expression: "has(object.spec.dynamodb) && has(object.spec.dynamodb.resources) ? object.spec.dynamodb.resources : []"
+    - name: rds
+      expression: "has(object.spec.rds) && has(object.spec.rds.resources) ? object.spec.rds.resources : []"
+    - name: kms
+      expression: "has(object.spec.kms) && has(object.spec.kms.resources) ? object.spec.kms.resources : []"
+  validations:
+    - expression: >-
+        variables.sqs.all(r, !(has(r.force) && r.force)) &&
+        variables.sns.all(r, !(has(r.force) && r.force)) &&
+        variables.s3.all(r, !(has(r.force) && r.force)) &&
+        variables.dynamodb.all(r, !(has(r.force) && r.force))
+      message: "force: true is not allowed in a production namespace"
+    - expression: >-
+        variables.sqs.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete')) &&
+        variables.sns.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete')) &&
+        variables.s3.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete')) &&
+        variables.dynamodb.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete')) &&
+        variables.rds.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete')) &&
+        variables.kms.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete'))
+      message: "deletionPolicy: Delete is not allowed in a production namespace"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: cloudctl-operator-protect-production
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: cloudctl-operator
+    helm.sh/chart: cloudctl-operator-0.1.0
+    app.kubernetes.io/instance: cloudctl-operator
+spec:
+  policyName: cloudctl-operator-protect-production
+  validationActions: [Deny, Audit]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: cloudctl.io/environment
+          operator: In
+          values: ["production"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: cloudctl-operator-require-encryption
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: cloudctl-operator
+    helm.sh/chart: cloudctl-operator-0.1.0
+    app.kubernetes.io/instance: cloudctl-operator
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["deps.cloudctl.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["appdependencies"]
+  matchConditions:
+    - name: creates-and-spec-changes
+      expression: "request.operation == 'CREATE' || object.spec != oldObject.spec"
+  variables:
+    
+    - name: sqs
+      expression: "has(object.spec.sqs) && has(object.spec.sqs.resources) ? object.spec.sqs.resources : []"
+    - name: sns
+      expression: "has(object.spec.sns) && has(object.spec.sns.resources) ? object.spec.sns.resources : []"
+    - name: s3
+      expression: "has(object.spec.s3) && has(object.spec.s3.resources) ? object.spec.s3.resources : []"
+    - name: dynamodb
+      expression: "has(object.spec.dynamodb) && has(object.spec.dynamodb.resources) ? object.spec.dynamodb.resources : []"
+    - name: rds
+      expression: "has(object.spec.rds) && has(object.spec.rds.resources) ? object.spec.rds.resources : []"
+    - name: kms
+      expression: "has(object.spec.kms) && has(object.spec.kms.resources) ? object.spec.kms.resources : []"
+  validations:
+    - expression: >-
+        variables.sqs.all(r, has(r.encryption) && ((has(r.encryption.enabled) && r.encryption.enabled) || (has(r.encryption.kmsKeyRef) && r.encryption.kmsKeyRef != ''))) &&
+        variables.sns.all(r, has(r.encryption) && ((has(r.encryption.enabled) && r.encryption.enabled) || (has(r.encryption.kmsKeyRef) && r.encryption.kmsKeyRef != ''))) &&
+        variables.s3.all(r, has(r.encryption) && ((has(r.encryption.enabled) && r.encryption.enabled) || (has(r.encryption.kmsKeyRef) && r.encryption.kmsKeyRef != ''))) &&
+        variables.dynamodb.all(r, has(r.encryption) && ((has(r.encryption.enabled) && r.encryption.enabled) || (has(r.encryption.kmsKeyRef) && r.encryption.kmsKeyRef != '')))
+      message: "sqs, sns, s3 and dynamodb resources must declare encryption: {enabled: true} or a kmsKeyRef"
+    - expression: "variables.rds.all(r, !has(r.encryption) || has(r.encryption) && ((has(r.encryption.enabled) && r.encryption.enabled) || (has(r.encryption.kmsKeyRef) && r.encryption.kmsKeyRef != '')))"
+      message: "an rds instance cannot opt out of encryption"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: cloudctl-operator-require-encryption
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: cloudctl-operator
+    helm.sh/chart: cloudctl-operator-0.1.0
+    app.kubernetes.io/instance: cloudctl-operator
+spec:
+  policyName: cloudctl-operator-require-encryption
+  validationActions: [Deny, Audit]

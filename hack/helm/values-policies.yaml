@@ -1,0 +1,55 @@
+
+## Admission policies for AppDependencies (ValidatingAdmissionPolicy, which
+## needs Kubernetes 1.30 or later). Off by default. They judge a request only
+## when it creates a CR or changes its spec, so a CR can always be deleted.
+##
+policies:
+  enabled: false
+
+  ## Deny refuses a request. Warn lets it through and shows the user the
+  ## message. Audit only records it in the API server's audit log. Start with
+  ## Warn to see what would be refused.
+  ##
+  action: Warn
+
+  ## Only namespaces labelled <label>=true may hold CRs.
+  ##
+  namespaces:
+    enabled: true
+    label: cloudctl.io/enabled
+
+  ## Caps on what a CR can ask for. A namespace labelled <profileLabel>=<name>
+  ## gets that profile's caps instead of the defaults; a profile leaves out
+  ## what it does not change.
+  ##
+  limits:
+    enabled: true
+    profileLabel: cloudctl.io/policy-profile
+    rds:
+      instanceClasses:
+        - db.t4g.micro
+        - db.t4g.small
+        - db.t4g.medium
+      ## GiB, for allocatedStorage and for the maxAllocatedStorage ceiling.
+      maxStorage: 500
+    profiles: {}
+    #  large:
+    #    rds:
+    #      instanceClasses: [db.m6g.large]
+    #      maxStorage: 2000
+
+  ## In namespaces labelled <label> with one of <values>, refuse force: true
+  ## and deletionPolicy: Delete. The label is set by whoever creates the
+  ## namespace; anyone who can edit the Namespace object can change it.
+  ##
+  production:
+    enabled: true
+    label: cloudctl.io/environment
+    values:
+      - production
+
+  ## Refuse resources declared without encryption. An RDS instance is
+  ## encrypted unless it opts out, so only the opt-out is refused.
+  ##
+  encryption:
+    enabled: false
