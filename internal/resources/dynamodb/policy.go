@@ -31,7 +31,9 @@ import (
 )
 
 const (
-	pendingDeletionDenySid = "cloudctl-pending-deletion-deny"
+	// DynamoDB accepts only letters and digits in a statement ID, unlike the
+	// other services, so this one has no hyphens.
+	pendingDeletionDenySid = "CloudctlPendingDeletionDeny"
 
 	// noPolicyRevision is what PutResourcePolicy takes as the expected
 	// revision to attach a policy only if the table has none.
