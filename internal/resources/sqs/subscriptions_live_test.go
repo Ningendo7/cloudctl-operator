@@ -46,6 +46,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/livetest"
+	kmspkg "github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -172,7 +173,10 @@ func TestLive_EnsureSubscriptions_RealSubscribeAndQueuePolicyGrant(t *testing.T)
 func TestLive_EnsureSubscriptions_DeliversIntoAQueueEncryptedWithTheSharedKey(t *testing.T) {
 	ctx := context.Background()
 	f := setupLiveSubscriptionFixture(t)
-	key := livetest.SharedKey(t, skipUnlessLiveAWSCredentials(t))
+	cfg := skipUnlessLiveAWSCredentials(t)
+	key := livetest.SharedKey(t, cfg)
+	// What the key policy sync grants: SNS may use the key for this topic only.
+	livetest.GrantServices(t, cfg, key, kmspkg.ServiceGrants{SNSTopicARNs: []string{f.topicARN}})
 	namespace, crName := "live", liveUniqueSuffix(t)
 	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 		{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: livetest.SharedKeyName}},

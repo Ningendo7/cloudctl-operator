@@ -183,6 +183,29 @@ func Cleanup(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, namespa
 	return reconcileAlarms(ctx, cwClient, own, nil, nil)
 }
 
+// AlarmARNs returns the ARNs of the alarms a CR's spec asks for, none when
+// alarms are not enabled. It is computed from the spec alone, with the names
+// Ensure creates the alarms under, so another CR can name them without
+// reading this one's status: a key policy that lets CloudWatch publish to an
+// encrypted topic lists exactly these.
+func AlarmARNs(
+	region, accountID, namespace, crName string,
+	alarmsSpec *depsv1alpha1.AlarmsSpec,
+	sqsSpec *depsv1alpha1.SQSSpec,
+	snsSpec *depsv1alpha1.SNSSpec,
+	dynamodbSpec *depsv1alpha1.DynamoDBSpec,
+) []string {
+	if alarmsSpec == nil || !alarmsSpec.Enabled {
+		return nil
+	}
+	defs := desiredAlarms(namespace, crName, sqsSpec, snsSpec, dynamodbSpec)
+	arns := make([]string, 0, len(defs))
+	for _, d := range defs {
+		arns = append(arns, alarmARN(region, accountID, d.name))
+	}
+	return arns
+}
+
 // desiredAlarms computes every alarm this CR's current spec implies,
 // purely from spec — no AWS calls, no ledger reads. Safe because every
 // dimension value (queue/topic/table name) is itself fully deterministic

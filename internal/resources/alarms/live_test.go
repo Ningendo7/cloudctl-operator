@@ -49,6 +49,7 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/livetest"
+	kmspkg "github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	snspkg "github.com/Ningendo7/cloudctl-operator/internal/resources/sns"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
@@ -140,7 +141,7 @@ func TestLive_Ensure_CreatesRealAlarmWithTagsAndCleansUp(t *testing.T) {
 
 // TestLive_AlarmReachesAnEncryptedTopic forces an alarm into ALARM and reads
 // the notification from a queue subscribed to a topic encrypted with the
-// shared key, which needs the CloudWatch key policy statement.
+// shared key, which needs the CloudWatch key policy statement for this alarm.
 func TestLive_AlarmReachesAnEncryptedTopic(t *testing.T) {
 	cfg, accountID := skipUnlessLiveAWSCredentials(t)
 	ctx := context.Background()
@@ -196,6 +197,9 @@ func TestLive_AlarmReachesAnEncryptedTopic(t *testing.T) {
 	if len(desired) == 0 {
 		t.Fatal("expected at least one desired alarm")
 	}
+	// What the key policy sync grants: CloudWatch may use the key for this
+	// alarm only.
+	livetest.GrantServices(t, cfg, key, kmspkg.ServiceGrants{AlarmARNs: []string{alarmARN(region, accountID, desired[0].name)}})
 	t.Cleanup(func() {
 		if err := Cleanup(context.Background(), cwClient, namespace, crName, "uid-1", region, accountID); err != nil {
 			t.Logf("alarm cleanup warning: %v", err)

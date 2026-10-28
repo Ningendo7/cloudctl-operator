@@ -22,6 +22,7 @@ package livetest
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -53,4 +54,23 @@ func SharedKey(t *testing.T, cfg aws.Config) depsv1alpha1.ManagedResource {
 	}
 	t.Fatal("the shared live-test KMS key has no ledger entry")
 	return depsv1alpha1.ManagedResource{}
+}
+
+// GrantServices lets AWS services use the shared key for exactly the
+// resources in grants, as the operator's key policy sync does, and takes the
+// grant away again when the test ends, so the next test starts from a key
+// nothing may use. KMS applies a policy change eventually, so it waits a
+// little before returning.
+func GrantServices(t *testing.T, cfg aws.Config, key depsv1alpha1.ManagedResource, grants kmspkg.ServiceGrants) {
+	t.Helper()
+	client := kms.NewFromConfig(cfg)
+	t.Cleanup(func() {
+		if err := kmspkg.SyncServiceGrants(context.Background(), client, key.ARN, kmspkg.ServiceGrants{}, nil); err != nil {
+			t.Logf("removing the service grants from the shared key: %v", err)
+		}
+	})
+	if err := kmspkg.SyncServiceGrants(context.Background(), client, key.ARN, grants, nil); err != nil {
+		t.Fatalf("granting services the shared live-test KMS key: %v", err)
+	}
+	time.Sleep(15 * time.Second)
 }

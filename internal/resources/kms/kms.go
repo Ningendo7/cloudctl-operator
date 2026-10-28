@@ -18,16 +18,11 @@ package kms
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
-	"reflect"
-	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsarn "github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -494,114 +489,6 @@ func adoptKey(
 		return ledger, wrapAWSError(err, fmt.Sprintf("enabling automatic rotation of adopted KMS key %q", alias))
 	}
 	return ledger, nil
-}
-
-const (
-	keyPolicyName       = "default"
-	sidSNSDelivery      = "cloudctl-sns-delivery"
-	sidCloudWatchAlarms = "cloudctl-cloudwatch-alarms"
-)
-
-// serviceKeyStatements are the key policy statements the operator owns,
-// keyed by Sid. AWS services aren't IAM identities in the account, so only
-// the key policy can let SNS deliver into an encrypted queue or CloudWatch
-// publish to an encrypted topic.
-func serviceKeyStatements(account string) map[string]any {
-	statement := func(sid, service string) any {
-		return map[string]any{
-			"Sid":       sid,
-			"Effect":    "Allow",
-			"Principal": map[string]any{"Service": service},
-			"Action":    []any{"kms:GenerateDataKey*", "kms:Decrypt"},
-			"Resource":  "*",
-			"Condition": map[string]any{"StringEquals": map[string]any{"aws:SourceAccount": account}},
-		}
-	}
-	return map[string]any{
-		sidSNSDelivery:      statement(sidSNSDelivery, "sns.amazonaws.com"),
-		sidCloudWatchAlarms: statement(sidCloudWatchAlarms, "cloudwatch.amazonaws.com"),
-	}
-}
-
-// mergeKeyPolicy adds or replaces the operator's statements in policy, by
-// Sid, and keeps every other statement: PutKeyPolicy replaces the whole
-// document. An empty policy gets the account root statement AWS's default
-// policy has, without which IAM policies grant nothing and PutKeyPolicy is
-// refused.
-func mergeKeyPolicy(policy, account string) (merged string, changed bool, err error) {
-	doc := map[string]any{}
-	if policy != "" {
-		if err := json.Unmarshal([]byte(policy), &doc); err != nil {
-			return "", false, fmt.Errorf("parsing key policy: %w", err)
-		}
-	}
-	var statements []any
-	switch st := doc["Statement"].(type) {
-	case []any:
-		statements = st
-	case map[string]any:
-		statements = []any{st}
-	}
-	if policy == "" {
-		doc["Version"] = "2012-10-17"
-		statements = append(statements, map[string]any{
-			"Sid":       "Enable IAM User Permissions",
-			"Effect":    "Allow",
-			"Principal": map[string]any{"AWS": "arn:aws:iam::" + account + ":root"},
-			"Action":    "kms:*",
-			"Resource":  "*",
-		})
-		changed = true
-	}
-
-	owned := serviceKeyStatements(account)
-	for i, st := range statements {
-		m, _ := st.(map[string]any)
-		sid, _ := m["Sid"].(string)
-		want, ours := owned[sid]
-		if !ours {
-			continue
-		}
-		if !reflect.DeepEqual(st, want) {
-			statements[i] = want
-			changed = true
-		}
-		delete(owned, sid)
-	}
-	for _, sid := range slices.Sorted(maps.Keys(owned)) {
-		statements = append(statements, owned[sid])
-		changed = true
-	}
-	if !changed {
-		return policy, false, nil
-	}
-	doc["Statement"] = statements
-	encoded, err := json.Marshal(doc)
-	if err != nil {
-		return "", false, fmt.Errorf("encoding key policy: %w", err)
-	}
-	return string(encoded), true, nil
-}
-
-// ensureKeyPolicy brings a key's policy up to date, writing it only when
-// something changed. The account comes from the key's own ARN.
-func ensureKeyPolicy(ctx context.Context, kmsClient kmsAPI, arn string) error {
-	parsed, err := awsarn.Parse(arn)
-	if err != nil {
-		return fmt.Errorf("parsing key ARN %q: %w", arn, err)
-	}
-	out, err := kmsClient.GetKeyPolicy(ctx, &kms.GetKeyPolicyInput{KeyId: &arn, PolicyName: aws.String(keyPolicyName)})
-	if err != nil {
-		return err
-	}
-	merged, changed, err := mergeKeyPolicy(aws.ToString(out.Policy), parsed.AccountID)
-	if err != nil || !changed {
-		return err
-	}
-	_, err = kmsClient.PutKeyPolicy(ctx, &kms.PutKeyPolicyInput{
-		KeyId: &arn, PolicyName: aws.String(keyPolicyName), Policy: &merged,
-	})
-	return err
 }
 
 // CheckAdoptedKey decides whether a resource found encrypted with currentKey

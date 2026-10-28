@@ -208,3 +208,36 @@ func TestPodNetworkIdentityPublishedPredicate_WakesProducerWhenConsumerStopsBein
 		})
 	}
 }
+
+func TestSpecOrDeletionChangedPredicate(t *testing.T) {
+	pred := SpecOrDeletionChangedPredicate()
+	now := metav1.Now()
+	at := func(generation int64, deleting bool) *depsv1alpha1.AppDependencies {
+		cr := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Generation: generation}}
+		if deleting {
+			cr.DeletionTimestamp = &now
+		}
+		return cr
+	}
+	for name, tc := range map[string]struct {
+		old, new *depsv1alpha1.AppDependencies
+		want     bool
+	}{
+		"spec changed":       {at(1, false), at(2, false), true},
+		"deletion starts":    {at(2, false), at(2, true), true},
+		"status-only update": {at(2, false), at(2, false), false},
+		"already deleting":   {at(2, true), at(2, true), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := pred.Update(event.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}); got != tc.want {
+				t.Errorf("Update() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if !pred.Create(event.CreateEvent{Object: at(1, false)}) || !pred.Delete(event.DeleteEvent{Object: at(1, false)}) {
+		t.Error("creates and deletes must pass: a consumer that appears or disappears changes the producer's grants")
+	}
+	if pred.Generic(event.GenericEvent{Object: at(1, false)}) {
+		t.Error("generic events are not changes")
+	}
+}

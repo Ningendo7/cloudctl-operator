@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -740,7 +741,7 @@ func TestEnsure_AdoptedKeyGetsRotation(t *testing.T) {
 type policyStatementView struct {
 	Sid       string
 	Principal map[string]any
-	Condition map[string]map[string]string
+	Condition map[string]map[string]any
 }
 
 func keyPolicyStatements(t *testing.T, policy string) map[string]policyStatementView {
@@ -756,10 +757,10 @@ func keyPolicyStatements(t *testing.T, policy string) map[string]policyStatement
 	return bySid
 }
 
-// AWS services aren't IAM identities in the account, so only the key
-// policy can let SNS deliver into an encrypted queue, or CloudWatch publish
-// to an encrypted topic. Without it both fail silently.
-func TestEnsure_CreatedKeyPolicyLetsSNSAndCloudWatchUseTheKey(t *testing.T) {
+// A key is created with the account root statement and no service statements:
+// which services need it depends on what is encrypted with it, so
+// SyncServiceGrants decides, and a key nothing uses grants no service anything.
+func TestEnsure_CreatedKeyPolicyHasTheRootStatementAndNoServiceGrants(t *testing.T) {
 	client := newFakeKMS()
 	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
 
@@ -770,18 +771,11 @@ func TestEnsure_CreatedKeyPolicyLetsSNSAndCloudWatchUseTheKey(t *testing.T) {
 	entry, _ := status.FindManagedResource(ledger, resourceType, "primary")
 	statements := keyPolicyStatements(t, client.keys[entry.ARN].policy)
 
-	for sid, service := range map[string]string{"cloudctl-sns-delivery": "sns.amazonaws.com", "cloudctl-cloudwatch-alarms": "cloudwatch.amazonaws.com"} {
-		st, ok := statements[sid]
-		if !ok {
-			t.Errorf("expected statement %s, got %v", sid, statements)
-			continue
-		}
-		if st.Principal["Service"] != service {
-			t.Errorf("%s principal = %v, want %s", sid, st.Principal, service)
-		}
-		if st.Condition["StringEquals"]["aws:SourceAccount"] != "123456789012" {
-			t.Errorf("%s should be scoped to the key's own account, got %v", sid, st.Condition)
-		}
+	if _, ok := statements[sidSNSDelivery]; ok {
+		t.Errorf("a key nothing delivers into got the SNS statement: %v", statements)
+	}
+	if _, ok := statements[sidCloudWatchAlarms]; ok {
+		t.Errorf("a key no topic uses got the CloudWatch statement: %v", statements)
 	}
 	rootKept := false
 	for _, st := range statements {
@@ -794,46 +788,144 @@ func TestEnsure_CreatedKeyPolicyLetsSNSAndCloudWatchUseTheKey(t *testing.T) {
 	}
 }
 
-// PutKeyPolicy replaces the whole policy, so statements someone else added
-// must survive the operator adding its own.
-func TestEnsure_KeyPolicyKeepsOtherStatementsAndIsNotRewrittenWhenCurrent(t *testing.T) {
-	client := newFakeKMS()
-	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
-	client.keys[arn] = ownedFakeKey(arn, "id-1")
-	client.keys[arn].rotationEnabled = true
-	client.keys[arn].policy = `{"Version":"2012-10-17","Statement":{"Sid":"team-admins","Effect":"Allow",` +
-		`"Principal":{"AWS":"arn:aws:iam::123456789012:role/admins"},"Action":"kms:*","Resource":"*"}}`
-	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
-	ledger := trustedKeyLedger(arn)
-	ledger[0].LastVerifiedAt = &stale
-	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+const teamAdmins = `{"Version":"2012-10-17","Statement":{"Sid":"team-admins","Effect":"Allow",` +
+	`"Principal":{"AWS":"arn:aws:iam::123456789012:role/admins"},"Action":"kms:*","Resource":"*"}}`
 
-	ledger, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
-	if err != nil {
-		t.Fatalf("Ensure() error = %v", err)
+const keyForGrants = "arn:aws:kms:us-east-1:123456789012:key/id-1"
+
+func keyWithPolicy(policy string) *fakeKMS {
+	client := newFakeKMS()
+	client.keys[keyForGrants] = ownedFakeKey(keyForGrants, "id-1")
+	client.keys[keyForGrants].policy = policy
+	return client
+}
+
+func TestSyncServiceGrants_SNSMayUseTheKeyOnlyForTheTopicsThatDeliverIntoIt(t *testing.T) {
+	client := keyWithPolicy(teamAdmins)
+	topicA := "arn:aws:sns:us-east-1:123456789012:orders"
+	topicB := "arn:aws:sns:us-east-1:123456789012:billing"
+
+	if err := SyncServiceGrants(context.Background(), client, keyForGrants, ServiceGrants{SNSTopicARNs: []string{topicB, topicA, topicA}}, nil); err != nil {
+		t.Fatalf("SyncServiceGrants() error = %v", err)
 	}
-	statements := keyPolicyStatements(t, client.keys[arn].policy)
-	for _, sid := range []string{"team-admins", "cloudctl-sns-delivery", "cloudctl-cloudwatch-alarms"} {
-		if _, ok := statements[sid]; !ok {
-			t.Errorf("expected statement %s after the merge, got %v", sid, statements)
+
+	statements := keyPolicyStatements(t, client.keys[keyForGrants].policy)
+	if _, ok := statements["team-admins"]; !ok {
+		t.Error("another statement was dropped")
+	}
+	if _, ok := statements[sidCloudWatchAlarms]; ok {
+		t.Error("CloudWatch got a statement although no alarm publishes to a topic encrypted with this key")
+	}
+	st, ok := statements[sidSNSDelivery]
+	if !ok {
+		t.Fatalf("expected the SNS statement, got %v", statements)
+	}
+	if st.Principal["Service"] != "sns.amazonaws.com" || st.Condition["StringEquals"]["aws:SourceAccount"] != "123456789012" {
+		t.Errorf("the statement should name SNS and this account, got %+v", st)
+	}
+	var doc struct {
+		Statement []struct {
+			Sid       string
+			Condition map[string]map[string]any
 		}
 	}
-	if client.putKeyPolicyCalls != 1 {
-		t.Fatalf("PutKeyPolicy calls = %d, want 1", client.putKeyPolicyCalls)
+	if err := json.Unmarshal([]byte(client.keys[keyForGrants].policy), &doc); err != nil {
+		t.Fatal(err)
 	}
-
-	ledger[0].LastVerifiedAt = &stale
-	if _, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err != nil {
-		t.Fatalf("second Ensure() error = %v", err)
-	}
-	if client.putKeyPolicyCalls != 1 {
-		t.Errorf("PutKeyPolicy calls = %d, want no rewrite of a policy that is already current", client.putKeyPolicyCalls)
+	for _, s := range doc.Statement {
+		if s.Sid == sidSNSDelivery {
+			got := s.Condition["ArnEquals"]["aws:SourceArn"]
+			want := []any{topicB, topicA} // sorted: billing before orders
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("aws:SourceArn = %v, want exactly the two topics, sorted and without repeats: %v", got, want)
+			}
+		}
 	}
 }
 
-// Adopting a resource encrypted with a key the operator doesn't know would
-// leave that key untracked and unprotected, and not granted to the CR's
-// role, while data already written stays encrypted with it.
+func TestSyncServiceGrants_CloudWatchMayUseTheKeyOnlyForTheAlarmsThatPublishToIt(t *testing.T) {
+	client := keyWithPolicy(teamAdmins)
+	alarm := "arn:aws:cloudwatch:us-east-1:123456789012:alarm:shop-checkout-age"
+
+	if err := SyncServiceGrants(context.Background(), client, keyForGrants, ServiceGrants{AlarmARNs: []string{alarm}}, nil); err != nil {
+		t.Fatalf("SyncServiceGrants() error = %v", err)
+	}
+
+	statements := keyPolicyStatements(t, client.keys[keyForGrants].policy)
+	if _, ok := statements[sidSNSDelivery]; ok {
+		t.Error("SNS got a statement although no queue encrypted with this key subscribes to a topic")
+	}
+	if st := statements[sidCloudWatchAlarms]; st.Principal["Service"] != "cloudwatch.amazonaws.com" {
+		t.Errorf("expected the CloudWatch statement, got %v", statements)
+	}
+}
+
+// Earlier versions put both statements, open to every topic and alarm in the
+// account, on every key. They are narrowed or removed, and nothing else is.
+func TestSyncServiceGrants_RetiresTheAccountWideStatementsEarlierVersionsWrote(t *testing.T) {
+	legacy := `{"Version":"2012-10-17","Statement":[` +
+		`{"Sid":"team-admins","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::123456789012:role/admins"},"Action":"kms:*","Resource":"*"},` +
+		`{"Sid":"cloudctl-sns-delivery","Effect":"Allow","Principal":{"Service":"sns.amazonaws.com"},"Action":["kms:GenerateDataKey*","kms:Decrypt"],"Resource":"*","Condition":{"StringEquals":{"aws:SourceAccount":"123456789012"}}},` +
+		`{"Sid":"cloudctl-cloudwatch-alarms","Effect":"Allow","Principal":{"Service":"cloudwatch.amazonaws.com"},"Action":["kms:GenerateDataKey*","kms:Decrypt"],"Resource":"*","Condition":{"StringEquals":{"aws:SourceAccount":"123456789012"}}}]}`
+	client := keyWithPolicy(legacy)
+	recordEvent, events := collectEvents()
+
+	if err := SyncServiceGrants(context.Background(), client, keyForGrants, ServiceGrants{}, recordEvent); err != nil {
+		t.Fatalf("SyncServiceGrants() error = %v", err)
+	}
+
+	statements := keyPolicyStatements(t, client.keys[keyForGrants].policy)
+	if len(statements) != 1 || statements["team-admins"].Sid == "" {
+		t.Errorf("only the team's own statement should remain, got %v", statements)
+	}
+	if !slices.Contains(*events, "KeyPolicyUpdated") {
+		t.Errorf("changing a key policy should be said in an event, got %v", *events)
+	}
+}
+
+func TestSyncServiceGrants_WritesOnlyWhenSomethingDiffers(t *testing.T) {
+	client := keyWithPolicy(teamAdmins)
+	grants := ServiceGrants{SNSTopicARNs: []string{"arn:aws:sns:us-east-1:123456789012:orders"}}
+	for range 3 {
+		if err := SyncServiceGrants(context.Background(), client, keyForGrants, grants, nil); err != nil {
+			t.Fatalf("SyncServiceGrants() error = %v", err)
+		}
+	}
+	if client.putKeyPolicyCalls != 1 {
+		t.Errorf("PutKeyPolicy calls = %d over three identical syncs, want 1", client.putKeyPolicyCalls)
+	}
+
+	grants.SNSTopicARNs = append(grants.SNSTopicARNs, "arn:aws:sns:us-east-1:123456789012:billing")
+	if err := SyncServiceGrants(context.Background(), client, keyForGrants, grants, nil); err != nil {
+		t.Fatalf("SyncServiceGrants() error = %v", err)
+	}
+	if client.putKeyPolicyCalls != 2 {
+		t.Errorf("PutKeyPolicy calls = %d after a topic was added, want 2", client.putKeyPolicyCalls)
+	}
+}
+
+// A key scheduled for deletion cannot have its policy changed, and the KMS
+// section already reports it.
+func TestSyncServiceGrants_LeavesAKeyThatCannotBeChanged(t *testing.T) {
+	client := keyWithPolicy(teamAdmins)
+	client.putKeyPolicyErr = &types.KMSInvalidStateException{}
+
+	err := SyncServiceGrants(context.Background(), client, keyForGrants,
+		ServiceGrants{SNSTopicARNs: []string{"arn:aws:sns:us-east-1:123456789012:orders"}}, nil)
+
+	if err != nil {
+		t.Errorf("SyncServiceGrants() error = %v, want none for a key in a state that rejects policy changes", err)
+	}
+	if err := SyncServiceGrants(context.Background(), client, "arn:aws:kms:us-east-1:123456789012:key/gone", ServiceGrants{}, nil); err != nil {
+		t.Errorf("a key that no longer exists is not this function's to report, got %v", err)
+	}
+}
+
+func collectEvents() (func(eventType, reason, message string), *[]string) {
+	var reasonsSeen []string
+	return func(_, reason, _ string) { reasonsSeen = append(reasonsSeen, reason) }, &reasonsSeen
+}
+
 func TestCheckAdoptedKey(t *testing.T) {
 	client := newFakeKMS()
 	const customer = "arn:aws:kms:us-east-1:123456789012:key/customer"

@@ -269,6 +269,11 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(watches.ConsumerPodIdentityToRDSProducers(r.Client)),
 			builder.WithPredicates(predicates.PodNetworkIdentityPublishedPredicate()),
 		).
+		Watches(
+			&depsv1alpha1.AppDependencies{},
+			handler.EnqueueRequestsFromMapFunc(watches.AlarmConsumerToTopicProducer()),
+			builder.WithPredicates(predicates.SpecOrDeletionChangedPredicate()),
+		).
 		WithOptions(controllerOptions(maxConcurrent)).
 		Named("appdependencies").
 		Complete(r)

@@ -24,7 +24,7 @@ the number of series does not grow with the number of CRs.
 | `cloudctl_aws_request_duration_seconds` | histogram | `service` | Wall time of an operation, including SDK retries and rate-limiter waits. |
 | `cloudctl_aws_rate_limit_wait_seconds_total` | counter | `service` | Time spent waiting on the operator's own rate limiter. Its `rate()` is the average number of calls queued behind the limiter; a rising value on one service is the signal to raise that service's `AWS_<SERVICE>_RATE_LIMIT_QPS`. |
 | `cloudctl_aws_destructive_requests_total` | counter | `service`, `operation`, `result` | The AWS operations that remove or disable something (`DeleteQueue`, `RevokeSecurityGroupIngress`, `Unsubscribe`, ...), a subset of `cloudctl_aws_requests_total`. Compare it with what you expected to be deleted. |
-| `cloudctl_section_reconcile_total` | counter | `section`, `result` | One per section per reconcile. `section` is `sqs`, `sns`, `dynamodb`, `s3`, `rds`, `kms`, `alarms` or `iam`. `result` is `ready`, `transient` (waiting, retried), `permission_denied`, `refused` (the operator declined to act and a human has to change something, for example `AdoptionConflict` or `InstanceMissing`) or `error`. |
+| `cloudctl_section_reconcile_total` | counter | `section`, `result` | One per section per reconcile. `section` is `sqs`, `sns`, `dynamodb`, `s3`, `rds`, `kms`, `alarms`, `keypolicy` or `iam`. `result` is `ready`, `transient` (waiting, retried), `permission_denied`, `refused` (the operator declined to act and a human has to change something, for example `AdoptionConflict` or `InstanceMissing`) or `error`. |
 | `cloudctl_section_reconcile_duration_seconds` | histogram | `section` | Wall time of one section. |
 | `cloudctl_events_total` | counter | `type`, `reason` | Every Kubernetes event the operator emits. Kubernetes keeps events for about an hour; this keeps the count. Reasons such as `QueueMissing`, `InstanceMissing`, `KeyMissing` and `InstanceAdopted` make it both an adoption audit trail and the signal that someone is changing things outside the operator. |
 | `cloudctl_aws_clients_ready` | gauge | none | 1 once the AWS clients are initialised, 0 while the manager runs without reaching AWS. |
@@ -110,7 +110,7 @@ One reconcile is one trace:
 |---|---|
 | `Reconcile` | The root, with `cloudctl.namespace` and `cloudctl.name`. Names belong on spans even though they stay off metrics. |
 | `ensure finalizer`, `patch status` | The two writes every reconcile makes to the CR. |
-| `reconcile <section>` and `finalize <section>` | One per section (`kms`, `sqs`, `sns`, `dynamodb`, `s3`, `rds`, `alarms`, `iam`, plus `connectioninfo`), with `cloudctl.section`. |
+| `reconcile <section>` and `finalize <section>` | One per section (`kms`, `sqs`, `sns`, `dynamodb`, `s3`, `rds`, `alarms`, `keypolicy`, `iam`, plus `connectioninfo`), with `cloudctl.section`. |
 | `SQS.GetQueueUrl`, `S3.PutBucketTagging`, ... | Every AWS call, nested under the section that made it. Retries and rate-limiter waits show up as the span's duration. |
 | `kube-apiserver GET/PATCH/...` | Every request to the Kubernetes API server, nested under whatever made it: the finalizer update, the status patch, the ConfigMap and Secret applies. Reads served from the informer cache never reach the API server, so they don't appear, and watches are left out because they stay open for minutes. |
 
