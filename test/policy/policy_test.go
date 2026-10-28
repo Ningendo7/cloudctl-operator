@@ -163,9 +163,9 @@ func chartDocs(t *testing.T, templates []string, set map[string]string, names ..
 		t.Skip("helm is not on the PATH; skipping the tests that render the chart")
 	}
 	chart := filepath.Join(repoRoot, "charts", "chart")
-	args := []string{
-		"template", "cloudctl-operator", chart, "--namespace", policyNamespace, "--set", "policies.enabled=true",
-	}
+	args := make([]string, 0, 7+2*len(set)+2*len(templates))
+	args = append(args,
+		"template", "cloudctl-operator", chart, "--namespace", policyNamespace, "--set", "policies.enabled=true")
 	for k, v := range set {
 		args = append(args, "--set", k+"="+v)
 	}
