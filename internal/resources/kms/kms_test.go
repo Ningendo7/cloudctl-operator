@@ -886,7 +886,7 @@ func TestSyncServiceGrants_RetiresTheAccountWideStatementsEarlierVersionsWrote(t
 func TestSyncServiceGrants_WritesOnlyWhenSomethingDiffers(t *testing.T) {
 	client := keyWithPolicy(teamAdmins)
 	grants := ServiceGrants{SNSTopicARNs: []string{"arn:aws:sns:us-east-1:123456789012:orders"}}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if err := SyncServiceGrants(context.Background(), client, keyForGrants, grants, nil); err != nil {
 			t.Fatalf("SyncServiceGrants() error = %v", err)
 		}

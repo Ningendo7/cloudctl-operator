@@ -320,7 +320,7 @@ func TestSyncKeyPolicies_ReadsAKeyThatGrantsSomethingEveryPass(t *testing.T) {
 	cr.Status.ManagedResources[0].LastVerifiedAt = &metav1.Time{Time: time.Now()}
 	trusted := cr.DeepCopy()
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := syncKeyPolicies(context.Background(), r, cr, trusted, managedKeys(cr)); err != nil {
 			t.Fatalf("syncKeyPolicies() error = %v", err)
 		}

@@ -586,7 +586,7 @@ func TestAlarmARNs_AreTheAlarmsEnsureCreates(t *testing.T) {
 		alarmsSpec, sqsSpec, snsSpec, ddbSpec); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
-	var want []string
+	want := make([]string, 0, len(client.alarms))
 	for name := range client.alarms {
 		want = append(want, alarmARN(testRegion, testAccountID, name))
 	}
