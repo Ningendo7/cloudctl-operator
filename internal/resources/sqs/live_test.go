@@ -1163,20 +1163,16 @@ func TestLive_EnsureSubscriptions_DeliversThroughATopicAndQueueThatRefuseHTTP(t 
 	topicSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "events", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
+	// Registered before Ensure, which creates the topic before it can fail.
+	topicARN := cloudctlaws.TopicARN(cfg.Region, *identity.Account, cloudctlaws.ResourceName(namespace, crName, "sns", "events", 256))
+	t.Cleanup(func() { _, _ = snsClient.DeleteTopic(context.Background(), &sns.DeleteTopicInput{TopicArn: &topicARN}) })
 	topicLedger, err := snspkg.Ensure(ctx, snsClient, nil, namespace, crName, "uid-1", cfg.Region, *identity.Account, topicSpec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("sns Ensure() error = %v", err)
 	}
-	topicARN := ""
-	for _, entry := range topicLedger {
-		if entry.Type == "sns" && entry.Name == "events" {
-			topicARN = entry.ARN
-		}
+	if entry := findEntry(topicLedger, "events"); entry == nil || entry.ARN != topicARN {
+		t.Fatalf("expected a ledger entry for the topic at %s, got %+v", topicARN, topicLedger)
 	}
-	if topicARN == "" {
-		t.Fatal("expected a ledger entry for the topic")
-	}
-	t.Cleanup(func() { _, _ = snsClient.DeleteTopic(context.Background(), &sns.DeleteTopicInput{TopicArn: &topicARN}) })
 	topicAttrs, err := snsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicARN})
 	if err != nil {
 		t.Fatalf("real GetTopicAttributes() error = %v", err)

@@ -155,6 +155,11 @@ func TestLive_AlarmReachesAnEncryptedTopic(t *testing.T) {
 	snsSpec := &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 		{Name: "alerts", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true, Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: livetest.SharedKeyName}},
 	}}
+	// Registered before Ensure, which creates the topic before it can fail.
+	topicARN := cloudctlaws.TopicARN(region, accountID, cloudctlaws.ResourceName(namespace, crName, "sns", "alerts", 256))
+	t.Cleanup(func() {
+		_, _ = snsClient.DeleteTopic(context.Background(), &snssdk.DeleteTopicInput{TopicArn: &topicARN})
+	})
 	ledger, err := snspkg.Ensure(ctx, snsClient, nil, namespace, crName, "uid-1", region, accountID, snsSpec, []depsv1alpha1.ManagedResource{key}, nil, nil)
 	if err != nil {
 		t.Fatalf("sns Ensure() error = %v", err)
@@ -163,9 +168,6 @@ func TestLive_AlarmReachesAnEncryptedTopic(t *testing.T) {
 	if !topicFound {
 		t.Fatal("expected a ledger entry for the topic")
 	}
-	t.Cleanup(func() {
-		_, _ = snsClient.DeleteTopic(context.Background(), &snssdk.DeleteTopicInput{TopicArn: &topic.ARN})
-	})
 
 	queueName := cloudctlaws.ResourceName(namespace, crName, "sqs", "inbox", 80)
 	queueOut, err := sqsClient.CreateQueue(ctx, &sqssdk.CreateQueueInput{QueueName: &queueName})
