@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,12 +100,12 @@ func TestCleanup_ATableWaitingToBeDeletedStopsTakingNewData_ButCanStillBeEmptied
 	}
 	st := v.Statement[0]
 	for _, want := range []string{"dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:BatchWriteItem", "dynamodb:PartiQLInsert", "dynamodb:PartiQLUpdate"} {
-		if !contains(st.Action, want) {
+		if !slices.Contains(st.Action, want) {
 			t.Errorf("the write %s is not denied: %v", want, st.Action)
 		}
 	}
 	for _, mustStayOpen := range []string{"dynamodb:DeleteItem", "dynamodb:PartiQLDelete", "dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:DeleteTable"} {
-		if contains(st.Action, mustStayOpen) {
+		if slices.Contains(st.Action, mustStayOpen) {
 			t.Errorf("%s is denied, but emptying the table needs it: %v", mustStayOpen, st.Action)
 		}
 	}
@@ -123,15 +124,6 @@ func retryable(err error) bool {
 	return cloudctlaws.IsRetryable(err)
 }
 
-func contains(list []string, s string) bool {
-	for _, e := range list {
-		if e == s {
-			return true
-		}
-	}
-	return false
-}
-
 func TestAddPendingDeletionDeny_WritesOnlyWhenItDiffers_AndKeepsOtherStatements(t *testing.T) {
 	client := newFakeDynamoDB()
 	setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyDelete, false)
@@ -139,7 +131,7 @@ func TestAddPendingDeletionDeny_WritesOnlyWhenItDiffers_AndKeepsOtherStatements(
 	table.policy = `{"Version":"2012-10-17","Statement":[{"Sid":"theirs","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:root"},"Action":"dynamodb:GetItem","Resource":"*"}]}`
 	table.policyRevision = 7
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if err := addPendingDeletionDeny(context.Background(), client, table.arn); err != nil {
 			t.Fatalf("addPendingDeletionDeny() error = %v", err)
 		}
