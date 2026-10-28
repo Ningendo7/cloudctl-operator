@@ -40,6 +40,11 @@ manager:
   ##
   releaseTags: true
 
+  ## Extra environment variables for the manager container, as Kubernetes env
+  ## entries, for example OTEL_EXPORTER_OTLP_ENDPOINT to turn on tracing.
+  ##
+  extraEnv: []
+
   ## Image pull secrets
   ##
   # imagePullSecrets:

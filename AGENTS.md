@@ -1,320 +1,96 @@
-# cloudctl-operator - AI Agent Guide
+# cloudctl-operator - agent guide
 
-## Project Structure
+A Kubernetes operator that provisions an app's AWS dependencies (SQS, SNS, S3,
+DynamoDB, RDS, KMS, CloudWatch alarms) from one `AppDependencies` CR, derives the
+IAM role for it, and keeps correcting drift. Start with [README.md](README.md);
+the design reasoning is in [docs/architecture.md](docs/architecture.md) and the
+threat model in [docs/threat-model.md](docs/threat-model.md). Read those before
+changing ownership, deletion, naming or sharing behaviour.
 
-**Single-group layout (default):**
+## Layout
+
 ```
-cmd/main.go                    Manager entry (registers controllers/webhooks)
-api/<version>/*_types.go       CRD schemas (+kubebuilder markers)
-api/<version>/zz_generated.*   Auto-generated (DO NOT EDIT)
-internal/controller/*          Reconciliation logic
-internal/webhook/*             Validation/defaulting (if present)
-config/crd/bases/*             Generated CRDs (DO NOT EDIT)
-config/rbac/role.yaml          Generated RBAC (DO NOT EDIT)
-config/samples/*               Example CRs (edit these)
-Makefile                       Build/test/deploy commands
-PROJECT                        Kubebuilder metadata Auto-generated (DO NOT EDIT)
-```
-
-**Multi-group layout** (for projects with multiple API groups):
-```
-api/<group>/<version>/*_types.go       CRD schemas by group
-internal/controller/<group>/*          Controllers by group
-internal/webhook/<group>/<version>/*   Webhooks by group and version (if present)
-```
-
-Multi-group layout organizes APIs by group name (e.g., `batch`, `apps`). Check the `PROJECT` file for `multigroup: true`.
-
-**To convert to multi-group layout:**
-1. Run: `kubebuilder edit --multigroup=true`
-2. Move APIs: `mkdir -p api/<group> && mv api/<version> api/<group>/`
-3. Move controllers: `mkdir -p internal/controller/<group> && mv internal/controller/*.go internal/controller/<group>/`
-4. Move webhooks (if present): `mkdir -p internal/webhook/<group> && mv internal/webhook/<version> internal/webhook/<group>/`
-5. Update import paths in all files
-6. Fix `path` in `PROJECT` file for each resource
-7. Update test suite CRD paths (add one more `..` to relative paths)
-
-## Critical Rules
-
-### Never Edit These (Auto-Generated)
-- `config/crd/bases/*.yaml` - from `make manifests`
-- `config/rbac/role.yaml` - from `make manifests`
-- `config/webhook/manifests.yaml` - from `make manifests`
-- `**/zz_generated.*.go` - from `make generate`
-- `PROJECT` - from `kubebuilder [OPTIONS]`
-
-### Never Remove Scaffold Markers
-Do NOT delete `// +kubebuilder:scaffold:*` comments. CLI injects code at these markers.
-
-### Keep Project Structure
-Do not move files around. The CLI expects files in specific locations.
-
-### Always Use CLI Commands
-Always use `kubebuilder create api` and `kubebuilder create webhook` to scaffold. Do NOT create files manually.
-
-### E2E Tests Require an Isolated Kind Cluster
-The e2e tests are designed to validate the solution in an isolated environment (similar to GitHub Actions CI).
-Ensure you run them against a dedicated [Kind](https://kind.sigs.k8s.io/) cluster (not your “real” dev/prod cluster).
-
-## After Making Changes
-
-**After editing `*_types.go` or markers:**
-```
-make manifests  # Regenerate CRDs/RBAC from markers
-make generate   # Regenerate DeepCopy methods
+api/v1alpha1/                 CRD types and their kubebuilder markers (validation lives here, as CEL)
+cmd/main.go                   Manager entry point and flags
+cmd/kubectl-appdeps/          The read-only CLI
+internal/controller/          Reconciler: one section per resource type, run in dependency order
+internal/resources/<type>/    One package per AWS resource type: the resource, cleanup, policy, tests
+internal/aws/                 Client interfaces, rate limiting, error classification, naming, tags
+internal/awspolicy/           Adding and removing the operator's own statements in resource policies
+internal/status/              Conditions, the ownership ledger, events
+internal/reasons/             The catalogue of condition reasons
+internal/livetest/, policycheck/   Helpers for the live tests
+charts/chart/                 Helm chart (generated, see below)
+hack/helm/                    Chart additions that survive regeneration
+config/                       Kustomize base and generated CRD/RBAC
+test/e2e, test/policy, test/alerts   Suites that run outside the package tests
+docs/                         User documentation
 ```
 
-**After editing `*.go` files:**
-```
-make lint-fix   # Auto-fix code style
-make test       # Run unit tests
-```
+## Generated files: do not edit by hand
 
-## CLI Commands Cheat Sheet
+`config/crd/bases/`, `config/rbac/role.yaml`, `**/zz_generated.*`, `PROJECT`, and everything
+under `charts/chart/` are produced by `make manifests generate helm-generate`. A hand edit is
+overwritten, and the Manifests Drift check fails when the committed files differ from a fresh
+regeneration.
 
-### Create API (your own types)
-```bash
-kubebuilder create api --group <group> --version <version> --kind <Kind>
-```
+The chart is regenerated wholesale, so a chart-only change goes in one of two places:
 
-### Deploy Image Plugin (scaffold to deploy/manage ANY container image)
+- a `sed` in the `helm-generate` recipe in the `Makefile` (a value or template line inside an
+  existing block, as `extraEnv` and `podBaseSecurityGroupIds` are), or
+- a top-level block in `hack/helm/values-*.yaml`, appended to `values.yaml`.
 
-Generate a controller that deploys and manages a container image (nginx, redis, memcached, your app, etc.):
+Then run `make helm-generate` and commit the result. Never remove `+kubebuilder:scaffold:*`
+markers. A new API kind is added with `kubebuilder create api`, not by hand.
 
-```bash
-# Example: deploying memcached
-kubebuilder create api --group example.com --version v1alpha1 --kind Memcached \
-  --image=memcached:alpine \
-  --plugins=deploy-image.go.kubebuilder.io/v1-alpha
-```
+## What must stay true
 
-Scaffolds good-practice code: reconciliation logic, status conditions, finalizers, RBAC. Use as a reference implementation.
+- **Never act on a resource the operator does not own.** Ownership is the `cloudctl.io/owner` and
+  `cloudctl.io/owner-uid` tags, re-checked before any destructive action. A name match is never
+  ownership; taking over needs `adopt: true`.
+- **`deletionPolicy` defaults to `Retain`.** `Delete` is opt-in, and a resource with data in it is
+  not deleted without `force`. The operator never calls `DeleteDBInstance`.
+- **Backup protections only go up.** Drift correction never turns off or shortens something
+  another system may rely on.
+- **A statement the operator writes into a resource policy has its own Sid, and everything else in
+  the policy is left alone.** Write only when the policy differs.
 
+## When you change X, also change Y
 
-### Create Webhooks
-```bash
-# Validation + defaulting
-kubebuilder create webhook --group <group> --version <version> --kind <Kind> \
-  --defaulting --programmatic-validation
+| Change | Also |
+|---|---|
+| A field or marker in `api/` | `make manifests generate helm-generate`; add a row to the table in `internal/controller/appdependencies_validation_test.go` if it adds validation |
+| A new AWS call | Add it to the client interface and the fake; add the IAM action to the permissions table in `docs/threat-model.md` (`internal/aws/permissions_doc_test.go` fails otherwise) |
+| A new condition reason | Add it to `internal/reasons`, then `go test ./internal/reasons -run Doc -update` to regenerate `docs/reasons.md` |
+| A metric or alert | `docs/observability.md`; alert rules are tested by `test/alerts` with promtool |
+| An admission policy template | `make policy-sample`, which regenerates `config/samples/policy/` |
+| A policy or API behaviour only AWS can judge | A live test (below) |
 
-# Conversion webhook (for multi-version APIs)
-kubebuilder create webhook --group <group> --version v1 --kind <Kind> \
-  --conversion --spoke v2
-```
+## Tests
 
-### Controller for Core Kubernetes Types
-```bash
-# Watch Pods
-kubebuilder create api --group core --version v1 --kind Pod \
-  --controller=true --resource=false
+| Tier | Run | Needs |
+|---|---|---|
+| Unit | `make test` | Nothing external; envtest for the controller |
+| Integration | `make test-integration` | LocalStack in a container |
+| E2E | `make test-e2e` | A kind cluster; use a dedicated one, never a real cluster |
+| Live | `make test-live` | Real AWS credentials; creates and deletes real resources and costs money |
 
-# Watch Deployments
-kubebuilder create api --group apps --version v1 --kind Deployment \
-  --controller=true --resource=false
-```
+The integration, live and e2e files carry build tags. `make lint` lints each tag separately, so
+code behind a tag is linted too. See [docs/testing.md](docs/testing.md).
 
-### Controller for External Types (e.g., from other operators)
+The fakes encode our own belief about AWS, so they cannot catch a wrong belief. Several defects
+were found only by the live tier: SNS rejects a wildcard action in a topic policy, DynamoDB accepts
+only letters and digits in a statement ID, SQS now refuses plain HTTP on every queue, and IAM has no
+`dynamodb:TransactGetItems`. When a change depends on how AWS treats a policy, an action name or an
+error code, add a live test that shows it.
 
-Watch resources from external APIs (cert-manager, Argo CD, Istio, etc.):
+## Code conventions
 
-```bash
-# Example: watching cert-manager Certificate resources
-kubebuilder create api \
-  --group cert-manager --version v1 --kind Certificate \
-  --controller=true --resource=false \
-  --external-api-path=github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1 \
-  --external-api-domain=io \
-  --external-api-module=github.com/cert-manager/cert-manager
-```
-
-**Note:** Use `--external-api-module=<module>@<version>` only if you need a specific version. Otherwise, omit `@<version>` to use what's in go.mod.
-
-### Webhook for External Types
-
-```bash
-# Example: validating external resources
-kubebuilder create webhook \
-  --group cert-manager --version v1 --kind Issuer \
-  --defaulting \
-  --external-api-path=github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1 \
-  --external-api-domain=io \
-  --external-api-module=github.com/cert-manager/cert-manager
-```
-
-## Testing & Development
-
-```bash
-make test              # Run unit tests (uses envtest: real K8s API + etcd)
-make run               # Run locally (uses current kubeconfig context)
-```
-
-Tests use **Ginkgo + Gomega** (BDD style). Check `suite_test.go` for setup.
-
-## Deployment Workflow
-
-```bash
-# 1. Regenerate manifests
-make manifests generate
-
-# 2. Build & deploy
-export IMG=<registry>/<project>:tag
-make docker-build docker-push IMG=$IMG  # Or: kind load docker-image $IMG --name <cluster>
-make deploy IMG=$IMG
-
-# 3. Test
-kubectl apply -k config/samples/
-
-# 4. Debug
-kubectl logs -n <project>-system deployment/<project>-controller-manager -c manager -f
-```
-
-### API Design
-
-**Key markers for** `api/<version>/*_types.go`:
-
-```go
-// +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced
-// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=".status.conditions[?(@.type=='Ready')].status"
-
-// On fields:
-// +kubebuilder:validation:Required
-// +kubebuilder:validation:Minimum=1
-// +kubebuilder:validation:MaxLength=100
-// +kubebuilder:validation:Pattern="^[a-z]+$"
-// +kubebuilder:default="value"
-```
-
-- **Use** `metav1.Condition` for status (not custom string fields)
-- **Use predefined types**: `metav1.Time` instead of `string` for dates
-- **Follow K8s API conventions**: Standard field names (`spec`, `status`, `metadata`)
-
-### Controller Design
-
-**RBAC markers in** `internal/controller/*_controller.go`:
-
-```go
-// +kubebuilder:rbac:groups=mygroup.example.com,resources=mykinds,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=mygroup.example.com,resources=mykinds/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=mygroup.example.com,resources=mykinds/finalizers,verbs=update
-// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-```
-
-**Implementation rules:**
-- **Idempotent reconciliation**: Safe to run multiple times
-- **Re-fetch before updates**: `r.Get(ctx, req.NamespacedName, obj)` before `r.Update` to avoid conflicts
-- **Structured logging**: `log := log.FromContext(ctx); log.Info("msg", "key", val)`
-- **Owner references**: Enable automatic garbage collection (`SetControllerReference`)
-- **Watch secondary resources**: Use `.Owns()` or `.Watches()`, not just `RequeueAfter`
-- **Finalizers**: Clean up external resources (buckets, VMs, DNS entries)
-
-### Logging
-
-**Follow Kubernetes logging message style guidelines:**
-
-- Start from a capital letter
-- Do not end the message with a period
-- Active voice: subject present (`"Deployment could not create Pod"`) or omitted (`"Could not create Pod"`)
-- Past tense: `"Could not delete Pod"` not `"Cannot delete Pod"`
-- Specify object type: `"Deleted Pod"` not `"Deleted"`
-- Balanced key-value pairs
-
-```go
-log.Info("Starting reconciliation")
-log.Info("Created Deployment", "name", deploy.Name)
-log.Error(err, "Failed to create Pod", "name", name)
-```
-
-**Reference:** https://github.com/kubernetes/community/blob/master/contributors/devel/sig-instrumentation/logging.md#message-style-guidelines
-
-### Webhooks
-- **Create all types together**: `--defaulting --programmatic-validation --conversion`
-- **When`--force`is used**: Backup custom logic first, then restore after scaffolding
-- **For multi-version APIs**: Use hub-and-spoke pattern (`--conversion --spoke v2`)
-  - Hub version: Usually oldest stable version (v1)
-  - Spoke versions: Newer versions that convert to/from hub (v2, v3)
-  - Example: `--group crew --version v1 --kind Captain --conversion --spoke v2` (v1 is hub, v2 is spoke)
-
-### Learning from Examples
-
-The **deploy-image plugin** scaffolds a complete controller following good practices. Use it as a reference implementation:
-
-```bash
-kubebuilder create api --group example --version v1alpha1 --kind MyApp \
-  --image=<your-image> --plugins=deploy-image.go.kubebuilder.io/v1-alpha
-```
-
-Generated code includes: status conditions (`metav1.Condition`), finalizers, owner references, events, idempotent reconciliation.
-
-## Distribution Options
-
-### Option 1: YAML Bundle (Kustomize)
-
-```bash
-# Generate dist/install.yaml from Kustomize manifests
-make build-installer IMG=<registry>/<project>:tag
-```
-
-**Key points:**
-- The `dist/install.yaml` is generated from Kustomize manifests (CRDs, RBAC, Deployment)
-- Commit this file to your repository for easy distribution
-- Users only need `kubectl` to install (no additional tools required)
-
-**Example:** Users install with a single command:
-```bash
-kubectl apply -f https://raw.githubusercontent.com/<org>/<repo>/<tag>/dist/install.yaml
-```
-
-### Option 2: Helm Chart
-
-```bash
-kubebuilder edit --plugins=helm/v2-alpha                      # Generates dist/chart/ (default)
-kubebuilder edit --plugins=helm/v2-alpha --output-dir=charts  # Generates charts/chart/
-```
-
-**For development:**
-```bash
-make helm-deploy IMG=<registry>/<project>:<tag>          # Deploy manager via Helm
-make helm-deploy IMG=$IMG HELM_EXTRA_ARGS="--set ..."    # Deploy with custom values
-make helm-status                                         # Show release status
-make helm-uninstall                                      # Remove release
-make helm-history                                        # View release history
-make helm-rollback                                       # Rollback to previous version
-```
-
-**For end users/production:**
-```bash
-helm install my-release ./<output-dir>/chart/ --namespace <ns> --create-namespace
-```
-
-**Important:** If you add webhooks or modify manifests after initial chart generation:
-1. Backup any customizations in `<output-dir>/chart/values.yaml` and `<output-dir>/chart/manager/manager.yaml`
-2. Re-run: `kubebuilder edit --plugins=helm/v2-alpha --force` (use same `--output-dir` if customized)
-3. Manually restore your custom values from the backup
-
-### Publish Container Image
-
-```bash
-export IMG=<registry>/<project>:<version>
-make docker-build docker-push IMG=$IMG
-```
-
-## References
-
-### Essential Reading
-- **Kubebuilder Book**: https://book.kubebuilder.io (comprehensive guide)
-- **controller-runtime FAQ**: https://github.com/kubernetes-sigs/controller-runtime/blob/main/FAQ.md (common patterns and questions)
-- **Good Practices**: https://book.kubebuilder.io/reference/good-practices.html (why reconciliation is idempotent, status conditions, etc.)
-- **Logging Conventions**: https://github.com/kubernetes/community/blob/master/contributors/devel/sig-instrumentation/logging.md#message-style-guidelines (message style, verbosity levels)
-
-### API Design & Implementation
-- **API Conventions**: https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md
-- **Operator Pattern**: https://kubernetes.io/docs/concepts/extend-kubernetes/operator/
-- **Markers Reference**: https://book.kubebuilder.io/reference/markers.html
-
-### Tools & Libraries
-- **controller-runtime**: https://github.com/kubernetes-sigs/controller-runtime
-- **controller-tools**: https://github.com/kubernetes-sigs/controller-tools
-- **Kubebuilder Repo**: https://github.com/kubernetes-sigs/kubebuilder
+- `gocyclo` fails above 20; aim for 15 or less. Do not add `nolint` without a reason on the line.
+- `lll` limits lines to 120 characters, except under `api/`, `internal/` and `test/e2e/`.
+- Use the `slices` package, not `sort`; `for range n`; preallocate slices of known length.
+- Comments say why, never what or when. They do not refer to tracking IDs, audits, reviews or other
+  projects, and do not promise behaviour that no test checks.
+- Log messages start with a capital letter, end without a period, and are in the past tense
+  (`log.Info("Created Deployment", "name", name)`).
+- Docs cover configuration, prerequisites and reason names, not every behaviour.
