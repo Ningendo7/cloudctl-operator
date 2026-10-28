@@ -4,6 +4,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # A release has to be a few days old before it is proposed, so a bad one
+    # that is pulled right after publication never reaches a PR. Security
+    # updates ignore the cooldown.
+    cooldown:
+      default-days: 3
     # One PR per ecosystem per week instead of one per dependency - every
     # PR triggers the full CI matrix (now 6 workflows, several of them a
     # real kind cluster), so ungrouped updates turn routine patch bumps
@@ -29,6 +34,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 3
     groups:
       github-actions:
         patterns:
@@ -44,6 +51,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 3
     groups:
       base-images:
         patterns:

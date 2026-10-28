@@ -104,6 +104,17 @@ bound the final name. FIFO queues and topics get AWS's required `.fifo`
 suffix. S3 bucket names, which are unique across every AWS account, also get
 an 8-character hash of the account ID.
 
+No name includes the cluster or the region, so **an AWS account supports one
+cluster per CR identity** (namespace and name). IAM role and S3 bucket names
+are account-wide and collide at once; the regional types collide between two
+clusters in the same region. A second cluster applying the same CR is refused
+with `PreviousIncarnation`, and if it is told to take over, both operators
+rewrite the role's trust policy to their own cluster in turn, so pods lose AWS
+access back and forth. To move a CR to another cluster, stop the old cluster's
+operator first (see [Moving to a new
+cluster](resources.md#moving-to-a-new-cluster-or-restoring-a-cr)). Use different namespace or CR names for clusters
+that share an account and run side by side.
+
 ## Resource identity delivery to workloads
 
 Two distinct delivery problems, deliberately not solved by the same
