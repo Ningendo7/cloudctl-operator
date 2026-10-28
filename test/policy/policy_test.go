@@ -15,16 +15,20 @@ limitations under the License.
 */
 
 // Package policy_test runs what the repository ships for people to apply
-// themselves, the samples and the example admission policy, against a real API
-// server, so neither can rot. It needs the envtest binaries (KUBEBUILDER_ASSETS,
-// set by `make test` and CI) and skips without them.
+// themselves, the samples and the admission policies, against a real API
+// server, so neither can rot. The policies are the sample rendered from the
+// chart, and the chart itself for what the sample does not show. It needs the
+// envtest binaries (KUBEBUILDER_ASSETS, set by `make test` and CI) and skips
+// without them; the tests that render the chart also need helm.
 package policy_test
 
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -45,12 +50,18 @@ const (
 	// The operator's own finalizer, added and removed with a metadata-only update.
 	finalizer = "deps.cloudctl.io/finalizer"
 
-	namespacePolicy = "appdependencies-enabled-namespaces"
-	limitsPolicy    = "appdependencies-limits"
+	// The policies take their names from the release the sample is rendered as.
+	namespacePolicy  = "cloudctl-operator-enabled-namespaces"
+	limitsPolicy     = "cloudctl-operator-limits"
+	productionPolicy = "cloudctl-operator-protect-production"
+	encryptionPolicy = "cloudctl-operator-require-encryption"
+	policyNamespace  = "cloudctl-system"
 )
 
 var (
 	admin    client.Client
+	envCfg   *rest.Config
+	scheme   *runtime.Scheme
 	stopEnv  func()
 	ctx      = context.Background()
 	repoRoot = filepath.Join("..", "..")
@@ -66,14 +77,14 @@ func TestMain(m *testing.M) {
 		if err != nil {
 			panic(err)
 		}
-		scheme := runtime.NewScheme()
+		scheme = runtime.NewScheme()
 		_ = clientgoscheme.AddToScheme(scheme)
 		_ = depsv1alpha1.AddToScheme(scheme)
 		c, err := client.New(cfg, client.Options{Scheme: scheme})
 		if err != nil {
 			panic(err)
 		}
-		admin, stopEnv = c, func() { _ = env.Stop() }
+		admin, envCfg, stopEnv = c, cfg, func() { _ = env.Stop() }
 	}
 	code := m.Run()
 	if stopEnv != nil {
@@ -128,33 +139,100 @@ func denied(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "denied request")
 }
 
-// install creates one example policy and its binding, and waits until it is
-// judging requests (enforcing reports true). It waits for the policy to be gone
-// again before the test ends, so the next test starts clean.
-func install(t *testing.T, name string, enforcing func() bool) {
+// deniedFor is denied with a reason in the message. A policy whose parameters
+// are not there yet also refuses requests, so a probe that waits for a policy
+// to be ready has to wait for what the policy itself says.
+func deniedFor(err error, reason string) bool {
+	return denied(err) && strings.Contains(err.Error(), reason)
+}
+
+// sampleDocs are the objects of the shipped sample that carry these names: a
+// policy and its binding.
+func sampleDocs(t *testing.T, names ...string) []*unstructured.Unstructured {
 	t.Helper()
-	t.Cleanup(func() {
-		waitFor(t, name+" to stop judging requests", func() bool { return !enforcing() })
-	})
-	policyFile := filepath.Join(repoRoot, "config", "samples", "policy", "appdependencies-guardrails.yaml")
-	for _, doc := range readDocs(t, policyFile) {
-		if doc.GetName() != name {
-			continue
+	return pick(t, readDocs(t, filepath.Join(repoRoot, "config", "samples", "policy", "appdependencies-guardrails.yaml")), names...)
+}
+
+// chartDocs renders the chart with the policies on and returns the objects
+// with these names. It skips the test without helm.
+func chartDocs(t *testing.T, templates []string, set map[string]string, names ...string) []*unstructured.Unstructured {
+	t.Helper()
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is not on the PATH; skipping the tests that render the chart")
+	}
+	args := []string{"template", "cloudctl-operator", filepath.Join(repoRoot, "charts", "chart"), "--namespace", policyNamespace, "--set", "policies.enabled=true"}
+	for k, v := range set {
+		args = append(args, "--set", k+"="+v)
+	}
+	for _, name := range templates {
+		args = append(args, "-s", "templates/policy/"+name+".yaml")
+	}
+	out, err := exec.Command(helm, args...).CombinedOutput() //nolint:gosec // fixed binary, arguments built in this file
+	if err != nil {
+		t.Fatalf("helm %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	path := filepath.Join(t.TempDir(), "rendered.yaml")
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return pick(t, readDocs(t, path), names...)
+}
+
+func pick(t *testing.T, docs []*unstructured.Unstructured, names ...string) []*unstructured.Unstructured {
+	t.Helper()
+	var picked []*unstructured.Unstructured
+	for _, doc := range docs {
+		for _, name := range names {
+			if doc.GetName() == name {
+				picked = append(picked, doc)
+			}
 		}
+	}
+	if len(picked) == 0 {
+		t.Fatalf("found no object named %v", names)
+	}
+	return picked
+}
+
+// install creates policy objects and waits until probe is refused with reason
+// in the message. It waits until probe is no longer refused at all after they
+// are deleted, so the next test starts clean: a binding whose parameters are
+// already gone still refuses requests, with a different message.
+func install(t *testing.T, docs []*unstructured.Unstructured, probe func() error, reason string) {
+	t.Helper()
+	installWith(t, docs, func() bool { return deniedFor(probe(), reason) }, func() bool { return !denied(probe()) })
+}
+
+// installWith is install for a policy whose effect is not a refusal.
+func installWith(t *testing.T, docs []*unstructured.Unstructured, ready, quiet func() bool) {
+	t.Helper()
+	t.Cleanup(func() { waitFor(t, "the policy to stop judging requests", quiet) })
+	for _, doc := range docs {
+		doc = doc.DeepCopy()
 		if err := admin.Create(ctx, doc); err != nil {
-			t.Fatalf("creating %s %s: %v", doc.GetKind(), name, err)
+			t.Fatalf("creating %s %s: %v", doc.GetKind(), doc.GetName(), err)
 		}
 		t.Cleanup(func() { _ = admin.Delete(ctx, doc) })
 	}
-	waitFor(t, name+" to start judging requests", enforcing)
+	waitFor(t, "the policy to start judging requests", ready)
 }
 
 func namespace(t *testing.T, name string, enabled bool) {
 	t.Helper()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	if enabled {
-		ns.Labels = map[string]string{"cloudctl.io/enabled": "true"}
+	labelledNamespace(t, name, enabledLabels(enabled))
+}
+
+func enabledLabels(enabled bool) map[string]string {
+	if !enabled {
+		return nil
 	}
+	return map[string]string{"cloudctl.io/enabled": "true"}
+}
+
+func labelledNamespace(t *testing.T, name string, labels map[string]string) {
+	t.Helper()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
 	if err := admin.Create(ctx, ns); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +324,7 @@ func TestNamespacePolicy_OnlyEnabledNamespacesMayCreateCRs(t *testing.T) {
 	needCluster(t)
 	namespace(t, "policy-ns-enabled", true)
 	namespace(t, "policy-ns-plain", false)
-	install(t, namespacePolicy, func() bool { return denied(dryRun(appDeps("policy-ns-plain", "probe"))) })
+	install(t, sampleDocs(t, namespacePolicy), func() error { return dryRun(appDeps("policy-ns-plain", "probe")) }, "")
 
 	if err := admin.Create(ctx, appDeps("policy-ns-plain", "checkout")); !denied(err) {
 		t.Errorf("expected a CR in an unlabelled namespace to be denied, got %v", err)
@@ -263,7 +341,7 @@ func TestNamespacePolicy_RemovingTheLabelDoesNotBlockDeletion(t *testing.T) {
 	needCluster(t)
 	namespace(t, "policy-ns-unlabelled-later", true)
 	namespace(t, "policy-ns-probe", false)
-	install(t, namespacePolicy, func() bool { return denied(dryRun(appDeps("policy-ns-probe", "probe"))) })
+	install(t, sampleDocs(t, namespacePolicy), func() error { return dryRun(appDeps("policy-ns-probe", "probe")) }, "")
 
 	if err := admin.Create(ctx, withFinalizer(appDeps("policy-ns-unlabelled-later", "checkout"))); err != nil {
 		t.Fatal(err)
@@ -302,9 +380,9 @@ func TestNamespacePolicy_RemovingTheLabelDoesNotBlockDeletion(t *testing.T) {
 func TestLimitsPolicy_DeniesOversizedDatabases(t *testing.T) {
 	needCluster(t)
 	namespace(t, "policy-limits", true)
-	install(t, limitsPolicy, func() bool {
-		return denied(dryRun(withDatabase(appDeps("policy-limits", "probe"), "db.m5.large", 20)))
-	})
+	install(t, sampleDocs(t, limitsPolicy), func() error {
+		return dryRun(withDatabase(appDeps("policy-limits", "probe"), "db.m5.large", 20))
+	}, "instanceClass")
 
 	for name, cr := range map[string]*depsv1alpha1.AppDependencies{
 		"an instance class outside the list": withDatabase(appDeps("policy-limits", "big-class"), "db.r6g.xlarge", 20),
@@ -333,9 +411,9 @@ func TestLimitsPolicy_TightenedLimitsDoNotBlockDeletion(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	install(t, limitsPolicy, func() bool {
-		return denied(dryRun(withDatabase(appDeps("policy-tightened", "probe"), "db.m5.large", 20)))
-	})
+	install(t, sampleDocs(t, limitsPolicy), func() error {
+		return dryRun(withDatabase(appDeps("policy-tightened", "probe"), "db.m5.large", 20))
+	}, "instanceClass")
 
 	stays := &depsv1alpha1.AppDependencies{}
 	if err := admin.Get(ctx, client.ObjectKey{Namespace: "policy-tightened", Name: "stays"}, stays); err != nil {
@@ -347,4 +425,185 @@ func TestLimitsPolicy_TightenedLimitsDoNotBlockDeletion(t *testing.T) {
 	}
 
 	deleteLikeTheOperator(t, "policy-tightened", "goes")
+}
+
+// bare is a CR that declares nothing, for the tests that add one thing.
+func bare(ns, name string) *depsv1alpha1.AppDependencies {
+	return &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+}
+
+func withQueue(cr *depsv1alpha1.AppDependencies, mutate func(*depsv1alpha1.SQSQueueSpec)) *depsv1alpha1.AppDependencies {
+	queue := depsv1alpha1.SQSQueueSpec{Name: "orders"}
+	mutate(&queue)
+	cr.Spec.SQS = &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{queue}}
+	return cr
+}
+
+func TestProductionPolicy_RefusesForceAndDeleteOnlyInProductionNamespaces(t *testing.T) {
+	needCluster(t)
+	labelledNamespace(t, "policy-prod", map[string]string{"cloudctl.io/environment": "production"})
+	labelledNamespace(t, "policy-dev", map[string]string{"cloudctl.io/environment": "dev"})
+	install(t, sampleDocs(t, productionPolicy), func() error {
+		return dryRun(withQueue(bare("policy-prod", "probe"), func(q *depsv1alpha1.SQSQueueSpec) { q.Force = true }))
+	}, "")
+
+	force := func(q *depsv1alpha1.SQSQueueSpec) { q.Force = true }
+	deleteIt := func(q *depsv1alpha1.SQSQueueSpec) { q.DeletionPolicy = depsv1alpha1.DeletionPolicyDelete }
+	for name, mutate := range map[string]func(*depsv1alpha1.SQSQueueSpec){"force": force, "deletionPolicy Delete": deleteIt} {
+		if err := admin.Create(ctx, withQueue(bare("policy-prod", "refused-"+strings.ToLower(strings.ReplaceAll(name, " ", "-"))), mutate)); !denied(err) {
+			t.Errorf("%s in a production namespace: expected the CR to be denied, got %v", name, err)
+		}
+		if err := admin.Create(ctx, withQueue(bare("policy-dev", "fine-"+strings.ToLower(strings.ReplaceAll(name, " ", "-"))), mutate)); err != nil {
+			t.Errorf("%s outside production: expected the CR to be allowed, got %v", name, err)
+		}
+	}
+	if err := admin.Create(ctx, appDeps("policy-prod", "plain")); err != nil {
+		t.Errorf("expected a CR with the safe defaults in production to be allowed, got %v", err)
+	}
+}
+
+// A production CR that already asks for Delete must stay deletable.
+func TestProductionPolicy_DoesNotBlockDeletion(t *testing.T) {
+	needCluster(t)
+	labelledNamespace(t, "policy-prod-existing", map[string]string{"cloudctl.io/environment": "production"})
+	labelledNamespace(t, "policy-prod-probe", map[string]string{"cloudctl.io/environment": "production"})
+	deleteIt := func(q *depsv1alpha1.SQSQueueSpec) { q.DeletionPolicy = depsv1alpha1.DeletionPolicyDelete }
+	if err := admin.Create(ctx, withFinalizer(withQueue(bare("policy-prod-existing", "checkout"), deleteIt))); err != nil {
+		t.Fatal(err)
+	}
+	install(t, sampleDocs(t, productionPolicy), func() error {
+		return dryRun(withQueue(bare("policy-prod-probe", "probe"), deleteIt))
+	}, "")
+
+	key := client.ObjectKey{Namespace: "policy-prod-existing", Name: "checkout"}
+	cr := &depsv1alpha1.AppDependencies{}
+	if err := admin.Get(ctx, key, cr); err != nil {
+		t.Fatal(err)
+	}
+	edited := cr.DeepCopy()
+	edited.Spec.SQS.Resources[0].Overrides = &depsv1alpha1.SQSOverrides{VisibilityTimeoutSeconds: new(int32(60))}
+	if err := admin.Update(ctx, edited); !denied(err) {
+		t.Errorf("expected a spec change that keeps Delete to be denied, got %v", err)
+	}
+	deleteLikeTheOperator(t, key.Namespace, key.Name)
+}
+
+func TestEncryptionPolicy_RequiresEncryptionAndRefusesAnRDSOptOut(t *testing.T) {
+	needCluster(t)
+	namespace(t, "policy-encryption", true)
+	install(t, sampleDocs(t, encryptionPolicy), func() error {
+		return dryRun(withQueue(bare("policy-encryption", "probe"), func(*depsv1alpha1.SQSQueueSpec) {}))
+	}, "")
+
+	encrypted := func(q *depsv1alpha1.SQSQueueSpec) { q.Encryption = &depsv1alpha1.EncryptionSpec{Enabled: true} }
+	if err := admin.Create(ctx, withQueue(bare("policy-encryption", "plain"), func(*depsv1alpha1.SQSQueueSpec) {})); !denied(err) {
+		t.Errorf("expected a queue without encryption to be denied, got %v", err)
+	}
+	if err := admin.Create(ctx, withQueue(bare("policy-encryption", "sealed"), encrypted)); err != nil {
+		t.Errorf("expected an encrypted queue to be allowed, got %v", err)
+	}
+
+	optOut := withDatabase(bare("policy-encryption", "opt-out"), "db.t4g.small", 100)
+	optOut.Spec.RDS.Resources[0].Encryption = &depsv1alpha1.EncryptionSpec{Enabled: false}
+	if err := admin.Create(ctx, optOut); !denied(err) {
+		t.Errorf("expected an RDS instance that opts out of encryption to be denied, got %v", err)
+	}
+	if err := admin.Create(ctx, withDatabase(bare("policy-encryption", "default"), "db.t4g.small", 100)); err != nil {
+		t.Errorf("expected an RDS instance with the default encryption to be allowed, got %v", err)
+	}
+}
+
+// A namespace labelled with a profile gets that profile's caps instead of the
+// defaults, and a cap the profile leaves out stays the default's.
+func TestLimitsPolicy_AProfileReplacesTheCapsOfItsNamespaces(t *testing.T) {
+	needCluster(t)
+	namespace(t, "policy-profile-default", true)
+	labelledNamespace(t, "policy-profile-large", map[string]string{"cloudctl.io/policy-profile": "large"})
+	docs := chartDocs(t, []string{"limits"}, map[string]string{
+		"policies.action": "Deny",
+		"policies.limits.profiles.large.rds.maxStorage": "2000",
+	}, limitsPolicy, limitsPolicy+"-large")
+	install(t, docs, func() error {
+		return dryRun(withDatabase(appDeps("policy-profile-default", "probe"), "db.t4g.small", 501))
+	}, "allocatedStorage")
+	waitFor(t, "the profile binding to start judging requests", func() bool {
+		return deniedFor(dryRun(withDatabase(appDeps("policy-profile-large", "probe"), "db.t4g.small", 2001)), "allocatedStorage")
+	})
+
+	for name, tc := range map[string]struct {
+		ns            string
+		class         string
+		storage       int32
+		ceiling       *int32
+		wantDenied    bool
+		wantDescribed string
+	}{
+		"default namespace, over the default cap":    {"policy-profile-default", "db.t4g.small", 1000, nil, true, "allocatedStorage"},
+		"profile namespace, inside its own cap":      {"policy-profile-large", "db.t4g.small", 1000, nil, false, ""},
+		"profile namespace, over its own cap":        {"policy-profile-large", "db.t4g.small", 2500, nil, true, "allocatedStorage"},
+		"profile namespace, a class not in the list": {"policy-profile-large", "db.m5.large", 100, nil, true, "instanceClass"},
+		"autoscaling ceiling over the cap":           {"policy-profile-default", "db.t4g.small", 100, new(int32(600)), true, "maxAllocatedStorage"},
+		"autoscaling ceiling inside the cap":         {"policy-profile-default", "db.t4g.small", 100, new(int32(400)), false, ""},
+	} {
+		cr := withDatabase(bare(tc.ns, ""), tc.class, tc.storage)
+		cr.GenerateName = "profile-"
+		cr.Spec.RDS.Resources[0].MaxAllocatedStorage = tc.ceiling
+		err := admin.Create(ctx, cr)
+		if got := denied(err); got != tc.wantDenied {
+			t.Errorf("%s: denied = %v, want %v (%v)", name, got, tc.wantDenied, err)
+		}
+		if tc.wantDenied && err != nil && !strings.Contains(err.Error(), tc.wantDescribed) {
+			t.Errorf("%s: expected the message to mention %q, got %v", name, tc.wantDescribed, err)
+		}
+	}
+}
+
+type warnings struct {
+	mu  sync.Mutex
+	got []string
+}
+
+func (w *warnings) HandleWarningHeader(_ int, _ string, text string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.got = append(w.got, text)
+}
+
+func (w *warnings) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.got)
+}
+
+// In Warn mode the request goes through and the user is told why it would
+// have been refused.
+func TestWarnMode_LetsTheRequestThroughWithAWarning(t *testing.T) {
+	needCluster(t)
+	namespace(t, "policy-warn-plain", false)
+	seen := &warnings{}
+	cfg := rest.CopyConfig(envCfg)
+	cfg.WarningHandler = seen
+	warned, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	docs := chartDocs(t, []string{"enabled-namespaces"}, map[string]string{"policies.action": "Warn"}, namespacePolicy)
+	warns := func() bool {
+		before := seen.count()
+		_ = warned.Create(ctx, appDeps("policy-warn-plain", "probe"), client.DryRunAll)
+		return seen.count() > before
+	}
+	installWith(t, docs, warns, func() bool { return !warns() })
+
+	before := seen.count()
+	if err := admin.Create(ctx, appDeps("policy-warn-plain", "checkout")); err != nil {
+		t.Errorf("expected Warn mode to allow the CR, got %v", err)
+	}
+	if err := warned.Create(ctx, appDeps("policy-warn-plain", "checkout-two")); err != nil {
+		t.Errorf("expected Warn mode to allow the CR, got %v", err)
+	}
+	if seen.count() == before {
+		t.Error("expected a warning telling the user the namespace is not labelled")
+	}
 }

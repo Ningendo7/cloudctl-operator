@@ -1,0 +1,66 @@
+{{- if and .Values.policies.enabled .Values.policies.limits.enabled }}
+{{- /*
+  One policy for the defaults and one per profile, each with its numbers
+  written into the rule. A profile's namespaces are left out of the default
+  policy's binding, so exactly one policy judges a CR.
+*/ -}}
+{{- $limits := .Values.policies.limits }}
+{{- $profiles := keys $limits.profiles | sortAlpha }}
+{{- range $profile := concat (list "") $profiles }}
+{{- $rds := dict }}
+{{- $suffix := "limits" }}
+{{- if $profile }}
+{{- $rds = (index $limits.profiles $profile).rds | default dict }}
+{{- $suffix = printf "limits-%s" $profile }}
+{{- end }}
+{{- $name := include "cloudctl-operator.resourceName" (dict "suffix" $suffix "context" $) }}
+{{- $classes := $rds.instanceClasses | default $limits.rds.instanceClasses }}
+{{- $maxStorage := $rds.maxStorage | default $limits.rds.maxStorage | int }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cloudctl-operator.policyLabels" $ | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  {{- include "cloudctl-operator.policyMatch" $ | nindent 2 }}
+  variables:
+    - name: databases
+      expression: "has(object.spec.rds) && has(object.spec.rds.resources) ? object.spec.rds.resources : []"
+  validations:
+    - expression: >-
+        variables.databases.all(d, d.instanceClass in {{ $classes | toJson }})
+      message: "rds instanceClass must be one of {{ join ", " $classes }}"
+    - expression: >-
+        variables.databases.all(d, d.allocatedStorage <= {{ $maxStorage }})
+      message: "rds allocatedStorage is limited to {{ $maxStorage }} GiB"
+    - expression: >-
+        variables.databases.all(d, !has(d.maxAllocatedStorage) || d.maxAllocatedStorage <= {{ $maxStorage }})
+      message: "rds maxAllocatedStorage is limited to {{ $maxStorage }} GiB"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cloudctl-operator.policyLabels" $ | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: {{ include "cloudctl-operator.policyActions" $ }}
+  {{- if $profile }}
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        {{ $limits.profileLabel }}: {{ $profile | quote }}
+  {{- else if $profiles }}
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: {{ $limits.profileLabel }}
+          operator: NotIn
+          values: {{ $profiles | toJson }}
+  {{- end }}
+{{- end }}
+{{- end }}

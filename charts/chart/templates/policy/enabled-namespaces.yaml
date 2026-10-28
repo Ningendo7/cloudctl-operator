@@ -1,0 +1,31 @@
+{{- if and .Values.policies.enabled .Values.policies.namespaces.enabled }}
+{{- $name := include "cloudctl-operator.resourceName" (dict "suffix" "enabled-namespaces" "context" $) }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cloudctl-operator.policyLabels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  {{- include "cloudctl-operator.policyMatch" . | nindent 2 }}
+  validations:
+    - expression: "false"
+      message: "AppDependencies are only allowed in namespaces labelled {{ .Values.policies.namespaces.label }}=true"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cloudctl-operator.policyLabels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: {{ include "cloudctl-operator.policyActions" . }}
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: {{ .Values.policies.namespaces.label }}
+          operator: NotIn
+          values: ["true"]
+{{- end }}

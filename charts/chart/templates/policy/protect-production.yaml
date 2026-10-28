@@ -1,0 +1,45 @@
+{{- if and .Values.policies.enabled .Values.policies.production.enabled }}
+{{- $name := include "cloudctl-operator.resourceName" (dict "suffix" "protect-production" "context" $) }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cloudctl-operator.policyLabels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  {{- include "cloudctl-operator.policyMatch" . | nindent 2 }}
+  variables:
+    {{- include "cloudctl-operator.policyVariables" . | nindent 4 }}
+  validations:
+    - expression: >-
+        variables.sqs.all(r, !(has(r.force) && r.force)) &&
+        variables.sns.all(r, !(has(r.force) && r.force)) &&
+        variables.s3.all(r, !(has(r.force) && r.force)) &&
+        variables.dynamodb.all(r, !(has(r.force) && r.force))
+      message: "force: true is not allowed in a production namespace"
+    - expression: >-
+        variables.sqs.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete')) &&
+        variables.sns.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete')) &&
+        variables.s3.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete')) &&
+        variables.dynamodb.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete')) &&
+        variables.rds.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete')) &&
+        variables.kms.all(r, !(has(r.deletionPolicy) && r.deletionPolicy == 'Delete'))
+      message: "deletionPolicy: Delete is not allowed in a production namespace"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cloudctl-operator.policyLabels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: {{ include "cloudctl-operator.policyActions" . }}
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: {{ .Values.policies.production.label }}
+          operator: In
+          values: {{ .Values.policies.production.values | toJson }}
+{{- end }}

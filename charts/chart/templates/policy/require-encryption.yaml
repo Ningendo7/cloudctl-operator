@@ -1,0 +1,34 @@
+{{- if and .Values.policies.enabled .Values.policies.encryption.enabled }}
+{{- $name := include "cloudctl-operator.resourceName" (dict "suffix" "require-encryption" "context" $) }}
+{{- $encrypted := "has(r.encryption) && ((has(r.encryption.enabled) && r.encryption.enabled) || (has(r.encryption.kmsKeyRef) && r.encryption.kmsKeyRef != ''))" }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cloudctl-operator.policyLabels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  {{- include "cloudctl-operator.policyMatch" . | nindent 2 }}
+  variables:
+    {{- include "cloudctl-operator.policyVariables" . | nindent 4 }}
+  validations:
+    - expression: >-
+        variables.sqs.all(r, {{ $encrypted }}) &&
+        variables.sns.all(r, {{ $encrypted }}) &&
+        variables.s3.all(r, {{ $encrypted }}) &&
+        variables.dynamodb.all(r, {{ $encrypted }})
+      message: "sqs, sns, s3 and dynamodb resources must declare encryption: {enabled: true} or a kmsKeyRef"
+    - expression: "variables.rds.all(r, !has(r.encryption) || {{ $encrypted }})"
+      message: "an rds instance cannot opt out of encryption"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cloudctl-operator.policyLabels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: {{ include "cloudctl-operator.policyActions" . }}
+{{- end }}

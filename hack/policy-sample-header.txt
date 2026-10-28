@@ -1,0 +1,8 @@
+# Admission guardrails for AppDependencies, rendered from the Helm chart's
+# policies (charts/chart/templates/policy) with every rule on and refusing. Do
+# not edit it: change the chart, then run `make policy-sample`. Needs
+# Kubernetes 1.30 or later (ValidatingAdmissionPolicy). Not part of the
+# install: apply it yourself, or set policies.enabled in the chart instead.
+#
+# The ConfigMap holds the limits; the namespace labels each rule reads are in
+# the chart's values.
