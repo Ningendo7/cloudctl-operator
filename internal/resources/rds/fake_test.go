@@ -74,6 +74,8 @@ type fakeInstance struct {
 	iops                  *int32
 	publiclyAccessible    bool
 	deletionProtection    bool
+	copyTagsToSnapshot    bool
+	maxAllocatedStorage   *int32
 }
 
 // awsManagedRDSKey stands for the key RDS uses when encryption is on and no
@@ -201,6 +203,8 @@ func (f *fakeRDS) CreateDBInstance(_ context.Context, in *rds.CreateDBInstanceIn
 		masterUsername:        masterUsername,
 		manageMasterPassword:  manageMasterPassword,
 		deletionProtection:    aws.ToBool(in.DeletionProtection),
+		copyTagsToSnapshot:    aws.ToBool(in.CopyTagsToSnapshot),
+		maxAllocatedStorage:   in.MaxAllocatedStorage,
 	}
 	return &rds.CreateDBInstanceOutput{
 		DBInstance: &types.DBInstance{
@@ -229,6 +233,12 @@ func (f *fakeRDS) ModifyDBInstance(_ context.Context, in *rds.ModifyDBInstanceIn
 	}
 	if in.DeletionProtection != nil {
 		i.deletionProtection = *in.DeletionProtection
+	}
+	if in.CopyTagsToSnapshot != nil {
+		i.copyTagsToSnapshot = *in.CopyTagsToSnapshot
+	}
+	if in.MaxAllocatedStorage != nil {
+		i.maxAllocatedStorage = in.MaxAllocatedStorage
 	}
 	if i.pending == nil {
 		i.pending = &types.PendingModifiedValues{}
@@ -327,6 +337,8 @@ func (f *fakeRDS) DescribeDBInstances(_ context.Context, in *rds.DescribeDBInsta
 				StorageEncrypted:      boolPtr(i.kmsKeyARN != ""),
 				PubliclyAccessible:    boolPtr(i.publiclyAccessible),
 				DeletionProtection:    boolPtr(i.deletionProtection),
+				CopyTagsToSnapshot:    boolPtr(i.copyTagsToSnapshot),
+				MaxAllocatedStorage:   i.maxAllocatedStorage,
 			},
 		},
 	}, nil

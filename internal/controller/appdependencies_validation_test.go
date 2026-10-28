@@ -694,6 +694,9 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Entry("a consumes entry with an empty resourceName", saCR(func(c *depsv1alpha1.AppDependencies) {
 				c.Spec.SQS.Consumes = []depsv1alpha1.ConsumeRef{{Namespace: "team", Name: "producer"}}
 			}), "at least 1 chars long"),
+			Entry("an autoscaling ceiling no larger than the storage", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) {
+				i.MaxAllocatedStorage = new(int32(20))
+			}), "must be larger than allocatedStorage"),
 			Entry("an empty RDS subnet group name", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) { i.DBSubnetGroupName = "" }), "at least 1 chars long"),
 			Entry("an empty DynamoDB partition key", ddbCR(func(t *depsv1alpha1.DynamoDBTableSpec) { t.PartitionKey = "" }), "at least 1 chars long"),
 		)
@@ -713,6 +716,9 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("accepts the same specs once they're valid, so the table is rejecting the right thing", func() {
 			Expect(k8sClient.Create(ctx, rdsCR(func(*depsv1alpha1.RDSInstanceSpec) {}))).To(Succeed())
+			Expect(k8sClient.Create(ctx, rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) {
+				i.MaxAllocatedStorage = new(int32(100))
+			}))).To(Succeed())
 			Expect(k8sClient.Create(ctx, sqsCR(func(*depsv1alpha1.SQSQueueSpec) {}))).To(Succeed())
 			Expect(k8sClient.Create(ctx, s3CR(func(*depsv1alpha1.S3BucketSpec) {}))).To(Succeed())
 			Expect(k8sClient.Create(ctx, ddbCR(func(*depsv1alpha1.DynamoDBTableSpec) {}))).To(Succeed())

@@ -192,6 +192,7 @@ spec:
 | `engineVersion` | A *minimum*, as dotted numbers such as `16` or `16.4`. A higher version upgrades the instance; an instance already at or past it, including one AWS minor-upgraded itself, is left alone. A major upgrade is refused unless `allowMajorVersionUpgrade: true`. |
 | `instanceClass`, `highAvailability` | Instance class and Multi-AZ. Changes are drift-corrected (see below). |
 | `allocatedStorage` | GiB, 20–65536. Can only grow; AWS rounds a growth up to at least 10% more. |
+| `maxAllocatedStorage` | Turns on storage autoscaling up to this many GiB, which must be above `allocatedStorage`. Off unless set, since growth is billed. An instance RDS has grown within the ceiling is not reported as larger than the spec. Removing the field leaves autoscaling as it is. |
 | `backup` | Automated backups with AWS's default 7-day retention. Only ever turned on or extended: omitting it or disabling it on an instance that has backups leaves them on and emits a `BackupsLeftEnabled` warning, since turning them off deletes the existing backups. |
 | `encryption` | `enabled: true` provisions a dedicated key, or `kmsKeyRef` names a key under this CR's `kms.resources` (see [KMS](#kms)). **Immutable once set.** |
 | `applyImmediately` | See "Changing a running instance". |
@@ -202,7 +203,7 @@ spec:
 
 **Connection info.** The owner's and each consumer's connection ConfigMap carries `RDS_<NAME>_HOST`, `_PORT`, `_ENGINE` and `_DB_INSTANCE_IDENTIFIER` (consumers' keys also include the producer's namespace and CR name).
 
-**Encrypted and protected by default.** Without `encryption`, a new instance is encrypted with AWS's own RDS key; `encryption: {enabled: false}` opts out. Instances the operator creates have deletion protection on and kept on while declared (`deletionProtection: false` turns it off), so removing one by hand means turning protection off first. An adopted instance keeps its own setting unless the field is set, with a `DeletionProtectionOff` warning when it's off.
+**Encrypted and protected by default.** Without `encryption`, a new instance is encrypted with AWS's own RDS key; `encryption: {enabled: false}` opts out. Instances the operator creates have deletion protection on and kept on while declared (`deletionProtection: false` turns it off), so removing one by hand means turning protection off first. An adopted instance keeps its own setting unless the field is set, with a `DeletionProtectionOff` warning when it's off. Snapshots of an instance the operator created carry its tags, so one that outlives the instance still says whose it was.
 
 **Private by default.** Instances are created with `PubliclyAccessible` explicitly off, since AWS otherwise defaults to public in a default VPC. If an instance later becomes public, the operator emits an `InstancePubliclyAccessible` warning each reconcile but does not change it: that may be a deliberate decision, and the security group is the only access it controls. An adopted instance keeps the security groups it already has, so check them too.
 

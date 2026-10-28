@@ -99,18 +99,21 @@ const defaultBackupRetentionDays = int32(7)
 var ErrReplicationNotSupported = errors.New("replication is not implemented yet - it needs cross-region awsClient support this operator doesn't have")
 
 type instanceOptions struct {
-	deletionPolicy    depsv1alpha1.DeletionPolicy
-	adopt             bool
-	engine            string
-	engineVersion     string
-	instanceClass     string
-	allocatedStorage  int32
-	applyImmediately  bool
-	allowMajor        bool
-	dbSubnetGroupName string
-	multiAZ           bool
-	backupEnabled     bool
-	kmsKeyARN         *string
+	deletionPolicy   depsv1alpha1.DeletionPolicy
+	adopt            bool
+	engine           string
+	engineVersion    string
+	instanceClass    string
+	allocatedStorage int32
+	// maxAllocatedStorage is the autoscaling ceiling, nil to leave
+	// autoscaling alone.
+	maxAllocatedStorage *int32
+	applyImmediately    bool
+	allowMajor          bool
+	dbSubnetGroupName   string
+	multiAZ             bool
+	backupEnabled       bool
+	kmsKeyARN           *string
 	// encryptionOff is an explicit encryption: {enabled: false}; without
 	// it, an instance with no key is encrypted with AWS's RDS key.
 	encryptionOff      bool
@@ -251,18 +254,19 @@ func (e *ensurer) holdUnauthorized(ctx context.Context, r depsv1alpha1.RDSInstan
 // optionsFor translates a declared instance into what the AWS calls need.
 func optionsFor(r depsv1alpha1.RDSInstanceSpec, sgARN string) instanceOptions {
 	opts := instanceOptions{
-		deletionPolicy:     r.DeletionPolicy,
-		adopt:              r.Adopt,
-		engine:             r.Engine,
-		engineVersion:      r.EngineVersion,
-		instanceClass:      r.InstanceClass,
-		allocatedStorage:   r.AllocatedStorage,
-		applyImmediately:   r.ApplyImmediately,
-		allowMajor:         r.AllowMajorVersionUpgrade,
-		dbSubnetGroupName:  r.DBSubnetGroupName,
-		securityGroupID:    SecurityGroupIDFromARN(sgARN),
-		encryptionOff:      r.Encryption != nil && !r.Encryption.Enabled && r.Encryption.KMSKeyRef == "",
-		deletionProtection: r.DeletionProtection,
+		deletionPolicy:      r.DeletionPolicy,
+		adopt:               r.Adopt,
+		engine:              r.Engine,
+		engineVersion:       r.EngineVersion,
+		instanceClass:       r.InstanceClass,
+		allocatedStorage:    r.AllocatedStorage,
+		maxAllocatedStorage: r.MaxAllocatedStorage,
+		applyImmediately:    r.ApplyImmediately,
+		allowMajor:          r.AllowMajorVersionUpgrade,
+		dbSubnetGroupName:   r.DBSubnetGroupName,
+		securityGroupID:     SecurityGroupIDFromARN(sgARN),
+		encryptionOff:       r.Encryption != nil && !r.Encryption.Enabled && r.Encryption.KMSKeyRef == "",
+		deletionProtection:  r.DeletionProtection,
 	}
 	if r.HighAvailability != nil {
 		opts.multiAZ = r.HighAvailability.Enabled
@@ -523,7 +527,11 @@ func createInstance(
 		// Set explicitly: AWS defaults to public in a default VPC.
 		PubliclyAccessible: aws.Bool(false),
 		MultiAZ:            aws.Bool(opts.multiAZ),
-		Tags:               mapToTags(ownerTags(namespace, crName, crUID)),
+		// Snapshots outlive the instance, and the owner tags are what say
+		// whose they were.
+		CopyTagsToSnapshot:  aws.Bool(true),
+		MaxAllocatedStorage: opts.maxAllocatedStorage,
+		Tags:                mapToTags(ownerTags(namespace, crName, crUID)),
 	}
 	if opts.backupEnabled {
 		input.BackupRetentionPeriod = aws.Int32(defaultBackupRetentionDays)
@@ -582,8 +590,10 @@ func reconcileInstanceAttributes(ctx context.Context, awsClient rdsAPI, instance
 	}
 
 	protectionChange := reconcileDeletionProtection(modify, instance, instanceARN, opts, recordEvent)
+	settingChange := reconcileCopyTags(modify, instance, opts)
+	settingChange = reconcileAutoscaling(modify, instance, opts) || settingChange
 
-	if !storageGrowth && !otherChange && !groupMissing && !protectionChange {
+	if !storageGrowth && !otherChange && !groupMissing && !protectionChange && !settingChange {
 		return nil
 	}
 	return sendModify(ctx, awsClient, modify, instance, instanceARN, opts, storageGrowth, otherChange, recordEvent)
@@ -625,7 +635,9 @@ func reconcileBackupRetention(modify *rds.ModifyDBInstanceInput, cur instanceAtt
 // outright. A smaller spec still gets here, when the instance has grown on
 // its own or the entry was removed and added back, and is reported.
 func reconcileStorage(modify *rds.ModifyDBInstanceInput, instance types.DBInstance, cur instanceAttributes, opts instanceOptions, instanceARN string, recordEvent status.EventRecorder) (growth bool) {
-	reportStorageLargerThanSpec(instanceARN, cur.allocatedStorage, opts.allocatedStorage, recordEvent)
+	if !autoscalingMayHaveGrown(instance, cur.allocatedStorage) {
+		reportStorageLargerThanSpec(instanceARN, cur.allocatedStorage, opts.allocatedStorage, recordEvent)
+	}
 	if opts.allocatedStorage <= cur.allocatedStorage {
 		return false
 	}
@@ -692,6 +704,28 @@ func reconcileDeletionProtection(modify *rds.ModifyDBInstanceInput, instance typ
 	if want && recordEvent != nil {
 		recordEvent("Warning", "DeletionProtectionEnabled", fmt.Sprintf("Turned on deletion protection for RDS instance %s; set deletionProtection: false to allow deleting it", instanceARN))
 	}
+	return true
+}
+
+// reconcileCopyTags keeps tag copying to snapshots on for an instance this
+// operator created. An adopted instance's own setting is left alone. The
+// change applies at once, without downtime.
+func reconcileCopyTags(modify *rds.ModifyDBInstanceInput, instance types.DBInstance, opts instanceOptions) bool {
+	if opts.adopt || aws.ToBool(instance.CopyTagsToSnapshot) {
+		return false
+	}
+	modify.CopyTagsToSnapshot = aws.Bool(true)
+	return true
+}
+
+// reconcileAutoscaling sets the storage autoscaling ceiling when the spec
+// names one. Without one the instance's own setting is not touched. The
+// change applies at once, without downtime.
+func reconcileAutoscaling(modify *rds.ModifyDBInstanceInput, instance types.DBInstance, opts instanceOptions) bool {
+	if opts.maxAllocatedStorage == nil || aws.ToInt32(instance.MaxAllocatedStorage) == *opts.maxAllocatedStorage {
+		return false
+	}
+	modify.MaxAllocatedStorage = opts.maxAllocatedStorage
 	return true
 }
 
@@ -946,6 +980,14 @@ func checkImmutableSettings(instance types.DBInstance, instanceID string, opts i
 		Err:    fmt.Errorf("instance %q can't change: %s; set them back, or move the data to a new entry", instanceID, strings.Join(changed, "; ")),
 		Reason: reasons.ImmutableSettingChanged,
 	}
+}
+
+// autoscalingMayHaveGrown is true for an instance with autoscaling on whose
+// size is within its ceiling: RDS made it bigger than the spec, so the
+// difference is expected.
+func autoscalingMayHaveGrown(instance types.DBInstance, actual int32) bool {
+	limit := aws.ToInt32(instance.MaxAllocatedStorage)
+	return limit > 0 && actual <= limit
 }
 
 func reportStorageLargerThanSpec(instanceARN string, actual, want int32, recordEvent status.EventRecorder) {

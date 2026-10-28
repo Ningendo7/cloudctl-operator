@@ -531,6 +531,16 @@ spec:
                           maxLength: 50
                           pattern: ^db\.[a-z0-9]+\.[a-z0-9]+$
                           type: string
+                        maxAllocatedStorage:
+                          description: |-
+                            maxAllocatedStorage turns on storage autoscaling: RDS grows the
+                            instance on its own, up to this many GiB, when it runs low on space.
+                            Off unless set, because growth is billed. Removing it leaves
+                            autoscaling as it is.
+                          format: int32
+                          maximum: 65536
+                          minimum: 21
+                          type: integer
                         name:
                           description: |-
                             name of the instance, used to derive the actual AWS DB instance
@@ -625,6 +635,9 @@ spec:
                       - message: dbSubnetGroupName is immutable on an RDS instance
                           for now - moving VPCs isn't supported
                         rule: self.dbSubnetGroupName == oldSelf.dbSubnetGroupName
+                      - message: maxAllocatedStorage must be larger than allocatedStorage
+                        rule: '!has(self.maxAllocatedStorage) || self.maxAllocatedStorage
+                          > self.allocatedStorage'
                     maxItems: 20
                     type: array
                     x-kubernetes-list-map-keys:
