@@ -38,16 +38,17 @@ const conditionTypeKeyPolicyReady = "KeyPolicyReady"
 // with what is encrypted with them. Registered after the resource sections,
 // so the subscriptions and topics it names exist in the same pass: a queue
 // encrypted with a key needs SNS to use that key the moment a topic delivers
-// into it.
-func keyPolicySection(r *AppDependenciesReconciler) section {
+// into it. original is the CR as the pass began, to tell which keys were
+// verified during it.
+func keyPolicySection(r *AppDependenciesReconciler, original *depsv1alpha1.AppDependencies) section {
 	return section{
 		name: conditionTypeKeyPolicyReady,
 		reconcile: func(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
-			keys := managedKeyARNs(cr)
+			keys := managedKeys(cr)
 			ctx, cancel := sectionContext(ctx, cr.Status.ManagedResources, resourceTypeKMS, len(keys))
 			defer cancel()
 
-			err := syncKeyPolicies(ctx, r, cr, keys)
+			err := syncKeyPolicies(ctx, r, cr, original, keys)
 			setSectionCondition(ctx, cr, conditionTypeKeyPolicyReady, err, eventRecorderFor(r, cr))
 			return err
 		},
@@ -59,23 +60,29 @@ func keyPolicySection(r *AppDependenciesReconciler) section {
 	}
 }
 
-// managedKeyARNs lists this CR's keys the operator still manages and can
-// still change: not released, and not already scheduled for deletion.
-func managedKeyARNs(cr *depsv1alpha1.AppDependencies) []string {
-	var arns []string
+// managedKeys lists this CR's keys the operator still manages and can still
+// change: not released, and not already scheduled for deletion.
+func managedKeys(cr *depsv1alpha1.AppDependencies) []depsv1alpha1.ManagedResource {
+	var keys []depsv1alpha1.ManagedResource
 	for _, e := range cr.Status.ManagedResources {
 		if e.Type == resourceTypeKMS && e.ARN != "" && e.State != depsv1alpha1.ManagedResourceStateRelinquished && e.PendingDeletionSince == nil {
-			arns = append(arns, e.ARN)
+			keys = append(keys, e)
 		}
 	}
-	return arns
+	return keys
 }
 
 // syncKeyPolicies gives every key exactly the service statements the
 // resources encrypted with it need. If what they need cannot be worked out,
 // nothing is written: guessing "nothing" would take away a grant that is
 // delivering messages right now.
-func syncKeyPolicies(ctx context.Context, r *AppDependenciesReconciler, cr *depsv1alpha1.AppDependencies, keys []string) error {
+//
+// A key that grants something is read every pass, since a subscription or
+// alarm can appear at any time and the grant must be there with it. A key
+// that grants nothing, which is most keys, is read when it is verified, once
+// per trust window: all that is left to find there is a statement an earlier
+// version wrote or someone added back. A nil original reads every key.
+func syncKeyPolicies(ctx context.Context, r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies, keys []depsv1alpha1.ManagedResource) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -84,12 +91,26 @@ func syncKeyPolicies(ctx context.Context, r *AppDependenciesReconciler, cr *deps
 		return err
 	}
 	var firstErr error
-	for _, arn := range keys {
-		if err := kms.SyncServiceGrants(ctx, r.AWSClients.KMS, arn, grants[arn], eventRecorderFor(r, cr)); err != nil && firstErr == nil {
+	for _, key := range keys {
+		g := grants[key.ARN]
+		if len(g.SNSTopicARNs)+len(g.AlarmARNs) == 0 && !verifiedThisPass(original, key) {
+			continue
+		}
+		if err := kms.SyncServiceGrants(ctx, r.AWSClients.KMS, key.ARN, g, eventRecorderFor(r, cr)); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+// verifiedThisPass reports whether the key was checked against AWS during
+// this pass, as opposed to trusted from the ledger.
+func verifiedThisPass(original *depsv1alpha1.AppDependencies, key depsv1alpha1.ManagedResource) bool {
+	if original == nil {
+		return true
+	}
+	before, _ := status.FindManagedResource(original.Status.ManagedResources, resourceTypeKMS, key.Name)
+	return status.VerifiedSince(before, key)
 }
 
 // keyServiceGrants works out, per key ARN, which topics SNS delivers from

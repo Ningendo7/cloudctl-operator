@@ -204,7 +204,7 @@ func allSections(r *AppDependenciesReconciler, original *depsv1alpha1.AppDepende
 		s3Section(r, original),
 		rdsSection(r, original),
 		alarmsSection(r),
-		keyPolicySection(r),
+		keyPolicySection(r, original),
 		iamSection(r),
 	}
 }

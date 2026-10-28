@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -219,7 +220,7 @@ func TestSyncKeyPolicies_FollowsTheSubscriptionsOfTheQueuesEncryptedWithTheKey(t
 	r := reconcilerWithKeys(k8s, kmsClient)
 	cr := checkoutCR(eventsFromShop)
 
-	if err := syncKeyPolicies(context.Background(), r, cr, managedKeyARNs(cr)); err != nil {
+	if err := syncKeyPolicies(context.Background(), r, cr, nil, managedKeys(cr)); err != nil {
 		t.Fatalf("syncKeyPolicies() error = %v", err)
 	}
 	policy := kmsClient.keys[checkoutKeyARN].policy
@@ -227,7 +228,7 @@ func TestSyncKeyPolicies_FollowsTheSubscriptionsOfTheQueuesEncryptedWithTheKey(t
 		t.Fatalf("SNS should be allowed to use the key for the subscribed topic, policy: %s", policy)
 	}
 
-	if err := syncKeyPolicies(context.Background(), r, cr, managedKeyARNs(cr)); err != nil {
+	if err := syncKeyPolicies(context.Background(), r, cr, nil, managedKeys(cr)); err != nil {
 		t.Fatalf("second syncKeyPolicies() error = %v", err)
 	}
 	if kmsClient.policyWrites != 1 {
@@ -236,7 +237,7 @@ func TestSyncKeyPolicies_FollowsTheSubscriptionsOfTheQueuesEncryptedWithTheKey(t
 
 	// The queue stops subscribing: the grant goes with it.
 	cr.Spec.SQS.Resources[0].SubscribesTo = nil
-	if err := syncKeyPolicies(context.Background(), r, cr, managedKeyARNs(cr)); err != nil {
+	if err := syncKeyPolicies(context.Background(), r, cr, nil, managedKeys(cr)); err != nil {
 		t.Fatalf("syncKeyPolicies() error = %v", err)
 	}
 	if strings.Contains(kmsClient.keys[checkoutKeyARN].policy, "cloudctl-sns-delivery") {
@@ -254,7 +255,7 @@ func TestSyncKeyPolicies_WritesNothingWhenWhatIsNeededCannotBeWorkedOut(t *testi
 			},
 		}).Build()
 
-	err := syncKeyPolicies(context.Background(), reconcilerWithKeys(k8s, kmsClient), platform, managedKeyARNs(platform))
+	err := syncKeyPolicies(context.Background(), reconcilerWithKeys(k8s, kmsClient), platform, nil, managedKeys(platform))
 
 	if err == nil {
 		t.Fatal("syncKeyPolicies() should fail so the pass is retried")
@@ -264,7 +265,7 @@ func TestSyncKeyPolicies_WritesNothingWhenWhatIsNeededCannotBeWorkedOut(t *testi
 	}
 }
 
-func TestManagedKeyARNs_LeavesOutKeysThatAreReleasedOrBeingDeleted(t *testing.T) {
+func TestManagedKeys_LeavesOutKeysThatAreReleasedOrBeingDeleted(t *testing.T) {
 	now := metav1.Now()
 	cr := &depsv1alpha1.AppDependencies{Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
 		{Type: "kms", Name: "live", ARN: "arn:live", State: depsv1alpha1.ManagedResourceStateVerified},
@@ -274,7 +275,57 @@ func TestManagedKeyARNs_LeavesOutKeysThatAreReleasedOrBeingDeleted(t *testing.T)
 		{Type: "sqs", Name: "not-a-key", ARN: "arn:queue"},
 	}}}
 
-	if got := managedKeyARNs(cr); len(got) != 1 || got[0] != "arn:live" {
-		t.Errorf("managedKeyARNs() = %v, want only the live key", got)
+	if got := managedKeys(cr); len(got) != 1 || got[0].ARN != "arn:live" {
+		t.Errorf("managedKeys() = %v, want only the live key", got)
+	}
+}
+
+const staleAccountWide = `{"Version":"2012-10-17","Statement":[` +
+	`{"Sid":"cloudctl-sns-delivery","Effect":"Allow","Principal":{"Service":"sns.amazonaws.com"},"Action":["kms:Decrypt"],"Resource":"*"}]}`
+
+// A key that grants nothing is read when it is verified, once per trust
+// window, not on every pass; a key that grants something is read every pass,
+// so a new subscription is never waiting on the next window.
+func TestSyncKeyPolicies_ReadsAKeyThatGrantsNothingOnlyWhenItIsVerified(t *testing.T) {
+	kmsClient := fakeKeys(checkoutKeyARN)
+	kmsClient.keys[checkoutKeyARN].policy = staleAccountWide
+	cr := checkoutCR() // no subscription: nothing to grant
+	r := reconcilerWithKeys(keyPolicyScheme(t), kmsClient)
+	cr.Status.ManagedResources[0].LastVerifiedAt = &metav1.Time{Time: time.Now()}
+	trusted := cr.DeepCopy() // the pass began with the key already verified
+
+	if err := syncKeyPolicies(context.Background(), r, cr, trusted, managedKeys(cr)); err != nil {
+		t.Fatalf("syncKeyPolicies() error = %v", err)
+	}
+	if kmsClient.policyReads != 0 {
+		t.Errorf("a key trusted from the ledger that grants nothing was read %d time(s)", kmsClient.policyReads)
+	}
+
+	// The same key, verified during this pass: the stale statement goes.
+	began := cr.DeepCopy()
+	began.Status.ManagedResources[0].LastVerifiedAt = &metav1.Time{Time: time.Now().Add(-time.Hour)}
+	if err := syncKeyPolicies(context.Background(), r, cr, began, managedKeys(cr)); err != nil {
+		t.Fatalf("syncKeyPolicies() error = %v", err)
+	}
+	if strings.Contains(kmsClient.keys[checkoutKeyARN].policy, "cloudctl-sns-delivery") {
+		t.Errorf("the statement an earlier version wrote was not retired when the key was verified: %s", kmsClient.keys[checkoutKeyARN].policy)
+	}
+}
+
+func TestSyncKeyPolicies_ReadsAKeyThatGrantsSomethingEveryPass(t *testing.T) {
+	kmsClient := fakeKeys(checkoutKeyARN)
+	k8s := keyPolicyScheme(t, platformCR(shopGrant))
+	r := reconcilerWithKeys(k8s, kmsClient)
+	cr := checkoutCR(eventsFromShop)
+	cr.Status.ManagedResources[0].LastVerifiedAt = &metav1.Time{Time: time.Now()}
+	trusted := cr.DeepCopy()
+
+	for i := 0; i < 2; i++ {
+		if err := syncKeyPolicies(context.Background(), r, cr, trusted, managedKeys(cr)); err != nil {
+			t.Fatalf("syncKeyPolicies() error = %v", err)
+		}
+	}
+	if kmsClient.policyReads != 2 {
+		t.Errorf("policy reads = %d over two trusted passes, want one each: a subscription must not wait for the next window", kmsClient.policyReads)
 	}
 }

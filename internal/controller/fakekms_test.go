@@ -46,8 +46,9 @@ type fakeKMSClient struct {
 
 	nextKeyNum int
 
-	// policyWrites counts PutKeyPolicy calls.
+	// policyWrites and policyReads count PutKeyPolicy and GetKeyPolicy calls.
 	policyWrites int
+	policyReads  int
 }
 
 func newFakeKMSClient() *fakeKMSClient {
@@ -128,6 +129,7 @@ func (f *fakeKMSClient) GetKeyPolicy(_ context.Context, in *kms.GetKeyPolicyInpu
 	if arn == "" {
 		return nil, &types.NotFoundException{}
 	}
+	f.policyReads++
 	policy := f.keys[arn].policy
 	return &kms.GetKeyPolicyOutput{Policy: &policy}, nil
 }
