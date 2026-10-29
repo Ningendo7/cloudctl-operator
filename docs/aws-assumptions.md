@@ -80,6 +80,9 @@ after ~9.1 seconds, 9 attempts.
   (`InvalidParameter: Policy statement action out of service scope!`, for
   `sns:*` and `SNS:*` alike), so the transport statement names the topic
   actions. Explicit actions in either case are accepted.
+- IAM returns a role's trust policy and inline policy URL-encoded but
+  otherwise byte for byte as submitted, so the operator's compact JSON comes
+  back equal and the comparison does not need to decode it.
 - DynamoDB accepts only letters and digits in the ID of a resource policy
   statement. A deny on writes took effect within about ten seconds. A second
   change within fifteen seconds of the last is refused with

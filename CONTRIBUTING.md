@@ -9,7 +9,7 @@ Standard fork-and-PR: fork the repo, branch off `main`, open a PR against
 
 ```bash
 make manifests generate   # after changing any +kubebuilder:... marker
-make test                 # unit tier - fast, no external dependencies
+make test                 # unit tier - no AWS or cluster; downloads envtest binaries on first run
 make build                # confirm it compiles
 ```
 

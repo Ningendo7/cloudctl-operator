@@ -131,17 +131,12 @@ func newRateLimiters() map[string]*rate.Limiter {
 
 // NewClients loads the default AWS config (region/credentials resolved from
 // the environment/IRSA), resolves this account's own identity via STS, and
-// builds one client per service. IAM gets a tighter retry budget than the
-// others since its rate limits are considerably stricter. Failing to
-// resolve the account ID is treated as fatal, same as a config load
-// failure — if we can't determine our own identity, something is
-// fundamentally wrong with the credentials setup, and failing fast at
-// startup beats failing deep inside a random reconcile later.
+// builds one client per service. An account lookup that fails is returned as
+// an error; the caller retries it until it succeeds.
 //
 // Each service's client also gets its own outgoing rate limiter attached
-// as SDK middleware (see ratelimit.go) — independent of retry budget,
-// this paces requests *before* they're sent, rather than backing off
-// after AWS itself starts throttling.
+// as SDK middleware (see ratelimit.go): it paces requests *before* they're
+// sent, rather than backing off after AWS itself starts throttling.
 func NewClients(ctx context.Context) (*Clients, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -149,9 +144,6 @@ func NewClients(ctx context.Context) (*Clients, error) {
 	}
 
 	limiters := newRateLimiters()
-
-	iamCfg := cfg.Copy()
-	iamCfg.RetryMaxAttempts = 3
 
 	stsClient := sts.NewFromConfig(cfg)
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
@@ -188,7 +180,7 @@ func NewClients(ctx context.Context) (*Clients, error) {
 			o.APIOptions = withObservability(o.APIOptions, serviceNameKMS, limiters[serviceNameKMS])
 			o.TracerProvider = tracerProvider()
 		}),
-		IAM: iam.NewFromConfig(iamCfg, func(o *iam.Options) {
+		IAM: iam.NewFromConfig(cfg, func(o *iam.Options) {
 			o.APIOptions = withObservability(o.APIOptions, serviceNameIAM, limiters[serviceNameIAM])
 			o.TracerProvider = tracerProvider()
 		}),

@@ -58,13 +58,13 @@ import (
 
 const resourceType = "sns" // ConsumeRef resolution for snsTopicRef always targets an SNS topic.
 
+// queueNameDimension is the CloudWatch dimension SQS metrics are keyed by.
+const queueNameDimension = "QueueName"
+
 // treatMissingDataNotBreaching is CloudWatch's TreatMissingData value this
 // package always uses: a resource that's momentarily stopped reporting
 // metrics (not necessarily broken) shouldn't flip an alarm to ALARM on
 // absence alone.
-// queueNameDimension is the CloudWatch dimension SQS metrics are keyed by.
-const queueNameDimension = "QueueName"
-
 const treatMissingDataNotBreaching = "notBreaching"
 
 // Alarm name suffixes. Combined with cloudctlaws.ResourceName's own

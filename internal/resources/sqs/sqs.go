@@ -236,7 +236,7 @@ func ensureQueue(
 
 	entry, entryFound := status.FindManagedResource(ledger, resourceType, q.Name)
 	if !entryFound {
-		return ledger, fmt.Errorf("expected a ledger entry after ensuring it, found none")
+		return ledger, errors.New("expected a ledger entry after ensuring it, found none")
 	}
 	queueName, err := queueNameFromARN(entry.ARN)
 	if err != nil {
@@ -274,7 +274,7 @@ func ensureSingleQueue(
 	if !status.VerifiedSince(before, entry) {
 		return ledger, queueURL, nil
 	}
-	return ledger, queueURL, reconcileTransportSecurity(ctx, awsClient, queueURL, entry.ARN, recordEvent)
+	return ledger, queueURL, reconcileDeclaredPolicy(ctx, awsClient, queueURL, entry.ARN, recordEvent)
 }
 
 // ensureQueueExists is ensureSingleQueue without the transport-security

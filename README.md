@@ -44,7 +44,7 @@ role scoped to exactly these resources, and a ConfigMap the app consumes via
 - **DynamoDB** — tables with on-demand or provisioned billing, point-in-time recovery, dedicated or shared KMS encryption.
 - **S3** — buckets with versioning/lifecycle-based backup, dedicated or shared KMS encryption.
 - **RDS** — Postgres, MySQL and MariaDB instances in a subnet group your platform team grants, with a dedicated security group opened only to the CRs you share it with, AWS-managed credentials mirrored into a Secret, encryption and deletion protection on by default. The operator never deletes an instance.
-- **KMS** — standalone keys for deliberate reuse across resources, with real access-level-aware grants.
+- **KMS** — standalone keys for deliberate reuse by resources in the same CR, with a key policy narrowed to the exact topics and alarms that use the key.
 - **CloudWatch alarms** — per-resource alarms, including notification to a topic owned by a different team's CR.
 - **IAM** — one role per CR, derived from exactly what it owns and what's been explicitly shared with it, attached via IRSA.
 
@@ -169,6 +169,29 @@ kubectl appdeps version
 
 `checksums.txt` and an SPDX SBOM per platform are attached too. Or build it:
 `go install github.com/Ningendo7/cloudctl-operator/cmd/kubectl-appdeps@<release>`.
+
+## Uninstalling
+
+Delete the `AppDependencies` CRs first and wait until they are gone. Each CR
+carries a finalizer that only the operator removes, after it has dealt with the
+CR's resources according to their `deletionPolicy`. Uninstalling the chart
+first, or deleting a namespace that still holds CRs while the operator is
+down, leaves them stuck in `Terminating`.
+
+```bash
+kubectl delete appdependencies --all --all-namespaces   # wait for it to finish
+helm uninstall <release> -n <namespace>
+```
+
+The chart keeps the CRD (`crd.keep: true`). Deleting the CRD deletes every CR
+left, so remove it only when none are.
+
+## API stability
+
+The API is `v1alpha1` and the project is before 1.0: a field can change or be
+removed in any minor release. Every such change, and every default that gets
+stricter, is listed under "Upgrade notes" in that release's
+[notes](https://github.com/Ningendo7/cloudctl-operator/releases).
 
 ## Documentation
 

@@ -467,6 +467,11 @@ A move to another **region** is not supported: an operator refuses a CR whose re
   write. A bucket that is open to the public through its policy or ACL, after
   Block Public Access is taken into account, gets a `BucketPubliclyAccessible`
   warning on each verification. Nothing is changed.
+- **Renaming a resource removes it and adds another.** Resources are keyed by
+  `name`, so the old one is let go according to its `deletionPolicy` (kept by
+  default; a `Delete` one only once it is empty, or with `force`) and the new
+  one starts empty. Nothing is copied. The ConfigMap key changes with the name,
+  and a CR that consumes the old name reports `ConsumedResourceNotDeclared`.
 - **`kubectl get appdeps`** shows `Ready`, and the aggregate condition's
   `Reason`, which is the first section that isn't ready, in its own words
   (`-o wide` adds the message). Every section's condition is under

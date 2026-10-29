@@ -194,7 +194,7 @@ func ensureKey(
 		return resumeKey(ctx, kmsClient, namespace, crName, crUID, alias, opts, entry, ledger, recordEvent)
 	}
 
-	descirbeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
+	describeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &alias,
 	})
 	var notFound *types.NotFoundException
@@ -205,7 +205,7 @@ func ensureKey(
 		return ledger, wrapAWSError(err, "looking up KMS key alias")
 	}
 
-	return adoptKey(ctx, kmsClient, namespace, crName, crUID, alias, resourceName, opts, *descirbeOut.KeyMetadata, ledger, recordEvent)
+	return adoptKey(ctx, kmsClient, namespace, crName, crUID, alias, resourceName, opts, *describeOut.KeyMetadata, ledger, recordEvent)
 }
 
 // createKey makes a brand new key: CreateKey (Tags set atomically; Policy
