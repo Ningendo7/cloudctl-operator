@@ -612,7 +612,7 @@ var _ = Describe("AppDependencies Controller", func() {
 // tests above need envtest (a real API server, unwrappable), while the
 // tests below need to count Patch calls, which only the fake client's
 // interceptor supports.
-func newCountingReconciler(t *testing.T, patchCount *int, objs ...client.Object) *AppDependenciesReconciler {
+func newCountingReconciler(t testing.TB, patchCount *int, objs ...client.Object) *AppDependenciesReconciler {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -625,6 +625,7 @@ func newCountingReconciler(t *testing.T, patchCount *int, objs ...client.Object)
 		WithScheme(scheme).
 		WithObjects(objs...).
 		WithStatusSubresource(&depsv1alpha1.AppDependencies{}).
+		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 				if subResourceName == "status" {

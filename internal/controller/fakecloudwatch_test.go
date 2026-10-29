@@ -53,8 +53,20 @@ func (f *fakeCloudWatchClient) DescribeAlarms(_ context.Context, in *cloudwatch.
 			continue
 		}
 		out.MetricAlarms = append(out.MetricAlarms, types.MetricAlarm{
-			AlarmName: a.input.AlarmName,
-			AlarmArn:  aws.String("arn:aws:cloudwatch:us-east-1:123456789012:alarm:" + name),
+			AlarmName:          a.input.AlarmName,
+			AlarmArn:           aws.String("arn:aws:cloudwatch:us-east-1:123456789012:alarm:" + name),
+			AlarmDescription:   a.input.AlarmDescription,
+			Namespace:          a.input.Namespace,
+			MetricName:         a.input.MetricName,
+			Dimensions:         a.input.Dimensions,
+			Statistic:          a.input.Statistic,
+			ComparisonOperator: a.input.ComparisonOperator,
+			Threshold:          a.input.Threshold,
+			EvaluationPeriods:  a.input.EvaluationPeriods,
+			Period:             a.input.Period,
+			TreatMissingData:   a.input.TreatMissingData,
+			AlarmActions:       a.input.AlarmActions,
+			OKActions:          a.input.OKActions,
 		})
 	}
 	return out, nil
