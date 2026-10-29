@@ -17,7 +17,7 @@ manager:
 
   image:
     repository: ghcr.io/ningendo7/cloudctl-operator
-    ## Image tag (defaults to v<Chart.appVersion> if not set, matching release.yml)
+    ## Image tag (defaults to v<Chart.appVersion>, matching release.yml; latest for a chart from a source checkout)
     ##
     # tag: ""
     pullPolicy: IfNotPresent
@@ -44,6 +44,19 @@ manager:
   ## entries, for example OTEL_EXPORTER_OTLP_ENDPOINT to turn on tracing.
   ##
   extraEnv: []
+
+  ## The cluster's IAM OIDC identity provider, which every IAM role the
+  ## operator derives trusts. A CR that needs a role fails until both are set.
+  ## The URL is the cluster's OIDC issuer, with or without https://.
+  ##
+  oidcProviderArn: ""
+  oidcProviderUrl: ""
+
+  ## Extra volumes and volume mounts for the manager pod, as Kubernetes
+  ## volume and volumeMount entries.
+  ##
+  extraVolumes: []
+  extraVolumeMounts: []
 
   ## Image pull secrets
   ##
@@ -132,6 +145,14 @@ rbac:
     ##
     enabled: false
 
+  ## Read-only role for AppDependencies, which kubectl appdeps needs. Bind it
+  ## to the people and groups that should see CRs and their status.
+  viewer:
+    enabled: true
+    ## Also give it to everyone with the built-in view role, in every namespace
+    ## they can view. Off by default: it widens who can read CRs.
+    aggregateToView: false
+
 ## ServiceAccount configuration
 ##
 serviceAccount:
@@ -188,6 +209,13 @@ prometheus:
     # Extra labels on the PrometheusRule, e.g. release: <kube-prometheus-stack
     # release name> so its ruleSelector picks the rules up.
     labels: {}
+
+  ## Prometheus's own ServiceAccount. Secure metrics (the default) answer 403
+  ## until the scraper may read them; this binds the chart's metrics-reader
+  ## ClusterRole to that ServiceAccount.
+  serviceAccount:
+    name: ""
+    namespace: ""
 
 ## Network policies for controlling traffic flow.
 ## Enable to restrict ingress to the controller manager.

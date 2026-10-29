@@ -106,9 +106,15 @@ spec:
         {{- if eq (toString .Values.manager.releaseTags) "false" }}
         - --release-tags=false
         {{- end }}
+        {{- with .Values.manager.oidcProviderArn }}
+        - --oidc-provider-arn={{ . }}
+        {{- end }}
+        {{- with .Values.manager.oidcProviderUrl }}
+        - --oidc-provider-url={{ . }}
+        {{- end }}
         command:
         - /manager
-        image: "{{ .Values.manager.image.repository }}{{- if not (contains "@" .Values.manager.image.repository) }}:{{ .Values.manager.image.tag | default (printf "v%s" .Chart.AppVersion) }}{{- end }}"
+        image: "{{ .Values.manager.image.repository }}{{- if not (contains "@" .Values.manager.image.repository) }}:{{ .Values.manager.image.tag | default (ternary "latest" (printf "v%s" .Chart.AppVersion) (eq .Chart.AppVersion "0.0.0-dev")) }}{{- end }}"
         {{- with .Values.manager.image.pullPolicy }}
         imagePullPolicy: {{ . }}
         {{- end }}

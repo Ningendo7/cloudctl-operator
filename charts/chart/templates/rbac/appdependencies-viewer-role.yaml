@@ -1,4 +1,4 @@
-{{- if .Values.rbac.helpers.enabled }}
+{{- if or .Values.rbac.helpers.enabled .Values.rbac.viewer.enabled }}
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.rbac.namespaced }}
 kind: Role
@@ -14,6 +14,9 @@ metadata:
     app.kubernetes.io/name: {{ include "cloudctl-operator.name" . }}
     helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
     app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- if .Values.rbac.viewer.aggregateToView }}
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+    {{- end }}
   name: {{ include "cloudctl-operator.resourceName" (dict "suffix" "appdependencies-viewer-role" "context" $) }}
 rules:
 - apiGroups:

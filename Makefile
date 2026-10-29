@@ -451,6 +451,18 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
   ## entries, for example OTEL_EXPORTER_OTLP_ENDPOINT to turn on tracing.\
   ##\
   extraEnv: []' charts/chart/values.yaml
+	@# manager.oidcProviderArn/oidcProviderUrl and extraVolumes/extraVolumeMounts:
+	@# the OIDC flags are required for any IAM role, and a named value is easier
+	@# to get right than rewriting manager.args; the volume values are read by the
+	@# plugin's template but never declared.
+	sed -i '/^  extraEnv: \[\]$$/r hack/helm/values-manager-extras.yaml' charts/chart/values.yaml
+	sed -i '/^        command:$$/i\
+        {{- with .Values.manager.oidcProviderArn }}\
+        - --oidc-provider-arn={{ . }}\
+        {{- end }}\
+        {{- with .Values.manager.oidcProviderUrl }}\
+        - --oidc-provider-url={{ . }}\
+        {{- end }}' charts/chart/templates/manager/manager.yaml
 	@# Default pod anti-affinity (the plugin emits an empty one), used only
 	@# when manager.affinity is unset and replicas > 1.
 	sed -i '/^      affinity: {{ toYaml \. | nindent 10 }}$$/a\
@@ -475,14 +487,16 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
 	@# ...and its adjacent comment, which the plugin regenerates to the
 	@# generic "defaults to Chart.appVersion" wording that no longer
 	@# matches the tag-default fix just below.
-	sed -i 's@## Image tag (defaults to Chart.appVersion if not set)@## Image tag (defaults to v<Chart.appVersion> if not set, matching release.yml)@' charts/chart/values.yaml
+	sed -i 's@## Image tag (defaults to Chart.appVersion if not set)@## Image tag (defaults to v<Chart.appVersion>, matching release.yml; latest for a chart from a source checkout)@' charts/chart/values.yaml
 	@# manager.image.tag's default: release.yml always publishes the image
 	@# tagged with a leading "v" (from the git tag), but Chart.AppVersion
 	@# itself never has one - the plugin's own default tag fallback
 	@# (bare .Chart.AppVersion) would resolve to a tag that was never
 	@# actually pushed. Prepending "v" here keeps the default correct for
-	@# every release without needing a tag override either.
-	sed -i 's@{{ .Values.manager.image.tag | default .Chart.AppVersion }}@{{ .Values.manager.image.tag | default (printf "v%s" .Chart.AppVersion) }}@' charts/chart/templates/manager/manager.yaml
+	@# every release without needing a tag override either. Chart.yaml in the
+	@# repository says 0.0.0-dev, for which no image exists, so a chart from a
+	@# source checkout defaults to latest, which the release job moves.
+	sed -i 's@{{ .Values.manager.image.tag | default .Chart.AppVersion }}@{{ .Values.manager.image.tag | default (ternary "latest" (printf "v%s" .Chart.AppVersion) (eq .Chart.AppVersion "0.0.0-dev")) }}@' charts/chart/templates/manager/manager.yaml
 	@# Observability switches: the plugin knows the ServiceMonitor but not
 	@# the alert rules or the Grafana dashboard, so their values are re-added
 	@# after it rewrites values.yaml. Their templates, and the dashboard JSON
@@ -496,6 +510,17 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
 	@# cluster-scoped kind, so that install cannot work. The value is dropped
 	@# from values.yaml; templates/validate.yaml fails a release that sets it.
 	sed -i '/^  ## RBAC resource scope$$/,/^$$/d' charts/chart/values.yaml
+	@# rbac.viewer: the plugin installs the viewer role only with the other
+	@# helper roles, off by default, but kubectl appdeps needs it to read CRs.
+	@# Aggregating it into the built-in view role is a separate, opt-in choice.
+	sed -i -e '/^rbac:$$/,/^$$/{' -e '/^    enabled: false$$/r hack/helm/values-rbac-viewer.yaml' -e '}' charts/chart/values.yaml
+	sed -i 's/^{{- if \.Values\.rbac\.helpers\.enabled }}$$/{{- if or .Values.rbac.helpers.enabled .Values.rbac.viewer.enabled }}/' charts/chart/templates/rbac/appdependencies-viewer-role.yaml
+	sed -i '/^    app\.kubernetes\.io\/instance: {{ \.Release\.Name }}$$/a\
+    {{- if .Values.rbac.viewer.aggregateToView }}\
+    rbac.authorization.k8s.io/aggregate-to-view: "true"\
+    {{- end }}' charts/chart/templates/rbac/appdependencies-viewer-role.yaml
+	@# NOTES.txt: the plugin's is generic; ours warns about missing settings.
+	cp hack/helm/NOTES.txt charts/chart/templates/NOTES.txt
 	$(MAKE) policy-sample
 
 POLICY_SAMPLE := config/samples/policy/appdependencies-guardrails.yaml

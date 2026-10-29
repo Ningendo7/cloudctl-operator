@@ -1,0 +1,8 @@
+
+  ## Read-only role for AppDependencies, which kubectl appdeps needs. Bind it
+  ## to the people and groups that should see CRs and their status.
+  viewer:
+    enabled: true
+    ## Also give it to everyone with the built-in view role, in every namespace
+    ## they can view. Off by default: it widens who can read CRs.
+    aggregateToView: false

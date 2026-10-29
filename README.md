@@ -90,10 +90,11 @@ exact commit.
 
 ### Prerequisites
 
-- A cluster with an **IAM OIDC identity provider** (standard on EKS), and the
-  **`--oidc-provider-arn` and `--oidc-provider-url` flags** set on the
-  manager. Every IAM role the operator derives is trust-scoped to that
-  provider, so any CR needing IAM fails reconciliation without them.
+- A cluster with an **IAM OIDC identity provider** (standard on EKS), set in
+  the chart as **`manager.oidcProviderArn` and `manager.oidcProviderUrl`**
+  (the manager's `--oidc-provider-arn` and `--oidc-provider-url` flags).
+  Every IAM role the operator derives is trust-scoped to that provider, so
+  any CR needing IAM fails reconciliation without them.
 - An IAM role for the operator's own pod, attached via IRSA and scoped to
   the AWS services you intend to let it manage. See
   [docs/threat-model.md](docs/threat-model.md) for what it can and can't do
@@ -113,8 +114,12 @@ helm install cloudctl-operator oci://ghcr.io/ningendo7/charts/cloudctl-operator 
   --namespace cloudctl-operator-system \
   --create-namespace \
   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=<operator-irsa-role-arn> \
-  --set-string manager.args="{--leader-elect,--oidc-provider-arn=<oidc-provider-arn>,--oidc-provider-url=<oidc-provider-url>}"
+  --set manager.oidcProviderArn=<oidc-provider-arn> \
+  --set manager.oidcProviderUrl=<oidc-provider-url>
 ```
+
+The chart installs a read-only `appdependencies-viewer-role` ClusterRole for
+`kubectl appdeps`; bind it to whoever should read CRs.
 
 See the chart's [values.yaml](charts/chart/values.yaml) for every
 configurable field. The manager keeps Go's memory use under 90% of its
