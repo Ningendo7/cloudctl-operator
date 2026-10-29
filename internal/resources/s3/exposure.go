@@ -45,15 +45,16 @@ const (
 // the site down. If the statement is there already it is removed, and either
 // way the bucket is reported, since requests to it are then not protected.
 // Failing to find out whether it hosts a website fails the pass: guessing
-// wrong in one direction breaks a site, in the other leaves HTTP open.
+// wrong in one direction breaks a site, in the other leaves HTTP open. The same
+// read also drops a pending-deletion deny the bucket should no longer have.
 func reconcileTransportSecurity(ctx context.Context, client s3API, bucket string, recordEvent status.EventRecorder) error {
 	website, err := hasWebsite(ctx, client, bucket)
 	if err != nil {
 		return wrapAWSError(err, "checking whether the bucket hosts a website")
 	}
-	changed, err := syncTransportPolicy(ctx, client, bucket, !website)
+	done, err := syncDeclaredPolicy(ctx, client, bucket, !website)
 	if err != nil {
-		return wrapAWSError(err, "reconciling the bucket's transport-security policy")
+		return wrapAWSError(err, "reconciling the bucket's policy")
 	}
 	if recordEvent == nil {
 		return nil
@@ -62,9 +63,13 @@ func reconcileTransportSecurity(ctx context.Context, client s3API, bucket string
 	case website:
 		recordEvent("Warning", "TransportSecurityNotEnforced", fmt.Sprintf(
 			"S3 bucket %s hosts a website, whose endpoint accepts plain HTTP only, so requests to it are not required to use TLS", bucket))
-	case changed:
+	case done.transport:
 		recordEvent("Normal", "TransportSecurityEnforced", fmt.Sprintf(
 			"S3 bucket %s now refuses requests that do not use TLS (policy statement %s)", bucket, awspolicy.InsecureTransportSid))
+	}
+	if done.lifted {
+		recordEvent("Normal", "PendingDeletionDenyLifted", fmt.Sprintf(
+			"Removed the deletion block (policy statement %s) from S3 bucket %s, which is declared", pendingDeletionDenySid, bucket))
 	}
 	return nil
 }

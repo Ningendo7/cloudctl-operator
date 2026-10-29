@@ -23,6 +23,7 @@ package configmap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"regexp"
@@ -412,7 +413,7 @@ func connectionKV(resourceType, resourceName, arn, region, accountID, producerNa
 // determine it, in the standard AWS partition this project targets.
 func sqsQueueURL(region, accountID, queueName string) (string, error) {
 	if region == "" || accountID == "" {
-		return "", fmt.Errorf("cannot derive an SQS queue URL without both region and account ID")
+		return "", errors.New("cannot derive an SQS queue URL without both region and account ID")
 	}
 	return fmt.Sprintf("https://sqs.%s.amazonaws.com/%s/%s", region, accountID, queueName), nil
 }

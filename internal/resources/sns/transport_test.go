@@ -84,22 +84,47 @@ func TestEnsure_TheTransportStatementIsNotRewrittenOnTheNextPass(t *testing.T) {
 	}
 }
 
-// AWS gives every topic a default statement; it must survive.
-func TestEnsure_TheTransportStatementKeepsAWSsDefaultStatementAndTheDeletionDeny(t *testing.T) {
+// AWS gives every topic a default statement, and people add their own; both
+// must survive.
+func TestEnsure_ThePolicyCheckKeepsAWSsDefaultStatementAndOnesPeopleAdded(t *testing.T) {
 	client := newFakeSNS()
 	ensureEvents(t, client, nil)
 	topic := eventsTopic(t, client)
-	topic.policy = `{"Version":"2012-10-17","Statement":[{"Sid":"__default_statement_ID","Effect":"Allow","Principal":{"AWS":"*"},"Action":["SNS:Publish"],"Resource":"` + topic.arn + `","Condition":{"StringEquals":{"AWS:SourceOwner":"123456789012"}}}]}`
-	if err := addPendingDeletionDeny(context.Background(), client, topic.arn); err != nil {
-		t.Fatalf("addPendingDeletionDeny() error = %v", err)
-	}
+	topic.policy = `{"Version":"2012-10-17","Statement":[` +
+		`{"Sid":"__default_statement_ID","Effect":"Allow","Principal":{"AWS":"*"},"Action":["SNS:Publish"],"Resource":"` + topic.arn + `","Condition":{"StringEquals":{"AWS:SourceOwner":"123456789012"}}},` +
+		`{"Sid":"TeamPublishers","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::123456789012:role/publisher"},"Action":["SNS:Publish"],"Resource":"` + topic.arn + `"}]}`
 
 	ensureEvents(t, client, nil)
 
-	for _, sid := range []string{"__default_statement_ID", pendingDeletionDenySid, awspolicy.InsecureTransportSid} {
+	for _, sid := range []string{"__default_statement_ID", "TeamPublishers", awspolicy.InsecureTransportSid} {
 		if !strings.Contains(topic.policy, `"`+sid+`"`) {
 			t.Errorf("statement %s is missing from %s", sid, topic.policy)
 		}
+	}
+}
+
+// The deny is only meant for a topic waiting to be deleted. One left on a
+// declared topic, because the ledger forgot the topic was pending, would
+// refuse every publish with nothing to say why.
+func TestEnsure_ADeclaredTopicLosesALeftoverDeletionDeny(t *testing.T) {
+	client := newFakeSNS()
+	ensureEvents(t, client, nil)
+	topic := eventsTopic(t, client)
+	if err := addPendingDeletionDeny(context.Background(), client, topic.arn); err != nil {
+		t.Fatalf("addPendingDeletionDeny() error = %v", err)
+	}
+	recordEvent, events := newEventCollector()
+
+	ensureEvents(t, client, recordEvent)
+
+	if strings.Contains(topic.policy, pendingDeletionDenySid) {
+		t.Errorf("the deletion deny should be gone from a declared topic, got %s", topic.policy)
+	}
+	if !strings.Contains(topic.policy, awspolicy.InsecureTransportSid) {
+		t.Errorf("the transport statement should stay, got %s", topic.policy)
+	}
+	if countEvents(*events, "PendingDeletionDenyLifted") != 1 {
+		t.Errorf("expected one PendingDeletionDenyLifted event, got %+v", *events)
 	}
 }
 

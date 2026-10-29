@@ -87,26 +87,40 @@ var topicActions = []string{
 	"sns:Publish",
 }
 
-// reconcileTransportSecurity makes the topic refuse plain-HTTP requests, by a
-// statement the operator owns in its policy. Other statements, AWS's default
-// one among them, are kept, and nothing is written when the policy already
-// says this.
-func reconcileTransportSecurity(ctx context.Context, client snsAPI, topicArn string, recordEvent status.EventRecorder) error {
+// reconcileDeclaredPolicy brings the policy of a declared topic to what the
+// operator owns in it: a statement that makes the topic refuse plain-HTTP
+// requests, and no deletion deny. A declared topic is not waiting to be
+// deleted, so a deny left from when it was (the ledger can lose that fact)
+// would silently refuse every publish. Other statements, AWS's default one
+// among them, are kept, and nothing is written when the policy already says
+// this.
+func reconcileDeclaredPolicy(ctx context.Context, client snsAPI, topicArn string, recordEvent status.EventRecorder) error {
 	doc, err := readPolicy(ctx, client, topicArn)
 	if err != nil {
 		return wrapAWSError(err, "reading the topic's policy")
 	}
 	statements, changed, err := awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, awspolicy.DenyInsecureTransportActions(topicActions, topicArn))
-	if err != nil || !changed {
+	if err != nil {
 		return err
+	}
+	statements, lifted := awspolicy.Remove(statements, pendingDeletionDenySid)
+	if !changed && !lifted {
+		return nil
 	}
 	doc.Statement = statements
 	if err := writePolicy(ctx, client, topicArn, doc); err != nil {
-		return wrapAWSError(err, "writing the topic's transport-security policy")
+		return wrapAWSError(err, "writing the topic's policy")
 	}
-	if recordEvent != nil {
+	if recordEvent == nil {
+		return nil
+	}
+	if changed {
 		recordEvent("Normal", "TransportSecurityEnforced", fmt.Sprintf(
 			"SNS topic %s now refuses requests that do not use TLS (policy statement %s)", topicArn, awspolicy.InsecureTransportSid))
+	}
+	if lifted {
+		recordEvent("Normal", "PendingDeletionDenyLifted", fmt.Sprintf(
+			"Removed the deletion block (policy statement %s) from SNS topic %s, which is declared", pendingDeletionDenySid, topicArn))
 	}
 	return nil
 }

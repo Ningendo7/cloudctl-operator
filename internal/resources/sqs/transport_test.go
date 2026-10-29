@@ -91,22 +91,43 @@ func TestEnsure_TheTransportStatementIsNotRewrittenOnTheNextPass(t *testing.T) {
 	}
 }
 
-func TestEnsure_TheTransportStatementKeepsOtherStatementsAndTheDeletionDeny(t *testing.T) {
+func TestEnsure_ThePolicyCheckKeepsStatementsPeopleAdded(t *testing.T) {
 	client := newFakeSQS()
 	ensureOrders(t, client, depsv1alpha1.SQSQueueSpec{Name: "orders"}, nil)
 	q := ordersQueue(t, client)
-	theirs := `{"Version":"2012-10-17","Statement":[{"Sid":"theirs","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:root"},"Action":"sqs:SendMessage","Resource":"` + q.arn + `"}]}`
-	q.policy = theirs
-	if err := addPendingDeletionDeny(context.Background(), client, q.url, q.arn); err != nil {
-		t.Fatalf("addPendingDeletionDeny() error = %v", err)
-	}
+	q.policy = `{"Version":"2012-10-17","Statement":[{"Sid":"theirs","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:root"},"Action":"sqs:SendMessage","Resource":"` + q.arn + `"}]}`
 
 	ensureOrders(t, client, depsv1alpha1.SQSQueueSpec{Name: "orders"}, nil)
 
-	for _, sid := range []string{"theirs", pendingDeletionDenySid, awspolicy.InsecureTransportSid} {
+	for _, sid := range []string{"theirs", awspolicy.InsecureTransportSid} {
 		if !strings.Contains(q.policy, `"`+sid+`"`) {
 			t.Errorf("statement %s is missing from %s", sid, q.policy)
 		}
+	}
+}
+
+// The deny is only meant for a queue waiting to be deleted. One left on a
+// declared queue, because the ledger forgot the queue was pending, would
+// refuse every send with nothing to say why.
+func TestEnsure_ADeclaredQueueLosesALeftoverDeletionDeny(t *testing.T) {
+	client := newFakeSQS()
+	ensureOrders(t, client, depsv1alpha1.SQSQueueSpec{Name: "orders"}, nil)
+	q := ordersQueue(t, client)
+	if err := addPendingDeletionDeny(context.Background(), client, q.url, q.arn); err != nil {
+		t.Fatalf("addPendingDeletionDeny() error = %v", err)
+	}
+	recordEvent, events := newEventCollector()
+
+	ensureOrders(t, client, depsv1alpha1.SQSQueueSpec{Name: "orders"}, recordEvent)
+
+	if strings.Contains(q.policy, pendingDeletionDenySid) {
+		t.Errorf("the deletion deny should be gone from a declared queue, got %s", q.policy)
+	}
+	if !strings.Contains(q.policy, awspolicy.InsecureTransportSid) {
+		t.Errorf("the transport statement should stay, got %s", q.policy)
+	}
+	if countEvents(*events, "PendingDeletionDenyLifted") != 1 {
+		t.Errorf("expected one PendingDeletionDenyLifted event, got %+v", *events)
 	}
 }
 

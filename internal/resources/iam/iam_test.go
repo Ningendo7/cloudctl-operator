@@ -460,6 +460,14 @@ func TestPolicyDocumentEquivalent_IgnoresKeyOrderingDivergence(t *testing.T) {
 	}
 }
 
+func TestPolicyDocumentEquivalent_AnIdenticalDocumentIsEquivalent(t *testing.T) {
+	desired := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["sqs:SendMessage"],"Resource":["arn:aws:sqs:us-east-1:123456789012:q"]}]}`
+
+	if !policyDocumentEquivalent(url.QueryEscape(desired), desired) {
+		t.Error("expected a document identical to the desired one to be equivalent")
+	}
+}
+
 func TestPolicyDocumentEquivalent_DetectsRealDifference(t *testing.T) {
 	desired := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x"},"Action":"sts:AssumeRoleWithWebIdentity"}]}`
 	different := `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x"},"Action":"sts:AssumeRoleWithWebIdentity"}]}`

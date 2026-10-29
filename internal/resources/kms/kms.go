@@ -35,10 +35,9 @@ import (
 
 // kmsAPI is the subset of the KMS client this package needs. It's a type
 // alias to the exported cloudctlaws.KMSClient rather than its own separate
-// interface, since that interface now has two consumers — this package's
-// own unit tests, and controller-level envtest suites that need to fake
-// the whole AWS backend to exercise Reconcile() end-to-end. Aliasing keeps
-// every reference to kmsAPI in this file unchanged (same pattern as
+// interface, since that interface has two consumers — this package's own
+// unit tests, and controller-level envtest suites that fake the whole AWS
+// backend to exercise Reconcile() end-to-end (same pattern as
 // sqsAPI/snsAPI/dynamodbAPI/s3API/iamAPI).
 type kmsAPI = cloudctlaws.KMSClient
 
@@ -194,7 +193,7 @@ func ensureKey(
 		return resumeKey(ctx, kmsClient, namespace, crName, crUID, alias, opts, entry, ledger, recordEvent)
 	}
 
-	descirbeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
+	describeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &alias,
 	})
 	var notFound *types.NotFoundException
@@ -205,7 +204,7 @@ func ensureKey(
 		return ledger, wrapAWSError(err, "looking up KMS key alias")
 	}
 
-	return adoptKey(ctx, kmsClient, namespace, crName, crUID, alias, resourceName, opts, *descirbeOut.KeyMetadata, ledger, recordEvent)
+	return adoptKey(ctx, kmsClient, namespace, crName, crUID, alias, resourceName, opts, *describeOut.KeyMetadata, ledger, recordEvent)
 }
 
 // createKey makes a brand new key: CreateKey (Tags set atomically; Policy

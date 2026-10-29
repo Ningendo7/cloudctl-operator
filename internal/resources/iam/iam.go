@@ -39,10 +39,9 @@ import (
 
 // iamAPI is the subset of the IAM client this package needs. It's a type
 // alias to the exported cloudctlaws.IAMClient rather than its own separate
-// interface, since that interface now has two consumers — this package's
-// own unit tests, and controller-level envtest suites that need to fake
-// the whole AWS backend to exercise Reconcile() end-to-end. Aliasing keeps
-// every reference to iamAPI in this file unchanged (same pattern as
+// interface, since that interface has two consumers — this package's own
+// unit tests, and controller-level envtest suites that fake the whole AWS
+// backend to exercise Reconcile() end-to-end (same pattern as
 // sqsAPI/snsAPI/dynamodbAPI/s3API).
 type iamAPI = cloudctlaws.IAMClient
 
@@ -285,6 +284,11 @@ func policyDocumentEquivalent(currentEncoded, desired string) bool {
 		// triggers a correction (idempotent, harmless if nothing actually
 		// changed) rather than silently skipping a real one.
 		return false
+	}
+	// Byte-for-byte equal documents are equivalent, and decoding both to
+	// compare them is the most expensive part of an unchanged pass.
+	if current == desired {
+		return true
 	}
 
 	var currentDoc, desiredDoc any

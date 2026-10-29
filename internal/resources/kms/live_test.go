@@ -162,6 +162,8 @@ func scratchKey(t *testing.T, client *kms.Client) string {
 	switch {
 	case findErr == nil && found.KeyMetadata.KeyState == types.KeyStateEnabled:
 		arn = aws.ToString(found.KeyMetadata.Arn)
+	case findErr == nil && reviveScratchKey(t, client, found.KeyMetadata):
+		arn = aws.ToString(found.KeyMetadata.Arn)
 	case findErr == nil || errors.As(findErr, &notFound):
 		created, err := client.CreateKey(ctx, &kms.CreateKeyInput{Description: aws.String("cloudctl live tests: scratch key")})
 		if err != nil {
@@ -182,6 +184,27 @@ func scratchKey(t *testing.T, client *kms.Client) string {
 	original := keyPolicyText(t, client, arn)
 	t.Cleanup(func() { restoreScratchKey(client, arn, original) })
 	return arn
+}
+
+// reviveScratchKey brings back a scratch key that was scheduled for deletion
+// or disabled, so a run after the key was retired reuses it instead of
+// creating another. It reports false for any other state.
+func reviveScratchKey(t *testing.T, client *kms.Client, meta *types.KeyMetadata) bool {
+	t.Helper()
+	ctx := context.Background()
+	switch meta.KeyState {
+	case types.KeyStatePendingDeletion:
+		if _, err := client.CancelKeyDeletion(ctx, &kms.CancelKeyDeletionInput{KeyId: meta.Arn}); err != nil {
+			t.Fatalf("real CancelKeyDeletion() (scratch key) error = %v", err)
+		}
+	case types.KeyStateDisabled:
+	default:
+		return false
+	}
+	if _, err := client.EnableKey(ctx, &kms.EnableKeyInput{KeyId: meta.Arn}); err != nil {
+		t.Fatalf("real EnableKey() (scratch key) error = %v", err)
+	}
+	return true
 }
 
 // restoreScratchKey is best effort: a failure leaves the key as the test left

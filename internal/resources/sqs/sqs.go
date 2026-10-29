@@ -35,10 +35,9 @@ import (
 
 // sqsAPI is the subset of the SQS client this package needs. It's a type
 // alias to the exported cloudctlaws.SQSClient rather than its own separate
-// interface, since that interface now has two consumers — this package's
-// own unit tests, and controller-level envtest suites that need to fake
-// the whole AWS backend to exercise Reconcile() end-to-end. Aliasing keeps
-// every reference to sqsAPI in this file unchanged.
+// interface, since that interface has two consumers — this package's own
+// unit tests, and controller-level envtest suites that fake the whole AWS
+// backend to exercise Reconcile() end-to-end.
 type sqsAPI = cloudctlaws.SQSClient
 
 const resourceType = "sqs"
@@ -236,7 +235,7 @@ func ensureQueue(
 
 	entry, entryFound := status.FindManagedResource(ledger, resourceType, q.Name)
 	if !entryFound {
-		return ledger, fmt.Errorf("expected a ledger entry after ensuring it, found none")
+		return ledger, errors.New("expected a ledger entry after ensuring it, found none")
 	}
 	queueName, err := queueNameFromARN(entry.ARN)
 	if err != nil {
@@ -274,7 +273,7 @@ func ensureSingleQueue(
 	if !status.VerifiedSince(before, entry) {
 		return ledger, queueURL, nil
 	}
-	return ledger, queueURL, reconcileTransportSecurity(ctx, awsClient, queueURL, entry.ARN, recordEvent)
+	return ledger, queueURL, reconcileDeclaredPolicy(ctx, awsClient, queueURL, entry.ARN, recordEvent)
 }
 
 // ensureQueueExists is ensureSingleQueue without the transport-security

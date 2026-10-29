@@ -71,7 +71,7 @@ func NewStateCollector(reader client.Reader, graceByType map[string]time.Duratio
 		reader: reader,
 		grace:  graceByType,
 		managed: desc("managed_resources",
-			"Resources the operator manages, by type and ledger state (Creating, TagPending, Verified, NeedsVerification).",
+			"Resources the operator manages, by type and ledger state (Creating, TagPending, Verified, NeedsVerification, Relinquished).",
 			"type", "state"),
 		pendingDeletion: desc("pending_deletion_resources",
 			"Resources removed from spec and awaiting deletion, by type; stuck=\"true\" once past that type's grace period.",

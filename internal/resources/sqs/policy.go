@@ -83,26 +83,40 @@ func addPendingDeletionDeny(ctx context.Context, client sqsAPI, queueURL, queueA
 	return writePolicy(ctx, client, queueURL, doc)
 }
 
-// reconcileTransportSecurity makes the queue refuse plain-HTTP requests, by a
-// statement the operator owns in its policy. Other statements, the SNS
-// delivery grants among them, are kept, and nothing is written when the
-// policy already says this.
-func reconcileTransportSecurity(ctx context.Context, client sqsAPI, queueURL, queueARN string, recordEvent status.EventRecorder) error {
+// reconcileDeclaredPolicy brings the policy of a declared queue to what the
+// operator owns in it: a statement that makes the queue refuse plain-HTTP
+// requests, and no send-blocking deny. A declared queue is not waiting to be
+// deleted, so a deny left from when it was (the ledger can lose that fact)
+// would silently refuse every send. Other statements, the SNS delivery grants
+// among them, are kept, and nothing is written when the policy already says
+// this.
+func reconcileDeclaredPolicy(ctx context.Context, client sqsAPI, queueURL, queueARN string, recordEvent status.EventRecorder) error {
 	doc, err := readPolicy(ctx, client, queueURL)
 	if err != nil {
 		return wrapAWSError(err, "reading the queue's policy")
 	}
 	statements, changed, err := awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, awspolicy.DenyInsecureTransport("sqs:*", queueARN))
-	if err != nil || !changed {
+	if err != nil {
 		return err
+	}
+	statements, lifted := awspolicy.Remove(statements, pendingDeletionDenySid)
+	if !changed && !lifted {
+		return nil
 	}
 	doc.Statement = statements
 	if err := writePolicy(ctx, client, queueURL, doc); err != nil {
-		return wrapAWSError(err, "writing the queue's transport-security policy")
+		return wrapAWSError(err, "writing the queue's policy")
 	}
-	if recordEvent != nil {
+	if recordEvent == nil {
+		return nil
+	}
+	if changed {
 		recordEvent("Normal", "TransportSecurityEnforced", fmt.Sprintf(
 			"SQS queue %s now refuses requests that do not use TLS (policy statement %s)", queueARN, awspolicy.InsecureTransportSid))
+	}
+	if lifted {
+		recordEvent("Normal", "PendingDeletionDenyLifted", fmt.Sprintf(
+			"Removed the deletion block (policy statement %s) from SQS queue %s, which is declared", pendingDeletionDenySid, queueARN))
 	}
 	return nil
 }
