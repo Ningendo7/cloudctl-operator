@@ -62,7 +62,14 @@ single pod and you will be wrong after every failover.
 | `grafana.dashboard.enabled` | `false` | A dashboard `ConfigMap` labeled `grafana_dashboard: "1"`, which kube-prometheus-stack's Grafana sidecar picks up by default. |
 
 With `metrics.secure: true` (the default) the scraper needs a bearer token
-whose ServiceAccount is bound to the chart's `metrics-reader` ClusterRole.
+whose ServiceAccount is bound to the chart's `metrics-reader` ClusterRole;
+until it is, scrapes get 403. Set `prometheus.serviceAccount.name` and
+`.namespace` to Prometheus's own ServiceAccount and the chart creates the
+binding. The `ServiceMonitor` sends that ServiceAccount's token with
+`bearerTokenFile`, so a Prometheus that sets
+`arbitraryFSAccessThroughSMs.deny: true` refuses it. Without
+`certManager.enabled` the metrics certificate is self-signed and the
+`ServiceMonitor` skips verifying it.
 
 ## Alerts
 

@@ -5,3 +5,10 @@
     # Extra labels on the PrometheusRule, e.g. release: <kube-prometheus-stack
     # release name> so its ruleSelector picks the rules up.
     labels: {}
+
+  ## Prometheus's own ServiceAccount. Secure metrics (the default) answer 403
+  ## until the scraper may read them; this binds the chart's metrics-reader
+  ## ClusterRole to that ServiceAccount.
+  serviceAccount:
+    name: ""
+    namespace: ""

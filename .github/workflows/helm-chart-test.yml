@@ -130,6 +130,37 @@ jobs:
             | grep -q -- '--pod-base-security-group-ids=sg-0123456789abcdef0,sg-0fedcba987654321'
           ! helm template ./charts/chart | grep -q -- '--pod-base-security-group-ids'
 
+      - name: OIDC values reach the manager flags
+        run: |
+          out=$(helm template ./charts/chart --set manager.oidcProviderArn=arn:aws:iam::123456789012:oidc-provider/oidc.example \
+            --set manager.oidcProviderUrl=https://oidc.example)
+          grep -q -- '--oidc-provider-arn=arn:aws:iam::123456789012:oidc-provider/oidc.example' <<<"$out"
+          grep -q -- '--oidc-provider-url=https://oidc.example' <<<"$out"
+          ! helm template ./charts/chart | grep -q -- '--oidc-provider'
+
+      # kubectl appdeps needs the viewer role; joining the built-in view role
+      # widens who can read CRs, so that stays a choice.
+      - name: The viewer role is installed and not aggregated by default
+        run: |
+          default=$(helm template ./charts/chart)
+          grep -q "name: .*-appdependencies-viewer-role$" <<<"$default"
+          if grep -q "aggregate-to-view" <<<"$default"; then
+            echo "the viewer role is aggregated into view by default"
+            exit 1
+          fi
+          helm template ./charts/chart --set rbac.viewer.aggregateToView=true | grep -q 'aggregate-to-view: "true"'
+          ! helm template ./charts/chart --set rbac.viewer.enabled=false | grep -q "appdependencies-viewer-role"
+
+      - name: The Prometheus ServiceAccount is bound to metrics-reader only when named
+        run: |
+          if helm template ./charts/chart | grep -q "metrics-reader-prometheus"; then
+            echo "the metrics-reader binding renders with no ServiceAccount named"
+            exit 1
+          fi
+          helm template ./charts/chart --set prometheus.serviceAccount.name=prometheus \
+            --set prometheus.serviceAccount.namespace=monitoring | grep -q "name: .*-metrics-reader-prometheus$"
+          ! helm template ./charts/chart --set prometheus.serviceAccount.name=prometheus
+
       - name: Everything enabled renders valid YAML
         run: |
           helm template ./charts/chart \
@@ -139,6 +170,9 @@ jobs:
             --set policies.enabled=true \
             --set policies.encryption.enabled=true \
             --set policies.limits.profiles.large.rds.maxStorage=2000 \
+            --set rbac.viewer.aggregateToView=true \
+            --set prometheus.serviceAccount.name=prometheus \
+            --set prometheus.serviceAccount.namespace=monitoring \
             | python3 -c 'import sys, yaml; list(yaml.safe_load_all(sys.stdin))'
 
       # The manager fails its own startup AWS identity check (and so never

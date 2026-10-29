@@ -14,7 +14,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: cloudctl-operator
-    helm.sh/chart: cloudctl-operator-0.1.0
+    helm.sh/chart: cloudctl-operator-0.0.0-dev
     app.kubernetes.io/instance: cloudctl-operator
 spec:
   failurePolicy: Fail
@@ -38,7 +38,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: cloudctl-operator
-    helm.sh/chart: cloudctl-operator-0.1.0
+    helm.sh/chart: cloudctl-operator-0.0.0-dev
     app.kubernetes.io/instance: cloudctl-operator
 spec:
   policyName: cloudctl-operator-enabled-namespaces
@@ -57,7 +57,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: cloudctl-operator
-    helm.sh/chart: cloudctl-operator-0.1.0
+    helm.sh/chart: cloudctl-operator-0.0.0-dev
     app.kubernetes.io/instance: cloudctl-operator
 spec:
   failurePolicy: Fail
@@ -91,7 +91,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: cloudctl-operator
-    helm.sh/chart: cloudctl-operator-0.1.0
+    helm.sh/chart: cloudctl-operator-0.0.0-dev
     app.kubernetes.io/instance: cloudctl-operator
 spec:
   policyName: cloudctl-operator-limits
@@ -104,7 +104,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: cloudctl-operator
-    helm.sh/chart: cloudctl-operator-0.1.0
+    helm.sh/chart: cloudctl-operator-0.0.0-dev
     app.kubernetes.io/instance: cloudctl-operator
 spec:
   failurePolicy: Fail
@@ -154,7 +154,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: cloudctl-operator
-    helm.sh/chart: cloudctl-operator-0.1.0
+    helm.sh/chart: cloudctl-operator-0.0.0-dev
     app.kubernetes.io/instance: cloudctl-operator
 spec:
   policyName: cloudctl-operator-protect-production
@@ -173,7 +173,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: cloudctl-operator
-    helm.sh/chart: cloudctl-operator-0.1.0
+    helm.sh/chart: cloudctl-operator-0.0.0-dev
     app.kubernetes.io/instance: cloudctl-operator
 spec:
   failurePolicy: Fail
@@ -217,7 +217,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: cloudctl-operator
-    helm.sh/chart: cloudctl-operator-0.1.0
+    helm.sh/chart: cloudctl-operator-0.0.0-dev
     app.kubernetes.io/instance: cloudctl-operator
 spec:
   policyName: cloudctl-operator-require-encryption

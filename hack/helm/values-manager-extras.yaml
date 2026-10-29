@@ -1,0 +1,13 @@
+
+  ## The cluster's IAM OIDC identity provider, which every IAM role the
+  ## operator derives trusts. A CR that needs a role fails until both are set.
+  ## The URL is the cluster's OIDC issuer, with or without https://.
+  ##
+  oidcProviderArn: ""
+  oidcProviderUrl: ""
+
+  ## Extra volumes and volume mounts for the manager pod, as Kubernetes
+  ## volume and volumeMount entries.
+  ##
+  extraVolumes: []
+  extraVolumeMounts: []

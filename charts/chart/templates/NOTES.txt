@@ -1,15 +1,23 @@
-Thank you for installing {{ .Chart.Name }}.
+{{ .Chart.Name }} is installed as {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+{{- $args := join " " (.Values.manager.args | default list) }}
+{{- if not (or .Values.manager.oidcProviderArn (contains "--oidc-provider-arn" $args)) }}
 
-Your release is named {{ .Release.Name }}.
+WARNING: manager.oidcProviderArn and manager.oidcProviderUrl are not set, so
+every CR that needs an IAM role fails until they are.
+{{- end }}
+{{- if and .Values.serviceAccount.enabled (not (and .Values.serviceAccount.annotations (index .Values.serviceAccount.annotations "eks.amazonaws.com/role-arn"))) }}
 
-The controller and CRDs have been installed in namespace {{ .Release.Namespace }}.
+WARNING: the manager's ServiceAccount has no eks.amazonaws.com/role-arn
+annotation, so the manager gets no AWS credentials through IRSA. Set
+serviceAccount.annotations."eks\.amazonaws\.com/role-arn" unless its pod gets
+credentials another way.
+{{- end }}
+{{- if and (eq .Chart.AppVersion "0.0.0-dev") (not .Values.manager.image.tag) }}
 
-To verify the installation:
+NOTE: this chart comes from a source checkout, so the image defaults to
+latest. Set manager.image.tag to run a specific release.
+{{- end }}
+
+Check the manager is running:
 
   kubectl get pods -n {{ .Release.Namespace }}
-  kubectl get customresourcedefinitions
-
-To learn more about the release, try:
-
-  $ helm status {{ .Release.Name }} -n {{ .Release.Namespace }}
-  $ helm get all {{ .Release.Name }} -n {{ .Release.Namespace }}
