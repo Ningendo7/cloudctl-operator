@@ -35,10 +35,9 @@ import (
 
 // sqsAPI is the subset of the SQS client this package needs. It's a type
 // alias to the exported cloudctlaws.SQSClient rather than its own separate
-// interface, since that interface now has two consumers — this package's
-// own unit tests, and controller-level envtest suites that need to fake
-// the whole AWS backend to exercise Reconcile() end-to-end. Aliasing keeps
-// every reference to sqsAPI in this file unchanged.
+// interface, since that interface has two consumers — this package's own
+// unit tests, and controller-level envtest suites that fake the whole AWS
+// backend to exercise Reconcile() end-to-end.
 type sqsAPI = cloudctlaws.SQSClient
 
 const resourceType = "sqs"

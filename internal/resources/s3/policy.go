@@ -80,37 +80,45 @@ func addPendingDeletionDeny(ctx context.Context, client s3API, bucket string) er
 	return writePolicy(ctx, client, bucket, doc)
 }
 
-// syncTransportPolicy makes the bucket policy carry the TLS-only deny when
-// want is true and not carry it when false, leaving every other statement
-// alone, and reports whether it wrote. Nothing is written when the policy
-// already says what is wanted.
-func syncTransportPolicy(ctx context.Context, client s3API, bucket string, want bool) (bool, error) {
+// policySync says what syncDeclaredPolicy wrote.
+type policySync struct {
+	transport bool // the TLS-only statement was added or removed
+	lifted    bool // a leftover pending-deletion deny was removed
+}
+
+// syncDeclaredPolicy makes the policy of a declared bucket carry the TLS-only
+// deny when want is true and not carry it when false, and carry no
+// pending-deletion deny, which only belongs to a bucket waiting to be
+// deleted. Every other statement is left alone, and nothing is written when
+// the policy already says what is wanted.
+func syncDeclaredPolicy(ctx context.Context, client s3API, bucket string, want bool) (policySync, error) {
 	doc, err := readPolicy(ctx, client, bucket)
 	if err != nil {
-		return false, err
+		return policySync{}, err
 	}
 
-	var changed bool
+	var done policySync
 	if want {
 		stmt := awspolicy.DenyInsecureTransport("s3:*", "arn:aws:s3:::"+bucket, "arn:aws:s3:::"+bucket+"/*")
-		doc.Statement, changed, err = awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, stmt)
+		doc.Statement, done.transport, err = awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, stmt)
 		if err != nil {
-			return false, err
+			return policySync{}, err
 		}
 	} else {
-		doc.Statement, changed = awspolicy.Remove(doc.Statement, awspolicy.InsecureTransportSid)
+		doc.Statement, done.transport = awspolicy.Remove(doc.Statement, awspolicy.InsecureTransportSid)
 	}
-	if !changed {
-		return false, nil
+	doc.Statement, done.lifted = awspolicy.Remove(doc.Statement, pendingDeletionDenySid)
+	if !done.transport && !done.lifted {
+		return policySync{}, nil
 	}
 
 	if len(doc.Statement) == 0 {
 		if _, err := client.DeleteBucketPolicy(ctx, &s3sdk.DeleteBucketPolicyInput{Bucket: &bucket}); err != nil && !isNotFoundError(err) {
-			return false, err
+			return policySync{}, err
 		}
-		return true, nil
+		return done, nil
 	}
-	return true, writePolicy(ctx, client, bucket, doc)
+	return done, writePolicy(ctx, client, bucket, doc)
 }
 
 // removePendingDeletionDeny removes exactly the Sid addPendingDeletionDeny

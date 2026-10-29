@@ -789,8 +789,8 @@ func TestLive_Ensure_TheTransportStatementIsAcceptedEnforcedAndNotRewritten(t *t
 		t.Errorf("a bucket with no Block Public Access configuration could not be checked: %v", *events)
 	}
 
-	if changed, err := syncTransportPolicy(ctx, client, bucket, false); err != nil || !changed {
-		t.Fatalf("removing the statement: changed = %v, error = %v", changed, err)
+	if done, err := syncDeclaredPolicy(ctx, client, bucket, false); err != nil || !done.transport {
+		t.Fatalf("removing the statement: done = %+v, error = %v", done, err)
 	}
 	var lastErr error
 	if !waitUntil(2*time.Minute, func() bool { lastErr = listOver(plain); return lastErr == nil }) {

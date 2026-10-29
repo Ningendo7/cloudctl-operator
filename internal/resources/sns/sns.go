@@ -34,10 +34,9 @@ import (
 
 // snsAPI is the subset of the SNS client this package needs. It's a type
 // alias to the exported cloudctlaws.SNSClient rather than its own separate
-// interface, since that interface now has two consumers — this package's
-// own unit tests, and controller-level envtest suites that need to fake the
-// whole AWS backend to exercise Reconcile() end-to-end. Aliasing keeps every
-// reference to snsAPI in this file unchanged (same pattern as sqsAPI).
+// interface, since that interface has two consumers — this package's own
+// unit tests, and controller-level envtest suites that fake the whole AWS
+// backend to exercise Reconcile() end-to-end (same pattern as sqsAPI).
 type snsAPI = cloudctlaws.SNSClient
 
 const resourceType = "sns"
@@ -51,10 +50,6 @@ const awsAttrTrue = "true"
 // ownership ledger as it goes. kmsClient is only ever touched when a
 // resource actually declares encryption.enabled — a CR that never uses it
 // can pass nil.
-//
-// Known gaps, deliberately deferred (same pattern as sqs's initial pass):
-// drift correction on an existing topic's attributes, and the trust-window
-// skip-on-recheck optimization.
 func Ensure(
 	ctx context.Context,
 	awsClient snsAPI,
@@ -112,10 +107,10 @@ func ensureTopic(
 	if !status.VerifiedSince(before, entry) {
 		return ledger, nil
 	}
-	return ledger, reconcileTransportSecurity(ctx, awsClient, entry.ARN, recordEvent)
+	return ledger, reconcileDeclaredPolicy(ctx, awsClient, entry.ARN, recordEvent)
 }
 
-// ensureTopicExists is ensureTopic without the transport-security statement.
+// ensureTopicExists is ensureTopic without the policy check.
 func ensureTopicExists(
 	ctx context.Context,
 	awsClient snsAPI,
@@ -347,7 +342,7 @@ func adoptTopic(
 // manages, without making any AWS call — used both at creation and as the
 // comparison target inside reconcileTopicAttributes. FifoTopic is never
 // included here since it's immutable after creation (enforced via CEL) —
-// only ever set at creation time, in ensureTopic's own create path.
+// only ever set at creation time, in createTopic.
 func desiredTopicAttributes(t depsv1alpha1.SNSTopicSpec, kmsKeyARN *string) map[string]string {
 	desired := map[string]string{}
 	if t.FIFO {
@@ -364,8 +359,8 @@ func desiredTopicAttributes(t depsv1alpha1.SNSTopicSpec, kmsKeyARN *string) map[
 }
 
 // reconcileTopicAttributes corrects drift on ContentBasedDeduplication and
-// KmsMasterKeyId, the only mutable attributes this package currently
-// exposes (both confirmed mutable via SetTopicAttributes per AWS's docs).
+// KmsMasterKeyId, the only mutable attributes this package manages (both
+// mutable via SetTopicAttributes per AWS's docs).
 // Unlike SQS's bulk SetQueueAttributes, SNS's SetTopicAttributes takes
 // exactly one attribute name/value per call, so a changed attribute is set
 // individually rather than in one batched request.

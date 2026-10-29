@@ -19,6 +19,7 @@ package s3
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,32 @@ func TestEnsure_ARemovedTransportStatementIsPutBack(t *testing.T) {
 	}
 	if !strings.Contains(client.buckets[receiptsBucket()].policy, awspolicy.InsecureTransportSid) {
 		t.Errorf("the statement was not restored: %q", client.buckets[receiptsBucket()].policy)
+	}
+}
+
+// The deny is only meant for a bucket waiting to be deleted. One left on a
+// declared bucket, because the ledger forgot the bucket was pending, would
+// refuse every upload with nothing to say why.
+func TestEnsure_ADeclaredBucketLosesALeftoverDeletionDeny(t *testing.T) {
+	client := newFakeS3()
+	if err := ensureReceipts(t, client, false, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if err := addPendingDeletionDeny(context.Background(), client, receiptsBucket()); err != nil {
+		t.Fatalf("addPendingDeletionDeny() error = %v", err)
+	}
+	recordEvent, events := newEventCollector()
+
+	if err := ensureReceipts(t, client, false, recordEvent); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	sids := statementsOf(t, client.buckets[receiptsBucket()].policy)
+	if slices.Contains(sids, pendingDeletionDenySid) || !slices.Contains(sids, awspolicy.InsecureTransportSid) {
+		t.Errorf("want the transport statement and no deletion deny, got %v", sids)
+	}
+	if got := countEvents(*events, "PendingDeletionDenyLifted"); got != 1 {
+		t.Errorf("expected one PendingDeletionDenyLifted event, got %+v", *events)
 	}
 }
 
