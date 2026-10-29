@@ -43,9 +43,17 @@ func SharedKey(t *testing.T, cfg aws.Config) depsv1alpha1.ManagedResource {
 	spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{
 		{Name: SharedKeyName, DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true},
 	}}
-	ledger, err := kmspkg.Ensure(context.Background(), kms.NewFromConfig(cfg), "live", "shared-key", "live-shared-key", spec, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("ensuring the shared live-test KMS key: %v", err)
+	client := kms.NewFromConfig(cfg)
+	// A second pass with the ledger of the first, as the reconciler runs it:
+	// the first one only records a key that was scheduled for deletion, the
+	// second one cancels the deletion.
+	var ledger []depsv1alpha1.ManagedResource
+	for range 2 {
+		var err error
+		ledger, err = kmspkg.Ensure(context.Background(), client, "live", "shared-key", "live-shared-key", spec, ledger, nil, nil)
+		if err != nil {
+			t.Fatalf("ensuring the shared live-test KMS key: %v", err)
+		}
 	}
 	for _, entry := range ledger {
 		if entry.Type == "kms" && entry.Name == SharedKeyName {
