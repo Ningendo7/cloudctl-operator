@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -49,6 +50,8 @@ type Options struct {
 	Context       string
 	Namespace     string
 	AllNamespaces bool
+	// Timeout bounds every request to the API server; 0 means none.
+	Timeout time.Duration
 	// WrapTransport lets a test observe every request. Not set in production.
 	WrapTransport func(http.RoundTripper) http.RoundTripper
 }
@@ -104,21 +107,29 @@ func classify(err error) error {
 }
 
 // ExplainForbidden says which permission a forbidden error is about, or
-// returns "" for any other error.
+// returns "" for any other error. It is printed under error, so it never
+// repeats it.
 func ExplainForbidden(err error) string {
 	var status *apierrors.StatusError
 	if !errors.As(err, &status) || !apierrors.IsForbidden(status) {
 		return ""
 	}
-	if details := status.ErrStatus.Details; details != nil {
-		switch details.Group {
-		case apiGroup:
-			return "You need get and list on appdependencies.deps.cloudctl.io; the appdependencies-viewer-role ClusterRole grants it."
-		case "events.k8s.io":
-			return "Events are optional: reading them needs get and list on events.k8s.io"
-		}
+	details := status.ErrStatus.Details
+	if details == nil {
+		return ""
 	}
-	return "forbidden:" + status.Error()
+	switch details.Group {
+	case apiGroup:
+		return "You need get and list on appdependencies.deps.cloudctl.io. The chart and install.yaml create a " +
+			"ClusterRole whose names ends in appdependencies-viewer-role that grants it; bind it to your user or group."
+	case "events.k8s.io":
+		return "Events are optional: reading them needs get and list on events.k8s.io"
+	}
+	resource := details.Kind
+	if details.Group != "" {
+		resource += "." + details.Group
+	}
+	return "You need get and list on " + resource
 }
 
 type reader struct {
@@ -142,6 +153,7 @@ func New(opts Options) (Reader, Target, error) {
 	if err != nil {
 		return nil, Target{}, fmt.Errorf("loading the kubeconfig: %w", err)
 	}
+	restConfig.Timeout = opts.Timeout
 	if opts.WrapTransport != nil {
 		restConfig.Wrap(opts.WrapTransport)
 	}
@@ -204,26 +216,40 @@ func (r *reader) List(ctx context.Context, namespace string) ([]depsv1alpha1.App
 
 func (r *reader) Events(ctx context.Context, namespace, name string) ([]Event, error) {
 	var list eventsv1.EventList
-	if err := r.client.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+	if err := r.client.List(ctx, &list, client.InNamespace(namespace),
+		client.MatchingFields{"regarding.kind": "AppDependencies", "regarding.name": name}); err != nil {
 		return nil, fmt.Errorf("listing events: %w", classify(err))
 	}
-	var events []Event
+	events := make([]Event, 0, len(list.Items))
 	for _, e := range list.Items {
-		if e.Regarding.Kind != "AppDependencies" || e.Regarding.Name != name {
-			continue
-		}
 		event := Event{
 			Type:    e.Type,
 			Reason:  e.Reason,
 			Message: e.Note,
-			Last:    e.EventTime.Time,
+			Last:    lastSeen(e),
 		}
 		if e.Series != nil {
 			event.Count = e.Series.Count
 		}
 		events = append(events, event)
 	}
+	slices.SortStableFunc(events, func(a, b Event) int { return a.Last.Compare(b.Last) })
 	return events, nil
+}
+
+// lastSeen is when the event last happened: a repeated event's series knows
+// that, a single one has only its own time, and one written through the older
+// core API has only the deprecated timestamp.
+func lastSeen(e eventsv1.Event) time.Time {
+	switch {
+	case e.Series != nil && !e.Series.LastObservedTime.IsZero():
+		return e.Series.LastObservedTime.Time
+	case !e.EventTime.IsZero():
+		return e.EventTime.Time
+	case !e.DeprecatedLastTimestamp.IsZero():
+		return e.DeprecatedLastTimestamp.Time
+	}
+	return e.CreationTimestamp.Time
 }
 
 func (r *reader) ServerVersions(ctx context.Context) (ServerInfo, error) {

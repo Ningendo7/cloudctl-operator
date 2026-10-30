@@ -19,8 +19,11 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/Ningendo7/cloudctl-operator/internal/cli/cmd"
@@ -28,6 +31,15 @@ import (
 )
 
 func main() {
+	// The first Ctrl-C (or TERM) cancels the request in flight; once it has,
+	// the default handling comes back, so a second Ctrl-C kills the process.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 	streams := cmd.Streams{In: os.Stdin, Out: os.Stdout, Err: os.Stderr}
-	os.Exit(cmd.Execute(os.Args[1:], filepath.Base(os.Args[0]), streams, kube.New, time.Now))
+	code := (cmd.Execute(ctx, os.Args[1:], filepath.Base(os.Args[0]), streams, kube.New, time.Now))
+	stop()
+	os.Exit(code)
 }

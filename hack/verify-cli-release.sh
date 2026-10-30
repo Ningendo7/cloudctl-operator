@@ -57,7 +57,10 @@ done
 out=$(KUBECONFIG=/nonexistent "$work/appdeps" version) || fail "appdeps version failed without a cluster: $out"
 [[ $out == *"Client: ${version} ("* ]] || fail "appdeps version does not report ${version}: $out"
 
-"$work/kubectl-appdeps" --help | grep -q "kubectl appdeps status" || fail "kubectl-appdeps --help does not use the plugin name"
+# Captured, not piped: grep -q stops reading at the first match, and under
+# pipefail the CLI's failed write to the closed pipe would fail the check.
+plugin=$("$work/kubectl-appdeps" --help)
+grep -q "kubectl appdeps status" <<<"$plugin" || fail "kubectl-appdeps --help does not use the plugin name"
 standalone=$("$work/appdeps" --help)
 grep -q "  appdeps status" <<<"$standalone" || fail "appdeps --help does not use its own name"
 grep -q "kubectl appdeps" <<<"$standalone" && fail "appdeps --help shows the plugin name"

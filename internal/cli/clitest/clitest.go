@@ -112,16 +112,38 @@ type FakeReader struct {
 	// GetErr, ListErr, EventsErr and ServerErr are returned as they are.
 	GetErr, ListErr, EventsErr, ServerErr error
 
+	// Block makes every call wait until its context ends and fail with the
+	// context's error, as a request to a cluster that never answers does.
+	Block bool
+
 	// Calls lists every request as "get ns/name", "list ns", "events ns/name"
 	// or "server".
 	Calls []string
+
+	// Deadlines records, call by call, whether the call's context had a
+	// deadline.
+	Deadlines []bool
+}
+
+// record notes the call, and with Block waits for the context to end.
+func (f *FakeReader) record(ctx context.Context, call string) error {
+	f.Calls = append(f.Calls, call)
+	_, hasDeadline := ctx.Deadline()
+	f.Deadlines = append(f.Deadlines, hasDeadline)
+	if !f.Block {
+		return nil
+	}
+	<-ctx.Done()
+	return fmt.Errorf("%s: %w", call, ctx.Err())
 }
 
 var _ kube.Reader = (*FakeReader)(nil)
 
 // Get returns the CR, or an error wrapping kube.ErrNotFound.
-func (f *FakeReader) Get(_ context.Context, namespace, name string) (*depsv1alpha1.AppDependencies, error) {
-	f.Calls = append(f.Calls, fmt.Sprintf("get %s/%s", namespace, name))
+func (f *FakeReader) Get(ctx context.Context, namespace, name string) (*depsv1alpha1.AppDependencies, error) {
+	if err := f.record(ctx, fmt.Sprintf("get %s/%s", namespace, name)); err != nil {
+		return nil, err
+	}
 	if f.GetErr != nil {
 		return nil, f.GetErr
 	}
@@ -134,8 +156,10 @@ func (f *FakeReader) Get(_ context.Context, namespace, name string) (*depsv1alph
 }
 
 // List returns the CRs of one namespace, or of all when namespace is empty.
-func (f *FakeReader) List(_ context.Context, namespace string) ([]depsv1alpha1.AppDependencies, error) {
-	f.Calls = append(f.Calls, "list "+namespace)
+func (f *FakeReader) List(ctx context.Context, namespace string) ([]depsv1alpha1.AppDependencies, error) {
+	if err := f.record(ctx, "list "+namespace); err != nil {
+		return nil, err
+	}
 	if f.ListErr != nil {
 		return nil, f.ListErr
 	}
@@ -149,13 +173,17 @@ func (f *FakeReader) List(_ context.Context, namespace string) ([]depsv1alpha1.A
 }
 
 // Events returns EventList.
-func (f *FakeReader) Events(_ context.Context, namespace, name string) ([]kube.Event, error) {
-	f.Calls = append(f.Calls, fmt.Sprintf("events %s/%s", namespace, name))
+func (f *FakeReader) Events(ctx context.Context, namespace, name string) ([]kube.Event, error) {
+	if err := f.record(ctx, fmt.Sprintf("events %s/%s", namespace, name)); err != nil {
+		return nil, err
+	}
 	return f.EventList, f.EventsErr
 }
 
 // ServerVersions returns Server.
-func (f *FakeReader) ServerVersions(_ context.Context) (kube.ServerInfo, error) {
-	f.Calls = append(f.Calls, "server")
+func (f *FakeReader) ServerVersions(ctx context.Context) (kube.ServerInfo, error) {
+	if err := f.record(ctx, "server"); err != nil {
+		return kube.ServerInfo{}, err
+	}
 	return f.Server, f.ServerErr
 }

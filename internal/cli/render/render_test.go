@@ -20,8 +20,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -207,6 +211,31 @@ func TestRetainedText(t *testing.T) {
 	}
 }
 
+// With --no-headers stdout carries rows only: the caller prints RetainedHint on
+// stderr instead.
+func TestRetainedText_NoHeadersLeavesTheHintToTheCaller(t *testing.T) {
+	if !strings.Contains(render.RetainedHint, "Key=cloudctl.io/released-from") {
+		t.Fatalf("RetainedHint = %q, want the AWS tag query", render.RetainedHint)
+	}
+	rows := []view.RetainedRow{{Namespace: "payments", CR: "ledger-service", Type: "sqs", Name: "audit", State: "Relinquished", OnDelete: "Retain", Why: "LetGo"}}
+
+	var b bytes.Buffer
+	if err := render.RetainedText(&b, rows, true); err != nil {
+		t.Fatalf("RetainedText() error = %v", err)
+	}
+	if strings.Contains(b.String(), "resourcegroupstaggingapi") || !strings.Contains(b.String(), "audit") {
+		t.Errorf("output:\n%s", b.String())
+	}
+
+	var none bytes.Buffer
+	if err := render.RetainedText(&none, nil, true); err != nil {
+		t.Fatalf("RetainedText() error = %v", err)
+	}
+	if none.Len() != 0 {
+		t.Errorf("nothing retained with --no-headers should print nothing, got %q", none.String())
+	}
+}
+
 func TestRetainedText_NothingRetained(t *testing.T) {
 	var b bytes.Buffer
 	if err := render.RetainedText(&b, nil, false); err != nil {
@@ -287,5 +316,55 @@ func collectKeys(prefix string, v any, out map[string]bool) {
 		for _, child := range t {
 			collectKeys(prefix+"[]", child, out)
 		}
+	}
+}
+
+// managedResourceStates reads the ledger states the API defines from its
+// source, so a state added there is checked here without anyone listing it.
+func managedResourceStates(t *testing.T) []string {
+	t.Helper()
+	path := filepath.Join("..", "..", "..", "api", "v1alpha1", "appdependencies_types.go")
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var states []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		spec, ok := n.(*ast.ValueSpec)
+		if !ok {
+			return true
+		}
+		if typ, ok := spec.Type.(*ast.Ident); !ok || typ.Name != "ManagedResourceState" {
+			return true
+		}
+		for _, v := range spec.Values {
+			if lit, ok := v.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				state, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				states = append(states, state)
+			}
+		}
+		return true
+	})
+	if len(states) == 0 {
+		t.Fatalf("found no ManagedResourceState constants in %s", path)
+	}
+	return states
+}
+
+// The ledger summary counts states in a fixed order; one missing from that
+// order would not be counted at all.
+func TestStatusText_CountsEveryLedgerStateTheAPIDefines(t *testing.T) {
+	for _, state := range managedResourceStates(t) {
+		t.Run(state, func(t *testing.T) {
+			v := readyView()
+			v.Ledger = view.LedgerSummary{Total: 1, ByState: map[string]int{state: 1}, Attention: []view.ResourceRow{}}
+
+			if got := render1(t, v, false); !strings.Contains(got, "Ledger: 1 entries (1 "+state+")") {
+				t.Errorf("the summary does not count %s:\n%s", state, got)
+			}
+		})
 	}
 }

@@ -40,11 +40,13 @@ const SchemaVersion = "appdeps.cloudctl.io/v1"
 const kindUnknown = "Unknown"
 
 // otherConditions are real conditions that are not a section and never decide
-// Ready.
+// Ready. TestTheCLIFilesEveryConditionTheWayTheControllerDoes keeps this in
+// step with the controller
 var otherConditions = map[string]bool{
 	"SharedWithReferencesValid": true,
 	"ConsumeReferencesValid":    true,
 	"DeletionBlocked":           true,
+	"EncryptionMatchesSpec":     true,
 }
 
 // StatusView is what `status` shows.
