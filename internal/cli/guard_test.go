@@ -222,7 +222,8 @@ func TestTheCLIFilesEveryConditionTheWayTheControllerDoes(t *testing.T) {
 	}
 	delete(all, "Ready") // the aggregate, shown on its own line
 
-	opts := []clitest.Option{clitest.Condition("Ready", metav1.ConditionFalse, "SomethingFailed", "x", 12, time.Minute)}
+	opts := make([]clitest.Option, 0, 1+len(all))
+	opts = append(opts, clitest.Condition("Ready", metav1.ConditionFalse, "SomethingFailed", "x", 12, time.Minute))
 	for condType := range all {
 		opts = append(opts, clitest.Condition(condType, metav1.ConditionFalse, "SomethingFailed", "x", 12, time.Minute))
 	}
