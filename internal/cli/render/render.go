@@ -35,7 +35,8 @@ import (
 // stateOrder is the order ledger states are listed in.
 var stateOrder = []string{"Verified", "Creating", "TagPending", "NeedsVerification", "Relinquished"}
 
-const retainedHint = "Resources released without a key leave the ledger. Find them in AWS with: " +
+// RetainedHint says how to find what the ledger no longer lists.
+const RetainedHint = "Resources released without a key leave the ledger. Find them in AWS with: " +
 	"aws resourcegroupstaggingapi get-resources --tag-filters Key=cloudctl.io/released-from\n"
 
 // table renders rows like `kubectl get`: columns padded with three spaces.
@@ -195,9 +196,14 @@ func ResourcesText(w io.Writer, rows []view.ResourceRow, now time.Time, wide, no
 }
 
 // RetainedText prints what is kept past its CR, then how to find the rest.
+// With noHeaders it prints the rows only, and nothing when there are none: the
+// caller puts the notes on stderr so stdout stays usable by scripts.
 func RetainedText(w io.Writer, rows []view.RetainedRow, noHeaders bool) error {
 	if len(rows) == 0 {
-		_, err := io.WriteString(w, "No retained resources found.\n\n"+retainedHint)
+		if noHeaders {
+			return nil
+		}
+		_, err := io.WriteString(w, "No retained resources found.\n\n"+RetainedHint)
 		return err
 	}
 	var out [][]string
@@ -207,7 +213,11 @@ func RetainedText(w io.Writer, rows []view.RetainedRow, noHeaders bool) error {
 	for _, r := range rows {
 		out = append(out, []string{r.Namespace, r.CR, r.Type, r.Name, r.State, dash(r.OnDelete), r.Why, dash(r.Detail)})
 	}
-	_, err := io.WriteString(w, table(out)+"\n"+retainedHint)
+	text := table(out)
+	if !noHeaders {
+		text += "\n" + RetainedHint
+	}
+	_, err := io.WriteString(w, text)
 	return err
 }
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -48,7 +49,7 @@ import (
 
 // These tests run the reader against a real API server. They need the
 // envtest binaries (KUBEBUILDER_ASSETS, set by `make test` and CI) and skip
-// without them.
+// without them, except in CI, where a skip would hide that they never ran.
 var (
 	envCfg   *rest.Config
 	admin    client.Client
@@ -85,6 +86,9 @@ func TestMain(m *testing.M) {
 
 func needCluster(t *testing.T) {
 	t.Helper()
+	if admin == nil && os.Getenv("CI") != "" {
+		t.Fatal("KUBEBUILDER_ASSETS is not set in CI, so the real API server tests would silently not run")
+	}
 	if admin == nil {
 		t.Skip("KUBEBUILDER_ASSETS is not set; skipping the real API server tests")
 	}
@@ -116,7 +120,11 @@ type recorder struct {
 func (r *recorder) wrap(next http.RoundTripper) http.RoundTripper {
 	return roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		r.mu.Lock()
-		r.requests = append(r.requests, req.Method+" "+req.URL.Path)
+		request := req.Method + " " + req.URL.Path
+		if req.URL.RawQuery != "" {
+			request += "?" + req.URL.RawQuery
+		}
+		r.requests = append(r.requests, request)
 		r.mu.Unlock()
 		return next.RoundTrip(req)
 	})
@@ -158,6 +166,20 @@ func seed(t *testing.T) {
 			EventTime:  metav1.NewMicroTime(time.Now()), Reason: "AdoptRequired", Note: "S3Ready: bucket exists", Type: "Warning",
 			Action: "Reconcile", ReportingController: "cloudctl-operator", ReportingInstance: "cloudctl-operator-0",
 			Regarding: corev1.ObjectReference{Kind: "AppDependencies", APIVersion: "deps.cloudctl.io/v1alpha1", Namespace: "checkout", Name: "checkout-service"},
+		}))
+		// Two events about one CR, the older one repeated since: listed by when
+		// each last happened, oldest first, the repeated one comes last.
+		regarding := corev1.ObjectReference{Kind: "AppDependencies", APIVersion: "deps.cloudctl.io/v1alpha1", Namespace: "checkout", Name: "series-service"}
+		must(admin.Create(ctx, &eventsv1.Event{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "checkout", Name: "ev-once"},
+			EventTime:  metav1.NewMicroTime(time.Now().Add(-10 * time.Minute)), Reason: "Reconciled", Note: "once", Type: "Normal",
+			Action: "Reconcile", ReportingController: "cloudctl-operator", ReportingInstance: "cloudctl-operator-0", Regarding: regarding,
+		}))
+		must(admin.Create(ctx, &eventsv1.Event{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "checkout", Name: "ev-repeated"},
+			EventTime:  metav1.NewMicroTime(time.Now().Add(-30 * time.Minute)), Reason: "Throttled", Note: "repeated", Type: "Warning",
+			Action: "Reconcile", ReportingController: "cloudctl-operator", ReportingInstance: "cloudctl-operator-0", Regarding: regarding,
+			Series: &eventsv1.EventSeries{Count: 4, LastObservedTime: metav1.NewMicroTime(time.Now().Add(-time.Minute))},
 		}))
 		labels := map[string]string{"app.kubernetes.io/name": "cloudctl-operator"}
 		must(admin.Create(ctx, &appsv1.Deployment{
@@ -248,6 +270,57 @@ func TestReader_EventsForOneCR(t *testing.T) {
 	other, err := newReader(t, "", nil).Events(ctx, "payments", "payments-service")
 	if err != nil || len(other) != 0 {
 		t.Errorf("another CR's events = %+v, err = %v, want none", other, err)
+	}
+}
+
+// The server picks out one CR's events; listing every event in the namespace
+// and filtering here would read a busy namespace's events on every call.
+func TestReader_EventsAskTheServerForOneCROnly(t *testing.T) {
+	needCluster(t)
+	seed(t)
+	rec := &recorder{}
+
+	if _, err := newReader(t, "", rec).Events(ctx, "checkout", "checkout-service"); err != nil {
+		t.Fatalf("Events() error = %v", err)
+	}
+
+	var selector string
+	for _, req := range rec.requests {
+		if path, query, found := strings.Cut(req, "?"); found && strings.HasSuffix(path, "/events") {
+			values, err := url.ParseQuery(query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			selector = values.Get("fieldSelector")
+		}
+	}
+	for _, want := range []string{"regarding.name=checkout-service", "regarding.kind=AppDependencies"} {
+		if !strings.Contains(selector, want) {
+			t.Errorf("the events request's field selector is %q, want it to contain %q (requests: %v)", selector, want, rec.requests)
+		}
+	}
+}
+
+// A repeated event reports when it last happened, not when it first did, and
+// the list runs oldest first like kubectl's.
+func TestReader_EventsAreOldestFirstByTheirLatestOccurrence(t *testing.T) {
+	needCluster(t)
+	seed(t)
+
+	events, err := newReader(t, "", nil).Events(ctx, "checkout", "series-service")
+
+	if err != nil || len(events) != 2 {
+		t.Fatalf("Events() = %+v, err = %v, want the two seeded events", events, err)
+	}
+	if events[0].Message != "once" || events[1].Message != "repeated" {
+		t.Errorf("order = %q, %q; want once, then repeated (it last happened most recently)", events[0].Message, events[1].Message)
+	}
+	repeated := events[1]
+	if repeated.Count != 4 {
+		t.Errorf("count = %d, want 4", repeated.Count)
+	}
+	if ago := time.Since(repeated.Last); ago < 30*time.Second || ago > 5*time.Minute {
+		t.Errorf("the repeated event last happened %s ago; want about a minute (its series), not half an hour (its first time)", ago)
 	}
 }
 

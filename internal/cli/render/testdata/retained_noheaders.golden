@@ -1,5 +1,3 @@
 payments   ledger-service   kms   dedicated   Verified       Delete   KeyHeld        held by sqs/orders
 payments   ledger-service   sqs   audit       Relinquished   Retain   LetGo          -
 payments   ledger-service   sqs   orders      Verified       Retain   KeptOnDelete   -
-
-Resources released without a key leave the ledger. Find them in AWS with: aws resourcegroupstaggingapi get-resources --tag-filters Key=cloudctl.io/released-from

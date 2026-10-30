@@ -18,6 +18,7 @@ package cmd_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -47,6 +48,12 @@ type run struct {
 // at clitest.Now.
 func exec(t *testing.T, reader kube.Reader, progName string, args ...string) run {
 	t.Helper()
+	return execWith(t, context.Background(), reader, progName, args...)
+}
+
+// execWith is exec with the context the binary would get from main.
+func execWith(t *testing.T, ctx context.Context, reader kube.Reader, progName string, args ...string) run {
+	t.Helper()
 	var out, errOut bytes.Buffer
 	r := run{}
 	factory := func(o kube.Options) (kube.Reader, kube.Target, error) {
@@ -57,7 +64,7 @@ func exec(t *testing.T, reader kube.Reader, progName string, args ...string) run
 		}
 		return reader, kube.Target{Context: "prod-eks", Namespace: ns}, nil
 	}
-	r.code = cmd.Execute(args, progName, cmd.Streams{Out: &out, Err: &errOut}, factory, func() time.Time { return clitest.Now })
+	r.code = cmd.Execute(ctx, args, progName, cmd.Streams{Out: &out, Err: &errOut}, factory, func() time.Time { return clitest.Now })
 	r.stdout, r.stderr = out.String(), errOut.String()
 	return r
 }
@@ -212,7 +219,7 @@ func TestClusterErrors(t *testing.T) {
 			return nil, kube.Target{}, errors.New("no kubeconfig found")
 		}
 
-		code := cmd.Execute([]string{"status", "x"}, "kubectl-appdeps", cmd.Streams{Out: &out, Err: &errOut}, failing, time.Now)
+		code := cmd.Execute(context.Background(), []string{"status", "x"}, "kubectl-appdeps", cmd.Streams{Out: &out, Err: &errOut}, failing, time.Now)
 
 		if code != cmd.ExitCluster || !strings.Contains(errOut.String(), "no kubeconfig found") {
 			t.Errorf("exit = %d, stderr = %q", code, errOut.String())
@@ -229,6 +236,14 @@ func TestUsageErrorsGoToStderrWithExitTwoAndNothingOnStdout(t *testing.T) {
 		"-A with status":        {"status", "x", "-A"},
 		"-A with resources":     {"resources", "x", "-A"},
 		"resources no argument": {"resources"},
+		// -o wide only changes the resources table, so anywhere else it would
+		// be silently ignored.
+		"-o wide with status":                  {"status", "x", "-o", "wide"},
+		"-o wide with retained":                {"retained", "-o", "wide"},
+		"-o wide with version":                 {"version", "-o", "wide"},
+		"a request timeout without a unit":     {"status", "x", "--request-timeout", "30"},
+		"a negative request timeout":           {"status", "x", "--request-timeout=-1s"},
+		"a request timeout that is not a time": {"retained", "--request-timeout", "soon"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			reader := &clitest.FakeReader{CRs: []*depsv1alpha1.AppDependencies{readyCR()}}
@@ -295,10 +310,10 @@ func TestResources(t *testing.T) {
 			t.Errorf("stdout:\n%s", r.stdout)
 		}
 	})
-	t.Run("--no-headers drops the header row only", func(t *testing.T) {
+	t.Run("--no-headers leaves only the rows", func(t *testing.T) {
 		r := exec(t, reader(), "kubectl-appdeps", "resources", "checkout-service", "-n", "checkout", "--no-headers")
 
-		if strings.Contains(r.stdout, "ON-DELETE") || !strings.Contains(r.stdout, "orders") || !strings.HasPrefix(r.stdout, "Context:") {
+		if strings.Contains(r.stdout, "ON-DELETE") || !strings.Contains(r.stdout, "orders") || !onlyRows(r.stdout) {
 			t.Errorf("stdout:\n%s", r.stdout)
 		}
 	})
@@ -432,7 +447,7 @@ func TestVersion(t *testing.T) {
 			return nil, kube.Target{}, errors.New("no kubeconfig found")
 		}
 
-		code := cmd.Execute([]string{"version"}, "kubectl-appdeps", cmd.Streams{Out: &out, Err: &errOut}, noCluster, time.Now)
+		code := cmd.Execute(context.Background(), []string{"version"}, "kubectl-appdeps", cmd.Streams{Out: &out, Err: &errOut}, noCluster, time.Now)
 
 		if code != cmd.ExitOK || !strings.Contains(out.String(), "Client: v0.8.1 (abc1234)") ||
 			!strings.Contains(out.String(), "Server API: unknown (no kubeconfig found)") {
@@ -492,4 +507,248 @@ func TestVersion(t *testing.T) {
 			t.Errorf("document = %+v", doc)
 		}
 	})
+}
+
+// A cluster that never answers is given up on, and the message says how long
+// the CLI waited and how to wait longer.
+func TestRequestTimeout(t *testing.T) {
+	t.Run("a cluster that does not answer is given up on", func(t *testing.T) {
+		start := time.Now()
+
+		r := exec(t, &clitest.FakeReader{Block: true}, "kubectl-appdeps", "status", "x", "-n", "checkout", "--request-timeout", "50ms")
+
+		if r.code != cmd.ExitCluster || r.stdout != "" {
+			t.Errorf("exit = %d, stdout = %q, want %d and nothing on stdout", r.code, r.stdout, cmd.ExitCluster)
+		}
+		if !strings.Contains(r.stderr, "50ms") || !strings.Contains(r.stderr, "--request-timeout") {
+			t.Errorf("stderr should say how long it waited and how to wait longer: %q", r.stderr)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("gave up only after %s", elapsed)
+		}
+	})
+	t.Run("every command that reads the cluster is bounded", func(t *testing.T) {
+		for name, args := range map[string][]string{
+			"resources": {"resources", "x", "-n", "checkout"},
+			"retained":  {"retained", "-A"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				r := exec(t, &clitest.FakeReader{Block: true}, "kubectl-appdeps", append(args, "--request-timeout", "50ms")...)
+
+				if r.code != cmd.ExitCluster || !strings.Contains(r.stderr, "--request-timeout") {
+					t.Errorf("exit = %d, stderr = %q", r.code, r.stderr)
+				}
+			})
+		}
+	})
+	t.Run("version still answers for the client when the server does not", func(t *testing.T) {
+		r := exec(t, &clitest.FakeReader{Block: true}, "kubectl-appdeps", "version", "--request-timeout", "50ms")
+
+		if r.code != cmd.ExitOK || !strings.Contains(r.stdout, "Client:") || !strings.Contains(r.stdout, "Server API: unknown") {
+			t.Errorf("exit = %d, stdout:\n%s", r.code, r.stdout)
+		}
+	})
+	t.Run("the default is 30s, for the reader and for every call", func(t *testing.T) {
+		reader := &clitest.FakeReader{CRs: []*depsv1alpha1.AppDependencies{readyCR()}}
+
+		r := exec(t, reader, "kubectl-appdeps", "status", "checkout-service", "-n", "checkout")
+
+		if r.opts.Timeout != 30*time.Second {
+			t.Errorf("the reader was built with timeout %s, want 30s", r.opts.Timeout)
+		}
+		if len(reader.Deadlines) == 0 || !reader.Deadlines[0] {
+			t.Errorf("the call had no deadline: %v", reader.Deadlines)
+		}
+	})
+	t.Run("0 waits as long as it takes, like kubectl", func(t *testing.T) {
+		reader := &clitest.FakeReader{CRs: []*depsv1alpha1.AppDependencies{readyCR()}}
+
+		r := exec(t, reader, "kubectl-appdeps", "status", "checkout-service", "-n", "checkout", "--request-timeout", "0")
+
+		if r.code != cmd.ExitOK || r.opts.Timeout != 0 {
+			t.Errorf("exit = %d, timeout = %s", r.code, r.opts.Timeout)
+		}
+		if len(reader.Deadlines) == 0 || reader.Deadlines[0] {
+			t.Errorf("with 0 the call should have no deadline: %v", reader.Deadlines)
+		}
+	})
+}
+
+// Ctrl-C cancels the request in flight, and the exit code says it was an
+// interrupt, as a shell expects (128 + SIGINT).
+func TestAnInterruptStopsTheRequestAndExits130(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r := execWith(t, ctx, &clitest.FakeReader{Block: true}, "kubectl-appdeps", "status", "x", "-n", "checkout")
+
+	if cmd.ExitInterrupted != 130 {
+		t.Errorf("ExitInterrupted = %d, want 130", cmd.ExitInterrupted)
+	}
+	if r.code != cmd.ExitInterrupted || r.stdout != "" || !strings.Contains(r.stderr, "interrupted") {
+		t.Errorf("exit = %d, stdout = %q, stderr = %q", r.code, r.stdout, r.stderr)
+	}
+}
+
+// kubectl says "No resources found" rather than printing a header with nothing
+// under it; the note goes to stderr so stdout stays empty for scripts.
+func TestResources_NothingToShowIsSaidOnStderr(t *testing.T) {
+	t.Run("an empty ledger", func(t *testing.T) {
+		empty := &clitest.FakeReader{CRs: []*depsv1alpha1.AppDependencies{clitest.CR("checkout", "empty")}}
+
+		r := exec(t, empty, "kubectl-appdeps", "resources", "empty", "-n", "checkout")
+
+		if r.code != cmd.ExitOK || strings.Contains(r.stdout, "TYPE") || !strings.Contains(r.stderr, "No resources found") {
+			t.Errorf("exit = %d, stdout = %q, stderr = %q", r.code, r.stdout, r.stderr)
+		}
+	})
+	t.Run("a filter that matches nothing", func(t *testing.T) {
+		reader := &clitest.FakeReader{CRs: []*depsv1alpha1.AppDependencies{readyCR()}}
+
+		r := exec(t, reader, "kubectl-appdeps", "resources", "checkout-service", "-n", "checkout", "--type", "rds")
+
+		if r.code != cmd.ExitOK || strings.Contains(r.stdout, "TYPE") || !strings.Contains(r.stderr, "No resources found") {
+			t.Errorf("exit = %d, stdout = %q, stderr = %q", r.code, r.stdout, r.stderr)
+		}
+	})
+	t.Run("--no-headers leaves stdout empty", func(t *testing.T) {
+		empty := &clitest.FakeReader{CRs: []*depsv1alpha1.AppDependencies{clitest.CR("checkout", "empty")}}
+
+		r := exec(t, empty, "kubectl-appdeps", "resources", "empty", "-n", "checkout", "--no-headers")
+
+		if r.code != cmd.ExitOK || r.stdout != "" || !strings.Contains(r.stderr, "No resources found") {
+			t.Errorf("exit = %d, stdout = %q, stderr = %q", r.code, r.stdout, r.stderr)
+		}
+	})
+	t.Run("json stays an empty list with nothing on stderr", func(t *testing.T) {
+		empty := &clitest.FakeReader{CRs: []*depsv1alpha1.AppDependencies{clitest.CR("checkout", "empty")}}
+
+		r := exec(t, empty, "kubectl-appdeps", "resources", "empty", "-n", "checkout", "-o", "json")
+
+		if r.stderr != "" {
+			t.Errorf("stderr = %q, want empty: structured output is complete on its own", r.stderr)
+		}
+	})
+}
+
+// With --no-headers stdout holds rows only, so the hint on how to find what the
+// ledger no longer lists moves to stderr.
+func TestRetained_NoHeadersLeavesOnlyRowsOnStdout(t *testing.T) {
+	reader := func() *clitest.FakeReader {
+		return &clitest.FakeReader{CRs: []*depsv1alpha1.AppDependencies{
+			clitest.CR("checkout", "checkout-service", clitest.Entry(clitest.Res("sqs", "orders"))),
+		}}
+	}
+
+	t.Run("with rows", func(t *testing.T) {
+		r := exec(t, reader(), "kubectl-appdeps", "retained", "-n", "checkout", "--no-headers")
+
+		if r.code != cmd.ExitOK || !strings.Contains(r.stdout, "orders") || strings.Contains(r.stdout, "NAMESPACE") || !onlyRows(r.stdout) {
+			t.Errorf("exit = %d, stdout:\n%s", r.code, r.stdout)
+		}
+		if !strings.Contains(r.stderr, "Key=cloudctl.io/released-from") {
+			t.Errorf("stderr should carry the hint: %q", r.stderr)
+		}
+	})
+	t.Run("with nothing retained", func(t *testing.T) {
+		r := exec(t, reader(), "kubectl-appdeps", "retained", "-n", "elsewhere", "--no-headers")
+
+		if r.code != cmd.ExitOK || r.stdout != "" {
+			t.Errorf("exit = %d, stdout = %q, want empty", r.code, r.stdout)
+		}
+		if !strings.Contains(r.stderr, "No retained resources found") || !strings.Contains(r.stderr, "Key=cloudctl.io/released-from") {
+			t.Errorf("stderr = %q", r.stderr)
+		}
+	})
+}
+
+// onlyRows reports whether out is table rows and nothing else: no Context
+// line, no hint, no blank lines.
+func onlyRows(out string) bool {
+	if out == "" || !strings.HasSuffix(out, "\n") {
+		return false
+	}
+	for line := range strings.Lines(out) {
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "Context:") || strings.Contains(line, "resourcegroupstaggingapi") {
+			return false
+		}
+	}
+	return true
+}
+
+func setVersion(t *testing.T, v, commit string) {
+	t.Helper()
+	oldV, oldC := version.Version, version.Commit
+	version.Version, version.Commit = v, commit
+	t.Cleanup(func() { version.Version, version.Commit = oldV, oldC })
+}
+
+// An unreachable cluster and a cluster with nothing installed must not look the
+// same in JSON: both have no API versions, only one has an error.
+func TestVersion_JSONSaysWhyTheServerIsUnknown(t *testing.T) {
+	serverOf := func(t *testing.T, r run) map[string]any {
+		t.Helper()
+		var doc struct {
+			Server map[string]any `json:"server"`
+		}
+		if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, r.stdout)
+		}
+		return doc.Server
+	}
+
+	t.Run("unreachable", func(t *testing.T) {
+		setVersion(t, "v0.9.0", "abc1234")
+
+		r := exec(t, &clitest.FakeReader{ServerErr: errors.New("connection refused")}, "kubectl-appdeps", "version", "-o", "json")
+
+		if server := serverOf(t, r); r.code != cmd.ExitOK || server["error"] != "connection refused" {
+			t.Errorf("exit = %d, server = %v, want error \"connection refused\"", r.code, server)
+		}
+	})
+	t.Run("answered", func(t *testing.T) {
+		setVersion(t, "v0.9.0", "abc1234")
+		reader := &clitest.FakeReader{Server: kube.ServerInfo{APIVersions: []string{"deps.cloudctl.io/v1alpha1"}}}
+
+		r := exec(t, reader, "kubectl-appdeps", "version", "-o", "json")
+
+		if _, has := serverOf(t, r)["error"]; has {
+			t.Errorf("a server that answered has no error:\n%s", r.stdout)
+		}
+	})
+}
+
+// The operator's version is the image tag, which a registry port or a digest
+// must not be mistaken for.
+func TestVersion_ServerReadsTheTagFromAnyImageReference(t *testing.T) {
+	const digest = "@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for image, want := range map[string]string{
+		"ghcr.io/ningendo7/cloudctl-operator:v0.9.0":               "v0.9.0",
+		"ghcr.io/ningendo7/cloudctl-operator:v0.9.0" + digest:      "v0.9.0",
+		"registry.example:5000/cloudctl-operator:v0.9.0":           "v0.9.0",
+		"registry.example:5000/cloudctl-operator:v0.9.0" + digest:  "v0.9.0",
+		"ghcr.io/ningendo7/cloudctl-operator" + digest:             "",
+		"registry.example:5000/cloudctl-operator":                  "",
+		"registry.example:5000/cloudctl-operator:v0.8.4":           "",
+		"registry.example:5000/team/cloudctl-operator:v0.9.0-rc.1": "v0.9.0-rc.1",
+		"localhost:5000/cloudctl-operator@sha256:abc":              "",
+		"cloudctl-operator": "",
+	} {
+		t.Run(image, func(t *testing.T) {
+			setVersion(t, "v0.8.1", "abc1234")
+
+			r := exec(t, &clitest.FakeReader{Server: kube.ServerInfo{OperatorImage: image}}, "kubectl-appdeps", "version", "--server")
+
+			if !strings.Contains(r.stdout, "Operator: "+image) {
+				t.Errorf("the image should be shown as it is:\n%s", r.stdout)
+			}
+			warned := strings.Contains(r.stdout, "Warning")
+			switch {
+			case want == "" && warned:
+				t.Errorf("%q has no tag, or one of the CLI's own minor version, so nothing should warn:\n%s", image, r.stdout)
+			case want != "" && !strings.Contains(r.stdout, "the operator is "+want+";"):
+				t.Errorf("want a warning naming the operator as %s:\n%s", want, r.stdout)
+			}
+		})
+	}
 }

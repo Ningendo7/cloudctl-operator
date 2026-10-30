@@ -35,10 +35,11 @@ import (
 
 // The exit codes are a documented contract.
 const (
-	ExitOK       = 0
-	ExitNotReady = 1
-	ExitUsage    = 2
-	ExitCluster  = 3
+	ExitOK          = 0
+	ExitNotReady    = 1
+	ExitUsage       = 2
+	ExitCluster     = 3
+	ExitInterrupted = 130 // 128 + SIGINT, what a shell expects after Ctrl-C
 )
 
 // The output formats -o accepts.
@@ -83,14 +84,14 @@ type app struct {
 }
 
 // Execute runs the CLI as progName with args and returns the exit code.
-func Execute(args []string, progName string, s Streams, newReader ReaderFactory, now func() time.Time) int {
+func Execute(ctx context.Context, args []string, progName string, s Streams, newReader ReaderFactory, now func() time.Time) int {
 	a := &app{streams: s, newReader: newReader, now: now, display: "appdeps"}
 	if progName == "kubectl-appdeps" {
 		a.display = "kubectl appdeps"
 	}
 	root := a.root()
 	root.SetArgs(args)
-	return a.exitCode(root.Execute())
+	return a.exitCode(root.ExecuteContext(ctx))
 }
 
 func (a *app) root() *cobra.Command {
@@ -115,6 +116,8 @@ func (a *app) root() *cobra.Command {
 	flags.BoolVarP(&a.opts.AllNamespaces, "all-namespaces", "A", false, "all namespaces")
 	flags.StringVarP(&a.output, "output", "o", formatTable, "output format: table, wide, json or yaml")
 	flags.BoolVar(&a.noHeaders, "no-headers", false, "leave the header row out of tables")
+	flags.DurationVar(&a.opts.Timeout, "request-timeout", 30*time.Second,
+		"how long to wait for the cluster before giving up, e.g. 10s or 1m; 0 waits as long as it takes")
 	root.AddCommand(a.statusCmd(), a.resourcesCmd(), a.retainedCmd(), a.versionCmd())
 	return root
 }
@@ -140,12 +143,28 @@ func (a *app) exitCode(err error) int {
 
 func (a *app) structured() bool { return a.output == formatJSON || a.output == formatYAML }
 
-func (a *app) checkOutput() error {
+func (a *app) checkFlags(wideAllowed bool) error {
 	switch a.output {
-	case formatTable, formatWide, formatJSON, formatYAML:
-		return nil
+	case formatTable, formatJSON, formatYAML:
+	case formatWide:
+		if !wideAllowed {
+			return errors.New("-o wide is only for resources")
+		}
+	default:
+		return fmt.Errorf("unknown output format %q", a.output)
 	}
-	return fmt.Errorf("unknown output format %q", a.output)
+	if a.opts.Timeout < 0 {
+		return fmt.Errorf("--request-timeout cannot be negative, got %s", a.opts.Timeout)
+	}
+	return nil
+}
+
+// requestContext bounds the calls one command makes by --request-timeout.
+func (a *app) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if a.opts.Timeout == 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, a.opts.Timeout)
 }
 
 func (a *app) emit(doc any) error {
@@ -170,29 +189,44 @@ func (a *app) connect() (kube.Reader, kube.Target, error) {
 	return reader, target, nil
 }
 
-// clusterError adds the RBAC hint when the error is a forbidden one.
-func clusterError(err error) error {
+// clusterError gives a failed read the exit code and message it deserves: an
+// interrupt, a cluster that did not answer in time, or what the cluster said,
+// with the RBAC hint when it refused.
+func (a *app) clusterError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return &exitError{ExitInterrupted, errors.New("interrupted")}
+	}
+	if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
+		return &exitError{ExitCluster, fmt.Errorf(
+			"the cluster did not answer within %s; check the connection, or wait longer with --request-timeout", a.opts.Timeout)}
+	}
 	if hint := kube.ExplainForbidden(err); hint != "" {
 		err = fmt.Errorf("%w\n%s", err, hint)
 	}
 	return &exitError{ExitCluster, err}
 }
 
+// isTimeout reports a timeout of the HTTP client itself, which arrives as a
+// net.Error rather than as the context's deadline.
+func isTimeout(err error) bool {
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
 func (a *app) statusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "status <cr>",
 		Aliases: []string{"explain"},
 		Short:   "Is it Ready, and if not, why and what to do",
 		Args:    cobra.ExactArgs(1),
-		RunE:    func(_ *cobra.Command, args []string) error { return a.runStatus(args[0]) },
+		RunE:    func(c *cobra.Command, args []string) error { return a.runStatus(c.Context(), args[0]) },
 	}
 	cmd.Flags().BoolVar(&a.showSource, "show-source", false, "show the status fields each statement came from")
 	cmd.Flags().BoolVar(&a.events, "events", false, "also show recent events")
 	return cmd
 }
 
-func (a *app) runStatus(name string) error {
-	if err := a.checkOutput(); err != nil {
+func (a *app) runStatus(ctx context.Context, name string) error {
+	if err := a.checkFlags(false); err != nil {
 		return err
 	}
 	if a.opts.AllNamespaces {
@@ -202,9 +236,11 @@ func (a *app) runStatus(name string) error {
 	if err != nil {
 		return err
 	}
-	cr, err := reader.Get(context.Background(), target.Namespace, name)
+	reqCtx, cancel := a.requestContext(ctx)
+	defer cancel()
+	cr, err := reader.Get(reqCtx, target.Namespace, name)
 	if err != nil {
-		return clusterError(err)
+		return a.clusterError(ctx, err)
 	}
 	v := view.Status(cr, target, a.now())
 	if a.structured() {
@@ -216,7 +252,7 @@ func (a *app) runStatus(name string) error {
 			return err
 		}
 		if a.events {
-			if err := a.printEvents(reader, target.Namespace, name); err != nil {
+			if err := a.printEvents(reqCtx, reader, target.Namespace, name); err != nil {
 				return err
 			}
 		}
@@ -229,8 +265,8 @@ func (a *app) runStatus(name string) error {
 
 // printEvents fails only if stdout cannot be written: events are optional, so
 // not being able to read them is a note on stderr.
-func (a *app) printEvents(reader kube.Reader, namespace, name string) error {
-	events, err := reader.Events(context.Background(), namespace, name)
+func (a *app) printEvents(ctx context.Context, reader kube.Reader, namespace, name string) error {
+	events, err := reader.Events(ctx, namespace, name)
 	if err != nil {
 		note := "could not read events: " + err.Error()
 		if hint := kube.ExplainForbidden(err); hint != "" {
@@ -254,7 +290,7 @@ func (a *app) resourcesCmd() *cobra.Command {
 		Aliases: []string{"ledger"},
 		Short:   "The ownership ledger of one CR",
 		Args:    cobra.ExactArgs(1),
-		RunE:    func(_ *cobra.Command, args []string) error { return a.runResources(args[0]) },
+		RunE:    func(c *cobra.Command, args []string) error { return a.runResources(c.Context(), args[0]) },
 	}
 	cmd.Flags().StringVar(&a.filter.Type, "type", "", "only this resource type")
 	cmd.Flags().StringVar(&a.filter.State, "state", "", "only this ledger state")
@@ -262,8 +298,8 @@ func (a *app) resourcesCmd() *cobra.Command {
 	return cmd
 }
 
-func (a *app) runResources(name string) error {
-	if err := a.checkOutput(); err != nil {
+func (a *app) runResources(ctx context.Context, name string) error {
+	if err := a.checkFlags(true); err != nil {
 		return err
 	}
 	if a.opts.AllNamespaces {
@@ -273,9 +309,11 @@ func (a *app) runResources(name string) error {
 	if err != nil {
 		return err
 	}
-	cr, err := reader.Get(context.Background(), target.Namespace, name)
+	reqCtx, cancel := a.requestContext(ctx)
+	defer cancel()
+	cr, err := reader.Get(reqCtx, target.Namespace, name)
 	if err != nil {
-		return clusterError(err)
+		return a.clusterError(ctx, err)
 	}
 	rows := view.Resources(cr, a.filter)
 	if a.structured() {
@@ -283,7 +321,13 @@ func (a *app) runResources(name string) error {
 			"context": target.Context, "namespace": target.Namespace, "name": name, "items": rows,
 		}))
 	}
-	if _, err := fmt.Fprintf(a.streams.Out, "Context: %s   Namespace: %s   CR: %s\n\n", target.Context, target.Namespace, name); err != nil {
+	if !a.noHeaders {
+		if _, err := fmt.Fprintf(a.streams.Out, "Context: %s   Namespace: %s   CR: %s\n\n", target.Context, target.Namespace, name); err != nil {
+			return err
+		}
+	}
+	if len(rows) == 0 {
+		_, err := fmt.Fprintln(a.streams.Err, "No resources found.")
 		return err
 	}
 	return render.ResourcesText(a.streams.Out, rows, a.now(), a.output == formatWide, a.noHeaders)
@@ -294,21 +338,23 @@ func (a *app) retainedCmd() *cobra.Command {
 		Use:   "retained",
 		Short: "What the operator keeps beyond a CR, and why",
 		Args:  cobra.NoArgs,
-		RunE:  func(_ *cobra.Command, _ []string) error { return a.runRetained() },
+		RunE:  func(c *cobra.Command, _ []string) error { return a.runRetained(c.Context()) },
 	}
 }
 
-func (a *app) runRetained() error {
-	if err := a.checkOutput(); err != nil {
+func (a *app) runRetained(ctx context.Context) error {
+	if err := a.checkFlags(false); err != nil {
 		return err
 	}
 	reader, target, err := a.connect()
 	if err != nil {
 		return err
 	}
-	crs, err := reader.List(context.Background(), target.Namespace) // "" with -A lists everything
+	reqCtx, cancel := a.requestContext(ctx)
+	defer cancel()
+	crs, err := reader.List(reqCtx, target.Namespace) // "" with -A lists everything
 	if err != nil {
-		return clusterError(err)
+		return a.clusterError(ctx, err)
 	}
 	rows := view.Retained(crs)
 	shown := target.Namespace
@@ -320,10 +366,24 @@ func (a *app) runRetained() error {
 			"context": target.Context, "namespace": shown, "items": rows,
 		}))
 	}
-	if _, err := fmt.Fprintf(a.streams.Out, "Context: %s   Namespace: %s\n\n", target.Context, shown); err != nil {
+	if !a.noHeaders {
+		if _, err := fmt.Fprintf(a.streams.Out, "Context: %s   Namespace: %s\n\n", target.Context, shown); err != nil {
+			return err
+		}
+	}
+	if err := render.RetainedText(a.streams.Out, rows, a.noHeaders); err != nil {
 		return err
 	}
-	return render.RetainedText(a.streams.Out, rows, a.noHeaders)
+	if !a.noHeaders {
+		return nil
+	}
+	// With --no-headers stdout holds rows only, for scripts; the notes go to stderr.
+	note := render.RetainedHint
+	if len(rows) == 0 {
+		note = "No retained resources found.\n" + note
+	}
+	_, err = io.WriteString(a.streams.Err, note)
+	return err
 }
 
 func (a *app) versionCmd() *cobra.Command {
@@ -331,32 +391,38 @@ func (a *app) versionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "The CLI version and the cluster's API version",
 		Args:  cobra.NoArgs,
-		RunE:  func(_ *cobra.Command, _ []string) error { return a.runVersion() },
+		RunE:  func(c *cobra.Command, _ []string) error { return a.runVersion(c.Context()) },
 	}
 	cmd.Flags().BoolVar(&a.server, "server", false, "also show the operator version")
 	return cmd
 }
 
-func (a *app) runVersion() error {
-	if err := a.checkOutput(); err != nil {
+func (a *app) runVersion(ctx context.Context) error {
+	if err := a.checkFlags(false); err != nil {
 		return err
 	}
 	client := version.Current()
 	// version must work without a cluster, so failing to connect is reported
 	// as an unknown server, not an error.
 	var info kube.ServerInfo
+	reqCtx, cancel := a.requestContext(ctx)
+	defer cancel()
 	reader, _, serverErr := a.newReader(a.opts)
 	if serverErr == nil {
-		info, serverErr = reader.ServerVersions(context.Background())
+		info, serverErr = reader.ServerVersions(reqCtx)
 	}
 	if a.structured() {
 		apiVersions := info.APIVersions
 		if apiVersions == nil {
 			apiVersions = []string{}
 		}
+		server := map[string]any{"apiVersions": apiVersions, "operatorImage": info.OperatorImage}
+		if serverErr != nil {
+			server["error"] = serverErr.Error()
+		}
 		return a.emit(document("Version", map[string]any{
 			"client": map[string]string{"version": client.Version, "commit": client.Commit, "goVersion": client.GoVersion},
-			"server": map[string]any{"apiVersions": apiVersions, "operatorImage": info.OperatorImage},
+			"server": server,
 		}))
 	}
 	var b strings.Builder
@@ -373,13 +439,24 @@ func (a *app) runVersion() error {
 	return err
 }
 
+// imageTag returns the tag of an image reference, or "" when it has none. A
+// digest is not a tag, and a colon before the last slash is a registry port.
+func imageTag(image string) string {
+	name, _, _ := strings.Cut(image, "@")
+	i := strings.LastIndex(name, ":")
+	if i == -1 || i < strings.LastIndex(name, "/") {
+		return ""
+	}
+	return name[i+1:]
+}
+
 func writeOperator(b *strings.Builder, clientVersion, image string) {
 	if image == "" {
 		b.WriteString("Operator: unknown\n")
 		return
 	}
 	fmt.Fprintf(b, "Operator: %s\n", image)
-	operator := image[strings.LastIndex(image, ":")+1:]
+	operator := imageTag(image)
 	if cm, om := minor(clientVersion), minor(operator); cm != "" && om != "" && cm != om {
 		fmt.Fprintf(b, "Warning: the CLI is %s and the operator is %s; output may not match\n", clientVersion, operator)
 	}
