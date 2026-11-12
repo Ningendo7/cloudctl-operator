@@ -514,6 +514,53 @@ var _ = Describe("AppDependencies Controller", func() {
 			callsDuringThisPass := fakeRDS.describeDBInstancesCalls[instanceID] - callsBefore
 			Expect(callsDuringThisPass).To(Equal(1), "expected rdsSection's own status check, the ConfigMap's connection-info delivery, and the Secret's credentials delivery to share one DescribeDBInstances call")
 		})
+
+		// The RDS half of TestReconcile_AnIdlePassWritesNothingToAWS: an
+		// instance, its security group and their policies need the API server.
+		It("writes nothing to AWS on an idle pass or at the recheck", func() {
+			grant := &depsv1alpha1.RDSSubnetGroupGrant{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-grant-idle-"},
+				Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "idle-subnet-group", AllowedNamespaces: []string{"default"}},
+			}
+			Expect(k8sClient.Create(ctx, grant)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, grant) })
+
+			cr := &depsv1alpha1.AppDependencies{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-rds-idle-", Namespace: "default"},
+				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
+					Name: "orders-db", DBSubnetGroupName: "idle-subnet-group",
+					Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
+					Backup: &depsv1alpha1.RDSBackupSpec{Enabled: true},
+				}}}},
+			}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			calls := countAWSCalls(reconciler.AWSClients)
+			pass := func() {
+				clear(calls)
+				_, err := reconciler.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			// Create, then verify ownership, then settle.
+			pass()
+			pass()
+			pass()
+
+			pass()
+			Expect(calls.writes()).To(BeEmpty(), "a pass inside the trust window wrote to AWS")
+
+			var stored depsv1alpha1.AppDependencies
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &stored)).To(Succeed())
+			stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+			for i := range stored.Status.ManagedResources {
+				stored.Status.ManagedResources[i].LastVerifiedAt = &stale
+			}
+			Expect(k8sClient.Status().Update(ctx, &stored)).To(Succeed())
+			pass()
+			Expect(calls.writes()).To(BeEmpty(), "the recheck after the trust window wrote to AWS")
+			Expect(calls).NotTo(BeEmpty(), "the recheck made no calls at all, so it checked nothing")
+			GinkgoWriter.Printf("calls at the RDS recheck: %v\n", calls)
+		})
 	})
 
 	Context("reconciling a declared RDS instance with no authorizing grant", func() {

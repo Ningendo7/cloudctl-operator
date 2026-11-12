@@ -1080,3 +1080,54 @@ func TestEnsure_AdoptingAKeyPendingDeletionCancelsTheDeletionBeforeTagging(t *te
 		t.Errorf("expected the key to be tagged as owned, got %v", client.keys[arn].tags)
 	}
 }
+
+// A recheck finds the alias already in place almost every time. Creating it
+// regardless fails with AlreadyExistsException, an error in CloudTrail for
+// every key every trust window, so the recheck looks the alias up and only
+// creates it when it is missing.
+func TestEnsure_ARecheckCreatesTheAliasOnlyWhenItIsMissing(t *testing.T) {
+	arn := "arn:aws:kms:us-east-1:123456789012:key/id-1"
+	other := "arn:aws:kms:us-east-1:123456789012:key/other-id"
+	alias := aliasName("default", "checkout-service", "primary", keyOptions{})
+	cases := []struct {
+		name            string
+		aliasTarget     string // "" means no alias
+		wantCreateCalls int
+		wantReason      string
+		wantAliasTarget string
+	}{
+		{name: "the alias points at the key", aliasTarget: arn, wantCreateCalls: 0, wantAliasTarget: arn},
+		{name: "the alias was deleted", aliasTarget: "", wantCreateCalls: 1, wantAliasTarget: arn},
+		{name: "the alias points at another key", aliasTarget: other, wantCreateCalls: 0, wantReason: reasons.NameTaken, wantAliasTarget: other},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newFakeKMS()
+			client.keys[arn] = ownedFakeKey(arn, "id-1")
+			client.keys[other] = &fakeKey{arn: other, keyID: "other-id", keyState: types.KeyStateEnabled}
+			if tc.aliasTarget != "" {
+				client.aliases[alias] = tc.aliasTarget
+			}
+			stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+			ledger := trustedKeyLedger(arn)
+			ledger[0].LastVerifiedAt = &stale
+			spec := &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}}
+
+			_, err := Ensure(context.Background(), client, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+
+			var reconcileErr *cloudctlaws.ReconcileError
+			switch {
+			case tc.wantReason == "" && err != nil:
+				t.Fatalf("Ensure() error = %v", err)
+			case tc.wantReason != "" && (!errors.As(err, &reconcileErr) || reconcileErr.Reason != tc.wantReason):
+				t.Fatalf("Ensure() error = %v, want %s", err, tc.wantReason)
+			}
+			if client.createAliasCalls != tc.wantCreateCalls {
+				t.Errorf("CreateAlias was called %d times, want %d", client.createAliasCalls, tc.wantCreateCalls)
+			}
+			if client.aliases[alias] != tc.wantAliasTarget {
+				t.Errorf("the alias points at %q, want %q", client.aliases[alias], tc.wantAliasTarget)
+			}
+		})
+	}
+}

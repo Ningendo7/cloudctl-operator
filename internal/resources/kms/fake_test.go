@@ -75,6 +75,7 @@ type fakeKMS struct {
 	describeKeyCalls      map[string]int
 	listResourceTagsCalls map[string]int
 	putKeyPolicyCalls     int
+	createAliasCalls      int
 }
 
 func newFakeKMS() *fakeKMS {
@@ -139,6 +140,7 @@ func (f *fakeKMS) CreateKey(_ context.Context, in *kms.CreateKeyInput, _ ...func
 }
 
 func (f *fakeKMS) CreateAlias(_ context.Context, in *kms.CreateAliasInput, _ ...func(*kms.Options)) (*kms.CreateAliasOutput, error) {
+	f.createAliasCalls++
 	if f.createAliasErr != nil {
 		return nil, f.createAliasErr
 	}

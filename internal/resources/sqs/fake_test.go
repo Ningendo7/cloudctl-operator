@@ -18,8 +18,10 @@ package sqs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
+	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -115,7 +117,31 @@ func (f *fakeSQS) GetQueueAttributes(_ context.Context, in *sqs.GetQueueAttribut
 		string(types.QueueAttributeNamePolicy):                                q.policy,
 	}
 	maps.Copy(out, q.attributes)
+	if policy, ok := out["RedrivePolicy"]; ok {
+		out["RedrivePolicy"] = redrivePolicyAsReturned(policy)
+	}
 	return &sqs.GetQueueAttributesOutput{Attributes: out}, nil
+}
+
+// redrivePolicyAsReturned is a RedrivePolicy the way SQS hands it back, not
+// the way it was sent: compact JSON, members in name order, and
+// maxReceiveCount a number even when the request quoted it. q.attributes
+// keeps what was sent, so tests can still check the request.
+func redrivePolicyAsReturned(sent string) string {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(sent), &doc); err != nil {
+		return sent
+	}
+	if count, ok := doc["maxReceiveCount"].(string); ok {
+		if n, err := strconv.Atoi(count); err == nil {
+			doc["maxReceiveCount"] = n
+		}
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return sent
+	}
+	return string(out)
 }
 
 func (f *fakeSQS) SetQueueAttributes(_ context.Context, in *sqs.SetQueueAttributesInput, _ ...func(*sqs.Options)) (*sqs.SetQueueAttributesOutput, error) {

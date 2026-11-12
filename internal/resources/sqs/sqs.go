@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -575,7 +576,7 @@ func reconcileAttributes(ctx context.Context, awsClient sqsAPI, queueURL string,
 
 	changed := map[string]string{}
 	for k, v := range desired {
-		if current.Attributes[k] != v {
+		if !attributeMatches(k, current.Attributes[k], v) {
 			changed[k] = v
 		}
 	}
@@ -589,6 +590,41 @@ func reconcileAttributes(ctx context.Context, awsClient sqsAPI, queueURL string,
 		Attributes: changed,
 	})
 	return err
+}
+
+// attributeMatches compares one queue attribute the way SQS means it. SQS
+// hands a RedrivePolicy back in its own form, with maxReceiveCount a number
+// where we send it quoted, so that one is compared by what it says; compared
+// as text it never matches and the queue is rewritten on every pass.
+func attributeMatches(name, current, desired string) bool {
+	if name != "RedrivePolicy" || current == "" || desired == "" {
+		return current == desired
+	}
+	got, gotErr := parseRedrivePolicy(current)
+	want, wantErr := parseRedrivePolicy(desired)
+	if gotErr != nil || wantErr != nil {
+		return current == desired
+	}
+	return got == want
+}
+
+type redrivePolicyValues struct {
+	deadLetterTargetARN string
+	maxReceiveCount     string
+}
+
+func parseRedrivePolicy(raw string) (redrivePolicyValues, error) {
+	var doc struct {
+		DeadLetterTargetArn string          `json:"deadLetterTargetArn"`
+		MaxReceiveCount     json.RawMessage `json:"maxReceiveCount"`
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return redrivePolicyValues{}, err
+	}
+	return redrivePolicyValues{
+		deadLetterTargetARN: doc.DeadLetterTargetArn,
+		maxReceiveCount:     strings.Trim(string(doc.MaxReceiveCount), `"`),
+	}, nil
 }
 
 func recordVerified(

@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
+	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -42,6 +44,7 @@ type fakeQueue struct {
 	approxMessagesHidden  string
 	approxMessagesDelayed string
 	policy                string
+	attributes            map[string]string
 }
 
 type fakeSQSClient struct {
@@ -75,6 +78,7 @@ func (f *fakeSQSClient) CreateQueue(ctx context.Context, in *sqs.CreateQueueInpu
 		approxMessages:        "0",
 		approxMessagesHidden:  "0",
 		approxMessagesDelayed: "0",
+		attributes:            maps.Clone(in.Attributes),
 	}
 	return &sqs.CreateQueueOutput{QueueUrl: &url}, nil
 }
@@ -96,13 +100,40 @@ func (f *fakeSQSClient) GetQueueAttributes(_ context.Context, in *sqs.GetQueueAt
 	if q == nil {
 		return nil, fmt.Errorf("queue not found: %s", *in.QueueUrl)
 	}
-	return &sqs.GetQueueAttributesOutput{Attributes: map[string]string{
+	out := map[string]string{
 		string(types.QueueAttributeNameQueueArn):                              q.arn,
 		string(types.QueueAttributeNameApproximateNumberOfMessages):           q.approxMessages,
 		string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible): q.approxMessagesHidden,
 		string(types.QueueAttributeNameApproximateNumberOfMessagesDelayed):    q.approxMessagesDelayed,
 		string(types.QueueAttributeNamePolicy):                                q.policy,
-	}}, nil
+	}
+	for name, value := range q.attributes {
+		if name == "RedrivePolicy" {
+			value = redrivePolicyAsReturned(value)
+		}
+		out[name] = value
+	}
+	return &sqs.GetQueueAttributesOutput{Attributes: out}, nil
+}
+
+// redrivePolicyAsReturned is a RedrivePolicy the way SQS hands it back, not
+// the way it was sent: compact JSON, members in name order, and
+// maxReceiveCount a number even when the request quoted it.
+func redrivePolicyAsReturned(sent string) string {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(sent), &doc); err != nil {
+		return sent
+	}
+	if count, ok := doc["maxReceiveCount"].(string); ok {
+		if n, err := strconv.Atoi(count); err == nil {
+			doc["maxReceiveCount"] = n
+		}
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return sent
+	}
+	return string(out)
 }
 
 func (f *fakeSQSClient) SetQueueAttributes(_ context.Context, in *sqs.SetQueueAttributesInput, _ ...func(*sqs.Options)) (*sqs.SetQueueAttributesOutput, error) {
@@ -110,8 +141,15 @@ func (f *fakeSQSClient) SetQueueAttributes(_ context.Context, in *sqs.SetQueueAt
 	if q == nil {
 		return nil, fmt.Errorf("queue not found: %s", *in.QueueUrl)
 	}
-	if policy, ok := in.Attributes[string(types.QueueAttributeNamePolicy)]; ok {
-		q.policy = policy
+	for name, value := range in.Attributes {
+		if name == string(types.QueueAttributeNamePolicy) {
+			q.policy = value
+			continue
+		}
+		if q.attributes == nil {
+			q.attributes = map[string]string{}
+		}
+		q.attributes[name] = value
 	}
 	return &sqs.SetQueueAttributesOutput{}, nil
 }
