@@ -44,74 +44,74 @@ func (c awsCalls) writes() map[string]int {
 	return out
 }
 
-// countingDynamoDB holds the client in a named field rather than embedding it: a method
+// countingDynamoDBAPI holds the client in a named field rather than embedding it: a method
 // added to dynamodbAPI then stops this file compiling until it is counted too.
-type countingDynamoDB struct {
+type countingDynamoDBAPI struct {
 	client dynamodbAPI
 	calls  awsCalls
 }
 
-func (w countingDynamoDB) DescribeTable(ctx context.Context, in *dynamodb.DescribeTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
+func (w countingDynamoDBAPI) DescribeTable(ctx context.Context, in *dynamodb.DescribeTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
 	w.calls["DescribeTable"]++
 	return w.client.DescribeTable(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) CreateTable(ctx context.Context, in *dynamodb.CreateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.CreateTableOutput, error) {
+func (w countingDynamoDBAPI) CreateTable(ctx context.Context, in *dynamodb.CreateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.CreateTableOutput, error) {
 	w.calls["CreateTable"]++
 	return w.client.CreateTable(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) DeleteTable(ctx context.Context, in *dynamodb.DeleteTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteTableOutput, error) {
+func (w countingDynamoDBAPI) DeleteTable(ctx context.Context, in *dynamodb.DeleteTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteTableOutput, error) {
 	w.calls["DeleteTable"]++
 	return w.client.DeleteTable(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) UpdateTable(ctx context.Context, in *dynamodb.UpdateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTableOutput, error) {
+func (w countingDynamoDBAPI) UpdateTable(ctx context.Context, in *dynamodb.UpdateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTableOutput, error) {
 	w.calls["UpdateTable"]++
 	return w.client.UpdateTable(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) GetResourcePolicy(ctx context.Context, in *dynamodb.GetResourcePolicyInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetResourcePolicyOutput, error) {
+func (w countingDynamoDBAPI) GetResourcePolicy(ctx context.Context, in *dynamodb.GetResourcePolicyInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetResourcePolicyOutput, error) {
 	w.calls["GetResourcePolicy"]++
 	return w.client.GetResourcePolicy(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) PutResourcePolicy(ctx context.Context, in *dynamodb.PutResourcePolicyInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutResourcePolicyOutput, error) {
+func (w countingDynamoDBAPI) PutResourcePolicy(ctx context.Context, in *dynamodb.PutResourcePolicyInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutResourcePolicyOutput, error) {
 	w.calls["PutResourcePolicy"]++
 	return w.client.PutResourcePolicy(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) DeleteResourcePolicy(ctx context.Context, in *dynamodb.DeleteResourcePolicyInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteResourcePolicyOutput, error) {
+func (w countingDynamoDBAPI) DeleteResourcePolicy(ctx context.Context, in *dynamodb.DeleteResourcePolicyInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteResourcePolicyOutput, error) {
 	w.calls["DeleteResourcePolicy"]++
 	return w.client.DeleteResourcePolicy(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) ListTagsOfResource(ctx context.Context, in *dynamodb.ListTagsOfResourceInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ListTagsOfResourceOutput, error) {
+func (w countingDynamoDBAPI) ListTagsOfResource(ctx context.Context, in *dynamodb.ListTagsOfResourceInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ListTagsOfResourceOutput, error) {
 	w.calls["ListTagsOfResource"]++
 	return w.client.ListTagsOfResource(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) TagResource(ctx context.Context, in *dynamodb.TagResourceInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TagResourceOutput, error) {
+func (w countingDynamoDBAPI) TagResource(ctx context.Context, in *dynamodb.TagResourceInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TagResourceOutput, error) {
 	w.calls["TagResource"]++
 	return w.client.TagResource(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) UntagResource(ctx context.Context, in *dynamodb.UntagResourceInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UntagResourceOutput, error) {
+func (w countingDynamoDBAPI) UntagResource(ctx context.Context, in *dynamodb.UntagResourceInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UntagResourceOutput, error) {
 	w.calls["UntagResource"]++
 	return w.client.UntagResource(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) UpdateContinuousBackups(ctx context.Context, in *dynamodb.UpdateContinuousBackupsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateContinuousBackupsOutput, error) {
+func (w countingDynamoDBAPI) UpdateContinuousBackups(ctx context.Context, in *dynamodb.UpdateContinuousBackupsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateContinuousBackupsOutput, error) {
 	w.calls["UpdateContinuousBackups"]++
 	return w.client.UpdateContinuousBackups(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) DescribeContinuousBackups(ctx context.Context, in *dynamodb.DescribeContinuousBackupsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeContinuousBackupsOutput, error) {
+func (w countingDynamoDBAPI) DescribeContinuousBackups(ctx context.Context, in *dynamodb.DescribeContinuousBackupsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeContinuousBackupsOutput, error) {
 	w.calls["DescribeContinuousBackups"]++
 	return w.client.DescribeContinuousBackups(ctx, in, optFns...)
 }
 
-func (w countingDynamoDB) Scan(ctx context.Context, in *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
+func (w countingDynamoDBAPI) Scan(ctx context.Context, in *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
 	w.calls["Scan"]++
 	return w.client.Scan(ctx, in, optFns...)
 }
@@ -120,7 +120,7 @@ func (w countingDynamoDB) Scan(ctx context.Context, in *dynamodb.ScanInput, optF
 // inside the trust window and at the recheck after it.
 func TestEnsure_AnIdleTableIsNotWrittenTo(t *testing.T) {
 	calls := awsCalls{}
-	client := countingDynamoDB{client: newFakeDynamoDB(), calls: calls}
+	client := countingDynamoDBAPI{client: newFakeDynamoDB(), calls: calls}
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{
 		Name:         "sessions",
 		PartitionKey: "id",
