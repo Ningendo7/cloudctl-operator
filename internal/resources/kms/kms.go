@@ -328,7 +328,7 @@ func resumeKey(
 	if err := reassertKeySettings(ctx, kmsClient, entry, keyID, recordEvent); err != nil {
 		return ledger, err
 	}
-	if err := ensureAlias(ctx, kmsClient, alias, entry.ARN, keyID); err != nil {
+	if err := ensureExistingKeyAlias(ctx, kmsClient, alias, entry.ARN, keyID); err != nil {
 		return ledger, err
 	}
 
@@ -601,10 +601,33 @@ func ensureAlias(ctx context.Context, kmsClient kmsAPI, alias, arn, keyID string
 		return wrapAWSError(dErr, fmt.Sprintf("verifying existing KMS key alias %q", alias))
 	}
 	if *describeOut.KeyMetadata.Arn != arn {
-		return &cloudctlaws.ReconcileError{
-			Err:    fmt.Errorf("KMS alias %q already points at a different key (%s) than this CR's own (%s) — naming collision, not correcting", alias, *describeOut.KeyMetadata.Arn, arn),
-			Reason: reasons.NameTaken,
-		}
+		return aliasTakenError(alias, *describeOut.KeyMetadata.Arn, arn)
+	}
+	return nil
+}
+
+func aliasTakenError(alias, holder, arn string) error {
+	return &cloudctlaws.ReconcileError{
+		Err:    fmt.Errorf("KMS alias %q already points at a different key (%s) than this CR's own (%s) — naming collision, not correcting", alias, holder, arn),
+		Reason: reasons.NameTaken,
+	}
+}
+
+// ensureExistingKeyAlias is ensureAlias for a key created on an earlier pass.
+// Its alias is almost always in place by then, and CreateAlias on an existing
+// alias fails, leaving an error in CloudTrail on every recheck, so the alias is
+// looked up first and created only when it is missing.
+func ensureExistingKeyAlias(ctx context.Context, kmsClient kmsAPI, alias, arn, keyID string) error {
+	out, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: &alias})
+	var notFound *types.NotFoundException
+	if errors.As(err, &notFound) {
+		return ensureAlias(ctx, kmsClient, alias, arn, keyID)
+	}
+	if err != nil {
+		return wrapAWSError(err, fmt.Sprintf("looking up KMS key alias %q", alias))
+	}
+	if *out.KeyMetadata.Arn != arn {
+		return aliasTakenError(alias, *out.KeyMetadata.Arn, arn)
 	}
 	return nil
 }

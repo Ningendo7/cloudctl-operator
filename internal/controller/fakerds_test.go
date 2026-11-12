@@ -49,6 +49,13 @@ type fakeRDSInstance struct {
 	backupRetentionPeriod          int32
 	storageEncrypted               bool
 	kmsKeyID                       string
+	engineVersion                  string
+	storageType                    string
+	allocatedStorage               int32
+	maxAllocatedStorage            *int32
+	deletionProtection             bool
+	copyTagsToSnapshot             bool
+	securityGroupIDs               []string
 }
 
 type fakeRDSSnapshot struct {
@@ -115,6 +122,13 @@ func (f *fakeRDSClient) CreateDBInstance(_ context.Context, in *rds.CreateDBInst
 		backupRetentionPeriod: aws.ToInt32(in.BackupRetentionPeriod),
 		storageEncrypted:      aws.ToBool(in.StorageEncrypted),
 		kmsKeyID:              aws.ToString(in.KmsKeyId),
+		engineVersion:         aws.ToString(in.EngineVersion),
+		storageType:           aws.ToString(in.StorageType),
+		allocatedStorage:      aws.ToInt32(in.AllocatedStorage),
+		maxAllocatedStorage:   in.MaxAllocatedStorage,
+		deletionProtection:    aws.ToBool(in.DeletionProtection),
+		copyTagsToSnapshot:    aws.ToBool(in.CopyTagsToSnapshot),
+		securityGroupIDs:      in.VpcSecurityGroupIds,
 	}
 	f.instances[id] = i
 	return &rds.CreateDBInstanceOutput{
@@ -137,6 +151,24 @@ func (f *fakeRDSClient) ModifyDBInstance(_ context.Context, in *rds.ModifyDBInst
 	}
 	if in.BackupRetentionPeriod != nil {
 		i.backupRetentionPeriod = *in.BackupRetentionPeriod
+	}
+	if in.EngineVersion != nil {
+		i.engineVersion = *in.EngineVersion
+	}
+	if in.AllocatedStorage != nil {
+		i.allocatedStorage = *in.AllocatedStorage
+	}
+	if in.MaxAllocatedStorage != nil {
+		i.maxAllocatedStorage = in.MaxAllocatedStorage
+	}
+	if in.DeletionProtection != nil {
+		i.deletionProtection = *in.DeletionProtection
+	}
+	if in.CopyTagsToSnapshot != nil {
+		i.copyTagsToSnapshot = *in.CopyTagsToSnapshot
+	}
+	if in.VpcSecurityGroupIds != nil {
+		i.securityGroupIDs = in.VpcSecurityGroupIds
 	}
 	id := *in.DBInstanceIdentifier
 	return &rds.ModifyDBInstanceOutput{DBInstance: &types.DBInstance{DBInstanceIdentifier: &id}}, nil
@@ -164,7 +196,22 @@ func (f *fakeRDSClient) DescribeDBInstances(_ context.Context, in *rds.DescribeD
 		KmsKeyId:              aws.String(i.kmsKeyID),
 		Endpoint:              &types.Endpoint{Address: &i.endpointAddress, Port: &i.endpointPort},
 		MasterUserSecret:      f.masterUserSecretFor(id),
+		EngineVersion:         &i.engineVersion,
+		StorageType:           &i.storageType,
+		AllocatedStorage:      &i.allocatedStorage,
+		MaxAllocatedStorage:   i.maxAllocatedStorage,
+		DeletionProtection:    &i.deletionProtection,
+		CopyTagsToSnapshot:    &i.copyTagsToSnapshot,
+		VpcSecurityGroups:     securityGroupMemberships(i.securityGroupIDs),
 	}}}, nil
+}
+
+func securityGroupMemberships(ids []string) []types.VpcSecurityGroupMembership {
+	out := make([]types.VpcSecurityGroupMembership, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, types.VpcSecurityGroupMembership{VpcSecurityGroupId: aws.String(id), Status: aws.String("active")})
+	}
+	return out
 }
 
 func (f *fakeRDSClient) DescribeDBSubnetGroups(_ context.Context, in *rds.DescribeDBSubnetGroupsInput, _ ...func(*rds.Options)) (*rds.DescribeDBSubnetGroupsOutput, error) {

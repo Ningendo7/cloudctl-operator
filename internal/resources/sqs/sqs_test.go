@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -1155,4 +1156,100 @@ func TestEnsure_RefusesAFlippedFIFOWhileTheOldQueueIsStillTracked(t *testing.T) 
 			t.Fatalf("Ensure() error = %v, want the FIFO queue created", err)
 		}
 	})
+}
+
+// SQS returns a RedrivePolicy in its own form, with maxReceiveCount a number
+// where the request quoted it. Compared as text, the two never match, and a
+// queue with a dead-letter queue would be rewritten on every pass.
+func TestEnsure_AnIdleQueueWithADLQIsNotRewritten(t *testing.T) {
+	client := newFakeSQS()
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DLQ: true}}}
+	ensure := func(ledger []depsv1alpha1.ManagedResource) []depsv1alpha1.ManagedResource {
+		t.Helper()
+		updated, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+		if err != nil {
+			t.Fatalf("Ensure() error = %v", err)
+		}
+		return updated
+	}
+	ledger := ensure(nil)
+	writes := client.setQueueAttributesCalls
+
+	ledger = ensure(ledger)
+	if got := client.setQueueAttributesCalls - writes; got != 0 {
+		t.Errorf("a pass inside the trust window wrote queue attributes %d times, want 0", got)
+	}
+
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	for i := range ledger {
+		ledger[i].LastVerifiedAt = &stale
+	}
+	writes = client.setQueueAttributesCalls
+	ensure(ledger)
+	if got := client.setQueueAttributesCalls - writes; got != 0 {
+		t.Errorf("the recheck wrote queue attributes %d times, want 0", got)
+	}
+}
+
+// What the comparison must still see: a redrive policy that differs in what
+// it says, not in how SQS writes it.
+func TestEnsure_ARedrivePolicyThatSaysSomethingElseIsCorrected(t *testing.T) {
+	queueName := cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)
+	dlqName := cloudctlaws.DerivedResourceName("default", "checkout-service", "sqs", 80, "orders", "dlq")
+	ten := int32(10)
+	cases := []struct {
+		name      string
+		drift     func(client *fakeSQS)
+		spec      depsv1alpha1.SQSQueueSpec
+		wantCount string
+	}{
+		{
+			name: "the count was changed in AWS",
+			drift: func(client *fakeSQS) {
+				client.queues[queueName].attributes["RedrivePolicy"] =
+					`{"deadLetterTargetArn":"` + client.queues[dlqName].arn + `","maxReceiveCount":9}`
+			},
+			spec:      depsv1alpha1.SQSQueueSpec{Name: "orders", DLQ: true},
+			wantCount: "5",
+		},
+		{
+			name: "the target was changed in AWS",
+			drift: func(client *fakeSQS) {
+				client.queues[queueName].attributes["RedrivePolicy"] =
+					`{"deadLetterTargetArn":"arn:aws:sqs:us-east-1:000000000000:elsewhere","maxReceiveCount":5}`
+			},
+			spec:      depsv1alpha1.SQSQueueSpec{Name: "orders", DLQ: true},
+			wantCount: "5",
+		},
+		{
+			name:      "the spec's count changed",
+			drift:     func(*fakeSQS) {},
+			spec:      depsv1alpha1.SQSQueueSpec{Name: "orders", DLQ: true, Overrides: &depsv1alpha1.SQSOverrides{MaxReceiveCount: &ten}},
+			wantCount: "10",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newFakeSQS()
+			created := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", DLQ: true}}}
+			ledger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", created, nil, nil, nil)
+			if err != nil {
+				t.Fatalf("setup Ensure() error = %v", err)
+			}
+			tc.drift(client)
+
+			spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{tc.spec}}
+			if _, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil); err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+
+			var policy map[string]any
+			if err := json.Unmarshal([]byte(client.queues[queueName].attributes["RedrivePolicy"]), &policy); err != nil {
+				t.Fatalf("parsing the queue's RedrivePolicy: %v", err)
+			}
+			if policy["deadLetterTargetArn"] != client.queues[dlqName].arn || fmt.Sprint(policy["maxReceiveCount"]) != tc.wantCount {
+				t.Errorf("RedrivePolicy = %v, want the DLQ %s and a count of %s", policy, client.queues[dlqName].arn, tc.wantCount)
+			}
+		})
+	}
 }
