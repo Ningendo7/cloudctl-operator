@@ -1,0 +1,48 @@
+name: Load Run
+
+# Measures the operator's memory and CPU with 100 to 1,000 CRs in kind against
+# LocalStack. Run by hand: it takes hours of runner time and its result is a
+# set of numbers to read, not a pass or fail.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  load:
+    permissions:
+      contents: read
+    name: Load run (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [growth, small, heavy]
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        run: hack/install-tool.sh kind
+
+      - name: Run the ${{ matrix.scenario }} scenario
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: hack/load/run.sh "$SCENARIO" "load-results/$SCENARIO"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: load-${{ matrix.scenario }}
+          path: load-results/${{ matrix.scenario }}
+          if-no-files-found: warn

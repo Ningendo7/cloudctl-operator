@@ -143,6 +143,7 @@ type config struct {
 	webhookCertPath, webhookCertName, webhookCertKey string
 	enableLeaderElection                             bool
 	probeAddr                                        string
+	pprofAddr                                        string
 	secureMetrics                                    bool
 	enableHTTP2                                      bool
 	oidcProviderARN                                  string
@@ -158,6 +159,9 @@ func parseFlags() config {
 	flag.StringVar(&c.metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&c.probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&c.pprofAddr, "pprof-bind-address", "",
+		"The address the pprof profiling endpoint binds to, for example localhost:6060. "+
+			"Empty, the default, serves no profiles. The endpoint has no authentication.")
 	flag.BoolVar(&c.enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -231,6 +235,7 @@ func main() {
 		Metrics:                metricsOpts,
 		WebhookServer:          webhook.NewServer(webhookOpts),
 		HealthProbeBindAddress: c.probeAddr,
+		PprofBindAddress:       c.pprofAddr,
 		LeaderElection:         c.enableLeaderElection,
 		LeaderElectionID:       "687fa3e1.cloudctl.io",
 		// Only cache our own Secrets/ConfigMaps, not the whole cluster's.
