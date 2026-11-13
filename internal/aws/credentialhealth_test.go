@@ -21,6 +21,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -53,23 +54,50 @@ func TestNewCredentialHealth_StartsHealthy(t *testing.T) {
 	}
 }
 
-func TestRunPeriodicCheck_FlipsUnhealthyOnFailure(t *testing.T) {
-	fake := &fakeSTSClient{callerIdentityErrs: []error{errors.New("AccessDenied")}}
+// The periodic-check tests run in a synctest bubble: time there is fake and
+// only moves when every goroutine in the bubble is blocked, so a tick or a
+// timeout lands exactly when the test says, however loaded the machine is.
+
+// startCheck runs RunPeriodicCheck in the bubble until the test returns.
+func startCheck(t *testing.T, stsClient STSClient, interval time.Duration) *CredentialHealth {
+	t.Helper()
 	h := NewCredentialHealth()
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go RunPeriodicCheck(ctx, stsClient, interval, h)
+	return h
+}
 
-	go RunPeriodicCheck(t.Context(), fake, 5*time.Millisecond, h)
+// advance moves the bubble's clock by d and lets everything due run.
+func advance(d time.Duration) {
+	time.Sleep(d)
+	synctest.Wait()
+}
 
-	waitForCondition(t, func() bool { return h.Check(nil) != nil }, "CredentialHealth to flip unhealthy after a failed re-check")
+func TestRunPeriodicCheck_FlipsUnhealthyOnFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := startCheck(t, &fakeSTSClient{callerIdentityErrs: []error{errors.New("AccessDenied")}}, time.Minute)
+
+		advance(time.Minute)
+		if h.Check(nil) == nil {
+			t.Error("expected unhealthy after the first re-check failed")
+		}
+	})
 }
 
 func TestRunPeriodicCheck_RecoversOnLaterSuccess(t *testing.T) {
-	fake := &fakeSTSClient{callerIdentityErrs: []error{errors.New("AccessDenied")}} // only the first call fails
-	h := NewCredentialHealth()
+	synctest.Test(t, func(t *testing.T) {
+		h := startCheck(t, &fakeSTSClient{callerIdentityErrs: []error{errors.New("AccessDenied")}}, time.Minute) // only the first call fails
 
-	go RunPeriodicCheck(t.Context(), fake, 5*time.Millisecond, h)
-
-	waitForCondition(t, func() bool { return h.Check(nil) != nil }, "CredentialHealth to flip unhealthy after the first failed re-check")
-	waitForCondition(t, func() bool { return h.Check(nil) == nil }, "CredentialHealth to recover once a later re-check succeeds")
+		advance(time.Minute)
+		if h.Check(nil) == nil {
+			t.Fatal("expected unhealthy after the first re-check failed")
+		}
+		advance(time.Minute)
+		if err := h.Check(nil); err != nil {
+			t.Errorf("expected healthy again once the next re-check succeeded, got %v", err)
+		}
+	})
 }
 
 // hangingSTSClient never answers, like a call on a half-open connection.
@@ -80,56 +108,75 @@ func (hangingSTSClient) GetCallerIdentity(ctx context.Context, _ *sts.GetCallerI
 	return nil, ctx.Err()
 }
 
-func TestRunPeriodicCheck_AHungCallTimesOutAndReportsUnhealthy(t *testing.T) {
-	h := NewCredentialHealth()
+// A hung call is cut off when the next check is due, so the result is never
+// older than one interval.
+func TestRunPeriodicCheck_AHungCallTimesOutAtTheNextInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := startCheck(t, hangingSTSClient{}, 10*time.Second)
 
-	go RunPeriodicCheck(t.Context(), hangingSTSClient{}, 5*time.Millisecond, h)
+		advance(10*time.Second + 10*time.Second - time.Nanosecond)
+		if err := h.Check(nil); err != nil {
+			t.Fatalf("unhealthy before the hung call's deadline: %v", err)
+		}
+		advance(time.Nanosecond)
+		if h.Check(nil) == nil {
+			t.Error("expected unhealthy once the hung call hit its deadline")
+		}
+	})
+}
 
-	waitForCondition(t, func() bool { return h.Check(nil) != nil }, "a hung GetCallerIdentity to time out and flip unhealthy")
+// With a long interval the call is still cut off after credentialCheckTimeout,
+// not left hanging until the next check.
+func TestRunPeriodicCheck_AHungCallNeverOutlivesTheCheckTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := startCheck(t, hangingSTSClient{}, time.Hour)
+
+		advance(time.Hour + credentialCheckTimeout - time.Nanosecond)
+		if err := h.Check(nil); err != nil {
+			t.Fatalf("unhealthy before the check timeout: %v", err)
+		}
+		advance(time.Nanosecond)
+		if h.Check(nil) == nil {
+			t.Errorf("expected unhealthy %s after the call started", credentialCheckTimeout)
+		}
+	})
 }
 
 func TestRunPeriodicCheck_StopsOnContextCancellation(t *testing.T) {
-	fake := &fakeSTSClient{}
-	h := NewCredentialHealth()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() {
+			RunPeriodicCheck(ctx, &fakeSTSClient{}, time.Minute, NewCredentialHealth())
+			close(done)
+		}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		RunPeriodicCheck(ctx, fake, 5*time.Millisecond, h)
-		close(done)
-	}()
-
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("expected RunPeriodicCheck to return promptly once its context is cancelled")
-	}
-}
-
-func TestRunPeriodicCheck_DoesNotCallBeforeFirstInterval(t *testing.T) {
-	fake := &fakeSTSClient{}
-	h := NewCredentialHealth()
-
-	go RunPeriodicCheck(t.Context(), fake, time.Hour, h)
-
-	time.Sleep(50 * time.Millisecond)
-	if calls := fake.calls.Load(); calls != 0 {
-		t.Errorf("expected no calls before the first interval elapses (1h), got %d", calls)
-	}
-}
-
-// waitForCondition polls cond until it's true or a short deadline passes,
-// failing the test with msg otherwise - used instead of a fixed sleep so
-// these tests run fast when healthy and still reliable under load.
-func waitForCondition(t *testing.T, cond func() bool, msg string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("expected RunPeriodicCheck to return once its context is cancelled")
 		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for: %s", msg)
+	})
+}
+
+func TestRunPeriodicCheck_CallsOncePerInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fake := &fakeSTSClient{}
+		startCheck(t, fake, time.Hour)
+
+		advance(time.Hour - time.Nanosecond)
+		if calls := fake.calls.Load(); calls != 0 {
+			t.Fatalf("calls before the first interval = %d, want 0", calls)
+		}
+		advance(time.Nanosecond)
+		if calls := fake.calls.Load(); calls != 1 {
+			t.Fatalf("calls after one interval = %d, want 1", calls)
+		}
+		advance(2 * time.Hour)
+		if calls := fake.calls.Load(); calls != 3 {
+			t.Errorf("calls after three intervals = %d, want 3", calls)
+		}
+	})
 }
