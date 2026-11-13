@@ -747,6 +747,48 @@ func TestEnsureNetworkIdentityLabel_TheDefaultServiceAccountIsNeverLabelled(t *t
 	}
 }
 
+// A CR that consumes a database creates its ServiceAccount through the
+// network identity path first, since the RDS section runs before IAM. Both
+// paths must go on accepting the account, and stop writing once it is right.
+func TestTheServiceAccountTheNetworkIdentityPathCreatedStaysUsable(t *testing.T) {
+	c, applies := countingApplies(t)
+	ctx := context.Background()
+	cr := newCR("ns", "checkout", "")
+	role := "arn:aws:iam::123456789012:role/a"
+	label := func(pass string) {
+		t.Helper()
+		if err := EnsureNetworkIdentityLabel(ctx, c, "ns", cr.Name, string(cr.UID), cr.Name); err != nil {
+			t.Fatalf("EnsureNetworkIdentityLabel, %s: %v", pass, err)
+		}
+	}
+	attachRole := func(pass string) {
+		t.Helper()
+		if _, err := Ensure(ctx, c, cr, role); err != nil {
+			t.Fatalf("Ensure, %s: %v", pass, err)
+		}
+	}
+
+	label("creating the ServiceAccount")
+	label("the next pass")
+	attachRole("the first pass with a role")
+	label("after the role was attached")
+
+	before := *applies
+	attachRole("a pass with nothing changed")
+	label("a pass with nothing changed")
+	if extra := *applies - before; extra != 0 {
+		t.Errorf("a pass with nothing changed applied %d times, want 0", extra)
+	}
+
+	sa := getSA(t, c, "ns", cr.Name)
+	if !ownedBy(sa, string(cr.UID)) {
+		t.Error("the ServiceAccount lost its owner reference, so it would outlive the CR")
+	}
+	if sa.Annotations[RoleARNAnnotation] != role || sa.Labels[NetworkIdentityLabelKey] != cr.Name {
+		t.Errorf("want the role annotation and the label, got annotations %v labels %v", sa.Annotations, sa.Labels)
+	}
+}
+
 // ownedSA is a ServiceAccount this operator already claimed for a CR.
 func ownedSA(name, crName, crUID string) *corev1.ServiceAccount {
 	sa := plainSA(name)

@@ -113,7 +113,9 @@ func claimError(sa *corev1.ServiceAccount, namespace, crName, crUID string) erro
 	if err := refuseDefault(sa.Name); err != nil {
 		return err
 	}
-	if cloudctlaws.IsOwnedBy(sa.Annotations, namespace, crName, crUID) {
+	// The CR's own account carries only the owner reference until the IAM
+	// path stamps the annotations.
+	if cloudctlaws.IsOwnedBy(sa.Annotations, namespace, crName, crUID) || ownedBy(sa, crUID) {
 		return nil
 	}
 	if owner := sa.Annotations[cloudctlaws.OwnerTagKey]; owner != "" {
