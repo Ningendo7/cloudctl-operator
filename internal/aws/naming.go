@@ -167,6 +167,9 @@ func buildName(style NameStyle, prefix, hash string, maxLen int) string {
 	if style == NameStyleRDS && (prefix == "" || !isLetter(prefix[0])) {
 		prefix = "db-" + prefix
 	}
+	if style == NameStyleS3 && hasReservedS3Prefix(prefix) {
+		prefix = "b-" + prefix
+	}
 	if len(prefix) > budget {
 		prefix = prefix[:budget]
 	}
@@ -180,6 +183,17 @@ func buildName(style NameStyle, prefix, hash string, maxLen int) string {
 func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// hasReservedS3Prefix reports a start S3 keeps for its own use. A namespace
+// can begin with one, and the bucket name begins with the namespace.
+func hasReservedS3Prefix(name string) bool {
+	for _, p := range []string{"xn--", "sthree-", "amzn-s3-demo-"} {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // clean rewrites what the service rejects as '-'.
 func (s NameStyle) clean(prefix string) string {

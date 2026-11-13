@@ -63,7 +63,12 @@ type fakeSQS struct {
 	// normal queue-state manipulation can't reach.
 	createQueueErr error
 	getQueueUrlErr error
+	// notReadableAfterCreate makes the next GetQueueAttributes after a
+	// CreateQueue answer QueueDoesNotExist, as SQS can for about a second.
+	notReadableAfterCreate bool
+	justCreated            bool
 
+	createQueueCalls        int
 	getQueueAttributesCalls int
 	setQueueAttributesCalls int
 	getQueueUrlCalls        int
@@ -74,9 +79,11 @@ func newFakeSQS() *fakeSQS {
 }
 
 func (f *fakeSQS) CreateQueue(_ context.Context, in *sqs.CreateQueueInput, _ ...func(*sqs.Options)) (*sqs.CreateQueueOutput, error) {
+	f.createQueueCalls++
 	if f.createQueueErr != nil {
 		return nil, f.createQueueErr
 	}
+	f.justCreated = true
 	name := *in.QueueName
 	url := "https://sqs.us-east-1.amazonaws.com/000000000000/" + name
 	f.queues[name] = &fakeQueue{
@@ -105,6 +112,11 @@ func (f *fakeSQS) GetQueueUrl(_ context.Context, in *sqs.GetQueueUrlInput, _ ...
 
 func (f *fakeSQS) GetQueueAttributes(_ context.Context, in *sqs.GetQueueAttributesInput, _ ...func(*sqs.Options)) (*sqs.GetQueueAttributesOutput, error) {
 	f.getQueueAttributesCalls++
+	if f.justCreated && f.notReadableAfterCreate {
+		f.justCreated = false
+		return nil, &types.QueueDoesNotExist{}
+	}
+	f.justCreated = false
 	q := f.findByURL(*in.QueueUrl)
 	if q == nil {
 		return nil, fmt.Errorf("queue not found: %s", *in.QueueUrl)

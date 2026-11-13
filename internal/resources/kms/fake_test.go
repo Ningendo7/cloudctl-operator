@@ -50,6 +50,7 @@ type fakeKey struct {
 	rotationEnabled bool
 	policy          string
 	keyManager      types.KeyManagerType
+	description     string
 }
 
 type fakeKMS struct {
@@ -129,11 +130,12 @@ func (f *fakeKMS) CreateKey(_ context.Context, in *kms.CreateKeyInput, _ ...func
 	id := fmt.Sprintf("11111111-1111-1111-1111-%012d", f.nextKeyNum)
 	arn := "arn:aws:kms:us-east-1:123456789012:key/" + id
 	f.keys[arn] = &fakeKey{
-		arn:      arn,
-		keyID:    id,
-		tags:     tagsToMap(in.Tags),
-		keyState: types.KeyStateEnabled,
-		policy:   aws.ToString(in.Policy),
+		arn:         arn,
+		keyID:       id,
+		tags:        tagsToMap(in.Tags),
+		keyState:    types.KeyStateEnabled,
+		policy:      aws.ToString(in.Policy),
+		description: aws.ToString(in.Description),
 	}
 	keyID, keyArn := id, arn
 	return &kms.CreateKeyOutput{KeyMetadata: &types.KeyMetadata{KeyId: &keyID, Arn: &keyArn, KeyState: types.KeyStateEnabled}}, nil

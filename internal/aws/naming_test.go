@@ -227,11 +227,23 @@ func validFor(style NameStyle, name string, maxLen int) bool {
 	case NameStyleRDS:
 		return rdsName.MatchString(name)
 	case NameStyleS3:
-		return len(name) >= 3 && s3Name.MatchString(name) &&
+		return len(name) >= 3 && s3Name.MatchString(name) && !startsWithReservedS3Prefix(name) &&
 			!strings.Contains(name, "..") && !strings.Contains(name, ".-") && !strings.Contains(name, "-.")
 	default:
 		return true
 	}
+}
+
+// reservedS3Prefixes are the starts S3 refuses in a bucket name.
+var reservedS3Prefixes = []string{"xn--", "sthree-", "amzn-s3-demo-"}
+
+func startsWithReservedS3Prefix(name string) bool {
+	for _, p := range reservedS3Prefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 var nameStyles = map[string]struct {
@@ -328,6 +340,25 @@ func TestResourceNameFor_S3KeepsDotsButFixesAdjacentSeparators(t *testing.T) {
 			if name := ResourceNameFor(NameStyleS3, "default", "orders", "s3", key, maxLen); !validFor(NameStyleS3, name, maxLen) {
 				t.Fatalf("ResourceNameFor(key %q, %d) = %q, which S3 would reject", key, maxLen, name)
 			}
+		}
+	}
+}
+
+// A namespace may start with what S3 reserves for its own use; a bucket name
+// may not.
+func TestResourceNameFor_S3NamesNeverStartWithAReservedPrefix(t *testing.T) {
+	namespaces := []string{"xn--team", "sthree-team", "sthree-configurator", "amzn-s3-demo-team"}
+	seen := map[string]string{}
+	for _, ns := range namespaces {
+		for maxLen := 20; maxLen <= 50; maxLen++ {
+			name := ResourceNameFor(NameStyleS3, ns, "orders", "s3", "receipts", maxLen)
+			if !validFor(NameStyleS3, name, maxLen) {
+				t.Fatalf("ResourceNameFor(namespace %q, %d) = %q, which S3 would reject", ns, maxLen, name)
+			}
+			if other, taken := seen[name]; taken && other != ns {
+				t.Fatalf("namespaces %q and %q both became %q", other, ns, name)
+			}
+			seen[name] = ns
 		}
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -530,6 +531,9 @@ func (f *fakeEC2) findByNameAndVPC(name, vpcID string) *fakeSecurityGroup {
 func (f *fakeEC2) CreateSecurityGroup(_ context.Context, in *ec2.CreateSecurityGroupInput, _ ...func(*ec2.Options)) (*ec2.CreateSecurityGroupOutput, error) {
 	if f.createSecurityGroupErr != nil {
 		return nil, f.createSecurityGroupErr
+	}
+	if strings.HasPrefix(*in.GroupName, "sg-") {
+		return nil, &smithy.GenericAPIError{Code: "InvalidParameterValue", Message: "Group names may not be in the format sg-*.", Fault: smithy.FaultClient}
 	}
 	f.nextID++
 	id := fmt.Sprintf("sg-%08d", f.nextID)

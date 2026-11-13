@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -157,6 +158,11 @@ func (f *fakeS3) HeadBucket(_ context.Context, in *s3sdk.HeadBucketInput, _ ...f
 func (f *fakeS3) CreateBucket(_ context.Context, in *s3sdk.CreateBucketInput, _ ...func(*s3sdk.Options)) (*s3sdk.CreateBucketOutput, error) {
 	if f.createBucketErr != nil {
 		return nil, f.createBucketErr
+	}
+	for _, reserved := range []string{"xn--", "sthree-", "amzn-s3-demo-"} {
+		if strings.HasPrefix(*in.Bucket, reserved) {
+			return nil, &fakeAWSError{code: "InvalidBucketName"}
+		}
 	}
 	b := &fakeBucket{}
 	if in.CreateBucketConfiguration != nil && len(in.CreateBucketConfiguration.Tags) > 0 {

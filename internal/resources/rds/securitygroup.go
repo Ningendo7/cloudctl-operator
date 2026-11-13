@@ -100,6 +100,17 @@ func narrowInstanceIngress(
 	return reconcileIngress(ctx, ec2Client, k8sClient, aws.ToString(known.GroupId), known.IpPermissions, engine, namespace, crName, resourceName, sharedWith, true)
 }
 
+// securityGroupName is ResourceName for an EC2 security group, which may not
+// be named in the format sg-*, as a namespace called sg-team would make it.
+func securityGroupName(namespace, crName, resourceType, key string) string {
+	const maxLen = 255
+	name := cloudctlaws.ResourceName(namespace, crName, resourceType, key, maxLen)
+	if !strings.HasPrefix(name, "sg-") {
+		return name
+	}
+	return "g-" + cloudctlaws.ResourceName(namespace, crName, resourceType, key, maxLen-len("g-"))
+}
+
 // ensureInstanceSecurityGroup is EnsureSecurityGroup given the ARN of the
 // group the ledger already records for this instance, if any. A recorded
 // group that still exists and is tagged as ours is used as it is: the
@@ -124,7 +135,7 @@ func ensureInstanceSecurityGroup(
 		if err != nil {
 			return "", err
 		}
-		groupName := cloudctlaws.ResourceName(namespace, crName, "rds-sg", resourceName, 255)
+		groupName := securityGroupName(namespace, crName, "rds-sg", resourceName)
 		groupID, currentIngress, err = findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, adopt)
 		if err != nil {
 			return "", err

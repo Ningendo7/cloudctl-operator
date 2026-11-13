@@ -49,6 +49,37 @@ func newSchemeForKMSKeyRefTest(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+// SQS can answer QueueDoesNotExist for about a second after CreateQueue. That
+// is a pass to retry, not a failure to report, and the next pass records the
+// queue it created instead of creating another.
+func TestEnsure_AQueueNotYetReadableAfterCreationIsRetried(t *testing.T) {
+	client := newFakeSQS()
+	client.notReadableAfterCreate = true
+	spec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
+
+	ledger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || !reconcileErr.Retryable {
+		t.Fatalf("first pass error = %v, want a retryable ReconcileError", err)
+	}
+
+	ledger, err = Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	entry, found := status.FindManagedResource(ledger, "sqs", "orders")
+	if !found || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+		t.Fatalf("expected the queue recorded as Verified, got %+v", entry)
+	}
+	queue := client.queues[cloudctlaws.ResourceName("default", "checkout-service", "sqs", "orders", 80)]
+	if queue == nil || entry.ARN != queue.arn {
+		t.Errorf("recorded ARN = %q, want the created queue's", entry.ARN)
+	}
+	if client.createQueueCalls != 1 {
+		t.Errorf("CreateQueue calls = %d, want 1", client.createQueueCalls)
+	}
+}
+
 func TestEnsure_CreatesNewQueue(t *testing.T) {
 	client := newFakeSQS()
 	spec := &depsv1alpha1.SQSSpec{

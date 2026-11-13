@@ -121,6 +121,29 @@ func TestEnsurePodNetworkIdentity_HappyPath(t *testing.T) {
 	}
 }
 
+func TestEnsurePodNetworkIdentity_IsCreatedInANamespaceStartingWithSG(t *testing.T) {
+	ec2Client := newFakeEC2()
+	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "sg-team", Name: "fulfillment-service",
+		Annotations: map[string]string{serviceaccount.AllowClaimAnnotation: "fulfillment-service"},
+	}}
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, sa).Build()
+	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
+
+	ledger, err := EnsurePodNetworkIdentity(context.Background(), newFakeRDS(), ec2Client, k8sClient,
+		"sg-team", "fulfillment-service", "uid-1", "fulfillment-service", testRegion, testAccountID, consumes, nil)
+	if err != nil {
+		t.Fatalf("EnsurePodNetworkIdentity() error = %v", err)
+	}
+	if _, found := status.FindManagedResource(ledger, podNetworkIdentityResourceType, podNetworkIdentityLedgerName); !found {
+		t.Fatal("expected a published pod-network-identity ledger entry")
+	}
+	if len(ec2Client.groups) != 1 {
+		t.Errorf("security groups created = %d, want 1", len(ec2Client.groups))
+	}
+}
+
 func TestEnsurePodNetworkIdentity_NoResolvedProducer_SkipsSilently(t *testing.T) {
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()

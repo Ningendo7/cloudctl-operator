@@ -61,6 +61,32 @@ func newConsumerWithPodIdentity(namespace, crName, podSGARN string) *depsv1alpha
 	}
 }
 
+// Kubernetes accepts a namespace called sg-team; EC2 refuses a group name in
+// the format sg-*.
+func TestEnsureSecurityGroup_IsCreatedInANamespaceStartingWithSG(t *testing.T) {
+	rdsClient := newFakeRDS()
+	ec2Client := newFakeEC2()
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	arn, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"sg-team", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
+	if err != nil {
+		t.Fatalf("EnsureSecurityGroup() error = %v", err)
+	}
+	if _, ok := ec2Client.groups[SecurityGroupIDFromARN(arn)]; !ok {
+		t.Fatal("expected a security group to have been created")
+	}
+
+	again, err := EnsureSecurityGroup(context.Background(), rdsClient, ec2Client, k8sClient,
+		"sg-team", "checkout-service", "uid-1", "orders-db", "prod-private-data-tier", "postgres", testRegion, testAccountID, false, nil)
+	if err != nil {
+		t.Fatalf("second EnsureSecurityGroup() error = %v", err)
+	}
+	if again != arn || len(ec2Client.groups) != 1 {
+		t.Errorf("the second pass must find the same group, got %q and %d groups", again, len(ec2Client.groups))
+	}
+}
+
 func TestEnsureSecurityGroup_CreatesNewGroupInResolvedVPC(t *testing.T) {
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()

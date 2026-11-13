@@ -69,6 +69,12 @@ func TestEnsure_CreatesKeyWithOwnerTagsAliasAndRotation(t *testing.T) {
 	if !key.rotationEnabled {
 		t.Error("expected automatic key rotation to be enabled on a newly created key")
 	}
+	// The console lists keys by description; without one a key is a bare ID.
+	for _, want := range []string{"default/checkout-service", "primary"} {
+		if !strings.Contains(key.description, want) {
+			t.Errorf("key description = %q, want it to name %q", key.description, want)
+		}
+	}
 }
 
 func TestEnsure_ResumesFromLedgerWithoutRecreatingKeyWhenAliasIsMissing(t *testing.T) {
