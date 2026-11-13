@@ -207,3 +207,13 @@ release people have already pulled; fix forward with the next patch. It can
 also be run by hand against any published version (Actions, Release Smoke
 Test, Run workflow).
 
+## Load run
+
+`load-run.yml`, run by hand only (Actions, Load Run, Run workflow), measures
+memory and CPU in kind against LocalStack with 100 to 1,000 CRs, unrelated
+ServiceAccounts, Secrets and ConfigMaps, and 5, 20 and 50 workers. Each
+scenario uploads `summary.tsv`, samples every 5 seconds and a heap profile per
+step. `hack/load/run.sh` does the work; it never touches a real cluster or AWS.
+Alarms, standalone KMS keys and RDS are not part of it, since LocalStack does
+not emulate them faithfully.
+
