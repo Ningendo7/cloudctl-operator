@@ -210,7 +210,7 @@ func podSecurityGroup(
 	// VPC is still kept.
 	groupID = aws.ToString(recordedGroup.GroupId)
 	if !stickyOK {
-		groupName := cloudctlaws.ResourceName(namespace, crName, "rds-pod-sg", "network-identity", 255)
+		groupName := securityGroupName(namespace, crName, "rds-pod-sg", "network-identity")
 		if groupID, _, err = findOrCreateSecurityGroup(ctx, ec2Client, namespace, crName, crUID, groupName, vpcID, false); err != nil {
 			return "", false, false, err
 		}

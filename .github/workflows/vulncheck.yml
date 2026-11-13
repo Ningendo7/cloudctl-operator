@@ -1,7 +1,9 @@
 name: Vulnerability Scan
 
-# Reports known vulnerabilities in code the operator actually calls. It also
-# runs weekly, because an advisory can land without any commit here.
+# Reports known vulnerabilities in code the operator actually calls, and runs
+# the release's own image scan, which goes by module version instead, so an
+# advisory fails a pull request rather than a tagged release. It also runs
+# weekly, because an advisory can land without any commit here.
 # Built with the newest stable Go: go.mod only sets the minimum, and the standard
 # library of that minimum has fixes missing that the shipped image already has.
 
@@ -39,3 +41,24 @@ jobs:
 
       - name: Check for reachable vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  image-scan:
+    permissions:
+      contents: read
+    name: Image scan (release gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Trivy
+        run: hack/install-tool.sh trivy
+
+      - name: Build the manager image
+        run: docker build -t cloudctl-operator:scan .
+
+      - name: Fail on a fixable high or critical vulnerability
+        run: trivy image --no-progress --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed cloudctl-operator:scan

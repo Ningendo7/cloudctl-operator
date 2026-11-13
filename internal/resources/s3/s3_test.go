@@ -86,6 +86,27 @@ func TestEnsure_CreatesBucketWithAccountHashSuffix(t *testing.T) {
 	}
 }
 
+// Kubernetes accepts a namespace that starts with a prefix S3 reserves.
+func TestEnsure_ABucketIsCreatedInANamespaceWithAReservedPrefix(t *testing.T) {
+	for _, ns := range []string{"xn--team", "sthree-team", "amzn-s3-demo-team"} {
+		t.Run(ns, func(t *testing.T) {
+			client := newFakeS3()
+			spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
+
+			ledger, err := Ensure(context.Background(), client, nil, nil, ns, "checkout-service", "uid-1", testRegion, testAccountID, spec, nil, nil, nil)
+			if err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			if entry, found := status.FindManagedResource(ledger, "s3", "receipts"); !found || entry.State != depsv1alpha1.ManagedResourceStateVerified {
+				t.Errorf("expected the bucket to reach Verified, got %+v", entry)
+			}
+			if len(client.buckets) != 1 {
+				t.Errorf("buckets created = %d, want 1", len(client.buckets))
+			}
+		})
+	}
+}
+
 func TestEnsure_ProvisionsDedicatedKeyWhenEncryptionEnabled(t *testing.T) {
 	client := newFakeS3()
 	kmsClient := kmstest.NewFakeKMSClient()

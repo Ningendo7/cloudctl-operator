@@ -224,7 +224,8 @@ func createKey(
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
 	createOut, err := kmsClient.CreateKey(ctx, &kms.CreateKeyInput{
-		Tags: mapToTags(ownerTags(namespace, crName, crUID)),
+		Description: aws.String(fmt.Sprintf("cloudctl: %s/%s %s", namespace, crName, resourceName)),
+		Tags:        mapToTags(ownerTags(namespace, crName, crUID)),
 	})
 	if err != nil {
 		return ledger, wrapAWSError(err, "creating KMS key")

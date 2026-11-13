@@ -443,15 +443,15 @@ func createQueue(
 	}
 	// Attributes were just set atomically at creation — nothing to
 	// drift-correct yet.
-	ledger, err := recordVerified(
-		ctx,
-		awsClient,
-		*createOut.QueueUrl,
-		resourceName,
-		opts.deletionPolicy,
-		opts.force,
-		ledger,
-	)
+	ledger, err := recordVerified(ctx, awsClient, *createOut.QueueUrl, resourceName, opts.deletionPolicy, opts.force, ledger)
+	var notYetReadable *types.QueueDoesNotExist
+	if errors.As(err, &notYetReadable) {
+		// SQS may not serve a queue for about a second after creating it.
+		err = &cloudctlaws.ReconcileError{
+			Err:       fmt.Errorf("queue %q was just created and can't be read yet: %w", queueName, err),
+			Retryable: true,
+		}
+	}
 	return ledger, *createOut.QueueUrl, err
 }
 
