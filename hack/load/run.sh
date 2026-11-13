@@ -49,7 +49,7 @@ log() { echo "load-run: $(date -u +%H:%M:%S) $*"; }
 
 cleanup() {
 	[[ -n $sampler_pid ]] && kill "$sampler_pid" 2>/dev/null || true
-	[[ -n $pf_pid ]] && kill "$pf_pid" 2>/dev/null || true
+	stop_port_forward
 	rm -f "$KUBECONFIG"
 }
 trap cleanup EXIT
@@ -104,29 +104,59 @@ set_workers() {
 	port_forward
 }
 
-# port_forward reaches metrics and pprof on the current pod; pprof listens on
+# live_pod is the running manager pod that is not shutting down; after a
+# restart the old one still reports Running for a while.
+live_pod() {
+	kubectl get pods -n "$ns" -l control-plane=controller-manager -o json |
+		jq -r '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")][0].metadata.name // empty'
+}
+
+# port_forward reaches metrics and pprof on the live pod, and reconnects when
+# kubectl drops the connection, which it does under load. pprof listens on
 # the pod's loopback only.
 port_forward() {
-	[[ -n $pf_pid ]] && kill "$pf_pid" 2>/dev/null || true
-	local pod
-	pod=$(kubectl get pods -n "$ns" -l control-plane=controller-manager \
-		--field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
-	kubectl port-forward -n "$ns" "pod/$pod" 18080:8080 16060:6060 >/dev/null 2>&1 &
+	stop_port_forward
+	(
+		set +e
+		while true; do
+			pod=$(live_pod)
+			[[ -n $pod ]] && kubectl port-forward -n "$ns" "pod/$pod" 18080:8080 16060:6060 >/dev/null 2>&1
+			sleep 1
+		done
+	) &
 	pf_pid=$!
-	for _ in $(seq 1 30); do
-		curl -sf localhost:18080/metrics >/dev/null && return 0
+	for _ in $(seq 1 60); do
+		fetch_metrics >/dev/null && return 0
 		sleep 1
 	done
 	echo "load-run: metrics never answered on the port-forward" >&2
 	exit 1
 }
 
+stop_port_forward() {
+	[[ -n $pf_pid ]] || return 0
+	kill "$pf_pid" 2>/dev/null || true
+	pkill -f "kubectl port-forward -n $ns pod/" 2>/dev/null || true
+	pf_pid=""
+}
+
 # --- measuring ----------------------------------------------------------------
 
-# metric prints the sum of every series of one metric name.
+# fetch_metrics prints the operator's metrics, giving up after 10s rather
+# than hanging on a stalled port-forward.
+fetch_metrics() {
+	curl -sf --max-time 10 localhost:18080/metrics
+}
+
+# sum prints the sum of every series of one metric name in the metrics on
+# stdin.
+sum() {
+	awk -v m="$1" '$1 == m || index($1, m "{") == 1 { s += $2; n++ } END { if (n) printf "%.0f", s }'
+}
+
+# metric is sum over a fresh fetch.
 metric() {
-	curl -sf localhost:18080/metrics |
-		awk -v m="$1" '$1 == m || index($1, m "{") == 1 { s += $2 } END { printf "%.0f", s }'
+	fetch_metrics | sum "$1"
 }
 
 ready_count() {
@@ -139,14 +169,16 @@ ready_count() {
 start_sampler() {
 	printf 'time\trss_bytes\theap_inuse_bytes\tgoroutines\tcpu_seconds\tqueue_depth\taws_requests\n' >"$out/samples.tsv"
 	(
+		set +e
 		while true; do
+			m=$(fetch_metrics)
 			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%s)" \
-				"$(metric process_resident_memory_bytes 2>/dev/null || echo)" \
-				"$(metric go_memstats_heap_inuse_bytes 2>/dev/null || echo)" \
-				"$(metric go_goroutines 2>/dev/null || echo)" \
-				"$(curl -sf localhost:18080/metrics | awk '$1 == "process_cpu_seconds_total" { print $2 }' 2>/dev/null || echo)" \
-				"$(metric workqueue_depth 2>/dev/null || echo)" \
-				"$(metric cloudctl_aws_requests_total 2>/dev/null || echo)" >>"$out/samples.tsv"
+				"$(sum process_resident_memory_bytes <<<"$m")" \
+				"$(sum go_memstats_heap_inuse_bytes <<<"$m")" \
+				"$(sum go_goroutines <<<"$m")" \
+				"$(awk '$1 == "process_cpu_seconds_total" { print $2 }' <<<"$m")" \
+				"$(sum workqueue_depth <<<"$m")" \
+				"$(sum cloudctl_aws_requests_total <<<"$m")" >>"$out/samples.tsv"
 			sleep 5
 		done
 	) &
@@ -158,14 +190,17 @@ start_sampler() {
 snapshot() {
 	local step=$1 crs=$2 converge_seconds=${3:-}
 	log "snapshot $step"
-	curl -sf localhost:18080/metrics >"$out/$step.metrics.txt"
-	curl -sf "localhost:16060/debug/pprof/heap?gc=1" >"$out/$step.heap.pb.gz"
+	# Profile first: the forced GC it runs makes the metrics that follow
+	# report live data.
+	curl -sf --max-time 120 "localhost:16060/debug/pprof/heap?gc=1" >"$out/$step.heap.pb.gz" ||
+		log "no heap profile for $step"
 	go tool pprof -top -inuse_space -nodecount=40 "$out/$step.heap.pb.gz" >"$out/$step.heap-top.txt" 2>/dev/null || true
-	local cpu
-	cpu=$(awk '$1 == "process_cpu_seconds_total" { print $2 }' "$out/$step.metrics.txt")
+	local m="$out/$step.metrics.txt"
+	fetch_metrics >"$m" || log "no metrics for $step"
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$step" "$crs" "$(ready_count)" \
-		"$(metric process_resident_memory_bytes)" "$(metric go_memstats_heap_inuse_bytes)" \
-		"$(metric go_goroutines)" "$cpu" "$(metric cloudctl_aws_requests_total)" "$converge_seconds" >>"$out/summary.tsv"
+		"$(sum process_resident_memory_bytes <"$m")" "$(sum go_memstats_heap_inuse_bytes <"$m")" \
+		"$(sum go_goroutines <"$m")" "$(awk '$1 == "process_cpu_seconds_total" { print $2 }' "$m")" \
+		"$(sum cloudctl_aws_requests_total <"$m")" "$converge_seconds" >>"$out/summary.tsv"
 }
 
 # --- load -------------------------------------------------------------------
@@ -173,6 +208,11 @@ snapshot() {
 apply_crs() {
 	local shape=$1 first=$2 last=$3 file
 	file=$(mktemp)
+	# Namespaces for real first: a server-side dry run creates nothing, so the
+	# CRs' dry run would find their namespaces missing.
+	for ((n = first / 10; n <= last / 10; n++)); do
+		printf -- '---\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: load-%03d\n' "$n"
+	done | kubectl apply -f - >/dev/null
 	"$here/crs.sh" "$shape" "$first" "$last" >"$file"
 	kubectl apply --dry-run=server -f "$file" >/dev/null
 	kubectl apply -f "$file" >/dev/null
@@ -185,7 +225,7 @@ converge() {
 	local want=$1 limit=$2 start now ready
 	start=$(date +%s)
 	while true; do
-		ready=$(ready_count)
+		ready=$(ready_count || echo 0)
 		now=$(date +%s)
 		if ((ready >= want)); then
 			echo $((now - start))
@@ -215,8 +255,9 @@ step() {
 # the operator's label: the cache must keep Secrets and ConfigMaps out, and
 # is known to hold every ServiceAccount.
 unrelated() {
-	local kind=$1 count=$2 file
+	local kind=$1 count=$2 file payload
 	file=$(mktemp)
+	payload=$(head -c 768 /dev/zero | base64 -w0)
 	for ((i = 0; i < count; i++)); do
 		if ((i % 500 == 0)); then
 			printf -- '---\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: unrelated-%s-%02d\n' "${kind,,}" $((i / 500))
@@ -227,7 +268,7 @@ unrelated() {
 			;;
 		Secret | ConfigMap)
 			printf -- '---\napiVersion: v1\nkind: %s\nmetadata:\n  name: obj-%05d\n  namespace: unrelated-%s-%02d\ndata:\n  payload: %s\n' \
-				"$kind" "$i" "${kind,,}" $((i / 500)) "$(head -c 768 /dev/zero | base64 -w0)"
+				"$kind" "$i" "${kind,,}" $((i / 500)) "$payload"
 			;;
 		esac
 	done >"$file"
@@ -238,16 +279,17 @@ unrelated() {
 # restart_drain restarts the operator with workers and times how long it
 # takes to work through every CR again, which it does on every start.
 restart_drain() {
-	local workers=$1 crs=$2 start took
+	local workers=$1 crs=$2 start took m done_count depth
 	log "restarting with $workers workers"
-	set_workers "$workers"
+	# Timed from before the restart: startup and the cache sync are part of
+	# what a restarted operator costs.
 	start=$(date +%s)
+	set_workers "$workers"
 	while true; do
-		local done_count depth
-		done_count=$(curl -sf localhost:18080/metrics |
-			awk '$1 ~ /^controller_runtime_reconcile_total\{controller="appdependencies"/ { s += $2 } END { printf "%.0f", s }')
-		depth=$(metric workqueue_depth)
-		if ((done_count >= crs)) && ((depth == 0)); then
+		m=$(fetch_metrics || true)
+		done_count=$(awk '$1 ~ /^controller_runtime_reconcile_total\{controller="appdependencies"/ { s += $2 } END { printf "%.0f", s }' <<<"$m")
+		depth=$(sum workqueue_depth <<<"$m")
+		if [[ -n $m ]] && ((done_count >= crs)) && ((${depth:-1} == 0)); then
 			took=$(($(date +%s) - start))
 			break
 		fi
