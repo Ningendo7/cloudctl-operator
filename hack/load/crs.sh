@@ -17,12 +17,12 @@
 #
 # Usage: hack/load/crs.sh <small|typical|heavy> <first> <last>
 #   small    one queue
-#   typical  a queue with a DLQ subscribed to the CR's own topic, a bucket
-#            and a table
-#   heavy    ten resources, three of them encrypted with a dedicated key
+#   typical  a queue with a DLQ, a second queue and a table
+#   heavy    ten resources, four of them encrypted with a dedicated key
 #
-# Only services LocalStack emulates faithfully: no alarms, no standalone KMS
-# keys, no RDS.
+# SQS, DynamoDB and dedicated KMS keys only. The pinned LocalStack can't
+# create an SNS topic or a tagged S3 bucket the way the operator does, and
+# doesn't emulate alarms, standalone keys or RDS faithfully.
 set -euo pipefail
 
 shape=${1:?usage: crs.sh <small|typical|heavy> <first> <last>}
@@ -50,16 +50,7 @@ EOF
     resources:
       - name: orders
         dlq: true
-        subscribesTo:
-          - {namespace: $ns, name: $name, resourceName: order-events}
-  sns:
-    resources:
-      - name: order-events
-        sharedWith:
-          - {namespace: $ns, name: $name}
-  s3:
-    resources:
-      - name: receipts
+      - name: notifications
   dynamodb:
     resources:
       - name: sessions
@@ -72,22 +63,11 @@ EOF
     resources:
       - name: orders
         dlq: true
-        subscribesTo:
-          - {namespace: $ns, name: $name, resourceName: order-events}
       - name: payments
         encryption: {enabled: true}
       - name: emails
-  sns:
-    resources:
-      - name: order-events
-        sharedWith:
-          - {namespace: $ns, name: $name}
-      - name: audit-events
-  s3:
-    resources:
-      - name: receipts
+      - name: refunds
         encryption: {enabled: true}
-      - name: exports
   dynamodb:
     resources:
       - name: sessions
@@ -96,6 +76,13 @@ EOF
       - name: carts
         partitionKey: pk
       - name: profiles
+        partitionKey: pk
+      - name: ledger
+        partitionKey: pk
+        encryption: {enabled: true}
+      - name: audit
+        partitionKey: pk
+      - name: events
         partitionKey: pk
 EOF
 		;;
