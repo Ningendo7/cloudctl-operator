@@ -38,8 +38,10 @@ import (
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/controller/predicates"
+	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/configmap"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/rds"
+	"github.com/Ningendo7/cloudctl-operator/internal/resources/serviceaccount"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
@@ -502,6 +504,40 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 			}
 			return leaked
 		}, 2*time.Second, poll).Should(BeEmpty(), "credentials must only ever reach the owner's namespace")
+	})
+
+	It("keeps using the ServiceAccount it created for a consumer's pods", func() {
+		Expect(k8sClient.Create(ctx, dbCR(nsA, "producer-db", depsv1alpha1.SharedWithEntry{Namespace: nsB, Name: "sa-consumer"}))).To(Succeed())
+		Eventually(func() string { return password(nsA, "producer-db") }, timeout, poll).Should(Equal("pw-1"))
+
+		consumer := &depsv1alpha1.AppDependencies{
+			ObjectMeta: metav1.ObjectMeta{Namespace: nsB, Name: "sa-consumer"},
+			Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{
+				Consumes: []depsv1alpha1.ConsumeRef{{Namespace: nsA, Name: "producer-db", ResourceName: "orders-db"}},
+			}},
+		}
+		Expect(k8sClient.Create(ctx, consumer)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			var sa corev1.ServiceAccount
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(consumer), &sa)).To(Succeed())
+			g.Expect(sa.Labels).To(HaveKey(serviceaccount.NetworkIdentityLabelKey))
+		}, timeout, poll).Should(Succeed())
+
+		// The account exists after the first pass; every later pass has to
+		// accept it as the CR's own.
+		Consistently(func() string {
+			var cr depsv1alpha1.AppDependencies
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(consumer), &cr); err != nil {
+				return ""
+			}
+			for _, c := range cr.Status.Conditions {
+				if c.Status == metav1.ConditionFalse && c.Reason == reasons.ServiceAccountNotClaimable {
+					return c.Type + ": " + c.Message
+				}
+			}
+			return ""
+		}, 5*time.Second, poll).Should(BeEmpty())
 	})
 })
 
