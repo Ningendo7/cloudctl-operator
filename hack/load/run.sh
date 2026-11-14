@@ -85,11 +85,13 @@ setup() {
 	set_workers 5
 }
 
-# set_workers replaces the manager's args and waits for the new pod.
+# set_workers replaces the manager's args and waits for the new pod. The
+# annotation forces a new pod even when the args are unchanged.
 set_workers() {
 	local workers=$1
-	kubectl patch deployment "$deploy" -n "$ns" --type=json -p "[
-		{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":[
+	kubectl patch deployment "$deploy" -n "$ns" --type=strategic -p "{\"spec\":{\"template\":{
+		\"metadata\":{\"annotations\":{\"load-run/started\":\"$(date +%s)\"}},
+		\"spec\":{\"containers\":[{\"name\":\"manager\",\"args\":[
 			\"--leader-elect=false\",
 			\"--health-probe-bind-address=:8081\",
 			\"--metrics-bind-address=:8080\",
@@ -98,8 +100,8 @@ set_workers() {
 			\"--max-concurrent-reconciles=$workers\",
 			\"--oidc-provider-arn=arn:aws:iam::000000000000:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/LOADRUN\",
 			\"--oidc-provider-url=oidc.eks.us-east-1.amazonaws.com/id/LOADRUN\"
-		]}
-	]"
+		]}]}
+	}}}"
 	kubectl rollout status "deployment/$deploy" -n "$ns" --timeout=5m
 	port_forward
 }
@@ -289,8 +291,12 @@ restart_drain() {
 		m=$(fetch_metrics || true)
 		done_count=$(awk '$1 ~ /^controller_runtime_reconcile_total\{controller="appdependencies"/ { s += $2 } END { printf "%.0f", s }' <<<"$m")
 		depth=$(sum workqueue_depth <<<"$m")
-		if [[ -n $m ]] && ((done_count >= crs)) && ((${depth:-1} == 0)); then
+		# Done once the new pod has reconciled as many times as there are CRs,
+		# not when the queue empties: at 1,000 CRs drift requeues kept it from
+		# ever emptying.
+		if [[ -n $m ]] && ((done_count >= crs)); then
 			took=$(($(date +%s) - start))
+			log "$done_count reconciles after ${took}s, ${depth:-0} still queued"
 			break
 		fi
 		if (($(date +%s) - start > 3600)); then
