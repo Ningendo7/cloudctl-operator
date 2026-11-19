@@ -53,6 +53,12 @@ from that:
   deletion scheduled by someone else is cancelled on the same pass while
   the key is still declared.
 
+The list of what a CR owns, `status.managedResources`, lives in the CR's
+status. Velero and most backup tools don't restore status by default, so
+after a restore the operator no longer knows about resources it retained or
+was waiting to delete. They keep their tags; to take them over again, use
+`cloudctl.io/adopt-from-uid` with the old CR's UID.
+
 ## Deletion is a lifecycle, not a single API call
 
 Every resource's `deletionPolicy` defaults to `Retain`, mirroring
@@ -191,19 +197,13 @@ under IRSA) and builds the retry/middleware stack, and doing that on every
 tick would add latency to every reconcile and could itself hammer STS
 under load.
 
-**Startup credential failure retries rather than crash-loops.**
-`NewClients` fails if the STS identity check fails (bad/revoked/rotated-out
-credentials) — but `cmd/main.go`'s `waitForAWSClients` retries this on a
-fixed interval instead of exiting the process. The manager (and its health
-probe port) isn't started until this succeeds, so a pod stuck in this state
-isn't crash-looping — it just has nothing listening yet, the same posture
-already confirmed for a real AWS network partition at startup. This matters
-specifically for a credentials outage that affects every replica at once
-(e.g. mid-rotation): without this, every *new* pod started during that
-window would crash-loop and the whole deployment could end up at zero
-`Ready` replicas; an already-`Running` pod on already-valid cached
-credentials is unaffected either way. This doesn't add periodic
-re-validation for an already-started manager — only the startup path.
+**Credential failures don't crash-loop the pod.** The AWS clients are built
+inside the running manager, retrying the STS identity check on a fixed
+interval until it passes. The probes start with the manager: `/healthz`
+passes from the start, and `/readyz` fails until the clients are ready. After
+that, the credentials are checked again every 5 minutes, and `/readyz` fails
+while they don't work. So during a credentials outage that hits every replica
+at once, such as mid-rotation, pods go not-ready instead of restarting.
 
 Each service also gets its own independent outgoing rate limiter
 (`internal/aws/ratelimit.go`), attached as SDK middleware on that service's
