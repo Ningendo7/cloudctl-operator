@@ -57,6 +57,9 @@ type AppDependenciesReconciler struct {
 	// clear error at that point rather than refusing to start without them.
 	OIDCProviderARN string
 	OIDCProviderURL string
+	// IAMPermissionsBoundaryARN and IAMRolePath, see iam.RoleSettings.
+	IAMPermissionsBoundaryARN string
+	IAMRolePath               string
 
 	// PodBaseSecurityGroupIDs are the security groups the pods of a CR using
 	// rds.consumes keep next to the database group.
@@ -94,7 +97,7 @@ func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	defer func() { endSpan(err) }()
 
 	var cr depsv1alpha1.AppDependencies
-	if err := r.Get(ctx, req.NamespacedName, &cr); err != nil {
+	if err := r.passReader().Get(ctx, req.NamespacedName, &cr); err != nil {
 		if apierror.IsNotFound(err) {
 			r.resetTransientBackoff(req.NamespacedName)
 			return ctrl.Result{}, nil
@@ -113,10 +116,22 @@ func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return r.reconcileNormal(ctx, &cr)
 }
 
+// passReader reads the CR a pass starts from. The cache can lag this
+// controller's own last status write, and the ledger is a list that a status
+// patch replaces whole, so a pass starting from a stale copy would undo what
+// the previous pass recorded. The API server can't lag; one read per pass is
+// cheap next to the AWS calls the pass makes.
+func (r *AppDependenciesReconciler) passReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *depsv1alpha1.AppDependencies) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	start := time.Now()
-	log.Info("Starting reconcile")
+	log.V(1).Info("Starting reconcile")
 	original := cr.DeepCopy()
 
 	if refused, err := refuseLegacyKMSKeyRef(ctx, r, cr, original); refused || err != nil {
@@ -175,7 +190,7 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	r.resetTransientBackoff(key)
 
 	requeueAfter := jitteredDriftRequeue()
-	log.Info("Reconcile succeeded", "requeueAfter", requeueAfter, "duration", time.Since(start))
+	log.V(1).Info("Reconcile succeeded", "requeueAfter", requeueAfter, "duration", time.Since(start))
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 

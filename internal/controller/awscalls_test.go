@@ -182,6 +182,11 @@ func (w countingIAM) CreateRole(ctx context.Context, in *iam.CreateRoleInput, op
 	return w.client.CreateRole(ctx, in, optFns...)
 }
 
+func (w countingIAM) PutRolePermissionsBoundary(ctx context.Context, in *iam.PutRolePermissionsBoundaryInput, optFns ...func(*iam.Options)) (*iam.PutRolePermissionsBoundaryOutput, error) {
+	w.calls["iam.PutRolePermissionsBoundary"]++
+	return w.client.PutRolePermissionsBoundary(ctx, in, optFns...)
+}
+
 func (w countingIAM) UpdateAssumeRolePolicy(ctx context.Context, in *iam.UpdateAssumeRolePolicyInput, optFns ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error) {
 	w.calls["iam.UpdateAssumeRolePolicy"]++
 	return w.client.UpdateAssumeRolePolicy(ctx, in, optFns...)

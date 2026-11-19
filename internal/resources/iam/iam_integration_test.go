@@ -113,7 +113,7 @@ func TestIntegration_Ensure_CreatesRealRoleWithTrustPolicyAndTags(t *testing.T) 
 		}
 	})
 
-	ledger, arn, err := Ensure(context.Background(), client, nil, testOIDCProviderARN, testOIDCProviderURL, cr, cr.Status.ManagedResources)
+	ledger, arn, err := Ensure(context.Background(), client, nil, RoleSettings{OIDCProviderARN: testOIDCProviderARN, OIDCProviderURL: testOIDCProviderURL}, cr, cr.Status.ManagedResources)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -163,13 +163,13 @@ func TestIntegration_Ensure_IsIdempotentAgainstRealAWS(t *testing.T) {
 	cr := crWithOneOwnedQueue(namespace, crName, "uid-1")
 	t.Cleanup(func() { deleteRoleIfExists(t, client, roleName(namespace, crName)) })
 
-	ledger, arn1, err := Ensure(context.Background(), client, nil, testOIDCProviderARN, testOIDCProviderURL, cr, cr.Status.ManagedResources)
+	ledger, arn1, err := Ensure(context.Background(), client, nil, RoleSettings{OIDCProviderARN: testOIDCProviderARN, OIDCProviderURL: testOIDCProviderURL}, cr, cr.Status.ManagedResources)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 	cr.Status.ManagedResources = ledger
 
-	_, arn2, err := Ensure(context.Background(), client, nil, testOIDCProviderARN, testOIDCProviderURL, cr, ledger)
+	_, arn2, err := Ensure(context.Background(), client, nil, RoleSettings{OIDCProviderARN: testOIDCProviderARN, OIDCProviderURL: testOIDCProviderURL}, cr, ledger)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -202,7 +202,7 @@ func TestIntegration_Ensure_RefusesForeignRoleWithNoAdoptEscapeHatch(t *testing.
 	}
 
 	cr := crWithOneOwnedQueue(namespace, crName, "uid-1")
-	_, _, err := Ensure(context.Background(), client, nil, testOIDCProviderARN, testOIDCProviderURL, cr, cr.Status.ManagedResources)
+	_, _, err := Ensure(context.Background(), client, nil, RoleSettings{OIDCProviderARN: testOIDCProviderARN, OIDCProviderURL: testOIDCProviderURL}, cr, cr.Status.ManagedResources)
 	if err == nil {
 		t.Fatal("expected Ensure() to refuse a foreign, untagged role with no adopt:true path")
 	}
@@ -218,7 +218,7 @@ func TestIntegration_Ensure_CorrectsTrustPolicyDriftOnRealRole(t *testing.T) {
 	name := roleName(namespace, crName)
 	t.Cleanup(func() { deleteRoleIfExists(t, client, name) })
 
-	ledger, _, err := Ensure(context.Background(), client, nil, testOIDCProviderARN, testOIDCProviderURL, cr, cr.Status.ManagedResources)
+	ledger, _, err := Ensure(context.Background(), client, nil, RoleSettings{OIDCProviderARN: testOIDCProviderARN, OIDCProviderURL: testOIDCProviderURL}, cr, cr.Status.ManagedResources)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
@@ -234,7 +234,7 @@ func TestIntegration_Ensure_CorrectsTrustPolicyDriftOnRealRole(t *testing.T) {
 		t.Fatalf("real UpdateAssumeRolePolicy() (setup) error = %v", err)
 	}
 
-	if _, _, err := Ensure(context.Background(), client, nil, testOIDCProviderARN, testOIDCProviderURL, cr, ledger); err != nil {
+	if _, _, err := Ensure(context.Background(), client, nil, RoleSettings{OIDCProviderARN: testOIDCProviderARN, OIDCProviderURL: testOIDCProviderURL}, cr, ledger); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
@@ -263,7 +263,7 @@ func TestIntegration_Cleanup_DeletesRealRoleAndItsInlinePolicy(t *testing.T) {
 	name := roleName(namespace, crName)
 	t.Cleanup(func() { deleteRoleIfExists(t, client, name) })
 
-	ledger, _, err := Ensure(context.Background(), client, nil, testOIDCProviderARN, testOIDCProviderURL, cr, cr.Status.ManagedResources)
+	ledger, _, err := Ensure(context.Background(), client, nil, RoleSettings{OIDCProviderARN: testOIDCProviderARN, OIDCProviderURL: testOIDCProviderURL}, cr, cr.Status.ManagedResources)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}

@@ -52,6 +52,14 @@ manager:
   oidcProviderArn: ""
   oidcProviderUrl: ""
 
+  ## A managed policy set as the permissions boundary of every IAM role the
+  ## operator manages, and a path for the roles it creates (such as
+  ## /cloudctl/). Together they let the operator's own IAM permissions be
+  ## limited to its roles; see docs/threat-model.md.
+  ##
+  iamPermissionsBoundaryArn: ""
+  iamRolePath: ""
+
   ## Extra volumes and volume mounts for the manager pod, as Kubernetes
   ## volume and volumeMount entries.
   ##

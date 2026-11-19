@@ -432,7 +432,7 @@ func TestCleanup_AConsumerWhoseOnlyGrantIsRevokedLosesItsRole(t *testing.T) {
 	revoked := producerCR("default", "checkout-service", nil, "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders")
 	k8s := newFakeK8sClient(revoked)
 
-	if _, _, err := Ensure(context.Background(), iamClient, k8s, testOIDCArn, testOIDCURL, cr, roleLedger(arn)); err == nil {
+	if _, _, err := Ensure(context.Background(), iamClient, k8s, RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, roleLedger(arn)); err == nil {
 		t.Fatal("expected Ensure to report the consumed resource as not granted")
 	}
 	ledger, err := Cleanup(context.Background(), iamClient, k8s, cr, roleLedger(arn), false)

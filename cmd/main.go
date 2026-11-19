@@ -148,6 +148,8 @@ type config struct {
 	enableHTTP2                                      bool
 	oidcProviderARN                                  string
 	oidcProviderURL                                  string
+	iamPermissionsBoundaryARN                        string
+	iamRolePath                                      string
 	podBaseSecurityGroupIDs                          string
 	maxConcurrentReconciles                          int
 	releaseTags                                      bool
@@ -182,6 +184,12 @@ func parseFlags() config {
 	flag.StringVar(&c.oidcProviderURL, "oidc-provider-url", "",
 		"URL (without https://) of this cluster's IAM OIDC identity provider, "+
 			"required for the IRSA trust policy on every IAM role this operator derives.")
+	flag.StringVar(&c.iamPermissionsBoundaryARN, "iam-permissions-boundary-arn", "",
+		"ARN of a managed policy set as the permissions boundary of every IAM role the operator manages. "+
+			"With it, the operator's own IAM permissions can be limited to roles that carry the boundary.")
+	flag.StringVar(&c.iamRolePath, "iam-role-path", "",
+		"Path for IAM roles the operator creates, such as /cloudctl/, so its permissions can be scoped "+
+			"to role/cloudctl/*. Existing roles keep their path.")
 	flag.StringVar(&c.podBaseSecurityGroupIDs, "pod-base-security-group-ids", "",
 		"Comma-separated security group IDs that the pods of a CR using rds.consumes keep next to the "+
 			"database group, normally the EKS cluster security group. Security Groups for Pods replaces a "+
@@ -217,6 +225,13 @@ func main() {
 	baseSecurityGroups, err := parseSecurityGroupIDs(c.podBaseSecurityGroupIDs)
 	if err != nil {
 		fatal(err, "Invalid --pod-base-security-group-ids")
+	}
+	if err := checkIAMRoleFlags(c.iamPermissionsBoundaryARN, c.iamRolePath); err != nil {
+		fatal(err, "Invalid IAM role flags")
+	}
+	if c.iamPermissionsBoundaryARN == "" {
+		setupLog.Info("Starting without --iam-permissions-boundary-arn: the operator's IAM permissions can't be " +
+			"limited to its own roles, so its credentials could put any policy on any role they can reach")
 	}
 
 	if limit := limitMemoryFromCgroup(cgroupRoot); limit > 0 {
@@ -374,16 +389,18 @@ func newAWSBootstrap(
 		interval:   awsClientInitRetryInterval,
 		onReady: func(ctx context.Context, awsClients *cloudctlaws.Clients) error {
 			if err := (&controller.AppDependenciesReconciler{
-				Client:                  mgr.GetClient(),
-				APIReader:               mgr.GetAPIReader(),
-				Scheme:                  mgr.GetScheme(),
-				AWSClients:              awsClients,
-				Recorder:                mgr.GetEventRecorder("appdependencies-controller"),
-				OIDCProviderARN:         c.oidcProviderARN,
-				OIDCProviderURL:         c.oidcProviderURL,
-				PodBaseSecurityGroupIDs: baseSecurityGroups,
-				MaxConcurrentReconciles: c.maxConcurrentReconciles,
-				DisableReleaseTags:      !c.releaseTags,
+				Client:                    mgr.GetClient(),
+				APIReader:                 mgr.GetAPIReader(),
+				Scheme:                    mgr.GetScheme(),
+				AWSClients:                awsClients,
+				Recorder:                  mgr.GetEventRecorder("appdependencies-controller"),
+				OIDCProviderARN:           c.oidcProviderARN,
+				OIDCProviderURL:           c.oidcProviderURL,
+				IAMPermissionsBoundaryARN: c.iamPermissionsBoundaryARN,
+				IAMRolePath:               c.iamRolePath,
+				PodBaseSecurityGroupIDs:   baseSecurityGroups,
+				MaxConcurrentReconciles:   c.maxConcurrentReconciles,
+				DisableReleaseTags:        !c.releaseTags,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("creating appdependencies controller: %w", err)
 			}
@@ -428,6 +445,25 @@ func addHealthChecks(mgr ctrl.Manager, bootstrap *awsBootstrap, credHealth *clou
 			fatal(err, check.failMsg)
 		}
 	}
+}
+
+var (
+	policyARNPattern = regexp.MustCompile(`^arn:aws[a-z-]*:iam::(\d{12}|aws):policy/[\w+=,.@/-]+$`)
+	rolePathPattern  = regexp.MustCompile(`^(/|/[\x21-\x7E]+/)$`)
+)
+
+// rolePathMaxLen is IAM's limit on a path.
+const rolePathMaxLen = 512
+
+// checkIAMRoleFlags rejects values IAM would refuse on every CreateRole.
+func checkIAMRoleFlags(boundaryARN, path string) error {
+	if boundaryARN != "" && !policyARNPattern.MatchString(boundaryARN) {
+		return fmt.Errorf("--iam-permissions-boundary-arn %q is not a managed policy ARN", boundaryARN)
+	}
+	if path != "" && (len(path) > rolePathMaxLen || !rolePathPattern.MatchString(path)) {
+		return fmt.Errorf("--iam-role-path %q must start and end with / and be at most %d characters", path, rolePathMaxLen)
+	}
+	return nil
 }
 
 var securityGroupIDPattern = regexp.MustCompile(`^sg-[0-9a-f]{8,17}$`)
