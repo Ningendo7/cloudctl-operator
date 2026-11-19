@@ -51,11 +51,14 @@ func isThrottled(err error) bool {
 
 // isNotFound matches the many spellings AWS services use for "no such
 // resource": NotFound, NoSuchBucket, QueueDoesNotExist, ResourceNotFound...
+// SQS reports a missing queue under its legacy code,
+// AWS.SimpleQueueService.NonExistentQueue.
 func isNotFound(err error) bool {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		code := apiErr.ErrorCode()
-		return strings.Contains(code, "NotFound") || strings.Contains(code, "NoSuch") || strings.Contains(code, "DoesNotExist")
+		return strings.Contains(code, "NotFound") || strings.Contains(code, "NoSuch") ||
+			strings.Contains(code, "DoesNotExist") || strings.Contains(code, "NonExistent")
 	}
 	var respErr *awshttp.ResponseError
 	return errors.As(err, &respErr) && respErr.HTTPStatusCode() == 404

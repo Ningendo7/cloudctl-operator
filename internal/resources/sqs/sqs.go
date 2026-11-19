@@ -261,7 +261,8 @@ func ensureSingleQueue(
 	recordEvent status.EventRecorder,
 ) (updatedLedger []depsv1alpha1.ManagedResource, queueURL string, err error) {
 	before, _ := status.FindManagedResource(ledger, resourceType, resourceName)
-	ledger, queueURL, err = ensureQueueExists(ctx, awsClient, namespace, crName, crUID, resourceName, opts, ledger, recordEvent)
+	var policy *string
+	ledger, queueURL, policy, err = ensureQueueExists(ctx, awsClient, namespace, crName, crUID, resourceName, opts, ledger, recordEvent)
 	if err != nil {
 		return ledger, queueURL, err
 	}
@@ -274,11 +275,15 @@ func ensureSingleQueue(
 	if !status.VerifiedSince(before, entry) {
 		return ledger, queueURL, nil
 	}
+	if policy != nil {
+		return ledger, queueURL, reconcileDeclaredPolicyFrom(ctx, awsClient, queueURL, entry.ARN, *policy, recordEvent)
+	}
 	return ledger, queueURL, reconcileDeclaredPolicy(ctx, awsClient, queueURL, entry.ARN, recordEvent)
 }
 
 // ensureQueueExists is ensureSingleQueue without the transport-security
-// statement.
+// statement. policy is the queue's policy when this pass read it, so the
+// caller needn't read it again.
 func ensureQueueExists(
 	ctx context.Context,
 	awsClient sqsAPI,
@@ -289,15 +294,15 @@ func ensureQueueExists(
 	opts queueOptions,
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
-) (updatedLedger []depsv1alpha1.ManagedResource, queueURL string, err error) {
+) (updatedLedger []depsv1alpha1.ManagedResource, queueURL string, policy *string, err error) {
 	if err := checkFIFOUnchanged(ledger, resourceName, opts.fifo); err != nil {
-		return ledger, "", err
+		return ledger, "", nil, err
 	}
 
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, resourceName); existingFound && !status.NeedsRevalidation(existing) {
 		trustedLedger, trustedURL, present, trustErr := ensureWithinTrust(ctx, awsClient, existing, opts, ledger, recordEvent)
 		if trustErr != nil || present {
-			return trustedLedger, trustedURL, trustErr
+			return trustedLedger, trustedURL, nil, trustErr
 		}
 		// The queue is gone; the full path below recreates it.
 		ledger = trustedLedger
@@ -320,39 +325,40 @@ func ensureQueueExists(
 
 	var notFound *types.QueueDoesNotExist
 	if errors.As(err, &notFound) {
-		return createQueue(ctx, awsClient, queueName, resourceName, ownerTags, opts, ledger, recordEvent)
+		ledger, queueURL, err = createQueue(ctx, awsClient, queueName, resourceName, ownerTags, opts, ledger, recordEvent)
+		return ledger, queueURL, nil, err
 	}
 	if err != nil {
-		return ledger, "", wrapAWSError(err, "looking up queue")
+		return ledger, "", nil, wrapAWSError(err, "looking up queue")
 	}
 
 	// Queue already exists — verify we actually own it before trusting it.
 	queueURL = *getOut.QueueUrl
 	tagsOut, tErr := awsClient.ListQueueTags(ctx, &sqs.ListQueueTagsInput{QueueUrl: &queueURL})
 	if tErr != nil {
-		return ledger, "", wrapAWSError(tErr, "reading queue tags")
+		return ledger, "", nil, wrapAWSError(tErr, "reading queue tags")
 	}
 
 	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, crUID) {
 		if err := adoptQueue(ctx, awsClient, namespace, crName, crUID, queueName, queueURL, tagsOut.Tags, ownerTags, opts, recordEvent); err != nil {
-			return ledger, "", err
+			return ledger, "", nil, err
 		}
 	}
 
-	if err := reconcileAttributes(ctx, awsClient, queueURL, opts); err != nil {
-		return ledger, "", wrapAWSError(err, "reconciling queue attributes")
+	// One read for the drift check, the ARN and the policy: SQS's rate limit
+	// is what bounds how many CRs one operator can keep up with.
+	current, err := readAttributes(ctx, awsClient, queueURL, opts,
+		types.QueueAttributeNameQueueArn, types.QueueAttributeNamePolicy)
+	if err != nil {
+		return ledger, "", nil, wrapAWSError(err, "reconciling queue attributes")
+	}
+	if err := applyAttributeDrift(ctx, awsClient, queueURL, opts, current); err != nil {
+		return ledger, "", nil, wrapAWSError(err, "reconciling queue attributes")
 	}
 
-	ledger, err = recordVerified(
-		ctx,
-		awsClient,
-		queueURL,
-		resourceName,
-		opts.deletionPolicy,
-		opts.force,
-		ledger,
-	)
-	return ledger, queueURL, err
+	ledger = recordVerifiedARN(current[string(types.QueueAttributeNameQueueArn)], resourceName, opts.deletionPolicy, opts.force, ledger)
+	queuePolicy := current[string(types.QueueAttributeNamePolicy)]
+	return ledger, queueURL, &queuePolicy, nil
 }
 
 // ensureWithinTrust handles a queue whose ownership was verified recently.
@@ -556,27 +562,48 @@ func desiredAttributes(opts queueOptions) map[string]string {
 // FifoQueue is never included here since it's immutable after creation
 // (enforced via CEL) — only ever set at creation time, never corrected.
 func reconcileAttributes(ctx context.Context, awsClient sqsAPI, queueURL string, opts queueOptions) error {
+	current, err := readAttributes(ctx, awsClient, queueURL, opts)
+	if err != nil {
+		return err
+	}
+	return applyAttributeDrift(ctx, awsClient, queueURL, opts, current)
+}
+
+// driftAttributes is what reconcileAttributes compares: desiredAttributes,
+// plus an empty RedrivePolicy when no DLQ is declared.
+func driftAttributes(opts queueOptions) map[string]string {
 	desired := desiredAttributes(opts)
 	if opts.redrivePolicy == nil {
 		desired["RedrivePolicy"] = ""
 	}
+	return desired
+}
 
-	attrNames := make([]types.QueueAttributeName, 0, len(desired))
+// readAttributes reads the attributes the drift check compares, and extra.
+func readAttributes(ctx context.Context, awsClient sqsAPI, queueURL string, opts queueOptions, extra ...types.QueueAttributeName) (map[string]string, error) {
+	desired := driftAttributes(opts)
+	attrNames := make([]types.QueueAttributeName, 0, len(desired)+len(extra))
 	for k := range desired {
 		attrNames = append(attrNames, types.QueueAttributeName(k))
 	}
+	attrNames = append(attrNames, extra...)
 
 	current, err := awsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 		QueueUrl:       &queueURL,
 		AttributeNames: attrNames,
 	})
 	if err != nil {
-		return fmt.Errorf("reading current attributes: %w", err)
+		return nil, fmt.Errorf("reading current attributes: %w", err)
 	}
+	return current.Attributes, nil
+}
 
+// applyAttributeDrift writes whichever drift-checked attributes differ from
+// current.
+func applyAttributeDrift(ctx context.Context, awsClient sqsAPI, queueURL string, opts queueOptions, current map[string]string) error {
 	changed := map[string]string{}
-	for k, v := range desired {
-		if !attributeMatches(k, current.Attributes[k], v) {
+	for k, v := range driftAttributes(opts) {
+		if !attributeMatches(k, current[k], v) {
 			changed[k] = v
 		}
 	}
@@ -585,7 +612,7 @@ func reconcileAttributes(ctx context.Context, awsClient sqsAPI, queueURL string,
 		return nil
 	}
 
-	_, err = awsClient.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
+	_, err := awsClient.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
 		QueueUrl:   &queueURL,
 		Attributes: changed,
 	})
@@ -643,7 +670,17 @@ func recordVerified(
 	if err != nil {
 		return ledger, wrapAWSError(err, "reading queue ARN")
 	}
+	return recordVerifiedARN(out.Attributes[string(types.QueueAttributeNameQueueArn)], ledgerName, deletionPolicy, force, ledger), nil
+}
 
+// recordVerifiedARN is recordVerified with the ARN already read.
+func recordVerifiedARN(
+	arn,
+	ledgerName string,
+	deletionPolicy depsv1alpha1.DeletionPolicy,
+	force bool,
+	ledger []depsv1alpha1.ManagedResource,
+) []depsv1alpha1.ManagedResource {
 	now := metav1.Now()
 	createdAt := now
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, ledgerName); existingFound {
@@ -653,14 +690,14 @@ func recordVerified(
 	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{
 		Type:           resourceType,
 		Name:           ledgerName,
-		ARN:            out.Attributes[string(types.QueueAttributeNameQueueArn)],
+		ARN:            arn,
 		State:          depsv1alpha1.ManagedResourceStateVerified,
 		DeletionPolicy: deletionPolicy,
 		Force:          force,
 		CreatedAt:      createdAt,
 		LastVerifiedAt: &now,
 	})
-	return ledger, nil
+	return ledger
 }
 
 func wrapAWSError(err error, errContext string) error {

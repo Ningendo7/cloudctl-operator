@@ -14,6 +14,7 @@ the same reason, with the section at the start of its text.
 | `AllSectionsReady` | Info | Every declared section is ready. | — |
 | `SectionsNotReady` | Waiting | A declared section has no condition yet, or has not run for the current generation. | Wait for the next reconcile. |
 | `TransientError` | Waiting | A retryable failure, such as throttling or AWS not having caught up. It is retried with backoff, and about every 5 minutes after 10 failures in a row. | None, unless it lasts; then read the message. |
+| `RateLimited` | Waiting | The section has not run yet because the operator's own AWS rate limit for a service was used up. A section that already had a condition keeps it. | None, unless it lasts; then raise that service's rate limit, or lower --max-concurrent-reconciles. |
 | `Error` | Failing | The section failed with an error the operator does not classify. | Read the message, which carries the cause, and the operator's logs. |
 | `PermissionDenied` | Failing | AWS refused a call made with the operator's credentials. | Grant the operator's IAM role the action named in the message. |
 | `EndpointUnreachable` | Failing | The operator cannot reach AWS and waiting will not help: the endpoint's name does not resolve, or its certificate is not trusted. | Check AWS_ENDPOINT_URL, any proxy in the way, and the CA bundle the manager trusts. |

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	equality "k8s.io/apimachinery/pkg/api/equality"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -333,6 +334,10 @@ func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr 
 
 func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, conditionType string, err error, recordEvent status.EventRecorder) {
 	observeSection(conditionType, err)
+	if errors.Is(err, cloudctlaws.ErrRateLimitWait) {
+		setRateLimited(ctx, cr, conditionType, err)
+		return
+	}
 	if err == nil {
 		status.SetSectionCondition(
 			&cr.Status.Conditions,
@@ -378,6 +383,25 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 		metav1.ConditionFalse,
 		reason,
 		message,
+		cr.Generation,
+		sectionTypes,
+	)
+}
+
+// setRateLimited handles a section cut short by the operator's own limiter.
+// That says nothing about the section's resources, so a condition it already
+// has stays, and no event is recorded: under load every CR would get one.
+// The pass still fails, so the CR is retried at the transient pace.
+func setRateLimited(ctx context.Context, cr *depsv1alpha1.AppDependencies, conditionType string, err error) {
+	logf.FromContext(ctx).V(1).Info("Section waiting on the operator's rate limit", "section", conditionType, "error", err.Error())
+	if apimeta.FindStatusCondition(cr.Status.Conditions, conditionType) != nil {
+		return
+	}
+	status.SetSectionCondition(
+		&cr.Status.Conditions,
+		conditionType,
+		metav1.ConditionFalse,
+		reasons.RateLimited, "waiting for the operator's own AWS rate limit",
 		cr.Generation,
 		sectionTypes,
 	)

@@ -1135,3 +1135,95 @@ func TestReconcile_StampsWhatWillHappenOnDeleteOnEveryEntry(t *testing.T) {
 		t.Errorf("the dedicated key should say the queue holds it, got %+v", key)
 	}
 }
+
+// limiterRefusal is the error a section returns when the operator's own
+// limiter refused to wait past the section's deadline, wrapped as sqs.Ensure
+// wraps it.
+func limiterRefusal() error {
+	refused := fmt.Errorf("rate limit wait: %w", fmt.Errorf("%w: %w", cloudctlaws.ErrRateLimitWait, errors.New("rate: Wait(n=1) would exceed context deadline")))
+	return fmt.Errorf("queue %q: %w", "orders", &cloudctlaws.ReconcileError{
+		Err:       fmt.Errorf("resolving queue URL for drift correction: %w", refused),
+		Retryable: cloudctlaws.IsRetryable(refused),
+	})
+}
+
+// markAllReady reconciles every section successfully, except skip.
+func markAllReady(cr *depsv1alpha1.AppDependencies, skip string) {
+	for _, t := range sectionTypes {
+		if t != skip {
+			setSectionCondition(context.Background(), cr, t, nil, nil)
+		}
+	}
+}
+
+func TestSetSectionCondition_ALimiterRefusalKeepsTheConditionASectionAlreadyHas(t *testing.T) {
+	for name, previous := range map[string]error{
+		"ready":  nil,
+		"failed": &cloudctlaws.ReconcileError{Err: errors.New("exists"), Reason: reasons.NameTaken},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cr := &depsv1alpha1.AppDependencies{}
+			cr.Generation = 1
+			markAllReady(cr, conditionTypeSQSReady)
+			setSectionCondition(context.Background(), cr, conditionTypeSQSReady, previous, nil)
+			before := apimeta.FindStatusCondition(cr.Status.Conditions, conditionTypeSQSReady).DeepCopy()
+			readyBefore := apimeta.FindStatusCondition(cr.Status.Conditions, status.ConditionTypeReady).DeepCopy()
+
+			var recorded []string
+			record := func(eventType, reason, _ string) { recorded = append(recorded, eventType+"/"+reason) }
+			setSectionCondition(context.Background(), cr, conditionTypeSQSReady, limiterRefusal(), record)
+
+			after := apimeta.FindStatusCondition(cr.Status.Conditions, conditionTypeSQSReady)
+			if after.Status != before.Status || after.Reason != before.Reason || after.Message != before.Message {
+				t.Errorf("SQSReady changed from %s/%s to %s/%s", before.Status, before.Reason, after.Status, after.Reason)
+			}
+			ready := apimeta.FindStatusCondition(cr.Status.Conditions, status.ConditionTypeReady)
+			if previous == nil && readyBefore.Status != metav1.ConditionTrue {
+				t.Fatalf("setup: Ready = %s/%s, want True", readyBefore.Status, readyBefore.Reason)
+			}
+			if ready.Status != readyBefore.Status || ready.Reason != readyBefore.Reason {
+				t.Errorf("Ready changed from %s/%s to %s/%s", readyBefore.Status, readyBefore.Reason, ready.Status, ready.Reason)
+			}
+			if len(recorded) != 0 {
+				t.Errorf("a limiter refusal records no event, got %v", recorded)
+			}
+		})
+	}
+}
+
+func TestSetSectionCondition_ALimiterRefusalOnAFirstPassSaysRateLimited(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{}
+	cr.Generation = 1
+	var recorded []string
+	record := func(eventType, reason, _ string) { recorded = append(recorded, eventType+"/"+reason) }
+
+	setSectionCondition(context.Background(), cr, conditionTypeSQSReady, limiterRefusal(), record)
+
+	section := apimeta.FindStatusCondition(cr.Status.Conditions, conditionTypeSQSReady)
+	if section == nil || section.Status != metav1.ConditionFalse || section.Reason != reasons.RateLimited {
+		t.Fatalf("SQSReady = %+v, want False/%s", section, reasons.RateLimited)
+	}
+	ready := apimeta.FindStatusCondition(cr.Status.Conditions, status.ConditionTypeReady)
+	if ready == nil || ready.Reason != reasons.RateLimited {
+		t.Errorf("Ready = %+v, want reason %s", ready, reasons.RateLimited)
+	}
+	if len(recorded) != 0 {
+		t.Errorf("a limiter refusal records no event, got %v", recorded)
+	}
+}
+
+// A spec change waiting on the limiter must not read as reconciled.
+func TestSetSectionCondition_ALimiterRefusalAfterASpecChangeLeavesReadyFalse(t *testing.T) {
+	cr := &depsv1alpha1.AppDependencies{}
+	cr.Generation = 1
+	markAllReady(cr, "")
+
+	cr.Generation = 2
+	setSectionCondition(context.Background(), cr, conditionTypeSQSReady, limiterRefusal(), nil)
+	markAllReady(cr, conditionTypeSQSReady)
+
+	ready := apimeta.FindStatusCondition(cr.Status.Conditions, status.ConditionTypeReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.ObservedGeneration != 2 {
+		t.Errorf("Ready = %+v, want False for generation 2", ready)
+	}
+}
