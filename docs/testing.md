@@ -214,6 +214,7 @@ memory and CPU in kind against LocalStack with 100 to 1,000 CRs, unrelated
 ServiceAccounts, Secrets and ConfigMaps, and 5, 20 and 50 workers. Each
 scenario uploads `summary.tsv`, samples every 5 seconds and a heap profile per
 step. `hack/load/run.sh` does the work; it never touches a real cluster or AWS.
-Alarms, standalone KMS keys and RDS are not part of it, since LocalStack does
-not emulate them faithfully.
+The CRs use SQS, DynamoDB and dedicated KMS keys only: LocalStack can't create
+an SNS topic or a tagged S3 bucket the way the operator does (see E2E), and
+doesn't emulate alarms, standalone keys or RDS faithfully.
 
