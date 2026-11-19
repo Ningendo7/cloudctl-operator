@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package version reports which build of the CLI this is.
+// Package version reports which build of a binary this is: the manager or
+// the CLI.
 package version
 
 import (

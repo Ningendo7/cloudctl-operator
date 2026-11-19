@@ -29,8 +29,8 @@ import (
 
 	"github.com/Ningendo7/cloudctl-operator/internal/cli/kube"
 	"github.com/Ningendo7/cloudctl-operator/internal/cli/render"
-	"github.com/Ningendo7/cloudctl-operator/internal/cli/version"
 	"github.com/Ningendo7/cloudctl-operator/internal/cli/view"
+	"github.com/Ningendo7/cloudctl-operator/internal/version"
 )
 
 // The exit codes are a documented contract.

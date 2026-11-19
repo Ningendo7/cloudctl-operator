@@ -188,7 +188,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t ${IMG} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -214,6 +214,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	$(CONTAINER_TOOL) buildx use cloudctl-operator-builder
 	mkdir -p dist
 	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
 		--attest type=provenance,mode=max \
 		--attest type=sbom,generator=$(SBOM_SCANNER) \
 		--metadata-file dist/image-metadata.json -f Dockerfile.cross .
@@ -229,9 +230,9 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 ##@ CLI
 
 CLI_PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
-CLI_VERSION_PKG := github.com/Ningendo7/cloudctl-operator/internal/cli/version
-CLI_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null)
-CLI_LDFLAGS = -s -w -X $(CLI_VERSION_PKG).Version=$(VERSION) -X $(CLI_VERSION_PKG).Commit=$(CLI_COMMIT)
+VERSION_PKG := github.com/Ningendo7/cloudctl-operator/internal/version
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null)
+CLI_LDFLAGS = -s -w -X $(VERSION_PKG).Version=$(VERSION) -X $(VERSION_PKG).Commit=$(COMMIT)
 CLI_DIST ?= dist/cli
 
 .PHONY: cli-build

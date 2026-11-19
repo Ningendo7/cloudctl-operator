@@ -22,8 +22,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"sync/atomic"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
