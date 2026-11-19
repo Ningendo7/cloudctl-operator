@@ -197,6 +197,17 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	return grants, skipped, nil
 }
 
+// declaresIAMWork reports whether the spec declares anything the CR's role
+// would grant: a resource it owns, one it consumes, or a key.
+func declaresIAMWork(cr *depsv1alpha1.AppDependencies) bool {
+	for _, sec := range grantSections(cr) {
+		if len(sec.owned) > 0 || len(sec.consumes) > 0 {
+			return true
+		}
+	}
+	return cr.Spec.KMS != nil && len(cr.Spec.KMS.Resources) > 0
+}
+
 // grantSection is what one declared section contributes: the resources the
 // CR owns and the ones it consumes from other CRs.
 type grantSection struct {

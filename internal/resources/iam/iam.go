@@ -91,7 +91,7 @@ func Ensure(
 		return ledger, "", err
 	}
 	if len(grants) == 0 {
-		return ledger, "", skippedToError(skipped)
+		return ledger, "", errors.Join(emptyRole(ctx, iamClient, cr, ledger), skippedToError(skipped))
 	}
 
 	name := roleName(cr.Namespace, cr.Name)
@@ -126,6 +126,33 @@ func Ensure(
 
 	updatedLedger = recordVerified(ledger, arn, digest, trusted && !created)
 	return updatedLedger, arn, skippedToError(skipped)
+}
+
+// emptyRole removes the policy from the role of a CR that has no grants right
+// now but still declares something needing IAM, for example while a producer
+// it consumes is being recreated. Cleanup keeps the role, so the
+// ServiceAccount keeps its annotation and pods started meanwhile don't fall
+// back to the node's role; removing the policy keeps a revoked grant revoked.
+func emptyRole(ctx context.Context, iamClient iamAPI, cr *depsv1alpha1.AppDependencies, ledger []depsv1alpha1.ManagedResource) error {
+	if !status.HasManagedResource(ledger, resourceType, roleLedgerName) || !declaresIAMWork(cr) {
+		return nil
+	}
+	name := roleName(cr.Namespace, cr.Name)
+	if err := verifyRoleOwnership(ctx, iamClient, cr.Namespace, cr.Name, string(cr.UID), name); err != nil {
+		if _, gone := errors.AsType[*types.NoSuchEntityException](err); gone {
+			return nil
+		}
+		return err
+	}
+	if _, err := iamClient.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{
+		RoleName:   &name,
+		PolicyName: strPtr(roleInlinePolicyName),
+	}); err != nil {
+		if _, gone := errors.AsType[*types.NoSuchEntityException](err); !gone {
+			return wrapAWSError(err, "removing the policy from a role with no grants")
+		}
+	}
+	return nil
 }
 
 // RoleSettings applies to every role the operator manages.

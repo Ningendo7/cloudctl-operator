@@ -54,14 +54,10 @@ func Cleanup(
 		return ledger, nil // never created, nothing to do
 	}
 
-	if !deleting {
-		grants, _, err := collectGrants(ctx, k8sClient, cr)
-		if err != nil {
-			return ledger, err
-		}
-		if len(grants) > 0 {
-			return ledger, nil // still needed
-		}
+	// The role goes when the spec stops needing one, not when its grants
+	// drop to zero for a moment; see emptyRole.
+	if !deleting && declaresIAMWork(cr) {
+		return ledger, nil
 	}
 
 	name, nameErr := roleNameFromARN(entry.ARN)
