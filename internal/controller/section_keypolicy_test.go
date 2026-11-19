@@ -53,7 +53,7 @@ var (
 // platform owns an encrypted topic shared with shop/checkout.
 func platformCR(sharedWith []depsv1alpha1.SharedWithEntry) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "data", Name: "platform"},
+		Namespace: "data", Name: "platform",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}},
 			SNS: &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{
@@ -75,7 +75,7 @@ func keyPolicyScheme(t *testing.T, objs ...client.Object) client.Client {
 // checkoutCR consumes the platform's topic into an encrypted queue.
 func checkoutCR(subscribesTo ...depsv1alpha1.ConsumeRef) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "checkout"},
+		Namespace: "shop", Name: "checkout",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}}},
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{
@@ -125,8 +125,8 @@ func TestKeyServiceGrants_AlarmsThatPublishToATopicAreGrantedToTheTopicsKey(t *t
 	checkout.Spec.SQS = checkoutQueueSQS
 	checkout.Spec.Alarms = alarmsOnEvents
 	elsewhere := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "reports"},
-		Spec:       depsv1alpha1.AppDependenciesSpec{SQS: checkoutQueueSQS, Alarms: &depsv1alpha1.AlarmsSpec{Enabled: true}}, // alarms, but no topic
+		Namespace: "shop", Name: "reports",
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: checkoutQueueSQS, Alarms: &depsv1alpha1.AlarmsSpec{Enabled: true}}, // alarms, but no topic
 	}
 	platform := platformCR([]depsv1alpha1.SharedWithEntry{
 		{Namespace: "shop", Name: "checkout"}, {Namespace: "shop", Name: "reports"}, {Namespace: "shop", Name: "ghost"},

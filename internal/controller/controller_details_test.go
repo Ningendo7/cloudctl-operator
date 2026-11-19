@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
@@ -49,7 +48,7 @@ func newFinalizerTestClient(t *testing.T, funcs interceptor.Funcs, objs ...clien
 
 func queueCR() *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "default", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},

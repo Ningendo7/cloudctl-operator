@@ -95,6 +95,20 @@ func reconcileDeclaredPolicy(ctx context.Context, client sqsAPI, queueURL, queue
 	if err != nil {
 		return wrapAWSError(err, "reading the queue's policy")
 	}
+	return reconcileDeclaredPolicyDoc(ctx, client, queueURL, queueARN, doc, recordEvent)
+}
+
+// reconcileDeclaredPolicyFrom is reconcileDeclaredPolicy with the policy
+// already read.
+func reconcileDeclaredPolicyFrom(ctx context.Context, client sqsAPI, queueURL, queueARN, raw string, recordEvent status.EventRecorder) error {
+	doc, err := parsePolicy(raw)
+	if err != nil {
+		return wrapAWSError(err, "reading the queue's policy")
+	}
+	return reconcileDeclaredPolicyDoc(ctx, client, queueURL, queueARN, doc, recordEvent)
+}
+
+func reconcileDeclaredPolicyDoc(ctx context.Context, client sqsAPI, queueURL, queueARN string, doc policyDocument, recordEvent status.EventRecorder) error {
 	statements, changed, err := awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, awspolicy.DenyInsecureTransport("sqs:*", queueARN))
 	if err != nil {
 		return err
@@ -157,7 +171,10 @@ func readPolicy(ctx context.Context, client sqsAPI, queueURL string) (policyDocu
 		return policyDocument{}, fmt.Errorf("reading queue policy: %w", err)
 	}
 
-	raw := out.Attributes[string(types.QueueAttributeNamePolicy)]
+	return parsePolicy(out.Attributes[string(types.QueueAttributeNamePolicy)])
+}
+
+func parsePolicy(raw string) (policyDocument, error) {
 	if raw == "" {
 		return policyDocument{Version: "2012-10-17"}, nil
 	}

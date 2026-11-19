@@ -426,8 +426,8 @@ func sqsQueueURL(region, accountID, queueName string) (string, error) {
 // out of the same two-step split with no special-casing needed.
 func arnResourceID(arn string) string {
 	resource := arn
-	if idx := strings.LastIndex(arn, ":"); idx != -1 {
-		resource = arn[idx+1:]
+	if _, after, ok := strings.CutLast(arn, ":"); ok {
+		resource = after
 	}
 	if idx := strings.LastIndex(resource, "/"); idx != -1 {
 		resource = resource[idx+1:]

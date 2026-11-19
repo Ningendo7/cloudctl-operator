@@ -60,7 +60,7 @@ func newScheme(t *testing.T) *runtime.Scheme {
 // starts from, since Ensure() refuses to proceed at all otherwise.
 func newAuthorizedSubnetGroupGrant(dbSubnetGroupName, namespace string) *depsv1alpha1.RDSSubnetGroupGrant {
 	return &depsv1alpha1.RDSSubnetGroupGrant{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-grant"},
+		Name: "test-grant",
 		Spec: depsv1alpha1.RDSSubnetGroupGrantSpec{
 			DBSubnetGroupName: dbSubnetGroupName,
 			AllowedNamespaces: []string{namespace},

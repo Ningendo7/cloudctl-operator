@@ -19,7 +19,6 @@ package watches
 import (
 	"context"
 
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -43,6 +42,6 @@ func AlarmConsumerToTopicProducer() handler.MapFunc {
 		if ref.Namespace == consumer.Namespace && ref.Name == consumer.Name {
 			return nil // a CR's own topic is handled by its own reconcile
 		}
-		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}}}
+		return []reconcile.Request{{Namespace: ref.Namespace, Name: ref.Name}}
 	}
 }

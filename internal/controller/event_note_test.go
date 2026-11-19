@@ -20,7 +20,6 @@ import (
 	"strings"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -31,7 +30,7 @@ import (
 func TestEventRecorder_ShortensANoteTheAPIWouldReject(t *testing.T) {
 	fake := events.NewFakeRecorder(1)
 	r := &AppDependenciesReconciler{Recorder: fake}
-	cr := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "checkout"}}
+	cr := &depsv1alpha1.AppDependencies{Namespace: "shop", Name: "checkout"}
 
 	eventRecorderFor(r, cr)("Warning", "Error", "SQSReady: "+strings.Repeat("a policy statement ", 200))
 
@@ -47,7 +46,7 @@ func TestEventRecorder_ShortensANoteTheAPIWouldReject(t *testing.T) {
 func TestEventRecorder_LeavesAShortNoteAlone(t *testing.T) {
 	fake := events.NewFakeRecorder(1)
 	r := &AppDependenciesReconciler{Recorder: fake}
-	cr := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "checkout"}}
+	cr := &depsv1alpha1.AppDependencies{Namespace: "shop", Name: "checkout"}
 
 	eventRecorderFor(r, cr)("Warning", "Error", "SQSReady: queue is fine")
 

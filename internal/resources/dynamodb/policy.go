@@ -99,8 +99,7 @@ func addPendingDeletionDeny(ctx context.Context, client dynamodbAPI, tableARN st
 func removePendingDeletionDeny(ctx context.Context, client dynamodbAPI, tableARN string) error {
 	policy, err := readTablePolicy(ctx, client, tableARN)
 	if err != nil {
-		var notFound *types.ResourceNotFoundException
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.ResourceNotFoundException](err); ok {
 			return nil
 		}
 		return err
@@ -122,8 +121,7 @@ func removePendingDeletionDeny(ctx context.Context, client dynamodbAPI, tableARN
 func readTablePolicy(ctx context.Context, client dynamodbAPI, tableARN string) (tablePolicy, error) {
 	out, err := client.GetResourcePolicy(ctx, &dynamodb.GetResourcePolicyInput{ResourceArn: &tableARN})
 	if err != nil {
-		var none *types.PolicyNotFoundException
-		if errors.As(err, &none) {
+		if _, ok := errors.AsType[*types.PolicyNotFoundException](err); ok {
 			return tablePolicy{}, nil
 		}
 		return tablePolicy{}, wrapAWSError(err, "reading the table's resource policy")

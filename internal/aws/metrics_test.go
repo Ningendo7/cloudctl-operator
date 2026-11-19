@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -68,6 +69,7 @@ func TestMetricResult(t *testing.T) {
 		"http 403":                   {httpStatus(403), observability.ResultPermissionDenied},
 		"no such bucket":             {api("NoSuchBucket"), observability.ResultNotFound},
 		"queue does not exist":       {api("QueueDoesNotExist"), observability.ResultNotFound},
+		"sqs legacy missing queue":   {api("AWS.SimpleQueueService.NonExistentQueue"), observability.ResultNotFound},
 		"resource not found":         {api("ResourceNotFoundException"), observability.ResultNotFound},
 		"plain not found":            {api("NotFound"), observability.ResultNotFound},
 		"http 404":                   {httpStatus(404), observability.ResultNotFound},
@@ -85,13 +87,16 @@ func TestMetricResult(t *testing.T) {
 type stubHTTP struct {
 	calls   atomic.Int32
 	respond func(attempt int) (status int, body string)
+	header  http.Header
 }
 
 func (s *stubHTTP) Do(r *http.Request) (*http.Response, error) {
 	status, body := s.respond(int(s.calls.Add(1)))
+	header := http.Header{"Content-Type": {"application/x-amz-json-1.0"}}
+	maps.Copy(header, s.header)
 	return &http.Response{
 		StatusCode: status,
-		Header:     http.Header{"Content-Type": {"application/x-amz-json-1.0"}},
+		Header:     header,
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Request:    r,
 	}, nil
@@ -132,20 +137,25 @@ func durationSamples(t *testing.T, service string) uint64 {
 }
 
 func TestMetricsMiddleware_RecordsEachOutcomeUnderItsService(t *testing.T) {
+	// SQS sends the legacy error code in X-Amzn-Query-Error, and the SDK
+	// reports that code instead of the JSON one.
+	legacy := http.Header{"X-Amzn-Query-Error": {"AWS.SimpleQueueService.NonExistentQueue;Sender"}}
 	for _, tc := range []struct {
 		service string
 		status  int
 		body    string
+		header  http.Header
 		want    string
 	}{
-		{"mw_success", 200, `{"QueueUrl":"https://sqs.us-east-1.amazonaws.com/123456789012/q"}`, observability.ResultSuccess},
-		{"mw_denied", 400, `{"__type":"AccessDeniedException","message":"no"}`, observability.ResultPermissionDenied},
-		{"mw_throttled", 400, `{"__type":"ThrottlingException","message":"slow down"}`, observability.ResultThrottled},
-		{"mw_missing", 400, `{"__type":"com.amazonaws.sqs#QueueDoesNotExist","message":"gone"}`, observability.ResultNotFound},
-		{"mw_broken", 400, `{"__type":"SomethingElse","message":"?"}`, observability.ResultError},
+		{"mw_success", 200, `{"QueueUrl":"https://sqs.us-east-1.amazonaws.com/123456789012/q"}`, nil, observability.ResultSuccess},
+		{"mw_denied", 400, `{"__type":"AccessDeniedException","message":"no"}`, nil, observability.ResultPermissionDenied},
+		{"mw_throttled", 400, `{"__type":"ThrottlingException","message":"slow down"}`, nil, observability.ResultThrottled},
+		{"mw_missing", 400, `{"__type":"com.amazonaws.sqs#QueueDoesNotExist","message":"gone"}`, nil, observability.ResultNotFound},
+		{"mw_missing_legacy", 400, `{"__type":"com.amazonaws.sqs#QueueDoesNotExist","message":"gone"}`, legacy, observability.ResultNotFound},
+		{"mw_broken", 400, `{"__type":"SomethingElse","message":"?"}`, nil, observability.ResultError},
 	} {
 		t.Run(tc.service, func(t *testing.T) {
-			stub := &stubHTTP{respond: func(int) (int, string) { return tc.status, tc.body }}
+			stub := &stubHTTP{respond: func(int) (int, string) { return tc.status, tc.body }, header: tc.header}
 			client := sqsClient(stub, aws.NopRetryer{}, MetricsMiddleware(tc.service))
 
 			_, _ = client.GetQueueUrl(context.Background(), &sqs.GetQueueUrlInput{QueueName: aws.String("q")})

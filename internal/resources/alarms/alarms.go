@@ -47,7 +47,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -140,10 +139,9 @@ func Ensure(
 	var alarmActions []string
 	if alarmsSpec != nil && alarmsSpec.SnsTopicRef != nil {
 		ref := *alarmsSpec.SnsTopicRef
-		consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{
+		consumer := &depsv1alpha1.AppDependencies{
 			Namespace: namespace,
-			Name:      crName,
-		}}
+			Name:      crName}
 		arn, ok, err := iam.ResolveConsumeARN(ctx, k8sClient, consumer, resourceType, ref)
 		if err != nil {
 			return mayExistAfterFailure(mayExist), err

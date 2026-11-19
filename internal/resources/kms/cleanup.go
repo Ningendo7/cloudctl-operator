@@ -203,8 +203,7 @@ func (c *keyCleaner) retain(ctx context.Context, entry depsv1alpha1.ManagedResou
 func (c *keyCleaner) scheduleDeletion(ctx context.Context, entry depsv1alpha1.ManagedResource, ledger []depsv1alpha1.ManagedResource, results []CleanupResult) ([]depsv1alpha1.ManagedResource, []CleanupResult, error) {
 	describeOut, err := c.client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: &entry.ARN})
 	if err != nil {
-		var notFound *types.NotFoundException
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.NotFoundException](err); ok {
 			// Already gone in AWS — just drop it from the ledger.
 			status.RemoveManagedResource(&ledger, resourceType, entry.Name)
 			return ledger, results, nil
@@ -314,8 +313,7 @@ func markPendingDeletion(
 func relinquishIfStillTagged(ctx context.Context, client kmsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) (relinquished, gone bool, err error) {
 	describeOut, err := client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: &entry.ARN})
 	if err != nil {
-		var notFound *types.NotFoundException
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.NotFoundException](err); ok {
 			return false, true, nil // already gone, nothing to relinquish
 		}
 		return false, false, wrapAWSError(err, fmt.Sprintf("checking state of retained key %q", entry.Name))

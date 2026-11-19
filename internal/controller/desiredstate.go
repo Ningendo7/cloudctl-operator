@@ -25,6 +25,7 @@ import (
 	"time"
 
 	equality "k8s.io/apimachinery/pkg/api/equality"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -333,6 +334,10 @@ func finalizeDesiredState(ctx context.Context, r *AppDependenciesReconciler, cr 
 
 func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, conditionType string, err error, recordEvent status.EventRecorder) {
 	observeSection(conditionType, err)
+	if errors.Is(err, cloudctlaws.ErrRateLimitWait) {
+		setRateLimited(ctx, cr, conditionType, err)
+		return
+	}
 	if err == nil {
 		status.SetSectionCondition(
 			&cr.Status.Conditions,
@@ -383,6 +388,25 @@ func setSectionCondition(ctx context.Context, cr *depsv1alpha1.AppDependencies, 
 	)
 }
 
+// setRateLimited handles a section cut short by the operator's own limiter.
+// That says nothing about the section's resources, so a condition it already
+// has stays, and no event is recorded: under load every CR would get one.
+// The pass still fails, so the CR is retried at the transient pace.
+func setRateLimited(ctx context.Context, cr *depsv1alpha1.AppDependencies, conditionType string, err error) {
+	logf.FromContext(ctx).V(1).Info("Section waiting on the operator's rate limit", "section", conditionType, "error", err.Error())
+	if apimeta.FindStatusCondition(cr.Status.Conditions, conditionType) != nil {
+		return
+	}
+	status.SetSectionCondition(
+		&cr.Status.Conditions,
+		conditionType,
+		metav1.ConditionFalse,
+		reasons.RateLimited, "waiting for the operator's own AWS rate limit",
+		cr.Generation,
+		sectionTypes,
+	)
+}
+
 // waitingError is a pass's error when every failure was a wait that a watch
 // will end, so the CR needn't be retried at the fast transient pace.
 type waitingError struct{ error }
@@ -393,8 +417,7 @@ func (e waitingError) Unwrap() error { return e.error }
 // classifies whatever AWS or network error is in the chain, so an error
 // returned without a ReconcileError isn't treated as permanent.
 func isRetryable(err error) bool {
-	var reconcileErr *cloudctlaws.ReconcileError
-	if errors.As(err, &reconcileErr) {
+	if reconcileErr, ok := errors.AsType[*cloudctlaws.ReconcileError](err); ok {
 		return reconcileErr.Retryable
 	}
 	return cloudctlaws.IsRetryable(err)

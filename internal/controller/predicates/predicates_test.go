@@ -134,15 +134,15 @@ func TestProducerChangedPredicate_UpdateFunc(t *testing.T) {
 }
 
 func TestProducerChangedPredicate_StillPassesSpecChanges(t *testing.T) {
-	old := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
-	updated := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
+	old := &depsv1alpha1.AppDependencies{Generation: 1}
+	updated := &depsv1alpha1.AppDependencies{Generation: 2}
 	if !ProducerChangedPredicate().Update(event.UpdateEvent{ObjectOld: old, ObjectNew: updated}) {
 		t.Error("expected a generation bump to still pass")
 	}
 }
 
 func crWithAnnotations(annotations map[string]string) *depsv1alpha1.AppDependencies {
-	return &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Generation: 1, Annotations: annotations}}
+	return &depsv1alpha1.AppDependencies{Generation: 1, Annotations: annotations}
 }
 
 // The annotation is how a person hands a CR its previous incarnation's
@@ -214,7 +214,7 @@ func TestSpecOrDeletionChangedPredicate(t *testing.T) {
 	pred := SpecOrDeletionChangedPredicate()
 	now := metav1.Now()
 	at := func(generation int64, deleting bool) *depsv1alpha1.AppDependencies {
-		cr := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Generation: generation}}
+		cr := &depsv1alpha1.AppDependencies{Generation: generation}
 		if deleting {
 			cr.DeletionTimestamp = &now
 		}

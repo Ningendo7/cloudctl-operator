@@ -252,11 +252,11 @@ func deleteGroupError(err error, errContext string) error {
 // this package stores in the ledger (EC2 never hands one back directly,
 // unlike every other service this operator calls).
 func SecurityGroupIDFromARN(arn string) string {
-	idx := strings.LastIndex(arn, "/")
-	if idx == -1 {
+	_, after, ok := strings.CutLast(arn, "/")
+	if !ok {
 		return arn
 	}
-	return arn[idx+1:]
+	return after
 }
 
 func resolveVPCID(ctx context.Context, rdsClient rdsAPI, dbSubnetGroupName string) (string, error) {

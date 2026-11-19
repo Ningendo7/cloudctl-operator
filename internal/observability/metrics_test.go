@@ -144,7 +144,7 @@ func ago(d time.Duration) *metav1.Time {
 }
 
 func appDeps(namespace, name string, status depsv1alpha1.AppDependenciesStatus) *depsv1alpha1.AppDependencies {
-	return &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}, Status: status}
+	return &depsv1alpha1.AppDependencies{Namespace: namespace, Name: name, Status: status}
 }
 
 func ledgerEntry(resourceType, name string, state depsv1alpha1.ManagedResourceState) depsv1alpha1.ManagedResource {

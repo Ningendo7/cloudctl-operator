@@ -125,6 +125,9 @@ var (
 	TransientError = register("TransientError", Waiting,
 		"A retryable failure, such as throttling or AWS not having caught up. It is retried with backoff, and about every 5 minutes after 10 failures in a row.",
 		"None, unless it lasts; then read the message.")
+	RateLimited = register("RateLimited", Waiting,
+		"The section has not run yet because the operator's own AWS rate limit for a service was used up. A section that already had a condition keeps it.",
+		"None, unless it lasts; then raise that service's rate limit, or lower --max-concurrent-reconciles.")
 	Error = register("Error", Failing,
 		"The section failed with an error the operator does not classify.",
 		"Read the message, which carries the cause, and the operator's logs.")

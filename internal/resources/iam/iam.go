@@ -213,8 +213,7 @@ func skippedToError(skipped []string) error {
 func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID, name, trustPolicy string, verifyOwnership bool) (arn string, created bool, err error) {
 	getOut, err := iamClient.GetRole(ctx, &iam.GetRoleInput{RoleName: &name})
 
-	var notFound *types.NoSuchEntityException
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.NoSuchEntityException](err); ok {
 		createOut, cErr := iamClient.CreateRole(ctx, &iam.CreateRoleInput{
 			RoleName:                 &name,
 			AssumeRolePolicyDocument: &trustPolicy,

@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -28,8 +27,8 @@ import (
 
 func consumerWithAlarms(namespace, name string, ref *depsv1alpha1.ConsumeRef) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
-		Spec:       depsv1alpha1.AppDependenciesSpec{Alarms: &depsv1alpha1.AlarmsSpec{Enabled: true, SnsTopicRef: ref}},
+		Namespace: namespace, Name: name,
+		Spec: depsv1alpha1.AppDependenciesSpec{Alarms: &depsv1alpha1.AlarmsSpec{Enabled: true, SnsTopicRef: ref}},
 	}
 }
 
@@ -45,7 +44,7 @@ func TestAlarmConsumerToTopicProducer(t *testing.T) {
 		"alarms notifying another CR's topic wake that CR": {consumerWithAlarms("shop", "checkout", topic), []types.NamespacedName{{Namespace: "data", Name: "platform"}}},
 		"a CR's own topic is not a cross-CR wake":          {consumerWithAlarms("shop", "checkout", own), nil},
 		"alarms with no topic":                             {consumerWithAlarms("shop", "checkout", nil), nil},
-		"no alarms at all":                                 {&depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "checkout"}}, nil},
+		"no alarms at all":                                 {&depsv1alpha1.AppDependencies{Namespace: "shop", Name: "checkout"}, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := mapFn(context.Background(), tc.obj)

@@ -233,8 +233,7 @@ func TestLive_Cleanup_DenyPolicyActuallyBlocksPublishThenClearingRestoresIt(t *t
 		t.Fatalf("addPendingDeletionDeny() error = %v", err)
 	}
 	_, pubErr := client.Publish(ctx, &sns.PublishInput{TopicArn: &topicArn, Message: &msg})
-	var authErr *types.AuthorizationErrorException
-	if !errors.As(pubErr, &authErr) {
+	if _, ok := errors.AsType[*types.AuthorizationErrorException](pubErr); !ok {
 		t.Fatalf("expected a real AuthorizationErrorException from Publish after denying it, got %v", pubErr)
 	}
 

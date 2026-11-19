@@ -67,7 +67,7 @@ func subscriptionAllowSid(ledgerName string) string {
 // (encryption.kmsKeyRef), reused here rather than threading the whole CR
 // object through Ensure/Cleanup's per-queue call chain.
 func resolveTopicARN(ctx context.Context, k8sClient client.Client, namespace, crName string, ref depsv1alpha1.ConsumeRef) (string, bool, error) {
-	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName}}
+	consumer := &depsv1alpha1.AppDependencies{Namespace: namespace, Name: crName}
 	return iam.ResolveConsumeARN(ctx, k8sClient, consumer, resourceTypeSNS, ref)
 }
 

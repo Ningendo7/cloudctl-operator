@@ -436,8 +436,7 @@ func checkTrackedImmutables(instance types.DBInstance, instanceID string, opts i
 // lookupInstance describes the instance, reporting whether AWS has it.
 func lookupInstance(ctx context.Context, awsClient rdsAPI, instanceID string) (instance types.DBInstance, found bool, err error) {
 	out, err := describeDBInstanceCached(ctx, awsClient, instanceID)
-	var notFound *types.DBInstanceNotFoundFault
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.DBInstanceNotFoundFault](err); ok {
 		return types.DBInstance{}, false, nil
 	}
 	if err != nil {

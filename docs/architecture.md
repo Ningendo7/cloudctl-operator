@@ -216,7 +216,10 @@ addition to each client's own SDK-level retry behavior, which only reacts
 after AWS has already started throttling. Defaults are deliberately
 conservative starting points, not verified figures for any specific
 account's real limits — tunable per service via
-`AWS_<SERVICE>_RATE_LIMIT_QPS`/`_BURST` env vars.
+`AWS_<SERVICE>_RATE_LIMIT_QPS`/`_BURST` env vars. Raising
+`--max-concurrent-reconciles` alone doesn't help once a service's limiter is
+saturated; raise that service's QPS with it. A section the limiter cuts short
+keeps the condition it had, and one with none yet reads `RateLimited`.
 
 A freshly-elected leader can have a large backlog of CRs to reconcile all
 at once (informer cache sync, then the workqueue populating) — exactly

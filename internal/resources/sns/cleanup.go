@@ -211,8 +211,7 @@ func (c *topicCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.Manag
 	if err != nil {
 		// ListTagsForResource raises ResourceNotFoundException, not the
 		// plain NotFoundException other topic operations use.
-		var notFound *types.ResourceNotFoundException
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.ResourceNotFoundException](err); ok {
 			return true, nil
 		}
 		return false, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of topic %q before delete", entry.Name))
@@ -324,8 +323,7 @@ func relinquishIfStillTagged(ctx context.Context, client snsAPI, namespace, crNa
 	if tErr != nil {
 		// ListTagsForResource raises ResourceNotFoundException, not the
 		// plain NotFoundException other topic operations use.
-		var notFound *types.ResourceNotFoundException
-		if errors.As(tErr, &notFound) {
+		if _, ok := errors.AsType[*types.ResourceNotFoundException](tErr); ok {
 			return false, true, nil // already gone, nothing to relinquish
 		}
 		return false, false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained topic %q", entry.Name))

@@ -35,7 +35,7 @@ const keyARN = "arn:aws:kms:us-east-1:123456789012:key/abc"
 // encryption, and a ledger holding each entry stamped with a KMS key.
 func crWith(encryption *depsv1alpha1.EncryptionSpec, stamped bool) *depsv1alpha1.AppDependencies {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "checkout", Generation: 1},
+		Namespace: "shop", Name: "checkout", Generation: 1,
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS:      &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", Encryption: encryption}}},
 			SNS:      &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", Encryption: encryption}}},

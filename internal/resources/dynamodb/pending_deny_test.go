@@ -118,8 +118,7 @@ func TestCleanup_ATableWaitingToBeDeletedStopsTakingNewData_ButCanStillBeEmptied
 // retryable mirrors how the controller decides: a ReconcileError says so
 // itself, anything else is classified by IsRetryable.
 func retryable(err error) bool {
-	var reconcileErr *cloudctlaws.ReconcileError
-	if errors.As(err, &reconcileErr) {
+	if reconcileErr, ok := errors.AsType[*cloudctlaws.ReconcileError](err); ok {
 		return reconcileErr.Retryable
 	}
 	return cloudctlaws.IsRetryable(err)

@@ -130,8 +130,7 @@ func (a *app) exitCode(err error) int {
 		return ExitOK
 	}
 	code, msg := ExitUsage, err
-	var exit *exitError
-	if errors.As(err, &exit) {
+	if exit, ok := errors.AsType[*exitError](err); ok {
 		code, msg = exit.code, exit.err
 	}
 	if msg != nil {

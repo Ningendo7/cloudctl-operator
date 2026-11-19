@@ -35,13 +35,11 @@ import (
 // left in spec to ever flip force back to true.
 func newStuckDeletionCR() *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:         "default",
-			Name:              "checkout-service",
-			UID:               "uid-1",
-			Finalizers:        []string{finalizerName},
-			DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
-		},
+		Namespace:         "default",
+		Name:              "checkout-service",
+		UID:               "uid-1",
+		Finalizers:        []string{finalizerName},
+		DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
 		Status: depsv1alpha1.AppDependenciesStatus{
 			Conditions: []metav1.Condition{
 				{Type: "Ready", Status: metav1.ConditionTrue, Reason: "AllSectionsReady", Message: "all declared sections are ready", ObservedGeneration: 1},

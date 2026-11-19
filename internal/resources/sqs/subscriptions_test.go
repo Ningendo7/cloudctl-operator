@@ -137,7 +137,7 @@ func newSubscriptionTestQueue(sqsClient *fakeSQS, name string) (queueURL, queueA
 // authorized-resolution test in this file starts from.
 func newAuthorizedTopicProducer(producerNS, producerName, topicName, topicARN, consumerNS, consumerName string) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: producerNS, Name: producerName},
+		Namespace: producerNS, Name: producerName,
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SNS: &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 				{Name: topicName, SharedWith: []depsv1alpha1.SharedWithEntry{

@@ -72,7 +72,7 @@ var _ = Describe("AppDependencies watches on its generated ConfigMap", Ordered, 
 	// process-global metrics registry, which rejects a second registration
 	// under the same name - a fresh manager per It would collide with itself.
 	BeforeAll(func() {
-		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "watch-test-"}}
+		ns := &corev1.Namespace{GenerateName: "watch-test-"}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		testNS = ns.Name
 
@@ -139,10 +139,8 @@ var _ = Describe("AppDependencies watches on its generated ConfigMap", Ordered, 
 	// connection data to watch.
 	newWatchTestCR := func(generateName string) *depsv1alpha1.AppDependencies {
 		return &depsv1alpha1.AppDependencies{
-			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: generateName,
-				Namespace:    testNS,
-			},
+			GenerateName: generateName,
+			Namespace:    testNS,
 			Spec: depsv1alpha1.AppDependenciesSpec{
 				SQS: &depsv1alpha1.SQSSpec{
 					Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}},
@@ -260,7 +258,7 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 
 	BeforeAll(func() {
 		for _, target := range []*string{&nsA, &nsB} {
-			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "resilience-"}}
+			ns := &corev1.Namespace{GenerateName: "resilience-"}
 			Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 			*target = ns.Name
 		}
@@ -335,7 +333,7 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 
 	queueCR := func(ns, name string, mutate func(*depsv1alpha1.AppDependencies)) *depsv1alpha1.AppDependencies {
 		cr := &depsv1alpha1.AppDependencies{
-			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+			Namespace: ns, Name: name,
 			Spec: depsv1alpha1.AppDependenciesSpec{
 				SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 			},
@@ -442,8 +440,8 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 	Context("an object the operator must not take over", func() {
 		It("refuses a pre-existing ConfigMap it doesn't own, leaves it untouched, and takes over the name once it's gone", func() {
 			foreign := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{Namespace: nsA, Name: configmap.ConfigMapName("foreign-cm")},
-				Data:       map[string]string{"MINE": "keep"},
+				Namespace: nsA, Name: configmap.ConfigMapName("foreign-cm"),
+				Data: map[string]string{"MINE": "keep"},
 			}
 			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
 
@@ -559,12 +557,10 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 	Context("a ServiceAccount the user owns", func() {
 		It("gets the role annotation merged in, keeps everything else, and is released (not deleted) with the CR", func() {
 			sa := &corev1.ServiceAccount{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace:   nsA,
-					Name:        "team-sa",
-					Labels:      map[string]string{"team": "payments"},
-					Annotations: map[string]string{"example.com/keep": "yes", serviceaccount.AllowClaimAnnotation: "user-sa"},
-				},
+				Namespace:   nsA,
+				Name:        "team-sa",
+				Labels:      map[string]string{"team": "payments"},
+				Annotations: map[string]string{"example.com/keep": "yes", serviceaccount.AllowClaimAnnotation: "user-sa"},
 			}
 			Expect(k8sClient.Create(ctx, sa)).To(Succeed())
 
@@ -596,9 +592,8 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 		})
 
 		It("is refused when another CR already claimed it", func() {
-			sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
-				Namespace: nsA, Name: "shared-sa", Annotations: map[string]string{serviceaccount.AllowClaimAnnotation: "sa-first"},
-			}}
+			sa := &corev1.ServiceAccount{
+				Namespace: nsA, Name: "shared-sa", Annotations: map[string]string{serviceaccount.AllowClaimAnnotation: "sa-first"}}
 			Expect(k8sClient.Create(ctx, sa)).To(Succeed())
 
 			first := queueCR(nsA, "sa-first", func(cr *depsv1alpha1.AppDependencies) { cr.Spec.ServiceAccountName = "shared-sa" })
@@ -673,7 +668,7 @@ var _ = Describe("AppDependencies under failure and hostile state", Ordered, fun
 			Expect(k8sClient.Create(ctx, producer)).To(Succeed())
 
 			consumer := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{Namespace: nsB, Name: "consumer"},
+				Namespace: nsB, Name: "consumer",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{{Namespace: nsA, Name: "producer", ResourceName: "orders"}}},
 				},

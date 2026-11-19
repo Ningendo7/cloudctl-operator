@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
 	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kmstest"
@@ -1282,5 +1284,48 @@ func TestEnsure_ARedrivePolicyThatSaysSomethingElseIsCorrected(t *testing.T) {
 				t.Errorf("RedrivePolicy = %v, want the DLQ %s and a count of %s", policy, client.queues[dlqName].arn, tc.wantCount)
 			}
 		})
+	}
+}
+
+// A pass that re-verifies ownership reads each queue's attributes once, for
+// the drift check, the ARN and the policy together, and still enforces TLS.
+func TestEnsure_AVerificationPassReadsEachQueueOnce(t *testing.T) {
+	client := newFakeSQS()
+	spec := &depsv1alpha1.SQSSpec{
+		Resources: []depsv1alpha1.SQSQueueSpec{
+			{Name: "orders", DLQ: true},
+			{Name: "notifications"},
+		},
+	}
+	ledger, err := Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+
+	stale := metav1.NewTime(time.Now().Add(-2 * status.TrustWindow))
+	for i := range ledger {
+		ledger[i].LastVerifiedAt = &stale
+	}
+	for _, q := range client.queues {
+		q.policy = ""
+	}
+	client.getQueueAttributesCalls, client.setQueueAttributesCalls = 0, 0
+
+	ledger, err = Ensure(context.Background(), client, nil, nil, nil, "default", "checkout-service", "uid-1", spec, ledger, nil, nil)
+	if err != nil {
+		t.Fatalf("second Ensure() error = %v", err)
+	}
+	if got, want := client.getQueueAttributesCalls, len(client.queues); got != want {
+		t.Errorf("GetQueueAttributes calls = %d, want %d (one per queue)", got, want)
+	}
+	for name, q := range client.queues {
+		if !strings.Contains(q.policy, awspolicy.InsecureTransportSid) {
+			t.Errorf("queue %s policy = %q, want the TLS statement back", name, q.policy)
+		}
+	}
+	for _, e := range ledger {
+		if e.LastVerifiedAt == nil || !e.LastVerifiedAt.After(stale.Time) || e.ARN == "" {
+			t.Errorf("ledger entry %s = %+v, want re-verified with its ARN", e.Name, e)
+		}
 	}
 }

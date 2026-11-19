@@ -147,12 +147,12 @@ func seed(t *testing.T) {
 			}
 		}
 		for _, ns := range []string{"checkout", "payments", "cloudctl-operator-system"} {
-			must(admin.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}))
+			must(admin.Create(ctx, &corev1.Namespace{Name: ns}))
 		}
 		for _, ns := range []string{"checkout", "payments"} {
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: ns + "-service"},
-				Spec:       depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}},
+				Namespace: ns, Name: ns + "-service",
+				Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}},
 			}
 			must(admin.Create(ctx, cr))
 			cr.Status.Conditions = []metav1.Condition{{
@@ -162,8 +162,8 @@ func seed(t *testing.T) {
 			must(admin.Status().Update(ctx, cr))
 		}
 		must(admin.Create(ctx, &eventsv1.Event{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "checkout", Name: "ev1"},
-			EventTime:  metav1.NewMicroTime(time.Now()), Reason: "AdoptRequired", Note: "S3Ready: bucket exists", Type: "Warning",
+			Namespace: "checkout", Name: "ev1",
+			EventTime: metav1.NewMicroTime(time.Now()), Reason: "AdoptRequired", Note: "S3Ready: bucket exists", Type: "Warning",
 			Action: "Reconcile", ReportingController: "cloudctl-operator", ReportingInstance: "cloudctl-operator-0",
 			Regarding: corev1.ObjectReference{Kind: "AppDependencies", APIVersion: "deps.cloudctl.io/v1alpha1", Namespace: "checkout", Name: "checkout-service"},
 		}))
@@ -171,19 +171,19 @@ func seed(t *testing.T) {
 		// each last happened, oldest first, the repeated one comes last.
 		regarding := corev1.ObjectReference{Kind: "AppDependencies", APIVersion: "deps.cloudctl.io/v1alpha1", Namespace: "checkout", Name: "series-service"}
 		must(admin.Create(ctx, &eventsv1.Event{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "checkout", Name: "ev-once"},
-			EventTime:  metav1.NewMicroTime(time.Now().Add(-10 * time.Minute)), Reason: "Reconciled", Note: "once", Type: "Normal",
+			Namespace: "checkout", Name: "ev-once",
+			EventTime: metav1.NewMicroTime(time.Now().Add(-10 * time.Minute)), Reason: "Reconciled", Note: "once", Type: "Normal",
 			Action: "Reconcile", ReportingController: "cloudctl-operator", ReportingInstance: "cloudctl-operator-0", Regarding: regarding,
 		}))
 		must(admin.Create(ctx, &eventsv1.Event{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "checkout", Name: "ev-repeated"},
-			EventTime:  metav1.NewMicroTime(time.Now().Add(-30 * time.Minute)), Reason: "Throttled", Note: "repeated", Type: "Warning",
+			Namespace: "checkout", Name: "ev-repeated",
+			EventTime: metav1.NewMicroTime(time.Now().Add(-30 * time.Minute)), Reason: "Throttled", Note: "repeated", Type: "Warning",
 			Action: "Reconcile", ReportingController: "cloudctl-operator", ReportingInstance: "cloudctl-operator-0", Regarding: regarding,
 			Series: &eventsv1.EventSeries{Count: 4, LastObservedTime: metav1.NewMicroTime(time.Now().Add(-time.Minute))},
 		}))
 		labels := map[string]string{"app.kubernetes.io/name": "cloudctl-operator"}
 		must(admin.Create(ctx, &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "cloudctl-operator-system", Name: "cloudctl-operator-controller-manager", Labels: labels},
+			Namespace: "cloudctl-operator-system", Name: "cloudctl-operator-controller-manager", Labels: labels,
 			Spec: appsv1.DeploymentSpec{
 				Selector: &metav1.LabelSelector{MatchLabels: labels},
 				Template: corev1.PodTemplateSpec{
@@ -204,9 +204,9 @@ func seed(t *testing.T) {
 		}
 		must(admin.Create(ctx, &role))
 		must(admin.Create(ctx, &rbacv1.ClusterRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "viewer-binding"},
-			RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: role.Name},
-			Subjects:   []rbacv1.Subject{{Kind: "User", APIGroup: "rbac.authorization.k8s.io", Name: "viewer"}},
+			Name:     "viewer-binding",
+			RoleRef:  rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: role.Name},
+			Subjects: []rbacv1.Subject{{Kind: "User", APIGroup: "rbac.authorization.k8s.io", Name: "viewer"}},
 		}))
 	})
 }

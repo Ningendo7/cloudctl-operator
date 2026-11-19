@@ -205,8 +205,8 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 	namespace, crName, resourceName := "live", liveUniqueSuffix(t), "primary"
 	instanceID := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, 63)
 	grant := &depsv1alpha1.RDSSubnetGroupGrant{
-		ObjectMeta: metav1.ObjectMeta{Name: "live-test-" + crName},
-		Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: subnetGroup, AllowedNamespaces: []string{namespace}},
+		Name: "live-test-" + crName,
+		Spec: depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: subnetGroup, AllowedNamespaces: []string{namespace}},
 	}
 
 	// An existing key, if supplied, is used through kmsKeyRef by seeding it
@@ -467,7 +467,7 @@ func TestLive_Ensure_FullInstanceLifecycle(t *testing.T) {
 		shared := make([]depsv1alpha1.SharedWithEntry, 0, 2)
 		for i, identity := range []struct{ arn string }{{consumerGroupARN}, {secondGroupARN}} {
 			consumer := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: fmt.Sprintf("%s-consumer%d", crName, i+1)},
+				Namespace: namespace, Name: fmt.Sprintf("%s-consumer%d", crName, i+1),
 				// Only a consumer that asks for the instance is granted access.
 				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 					{Namespace: namespace, Name: crName, ResourceName: resourceName},
@@ -732,8 +732,7 @@ func waitForInstanceGone(t *testing.T, rdsClient *rds.Client, instanceID string,
 	deadline := time.Now().Add(timeout)
 	for {
 		_, err := rdsClient.DescribeDBInstances(context.Background(), &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
-		var notFound *types.DBInstanceNotFoundFault
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.DBInstanceNotFoundFault](err); ok {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -752,8 +751,7 @@ func deleteSecurityGroupsAfterInstanceGone(t *testing.T, rdsClient *rds.Client, 
 	deadline := time.Now().Add(20 * time.Minute)
 	for {
 		_, err := rdsClient.DescribeDBInstances(context.Background(), &rds.DescribeDBInstancesInput{DBInstanceIdentifier: &instanceID})
-		var notFound *types.DBInstanceNotFoundFault
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.DBInstanceNotFoundFault](err); ok {
 			break
 		}
 		if time.Now().After(deadline) {

@@ -21,7 +21,6 @@ import (
 	"strings"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -30,38 +29,38 @@ import (
 )
 
 func TestProducerToConsumers_MapsEveryConsumingResourceType(t *testing.T) {
-	producer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"}}
+	producer := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "checkout-service"}
 	sqsConsumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "sqs-consumer"},
+		Namespace: "fulfillment", Name: "sqs-consumer",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
 		}}},
 	}
 	snsConsumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "sns-consumer"},
+		Namespace: "fulfillment", Name: "sns-consumer",
 		Spec: depsv1alpha1.AppDependenciesSpec{SNS: &depsv1alpha1.SNSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
 		}}},
 	}
 	dynamodbConsumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "dynamodb-consumer"},
+		Namespace: "fulfillment", Name: "dynamodb-consumer",
 		Spec: depsv1alpha1.AppDependenciesSpec{DynamoDB: &depsv1alpha1.DynamoDBSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
 		}}},
 	}
 	s3Consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "s3-consumer"},
+		Namespace: "fulfillment", Name: "s3-consumer",
 		Spec: depsv1alpha1.AppDependenciesSpec{S3: &depsv1alpha1.S3Spec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
 		}}},
 	}
 	rdsConsumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "rds-consumer"},
+		Namespace: "fulfillment", Name: "rds-consumer",
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"},
 		}}},
 	}
-	unrelated := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "unrelated"}}
+	unrelated := &depsv1alpha1.AppDependencies{Namespace: "fulfillment", Name: "unrelated"}
 
 	k8sClient := newIndexedClientBuilder(t).
 		WithObjects(producer, sqsConsumer, snsConsumer, dynamodbConsumer, s3Consumer, rdsConsumer, unrelated).Build()
@@ -92,7 +91,7 @@ func TestProducerToConsumers_NeverMapsProducerToItself(t *testing.T) {
 	// mapped - not something any valid spec should express, but the map
 	// function itself must not be the thing that lets it reconcile forever.
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
 		}}},
@@ -108,9 +107,9 @@ func TestProducerToConsumers_NeverMapsProducerToItself(t *testing.T) {
 func TestProducerToConsumers_IgnoresConsumerInDifferentNamespaceWithSameName(t *testing.T) {
 	// A ConsumeRef names both namespace and name - a consumer referencing a
 	// different producer that merely shares this one's name must not match.
-	producer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"}}
+	producer := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "checkout-service"}
 	decoy := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "decoy-consumer"},
+		Namespace: "fulfillment", Name: "decoy-consumer",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "staging", Name: "checkout-service", ResourceName: "orders"},
 		}}},
@@ -124,7 +123,7 @@ func TestProducerToConsumers_IgnoresConsumerInDifferentNamespaceWithSameName(t *
 }
 
 func TestProducerToConsumers_NoConsumersReturnsNil(t *testing.T) {
-	producer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"}}
+	producer := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "checkout-service"}
 	k8sClient := newIndexedClientBuilder(t).WithObjects(producer).Build()
 
 	requests := ProducerToConsumers(k8sClient)(context.Background(), producer)
@@ -134,7 +133,7 @@ func TestProducerToConsumers_NoConsumersReturnsNil(t *testing.T) {
 }
 
 func TestProducerToConsumers_ListFailure_ReturnsNilNotPanic(t *testing.T) {
-	producer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"}}
+	producer := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "checkout-service"}
 	// An empty, unregistered scheme makes List fail deterministically -
 	// exercising the "can't even ask" path without needing a dedicated
 	// error-injecting fake client just for this package.
@@ -154,20 +153,20 @@ func TestProducerToConsumers_ListFailure_ReturnsNilNotPanic(t *testing.T) {
 // whose topic isn't there yet only polls, so both must be woken the moment
 // the topic's producer changes.
 func TestProducerToConsumers_WakesSubscribersAndAlarmNotifiers(t *testing.T) {
-	producer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "platform-service"}}
+	producer := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "platform-service"}
 	topic := depsv1alpha1.ConsumeRef{Namespace: "default", Name: "platform-service", ResourceName: "events"}
 	subscriber := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "subscriber"},
+		Namespace: "fulfillment", Name: "subscriber",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 			{Name: "orders", SubscribesTo: []depsv1alpha1.ConsumeRef{topic}},
 		}}},
 	}
 	notifier := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "notifier"},
-		Spec:       depsv1alpha1.AppDependenciesSpec{Alarms: &depsv1alpha1.AlarmsSpec{Enabled: true, SnsTopicRef: &topic}},
+		Namespace: "fulfillment", Name: "notifier",
+		Spec: depsv1alpha1.AppDependenciesSpec{Alarms: &depsv1alpha1.AlarmsSpec{Enabled: true, SnsTopicRef: &topic}},
 	}
 	unrelated := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "unrelated"},
+		Namespace: "fulfillment", Name: "unrelated",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 			{Name: "orders", SubscribesTo: []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "someone-else", ResourceName: "events"}}},
 		}}},
@@ -190,12 +189,12 @@ func TestProducerToConsumers_WakesSubscribersAndAlarmNotifiers(t *testing.T) {
 // must not make the cache copy every matched CR with its whole ledger.
 func TestWatchMapFunctions_DoNotDeepCopyWhatTheyList(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{
 			{Name: "orders-db", DBSubnetGroupName: "prod-tier"},
 		}}},
 	}
-	grant := &depsv1alpha1.RDSSubnetGroupGrant{ObjectMeta: metav1.ObjectMeta{Name: "g"}, Spec: depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "prod-tier"}}
+	grant := &depsv1alpha1.RDSSubnetGroupGrant{Name: "g", Spec: depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "prod-tier"}}
 
 	for name, call := range map[string]func(client.Reader){
 		"ProducerToConsumers": func(r client.Reader) {
