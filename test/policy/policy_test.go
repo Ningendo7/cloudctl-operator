@@ -33,7 +33,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -236,7 +235,7 @@ func enabledLabels(enabled bool) map[string]string {
 
 func labelledNamespace(t *testing.T, name string, labels map[string]string) {
 	t.Helper()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
+	ns := &corev1.Namespace{Name: name, Labels: labels}
 	if err := admin.Create(ctx, ns); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +243,7 @@ func labelledNamespace(t *testing.T, name string, labels map[string]string) {
 
 func appDeps(ns, name string) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Namespace: ns, Name: name,
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -433,7 +432,7 @@ func TestLimitsPolicy_TightenedLimitsDoNotBlockDeletion(t *testing.T) {
 
 // bare is a CR that declares nothing, for the tests that add one thing.
 func bare(ns, name string) *depsv1alpha1.AppDependencies {
-	return &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+	return &depsv1alpha1.AppDependencies{Namespace: ns, Name: name}
 }
 
 func withQueue(

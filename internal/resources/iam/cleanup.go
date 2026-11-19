@@ -71,8 +71,7 @@ func Cleanup(
 
 	tags, tErr := listAllRoleTags(ctx, iamClient, name)
 	if tErr != nil {
-		var notFound *types.NoSuchEntityException
-		if errors.As(tErr, &notFound) {
+		if _, ok := errors.AsType[*types.NoSuchEntityException](tErr); ok {
 			updatedLedger = ledger
 			status.RemoveManagedResource(&updatedLedger, resourceType, roleLedgerName)
 			return updatedLedger, nil
@@ -87,8 +86,7 @@ func Cleanup(
 		RoleName:   &name,
 		PolicyName: strPtr(roleInlinePolicyName),
 	}); err != nil {
-		var notFound *types.NoSuchEntityException
-		if !errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.NoSuchEntityException](err); !ok {
 			return ledger, wrapAWSError(err, fmt.Sprintf("deleting inline policy on role %q", name))
 		}
 	}

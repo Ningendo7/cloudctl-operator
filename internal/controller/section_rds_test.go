@@ -86,7 +86,7 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 	)
 
 	BeforeAll(func() {
-		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-watch-test-"}}
+		ns := &corev1.Namespace{GenerateName: "rds-watch-test-"}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		testNS = ns.Name
 
@@ -151,7 +151,7 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 
 	It("re-reconciles a blocked CR the moment an authorizing grant is created", func() {
 		cr := &depsv1alpha1.AppDependencies{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: "watch-rds-", Namespace: testNS},
+			GenerateName: "watch-rds-", Namespace: testNS,
 			Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 				Name:              "orders-db",
 				DBSubnetGroupName: "watch-test-subnet-group",
@@ -174,8 +174,8 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 		}, 10*time.Second, 100*time.Millisecond).Should(BeTrue(), "expected RDSReady=False while unauthorized")
 
 		grant := &depsv1alpha1.RDSSubnetGroupGrant{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: "watch-rds-grant-"},
-			Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "watch-test-subnet-group", AllowedNamespaces: []string{testNS}},
+			GenerateName: "watch-rds-grant-",
+			Spec:         depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "watch-test-subnet-group", AllowedNamespaces: []string{testNS}},
 		}
 		Expect(k8sClient.Create(ctx, grant)).To(Succeed())
 
@@ -196,13 +196,13 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 
 	It("grants ingress to a consumer's security group the moment it publishes its pod identity, with no manual producer reconcile", func() {
 		grant := &depsv1alpha1.RDSSubnetGroupGrant{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: "watch-identity-grant-"},
-			Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "identity-watch-subnet-group", AllowedNamespaces: []string{testNS}},
+			GenerateName: "watch-identity-grant-",
+			Spec:         depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "identity-watch-subnet-group", AllowedNamespaces: []string{testNS}},
 		}
 		Expect(k8sClient.Create(ctx, grant)).To(Succeed())
 
 		producer := &depsv1alpha1.AppDependencies{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: "watch-identity-producer-", Namespace: testNS},
+			GenerateName: "watch-identity-producer-", Namespace: testNS,
 			Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 				Name:              "orders-db",
 				DBSubnetGroupName: "identity-watch-subnet-group",
@@ -214,7 +214,7 @@ var _ = Describe("AppDependencies watches on RDSSubnetGroupGrant", Ordered, func
 		}
 		Expect(k8sClient.Create(ctx, producer)).To(Succeed())
 
-		consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{GenerateName: "watch-identity-consumer-", Namespace: testNS}}
+		consumer := &depsv1alpha1.AppDependencies{GenerateName: "watch-identity-consumer-", Namespace: testNS}
 		Expect(k8sClient.Create(ctx, consumer)).To(Succeed())
 
 		// Wait for the producer's own security group to exist, then share
@@ -275,13 +275,13 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 
 	BeforeAll(func() {
 		for _, target := range []*string{&nsA, &nsB} {
-			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-secret-"}}
+			ns := &corev1.Namespace{GenerateName: "rds-secret-"}
 			Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 			*target = ns.Name
 		}
 		grant = &depsv1alpha1.RDSSubnetGroupGrant{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-secret-grant-"},
-			Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "secret-spec-sg", AllowedNamespaces: []string{nsA, nsB}},
+			GenerateName: "rds-secret-grant-",
+			Spec:         depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "secret-spec-sg", AllowedNamespaces: []string{nsA, nsB}},
 		}
 		Expect(k8sClient.Create(ctx, grant)).To(Succeed())
 
@@ -354,7 +354,7 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 
 	dbCR := func(ns, name string, sharedWith ...depsv1alpha1.SharedWithEntry) *depsv1alpha1.AppDependencies {
 		return &depsv1alpha1.AppDependencies{
-			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+			Namespace: ns, Name: name,
 			Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 				Name: "orders-db", DBSubnetGroupName: "secret-spec-sg",
 				Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
@@ -438,8 +438,8 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 
 	It("refuses a pre-existing Secret it doesn't own, leaves it untouched, and takes the name once it's gone", func() {
 		foreign := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Namespace: nsA, Name: rds.CredentialsSecretName("foreign")},
-			Data:       map[string][]byte{"MINE": []byte("keep")},
+			Namespace: nsA, Name: rds.CredentialsSecretName("foreign"),
+			Data: map[string][]byte{"MINE": []byte("keep")},
 		}
 		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
 		Expect(k8sClient.Create(ctx, dbCR(nsA, "foreign"))).To(Succeed())
@@ -470,7 +470,7 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 		Eventually(func() string { return password(nsA, "producer-db") }, timeout, poll).Should(Equal("pw-1"))
 
 		consumer := &depsv1alpha1.AppDependencies{
-			ObjectMeta: metav1.ObjectMeta{Namespace: nsB, Name: "consumer-db"},
+			Namespace: nsB, Name: "consumer-db",
 			Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{
 				Consumes: []depsv1alpha1.ConsumeRef{{Namespace: nsA, Name: "producer-db", ResourceName: "orders-db"}},
 			}},
@@ -511,7 +511,7 @@ var _ = Describe("RDS credentials Secret on a real cluster", Ordered, func() {
 		Eventually(func() string { return password(nsA, "producer-db") }, timeout, poll).Should(Equal("pw-1"))
 
 		consumer := &depsv1alpha1.AppDependencies{
-			ObjectMeta: metav1.ObjectMeta{Namespace: nsB, Name: "sa-consumer"},
+			Namespace: nsB, Name: "sa-consumer",
 			Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{
 				Consumes: []depsv1alpha1.ConsumeRef{{Namespace: nsA, Name: "producer-db", ResourceName: "orders-db"}},
 			}},

@@ -22,8 +22,6 @@ import (
 	"runtime"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -46,7 +44,7 @@ func BenchmarkReconcile_SteadyState(b *testing.B) {
 	objs := make([]client.Object, 0, crs)
 	for i := range crs {
 		objs = append(objs, &depsv1alpha1.AppDependencies{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: fmt.Sprintf("app-%d", i)},
+			Namespace: "default", Name: fmt.Sprintf("app-%d", i),
 			Spec: depsv1alpha1.AppDependenciesSpec{
 				SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 					{Name: "orders", DLQ: true, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
@@ -60,7 +58,7 @@ func BenchmarkReconcile_SteadyState(b *testing.B) {
 	patches := 0
 	r := newCountingReconciler(b, &patches, objs...)
 	request := func(i int) reconcile.Request {
-		return reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("app-%d", i%crs)}}
+		return reconcile.Request{Namespace: "default", Name: fmt.Sprintf("app-%d", i%crs)}
 	}
 	// Two rounds to create everything and let the trust windows settle.
 	for range 2 {

@@ -160,8 +160,7 @@ func ensureTopicExists(
 	// ListTagsForResource) — those raise ResourceNotFoundException, not the
 	// plain NotFoundException GetTopicAttributes/SetTopicAttributes use for
 	// the same "no such topic" condition.
-	var notFound *types.ResourceNotFoundException
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.ResourceNotFoundException](err); ok {
 		return createTopic(ctx, awsClient, topicName, ownerTags, t, kmsKeyARN, ledger, recordEvent)
 	}
 	if err != nil {

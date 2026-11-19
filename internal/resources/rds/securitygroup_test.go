@@ -49,7 +49,7 @@ const (
 // piece).
 func newConsumerWithPodIdentity(namespace, crName, podSGARN string) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName},
+		Namespace: namespace, Name: crName,
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{
 			Consumes: []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}},
 		}},
@@ -193,7 +193,7 @@ func TestEnsureSecurityGroup_SkipsIngressForConsumerWithoutPublishedPodIdentity(
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()
 	// Consumer exists but has never published a pod security group.
-	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	consumer := &depsv1alpha1.AppDependencies{Namespace: "fulfillment", Name: "fulfillment-service"}
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
 	sharedWith := []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}
 
@@ -316,7 +316,7 @@ func TestEnsureSecurityGroup_MultipleConsumers_GrantsOnlyTheResolvedOne(t *testi
 	ec2Client := newFakeEC2()
 	resolvedConsumer := newConsumerWithPodIdentity("fulfillment", "fulfillment-service", "arn:aws:ec2:us-east-1:123456789012:security-group/sg-consumer1")
 	// "analytics" exists but hasn't published its pod identity yet.
-	unresolvedConsumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "analytics", Name: "analytics-service"}}
+	unresolvedConsumer := &depsv1alpha1.AppDependencies{Namespace: "analytics", Name: "analytics-service"}
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(resolvedConsumer, unresolvedConsumer).Build()
 	sharedWith := []depsv1alpha1.SharedWithEntry{
 		{Namespace: "fulfillment", Name: "fulfillment-service"},

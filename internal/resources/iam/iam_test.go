@@ -39,7 +39,7 @@ const (
 
 func ownedCR(name string) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name, UID: "uid-1"},
+		Namespace: "default", Name: name, UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -53,7 +53,7 @@ func ownedCR(name string) *depsv1alpha1.AppDependencies {
 
 func TestEnsure_ReturnsNoRoleWhenNothingNeedsIAM(t *testing.T) {
 	client := newFakeIAM()
-	cr := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "empty-cr", UID: "uid-1"}}
+	cr := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "empty-cr", UID: "uid-1"}
 
 	ledger, arn, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
 	if err != nil {
@@ -421,7 +421,7 @@ func TestEnsure_GrantsConsumedResourceFromAnotherCR(t *testing.T) {
 	}, "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders")
 
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service", UID: "uid-2"},
+		Namespace: "default", Name: "fulfillment-service", UID: "uid-2",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
@@ -563,7 +563,7 @@ func TestEnsure_RevokingOneOfTwoGrantsNarrowsThePolicy(t *testing.T) {
 	billing := producerCR("default", "billing-service", shared, billingARN)
 	k8s := newFakeK8sClient(producerCR("default", "checkout-service", shared, ordersARN), billing)
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service", UID: "uid-2"},
+		Namespace: "default", Name: "fulfillment-service", UID: "uid-2",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
 			{Namespace: "default", Name: "billing-service", ResourceName: "orders"},

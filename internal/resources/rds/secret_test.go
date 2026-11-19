@@ -55,7 +55,7 @@ func ownedCRWithCredentials(t *testing.T, rdsClient *fakeRDS, smClient *fakeSecr
 	smClient.secrets[secretARN] = `{"username":"` + username + `","password":"` + password + `"}`
 
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName, UID: "uid-1"},
+		Namespace: namespace, Name: crName, UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{
 			{Name: resourceName},
 		}}},
@@ -99,7 +99,7 @@ func TestEnsureCredentialsSecret_OwnedInstance_HappyPath(t *testing.T) {
 func TestEnsureCredentialsSecret_NilRDSSpec_NoSecretCreated(t *testing.T) {
 	rdsClient := newFakeRDS()
 	smClient := newFakeSecretsManager()
-	cr := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service", UID: "uid-1"}}
+	cr := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "checkout-service", UID: "uid-1"}
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
 
 	if err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr); err != nil {
@@ -122,9 +122,9 @@ func TestEnsureCredentialsSecret_SecretNotYetProvisioned_SkipsSilently(t *testin
 	rdsClient.findByARN(entry.ARN).endpointAddress = "orders-db.abc123.us-east-1.rds.amazonaws.com"
 
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service", UID: "uid-1"},
-		Spec:       depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}},
-		Status:     depsv1alpha1.AppDependenciesStatus{ManagedResources: ledger},
+		Namespace: "default", Name: "checkout-service", UID: "uid-1",
+		Spec:   depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db"}}}},
+		Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: ledger},
 	}
 	k8sClient := newFakeK8sClientWithScheme(t, cr)
 
@@ -164,7 +164,7 @@ func TestEnsureCredentialsSecret_RefusesForeignSecret(t *testing.T) {
 	rdsClient := newFakeRDS()
 	smClient := newFakeSecretsManager()
 	cr := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
-	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: CredentialsSecretName("checkout-service")}}
+	foreign := &corev1.Secret{Namespace: "default", Name: CredentialsSecretName("checkout-service")}
 	k8sClient := newFakeK8sClientWithScheme(t, cr, foreign)
 
 	err := EnsureCredentialsSecret(context.Background(), smClient, rdsClient, k8sClient, k8sClient, cr)
@@ -178,8 +178,8 @@ func TestEnsureCredentialsSecret_RefusesForeignSecretHiddenFromCache(t *testing.
 	smClient := newFakeSecretsManager()
 	cr := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
 	foreign := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: CredentialsSecretName("checkout-service")},
-		Data:       map[string][]byte{"UNRELATED": []byte("keep-me")},
+		Namespace: "default", Name: CredentialsSecretName("checkout-service"),
+		Data: map[string][]byte{"UNRELATED": []byte("keep-me")},
 	}
 	cached := newFakeK8sClientWithScheme(t, cr)
 	apiServer := newFakeK8sClientWithScheme(t, cr, foreign)
@@ -224,7 +224,7 @@ func authorizedConsumerOf(producer *depsv1alpha1.AppDependencies) *depsv1alpha1.
 		{Namespace: "fulfillment", Name: "fulfillment-service"},
 	}
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service", UID: "uid-2"},
+		Namespace: "fulfillment", Name: "fulfillment-service", UID: "uid-2",
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"},
 		}}},
@@ -279,13 +279,11 @@ func TestEnsureCredentialsSecret_RemovesCredentialsAnEarlierVersionDeliveredToAC
 	producer := ownedCRWithCredentials(t, rdsClient, smClient, "default", "checkout-service", "orders-db", "cloudctl_admin", "s3cr3t-pw")
 	consumer := authorizedConsumerOf(producer)
 	delivered := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "fulfillment", Name: CredentialsSecretName("fulfillment-service"),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: depsv1alpha1.GroupVersion.String(), Kind: "AppDependencies",
-				Name: consumer.Name, UID: consumer.UID, Controller: ptrTo(true),
-			}},
-		},
+		Namespace: "fulfillment", Name: CredentialsSecretName("fulfillment-service"),
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: depsv1alpha1.GroupVersion.String(), Kind: "AppDependencies",
+			Name: consumer.Name, UID: consumer.UID, Controller: ptrTo(true),
+		}},
 		Data: map[string][]byte{"RDS_DEFAULT_CHECKOUT_SERVICE_ORDERS_DB_PASSWORD": []byte("s3cr3t-pw")},
 	}
 	k8sClient := newFakeK8sClientWithScheme(t, producer, consumer, delivered)
@@ -358,7 +356,7 @@ func TestEnsureCredentialsSecret_MultipleOwnedInstances(t *testing.T) {
 	smClient.secrets[i2.masterUserSecretARN] = `{"username":"u2","password":"p2"}`
 
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "default", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{
 			{Name: "orders-db"}, {Name: "invoices-db"},
 		}}},

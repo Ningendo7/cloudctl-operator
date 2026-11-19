@@ -221,8 +221,7 @@ func (c *tableCleaner) deleteUndeclared(ctx context.Context, entry depsv1alpha1.
 func (c *tableCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.ManagedResource) (gone bool, err error) {
 	tags, err := listAllTags(ctx, c.client, entry.ARN)
 	if err != nil {
-		var notFound *types.ResourceNotFoundException
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.ResourceNotFoundException](err); ok {
 			return true, nil
 		}
 		return false, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of table %q before delete", entry.Name))
@@ -269,8 +268,7 @@ func (c *tableCleaner) gateOnEmpty(ctx context.Context, entry depsv1alpha1.Manag
 func (c *tableCleaner) releaseDeletionProtection(ctx context.Context, entry depsv1alpha1.ManagedResource, tableName string) error {
 	out, err := c.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
 	if err != nil {
-		var notFound *types.ResourceNotFoundException
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.ResourceNotFoundException](err); ok {
 			return nil
 		}
 		return wrapAWSError(err, fmt.Sprintf("reading table %q before delete", entry.Name))
@@ -294,8 +292,7 @@ func (c *tableCleaner) deleteTable(ctx context.Context, entry depsv1alpha1.Manag
 		return ledger, err
 	}
 	if _, err := c.client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: &tableName}); err != nil {
-		var notFound *types.ResourceNotFoundException
-		if !errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.ResourceNotFoundException](err); !ok {
 			return ledger, wrapAWSError(err, fmt.Sprintf("deleting table %q", entry.Name))
 		}
 		// Already gone (e.g. a previous attempt succeeded but the
@@ -372,8 +369,7 @@ func tableNameFromARN(arn string) (string, error) {
 func relinquishIfStillTagged(ctx context.Context, client dynamodbAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) (relinquished, gone bool, err error) {
 	tags, tErr := listAllTags(ctx, client, entry.ARN)
 	if tErr != nil {
-		var notFound *types.ResourceNotFoundException
-		if errors.As(tErr, &notFound) {
+		if _, ok := errors.AsType[*types.ResourceNotFoundException](tErr); ok {
 			return false, true, nil // already gone, nothing to relinquish
 		}
 		return false, false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained table %q", entry.Name))

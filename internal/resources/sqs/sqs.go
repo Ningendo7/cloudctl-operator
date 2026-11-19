@@ -323,8 +323,7 @@ func ensureQueueExists(
 		QueueName: &queueName,
 	})
 
-	var notFound *types.QueueDoesNotExist
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.QueueDoesNotExist](err); ok {
 		ledger, queueURL, err = createQueue(ctx, awsClient, queueName, resourceName, ownerTags, opts, ledger, recordEvent)
 		return ledger, queueURL, nil, err
 	}
@@ -435,8 +434,7 @@ func createQueue(
 		Tags:       ownerTags,
 	})
 	if cErr != nil {
-		var deletedRecently *types.QueueDeletedRecently
-		if errors.As(cErr, &deletedRecently) {
+		if _, ok := errors.AsType[*types.QueueDeletedRecently](cErr); ok {
 			return ledger, "", &cloudctlaws.ReconcileError{
 				Err:       fmt.Errorf("queue %q was deleted too recently to recreate yet (AWS enforces a cooldown): %w", queueName, cErr),
 				Retryable: true,
@@ -450,8 +448,7 @@ func createQueue(
 	// Attributes were just set atomically at creation — nothing to
 	// drift-correct yet.
 	ledger, err := recordVerified(ctx, awsClient, *createOut.QueueUrl, resourceName, opts.deletionPolicy, opts.force, ledger)
-	var notYetReadable *types.QueueDoesNotExist
-	if errors.As(err, &notYetReadable) {
+	if _, ok := errors.AsType[*types.QueueDoesNotExist](err); ok {
 		// SQS may not serve a queue for about a second after creating it.
 		err = &cloudctlaws.ReconcileError{
 			Err:       fmt.Errorf("queue %q was just created and can't be read yet: %w", queueName, err),

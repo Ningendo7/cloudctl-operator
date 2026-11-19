@@ -45,7 +45,7 @@ import (
 // firstConsumedSubnetGroupName reads from.
 func newProducerWithInstance(namespace, crName, resourceName, dbSubnetGroupName string) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName},
+		Namespace: namespace, Name: crName,
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{
 				{Name: resourceName, DBSubnetGroupName: dbSubnetGroupName},
@@ -124,10 +124,9 @@ func TestEnsurePodNetworkIdentity_HappyPath(t *testing.T) {
 func TestEnsurePodNetworkIdentity_IsCreatedInANamespaceStartingWithSG(t *testing.T) {
 	ec2Client := newFakeEC2()
 	producer := newProducerWithInstance("default", "checkout-service", "orders-db", "prod-private-data-tier")
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+	sa := &corev1.ServiceAccount{
 		Namespace: "sg-team", Name: "fulfillment-service",
-		Annotations: map[string]string{serviceaccount.AllowClaimAnnotation: "fulfillment-service"},
-	}}
+		Annotations: map[string]string{serviceaccount.AllowClaimAnnotation: "fulfillment-service"}}
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer, sa).Build()
 	consumes := []depsv1alpha1.ConsumeRef{{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}}
 
@@ -186,7 +185,7 @@ func TestEnsurePodNetworkIdentity_UsesFirstResolvedProducer(t *testing.T) {
 	rdsClient := newFakeRDS()
 	ec2Client := newFakeEC2()
 	// "checkout-service" exists but has no matching rds resource declared.
-	unresolvedProducer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"}}
+	unresolvedProducer := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "checkout-service"}
 	resolvedProducer := newProducerWithInstance("default", "billing-service", "invoices-db", "prod-private-data-tier")
 	sa := consentingServiceAccount()
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(unresolvedProducer, resolvedProducer, sa).Build()
@@ -1003,8 +1002,7 @@ func TestAnyConsumedVPCMatches_OnlyAGoneSubnetGroupCountsAsNoMatch(t *testing.T)
 // consentingServiceAccount is a ServiceAccount the team created and handed to
 // the CR that uses it, as the operator requires for one it did not create.
 func consentingServiceAccount() *corev1.ServiceAccount {
-	return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+	return &corev1.ServiceAccount{
 		Namespace: "fulfillment", Name: "fulfillment-service",
-		Annotations: map[string]string{serviceaccount.AllowClaimAnnotation: "fulfillment-service"},
-	}}
+		Annotations: map[string]string{serviceaccount.AllowClaimAnnotation: "fulfillment-service"}}
 }

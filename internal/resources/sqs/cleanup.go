@@ -268,8 +268,7 @@ func (c *queueCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.Manag
 		QueueName: &queueName,
 	})
 	if err != nil {
-		var notFound *types.QueueDoesNotExist
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.QueueDoesNotExist](err); ok {
 			return "", true, nil
 		}
 		// Anything else (throttling, a permission gap, a network blip)
@@ -469,8 +468,7 @@ func clearPendingDeletion(ctx context.Context, sqsClient sqsAPI, entry depsv1alp
 		QueueName: &queueName,
 	})
 	if err != nil {
-		var notFound *types.QueueDoesNotExist
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.QueueDoesNotExist](err); ok {
 			return nil // already gone, nothing to clean up
 		}
 		return wrapAWSError(err, fmt.Sprintf("looking up queue %q to clear its pending-deletion deny", entry.Name))
@@ -491,8 +489,7 @@ func relinquishIfStillTagged(ctx context.Context, sqsClient sqsAPI, namespace, c
 	}
 	urlOut, err := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &queueName})
 	if err != nil {
-		var notFound *types.QueueDoesNotExist
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.QueueDoesNotExist](err); ok {
 			return false, true, nil // already gone, nothing to relinquish
 		}
 		return false, false, wrapAWSError(err, fmt.Sprintf("looking up retained queue %q", entry.Name))

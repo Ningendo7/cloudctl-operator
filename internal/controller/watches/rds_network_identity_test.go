@@ -21,22 +21,21 @@ import (
 	"strings"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 )
 
 func TestConsumerPodIdentityToRDSProducers_MapsProducerThatSharesWithConsumer(t *testing.T) {
-	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	consumer := &depsv1alpha1.AppDependencies{Namespace: "fulfillment", Name: "fulfillment-service"}
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 			Name: "orders-db", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}},
 		}}}},
 	}
 	unrelatedProducer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "billing-service"},
+		Namespace: "default", Name: "billing-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 			Name: "invoices-db", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "analytics", Name: "analytics-service"}},
 		}}}},
@@ -57,9 +56,9 @@ func TestConsumerPodIdentityToRDSProducers_MapsProducerThatSharesWithConsumer(t 
 }
 
 func TestConsumerPodIdentityToRDSProducers_MapsOnlyOncePerProducerWithMultipleResources(t *testing.T) {
-	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	consumer := &depsv1alpha1.AppDependencies{Namespace: "fulfillment", Name: "fulfillment-service"}
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{
 			{Name: "orders-db", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}},
 			{Name: "invoices-db", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "fulfillment", Name: "fulfillment-service"}}},
@@ -86,7 +85,7 @@ func TestConsumerPodIdentityToRDSProducers_NeverMapsConsumerToItself(t *testing.
 	// loop via this watch specifically (the main watch already handles
 	// a CR's own spec changes).
 	self := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 			Name: "orders-db", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "default", Name: "checkout-service"}},
 		}}}},
@@ -100,7 +99,7 @@ func TestConsumerPodIdentityToRDSProducers_NeverMapsConsumerToItself(t *testing.
 }
 
 func TestConsumerPodIdentityToRDSProducers_NoSharingProducers(t *testing.T) {
-	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	consumer := &depsv1alpha1.AppDependencies{Namespace: "fulfillment", Name: "fulfillment-service"}
 	k8sClient := newIndexedClientBuilder(t).WithObjects(consumer).Build()
 
 	requests := ConsumerPodIdentityToRDSProducers(k8sClient)(context.Background(), consumer)
@@ -110,8 +109,8 @@ func TestConsumerPodIdentityToRDSProducers_NoSharingProducers(t *testing.T) {
 }
 
 func TestConsumerPodIdentityToRDSProducers_IgnoresProducerWithNoRDSSpec(t *testing.T) {
-	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
-	noRDS := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "no-rds-service"}}
+	consumer := &depsv1alpha1.AppDependencies{Namespace: "fulfillment", Name: "fulfillment-service"}
+	noRDS := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "no-rds-service"}
 	k8sClient := newIndexedClientBuilder(t).WithObjects(consumer, noRDS).Build()
 
 	requests := ConsumerPodIdentityToRDSProducers(k8sClient)(context.Background(), consumer)
@@ -121,7 +120,7 @@ func TestConsumerPodIdentityToRDSProducers_IgnoresProducerWithNoRDSSpec(t *testi
 }
 
 func TestConsumerPodIdentityToRDSProducers_ListFailure_ReturnsNilNotPanic(t *testing.T) {
-	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "fulfillment", Name: "fulfillment-service"}}
+	consumer := &depsv1alpha1.AppDependencies{Namespace: "fulfillment", Name: "fulfillment-service"}
 	k8sClient := fake.NewClientBuilder().Build() // unregistered scheme makes List fail
 
 	ctx, logged := capturedLog()

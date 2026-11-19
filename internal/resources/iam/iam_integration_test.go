@@ -37,7 +37,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -91,7 +90,7 @@ func deleteRoleIfExists(t *testing.T, client *iam.Client, name string) {
 // queue for a test that's specifically about IAM's own API behavior.
 func crWithOneOwnedQueue(namespace, crName, crUID string) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName, UID: types.UID(crUID)},
+		Namespace: namespace, Name: crName, UID: types.UID(crUID),
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},

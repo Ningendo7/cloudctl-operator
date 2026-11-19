@@ -39,12 +39,12 @@ func newSharedWithScheme(t *testing.T) *runtime.Scheme {
 
 func TestCheckSharedWithReferences_AllResolve_ReportsTrue(t *testing.T) {
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "fulfillment-service"},
+		Namespace: "team-b", Name: "fulfillment-service",
 	}
 	c := fake.NewClientBuilder().WithScheme(newSharedWithScheme(t)).WithObjects(consumer).Build()
 
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", Generation: 1},
+		Namespace: "team-a", Name: "checkout-service", Generation: 1,
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 				{Name: "orders", SharedWith: []depsv1alpha1.SharedWithEntry{
@@ -69,7 +69,7 @@ func TestCheckSharedWithReferences_MissingConsumer_ReportsFalseWithDetail(t *tes
 	c := fake.NewClientBuilder().WithScheme(newSharedWithScheme(t)).Build()
 
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", Generation: 1},
+		Namespace: "team-a", Name: "checkout-service", Generation: 1,
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 				{Name: "orders", SharedWith: []depsv1alpha1.SharedWithEntry{
@@ -101,7 +101,7 @@ func TestCheckSharedWithReferences_DoesNotAffectAggregateReady(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newSharedWithScheme(t)).Build()
 
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", Generation: 1},
+		Namespace: "team-a", Name: "checkout-service", Generation: 1,
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 				{Name: "orders", SharedWith: []depsv1alpha1.SharedWithEntry{

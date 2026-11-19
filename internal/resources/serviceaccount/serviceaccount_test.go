@@ -50,11 +50,9 @@ func newScheme(t *testing.T) *runtime.Scheme {
 
 func newCR(namespace, name, serviceAccountName string) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
-			UID:       "test-uid",
-		},
+		Namespace: namespace,
+		Name:      name,
+		UID:       "test-uid",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			ServiceAccountName: serviceAccountName,
 		},
@@ -122,11 +120,9 @@ func TestEnsure_ExplicitNameThatDoesNotExist_IsReportedNotCreated(t *testing.T) 
 
 func TestEnsure_PreExisting_MergesWithoutClobberingOtherAnnotations(t *testing.T) {
 	existing := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   "ns",
-			Name:        "checkout",
-			Annotations: map[string]string{"team.example.com/owner": "payments", AllowClaimAnnotation: "checkout"},
-		},
+		Namespace:   "ns",
+		Name:        "checkout",
+		Annotations: map[string]string{"team.example.com/owner": "payments", AllowClaimAnnotation: "checkout"},
 	}
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
 	cr := newCR("ns", "checkout", "")
@@ -159,8 +155,8 @@ func TestEnsure_DifferentCROwnsTarget_Refused(t *testing.T) {
 	}
 
 	intruder := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "fraud-detector", UID: "intruder-uid"},
-		Spec:       depsv1alpha1.AppDependenciesSpec{ServiceAccountName: "shared-sa"},
+		Namespace: "ns", Name: "fraud-detector", UID: "intruder-uid",
+		Spec: depsv1alpha1.AppDependenciesSpec{ServiceAccountName: "shared-sa"},
 	}
 	_, err := Ensure(context.Background(), c, intruder, "arn:aws:iam::123456789012:role/fraud-detector")
 	if err == nil {
@@ -181,13 +177,11 @@ func TestEnsure_DifferentCROwnsTarget_Refused(t *testing.T) {
 // reusing the same name has a different UID.
 func TestEnsure_DefaultName_StaleOwnerFromRecreatedCR_Refused(t *testing.T) {
 	existing := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "ns",
-			Name:      "checkout",
-			Annotations: map[string]string{
-				cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("ns", "checkout"),
-				cloudctlaws.OwnerUIDTagKey: "old-uid",
-			},
+		Namespace: "ns",
+		Name:      "checkout",
+		Annotations: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("ns", "checkout"),
+			cloudctlaws.OwnerUIDTagKey: "old-uid",
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
@@ -222,11 +216,9 @@ func TestEnsure_SameCRReconcilingAgain_UpdatesOwnRoleARN(t *testing.T) {
 // ServiceAccount its owner consented to (no cloudctl marker yet) can be claimed.
 func TestEnsure_PreExistingForeignSA_StampsOwnershipOnFirstClaim(t *testing.T) {
 	existing := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   "ns",
-			Name:        "checkout",
-			Annotations: map[string]string{"team.example.com/owner": "payments", AllowClaimAnnotation: "checkout"},
-		},
+		Namespace:   "ns",
+		Name:        "checkout",
+		Annotations: map[string]string{"team.example.com/owner": "payments", AllowClaimAnnotation: "checkout"},
 	}
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
 	cr := newCR("ns", "checkout", "")
@@ -253,11 +245,9 @@ func TestEnsure_PreExistingForeignSA_StampsOwnershipOnFirstClaim(t *testing.T) {
 // honestly otherwise.
 func TestEnsure_Rename_CleansUpPreviousTarget(t *testing.T) {
 	old := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   "ns",
-			Name:        "old-sa",
-			Annotations: map[string]string{"unrelated": "keep-me", AllowClaimAnnotation: "checkout"},
-		},
+		Namespace:   "ns",
+		Name:        "old-sa",
+		Annotations: map[string]string{"unrelated": "keep-me", AllowClaimAnnotation: "checkout"},
 	}
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(old, consentingSA("new-sa", "checkout")).Build()
 
@@ -294,11 +284,9 @@ func TestEnsure_Rename_CleansUpPreviousTarget(t *testing.T) {
 // as the rename test above, for the same reason.
 func TestCleanup_StripsOwnedFieldOnly(t *testing.T) {
 	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   "ns",
-			Name:        "checkout",
-			Annotations: map[string]string{"team.example.com/owner": "payments", AllowClaimAnnotation: "checkout"},
-		},
+		Namespace:   "ns",
+		Name:        "checkout",
+		Annotations: map[string]string{"team.example.com/owner": "payments", AllowClaimAnnotation: "checkout"},
 	}
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(sa).Build()
 	cr := newCR("ns", "checkout", "")
@@ -449,7 +437,7 @@ const platformRole = "arn:aws:iam::123456789012:role/platform-payments"
 func saWithRole(name string, annotations map[string]string) *corev1.ServiceAccount {
 	all := map[string]string{RoleARNAnnotation: platformRole}
 	maps.Copy(all, annotations)
-	return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, Annotations: all}}
+	return &corev1.ServiceAccount{Namespace: "ns", Name: name, Annotations: all}
 }
 
 // A CR author who can't edit ServiceAccounts must not be able to swap a
@@ -585,7 +573,7 @@ func TestReleaseNetworkIdentityLabel_KeepsTheLabelWhileAnotherCRStillUsesIt(t *t
 
 // plainSA is a ServiceAccount a team created, with no IAM role on it yet.
 func plainSA(name string) *corev1.ServiceAccount {
-	return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name}}
+	return &corev1.ServiceAccount{Namespace: "ns", Name: name}
 }
 
 // consentingSA is a ServiceAccount whose owner has handed it to the CR.

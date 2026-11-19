@@ -42,7 +42,7 @@ func platformProducer(granted bool) *depsv1alpha1.AppDependencies {
 		grant = checkoutGrant
 	}
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "data", Name: "platform"},
+		Namespace: "data", Name: "platform",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders", SharedWith: grant}}},
 			SNS: &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events", SharedWith: grant}}},
@@ -58,7 +58,7 @@ func platformRef(resourceName string) depsv1alpha1.ConsumeRef {
 // checkoutConsumer references the platform's resources through the given
 // spec field.
 func checkoutConsumer(field string, ref depsv1alpha1.ConsumeRef) *depsv1alpha1.AppDependencies {
-	cr := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "checkout", Generation: 1}}
+	cr := &depsv1alpha1.AppDependencies{Namespace: "shop", Name: "checkout", Generation: 1}
 	switch field {
 	case "rds.consumes":
 		cr.Spec.RDS = &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{ref}}

@@ -48,10 +48,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 	Context("DynamoDB partitionKey immutability", func() {
 		It("rejects changing partitionKey on an existing table entry", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-dynamodb-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-dynamodb-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					DynamoDB: &depsv1alpha1.DynamoDBSpec{
 						Resources: []depsv1alpha1.DynamoDBTableSpec{
@@ -70,10 +68,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("rejects changing sortKey on an existing table entry", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-dynamodb-sortkey-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-dynamodb-sortkey-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					DynamoDB: &depsv1alpha1.DynamoDBSpec{
 						Resources: []depsv1alpha1.DynamoDBTableSpec{
@@ -92,10 +88,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("allows changing fields other than the key schema", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-dynamodb-mutable-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-dynamodb-mutable-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					DynamoDB: &depsv1alpha1.DynamoDBSpec{
 						Resources: []depsv1alpha1.DynamoDBTableSpec{
@@ -114,10 +108,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 	Context("S3 replication region requirement", func() {
 		It("rejects replication enabled with no region set", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-s3-noregion-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-s3-noregion-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					S3: &depsv1alpha1.S3Spec{
 						Resources: []depsv1alpha1.S3BucketSpec{
@@ -136,10 +128,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("rejects replication enabled even with a region set, since replication does not exist yet", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-s3-withregion-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-s3-withregion-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					S3: &depsv1alpha1.S3Spec{
 						Resources: []depsv1alpha1.S3BucketSpec{
@@ -161,10 +151,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("accepts replication disabled with no region set", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-s3-disabled-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-s3-disabled-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					S3: &depsv1alpha1.S3Spec{
 						Resources: []depsv1alpha1.S3BucketSpec{
@@ -183,10 +171,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 	Context("deletionPolicy default", func() {
 		It("defaults an SQS queue's deletionPolicy to Retain when omitted", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-sqs-default-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-sqs-default-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{
@@ -201,10 +187,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("rejects an invalid deletionPolicy value", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-sqs-badpolicy-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-sqs-badpolicy-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{
@@ -220,10 +204,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 	Context("resource name uniqueness within a section", func() {
 		It("rejects two sqs resources with the same name", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-sqs-duplicate-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-sqs-duplicate-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{
@@ -240,10 +222,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 	Context("SQS fifo immutability", func() {
 		It("rejects changing fifo on an existing queue entry", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-sqs-fifo-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-sqs-fifo-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{
@@ -262,10 +242,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("defaults fifo to false when omitted", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-sqs-fifo-default-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-sqs-fifo-default-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{
@@ -282,10 +260,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 	Context("SNS fifo immutability", func() {
 		It("rejects changing fifo on an existing topic entry", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-sns-fifo-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-sns-fifo-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SNS: &depsv1alpha1.SNSSpec{
 						Resources: []depsv1alpha1.SNSTopicSpec{
@@ -304,10 +280,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("defaults fifo to false when omitted", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-sns-fifo-default-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-sns-fifo-default-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SNS: &depsv1alpha1.SNSSpec{
 						Resources: []depsv1alpha1.SNSTopicSpec{
@@ -324,10 +298,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 	Context("EncryptionSpec mutual exclusivity", func() {
 		It("rejects enabled and kmsKeyRef set together", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-encryption-exclusive-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-encryption-exclusive-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{
@@ -349,10 +321,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("accepts enabled alone", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-encryption-enabled-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-encryption-enabled-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{
@@ -366,10 +336,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("accepts kmsKeyRef alone", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-encryption-ref-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-encryption-ref-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{
@@ -390,10 +358,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 	Context("S3 lifecycle rule transition fields", func() {
 		It("rejects transitionStorageClass set without transitionAfterDays", func() {
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-s3-lifecycle-notransition-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-s3-lifecycle-notransition-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					S3: &depsv1alpha1.S3Spec{
 						Resources: []depsv1alpha1.S3BucketSpec{
@@ -417,10 +383,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 		It("accepts transitionStorageClass paired with transitionAfterDays", func() {
 			days := int32(30)
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-s3-lifecycle-withtransition-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-s3-lifecycle-withtransition-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					S3: &depsv1alpha1.S3Spec{
 						Resources: []depsv1alpha1.S3BucketSpec{
@@ -442,10 +406,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 		It("accepts a rule with neither transition field set", func() {
 			days := int32(90)
 			obj := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "validation-s3-lifecycle-expironly-",
-					Namespace:    "default",
-				},
+				GenerateName: "validation-s3-lifecycle-expironly-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					S3: &depsv1alpha1.S3Spec{
 						Resources: []depsv1alpha1.S3BucketSpec{
@@ -479,7 +441,7 @@ var _ = Describe("AppDependencies CRD validation", func() {
 				mutate(&inst)
 			}
 			return &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: generateName, Namespace: "default"},
+				GenerateName: generateName, Namespace: "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{inst}},
 				},
@@ -573,24 +535,24 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			inst := validRDS()
 			mutate(&inst)
 			return &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-invalid-rds-", Namespace: "default"},
-				Spec:       depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{inst}}},
+				GenerateName: "validation-invalid-rds-", Namespace: "default",
+				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{inst}}},
 			}
 		}
 		sqsCR := func(mutate func(*depsv1alpha1.SQSQueueSpec)) *depsv1alpha1.AppDependencies {
 			q := depsv1alpha1.SQSQueueSpec{Name: "orders"}
 			mutate(&q)
 			return &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-invalid-sqs-", Namespace: "default"},
-				Spec:       depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{q}}},
+				GenerateName: "validation-invalid-sqs-", Namespace: "default",
+				Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{q}}},
 			}
 		}
 		s3CR := func(mutate func(*depsv1alpha1.S3BucketSpec)) *depsv1alpha1.AppDependencies {
 			b := depsv1alpha1.S3BucketSpec{Name: "receipts"}
 			mutate(&b)
 			return &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-invalid-s3-", Namespace: "default"},
-				Spec:       depsv1alpha1.AppDependenciesSpec{S3: &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{b}}},
+				GenerateName: "validation-invalid-s3-", Namespace: "default",
+				Spec: depsv1alpha1.AppDependenciesSpec{S3: &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{b}}},
 			}
 		}
 
@@ -598,15 +560,15 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			tbl := depsv1alpha1.DynamoDBTableSpec{Name: "sessions", PartitionKey: "userId"}
 			mutate(&tbl)
 			return &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-invalid-ddb-", Namespace: "default"},
-				Spec:       depsv1alpha1.AppDependenciesSpec{DynamoDB: &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{tbl}}},
+				GenerateName: "validation-invalid-ddb-", Namespace: "default",
+				Spec: depsv1alpha1.AppDependenciesSpec{DynamoDB: &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{tbl}}},
 			}
 		}
 
 		saCR := func(mutate func(*depsv1alpha1.AppDependencies)) *depsv1alpha1.AppDependencies {
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-invalid-sa-", Namespace: "default"},
-				Spec:       depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}},
+				GenerateName: "validation-invalid-sa-", Namespace: "default",
+				Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}},
 			}
 			mutate(cr)
 			return cr
@@ -726,8 +688,8 @@ var _ = Describe("AppDependencies CRD validation", func() {
 
 		It("rejects a subnet group grant with an empty subnet group name", func() {
 			grant := &depsv1alpha1.RDSSubnetGroupGrant{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-invalid-grant-"},
-				Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{AllowedNamespaces: []string{"default"}},
+				GenerateName: "validation-invalid-grant-",
+				Spec:         depsv1alpha1.RDSSubnetGroupGrantSpec{AllowedNamespaces: []string{"default"}},
 			}
 			err := k8sClient.Create(ctx, grant)
 			Expect(err).To(HaveOccurred())

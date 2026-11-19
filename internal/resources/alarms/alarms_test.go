@@ -25,7 +25,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -380,7 +379,7 @@ func TestEnsure_SnsTopicRefRetriesWhenNotYetAuthorized(t *testing.T) {
 func TestEnsure_SnsTopicRefWiresAlarmActionsWhenAuthorized(t *testing.T) {
 	client := newFakeCloudWatch()
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "platform-alerts"},
+		Namespace: "platform", Name: "platform-alerts",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SNS: &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 				{Name: "pagerduty-bridge", SharedWith: []depsv1alpha1.SharedWithEntry{

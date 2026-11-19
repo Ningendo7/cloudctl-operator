@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -235,7 +234,7 @@ func TestSetSectionCondition_NoLogOnSuccess(t *testing.T) {
 
 func newSQSBackedCR() *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -248,7 +247,7 @@ func TestReconcileNormal_SuccessPath_LogsStartAndSuccessNoErrors(t *testing.T) {
 	r := newCountingReconciler(t, &patchCount, cr)
 	logger, calls := newFakeLogger()
 	ctx := logf.IntoContext(context.Background(), logger)
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+	req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -282,7 +281,7 @@ func TestReconcileNormal_RetryableError_LogsInfoNotError(t *testing.T) {
 	r.AWSClients.SQS.(*fakeSQSClient).createQueueErr = &fakeAWSError{code: "InternalError", fault: smithy.FaultServer}
 	logger, calls := newFakeLogger()
 	ctx := logf.IntoContext(context.Background(), logger)
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+	req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 	result, err := r.Reconcile(ctx, req)
 	if err != nil {
@@ -323,7 +322,7 @@ func TestReconcileNormal_HardError_LogsError(t *testing.T) {
 	r.AWSClients.SQS.(*fakeSQSClient).createQueueErr = &fakeAWSError{code: "AccessDenied", fault: smithy.FaultClient}
 	logger, calls := newFakeLogger()
 	ctx := logf.IntoContext(context.Background(), logger)
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+	req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 	if _, err := r.Reconcile(ctx, req); err == nil {
 		t.Fatal("expected Reconcile() to return an error for a non-retryable failure")
@@ -342,7 +341,7 @@ func TestReconcileNormal_HardError_LogsError(t *testing.T) {
 
 func TestReconcileDelete_NoFinalizer_LogsNothing(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 	}
 	patchCount := 0
 	r := newCountingReconciler(t, &patchCount, cr)
@@ -360,12 +359,10 @@ func TestReconcileDelete_NoFinalizer_LogsNothing(t *testing.T) {
 
 func TestReconcileDelete_Success_LogsStartAndFinalizerRemoved(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:         "default",
-			Name:              "checkout-service",
-			Finalizers:        []string{finalizerName},
-			DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
-		},
+		Namespace:         "default",
+		Name:              "checkout-service",
+		Finalizers:        []string{finalizerName},
+		DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
 	}
 	patchCount := 0
 	r := newCountingReconciler(t, &patchCount, cr)
@@ -398,12 +395,10 @@ func TestReconcileDelete_Success_LogsStartAndFinalizerRemoved(t *testing.T) {
 // Info, not Error, for the same false-alerting reason.
 func TestReconcileDelete_RetryableError_LogsInfoNotError(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:         "default",
-			Name:              "checkout-service",
-			Finalizers:        []string{finalizerName},
-			DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
-		},
+		Namespace:         "default",
+		Name:              "checkout-service",
+		Finalizers:        []string{finalizerName},
+		DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},

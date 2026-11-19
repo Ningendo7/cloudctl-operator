@@ -58,8 +58,7 @@ func ResolveConnectionInfo(ctx context.Context, awsClient rdsAPI, instanceARN st
 
 	out, err := describeDBInstanceCached(ctx, awsClient, instanceID)
 	if err != nil {
-		var notFound *types.DBInstanceNotFoundFault
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.DBInstanceNotFoundFault](err); ok {
 			return ConnectionInfo{}, false, nil
 		}
 		return ConnectionInfo{}, false, wrapAWSError(err, "resolving RDS connection info")

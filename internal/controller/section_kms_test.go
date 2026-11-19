@@ -107,7 +107,7 @@ func TestReconcileNormal_KeyStillReferencedButNotDeclared_IsKeptAndReported(t *t
 	const keyARN = "arn:aws:kms:us-east-1:123456789012:key/11111111-1111-1111-1111-000000000001"
 	longAgo := metav1.NewTime(metav1.Now().Add(-90 * 24 * time.Hour))
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "shared-keys", UID: "uid-1", Finalizers: []string{finalizerName}},
+		Namespace: "platform", Name: "shared-keys", UID: "uid-1", Finalizers: []string{finalizerName},
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 			{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{KMSKeyRef: "general"}},
 		}}},
@@ -237,7 +237,7 @@ func TestReconcileNormal_KeyOfARemovedResourceStillHoldingDataIsKept(t *testing.
 	const keyARN = "arn:aws:kms:us-east-1:123456789012:key/11111111-1111-1111-1111-000000000002"
 	longAgo := metav1.NewTime(metav1.Now().Add(-90 * 24 * time.Hour))
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "app", UID: "uid-1", Finalizers: []string{finalizerName}},
+		Namespace: "platform", Name: "app", UID: "uid-1", Finalizers: []string{finalizerName},
 		Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
 			{
 				Type: "kms", Name: "sqs#orders#key", ARN: keyARN,
@@ -275,7 +275,7 @@ func TestFinalize_KeyOfRetainedDataIsRelinquishedNotDeleted(t *testing.T) {
 	const keyARN = "arn:aws:kms:us-east-1:123456789012:key/11111111-1111-1111-1111-000000000003"
 	longAgo := metav1.NewTime(metav1.Now().Add(-90 * 24 * time.Hour))
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "app", UID: "uid-1", Finalizers: []string{finalizerName}},
+		Namespace: "platform", Name: "app", UID: "uid-1", Finalizers: []string{finalizerName},
 		Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
 			{
 				Type: "kms", Name: "shared", ARN: keyARN,
@@ -314,7 +314,7 @@ func TestFinalize_KeyOfDrainingDataBlocksDeletion(t *testing.T) {
 	const keyARN = "arn:aws:kms:us-east-1:123456789012:key/11111111-1111-1111-1111-000000000004"
 	longAgo := metav1.NewTime(metav1.Now().Add(-90 * 24 * time.Hour))
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "app", UID: "uid-1", Finalizers: []string{finalizerName}},
+		Namespace: "platform", Name: "app", UID: "uid-1", Finalizers: []string{finalizerName},
 		Status: depsv1alpha1.AppDependenciesStatus{ManagedResources: []depsv1alpha1.ManagedResource{
 			{
 				Type: "kms", Name: "dynamodb#sessions#key", ARN: keyARN,

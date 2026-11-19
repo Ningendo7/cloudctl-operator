@@ -87,8 +87,7 @@ func TestDescribeDBInstanceCached_DoesNotCacheNotFound(t *testing.T) {
 	ctx := WithDescribeCache(context.Background())
 
 	_, err := describeDBInstanceCached(ctx, client, "orders-db")
-	var notFound *types.DBInstanceNotFoundFault
-	if !errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.DBInstanceNotFoundFault](err); !ok {
 		t.Fatalf("expected a DBInstanceNotFoundFault before the instance exists, got %v", err)
 	}
 

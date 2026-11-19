@@ -417,8 +417,7 @@ func (e waitingError) Unwrap() error { return e.error }
 // classifies whatever AWS or network error is in the chain, so an error
 // returned without a ReconcileError isn't treated as permanent.
 func isRetryable(err error) bool {
-	var reconcileErr *cloudctlaws.ReconcileError
-	if errors.As(err, &reconcileErr) {
+	if reconcileErr, ok := errors.AsType[*cloudctlaws.ReconcileError](err); ok {
 		return reconcileErr.Retryable
 	}
 	return cloudctlaws.IsRetryable(err)

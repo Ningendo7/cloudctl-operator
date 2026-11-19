@@ -416,8 +416,7 @@ func retireFinalSnapshot(
 	}
 
 	if _, err := awsClient.DeleteDBSnapshot(ctx, &rds.DeleteDBSnapshotInput{DBSnapshotIdentifier: &existing.ARN}); err != nil {
-		var notFound *types.DBSnapshotNotFoundFault
-		if !errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.DBSnapshotNotFoundFault](err); !ok {
 			return ledger, wrapAWSError(err, fmt.Sprintf("deleting retired snapshot %q", existing.ARN))
 		}
 	}
@@ -433,8 +432,7 @@ func retireFinalSnapshot(
 func verifyInstanceOwned(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (owned, gone bool, err error) {
 	tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &entry.ARN})
 	if tErr != nil {
-		var notFound *types.DBInstanceNotFoundFault
-		if errors.As(tErr, &notFound) {
+		if _, ok := errors.AsType[*types.DBInstanceNotFoundFault](tErr); ok {
 			return false, true, nil
 		}
 		return false, false, wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of instance %q", entry.Name))
@@ -459,8 +457,7 @@ func instanceIDFromARN(arn string) (string, error) {
 func relinquishIfStillTagged(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) (relinquished, gone bool, err error) {
 	tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &entry.ARN})
 	if tErr != nil {
-		var notFound *types.DBInstanceNotFoundFault
-		if errors.As(tErr, &notFound) {
+		if _, ok := errors.AsType[*types.DBInstanceNotFoundFault](tErr); ok {
 			return false, true, nil // already gone, nothing to relinquish
 		}
 		return false, false, wrapAWSError(tErr, fmt.Sprintf("checking ownership tags on retained instance %q", entry.Name))

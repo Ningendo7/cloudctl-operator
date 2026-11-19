@@ -24,7 +24,6 @@ import (
 	"strings"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -47,7 +46,7 @@ func TestCollectGrants_OwnedResourceAlwaysGrantedRegardlessOfSharing(t *testing.
 	// sharedWith/consumes - declaring a dependency as your own already
 	// implies needing to use it.
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -69,7 +68,7 @@ func TestCollectGrants_OwnedResourceAlwaysGrantedRegardlessOfSharing(t *testing.
 
 func TestCollectGrants_EncryptedOwnedSQSResourceAlsoGrantsItsDedicatedKey(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 				{Name: "orders", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
@@ -120,7 +119,7 @@ func TestCollectGrants_EncryptedOwnedSQSResourceAlsoGrantsItsDedicatedKey(t *tes
 
 func TestCollectGrants_EncryptedOwnedSNSResourceAlsoGrantsItsDedicatedKey(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SNS: &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{
 				{Name: "events", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
@@ -155,7 +154,7 @@ func TestCollectGrants_EncryptedOwnedSNSResourceAlsoGrantsItsDedicatedKey(t *tes
 
 func TestCollectGrants_EncryptedOwnedS3ResourceAlsoGrantsItsDedicatedKey(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			S3: &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{
 				{Name: "receipts", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
@@ -190,7 +189,7 @@ func TestCollectGrants_EncryptedOwnedS3ResourceAlsoGrantsItsDedicatedKey(t *test
 
 func TestCollectGrants_EncryptedOwnedDynamoDBResourceAlsoGrantsItsDedicatedKey(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			DynamoDB: &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
 				{Name: "sessions", PartitionKey: "id", Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
@@ -225,7 +224,7 @@ func TestCollectGrants_EncryptedOwnedDynamoDBResourceAlsoGrantsItsDedicatedKey(t
 
 func TestCollectGrants_UnencryptedOwnedSQSResourceGrantsNoKMSAccess(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -246,7 +245,7 @@ func TestCollectGrants_UnencryptedOwnedSQSResourceGrantsNoKMSAccess(t *testing.T
 
 func TestCollectGrants_OwnedResourceWithoutLedgerEntryIsSkippedWithReason(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -264,7 +263,7 @@ func TestCollectGrants_OwnedResourceWithoutLedgerEntryIsSkippedWithReason(t *tes
 
 func producerCR(namespace, name string, sharedWith []depsv1alpha1.SharedWithEntry, arn string) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Namespace: namespace, Name: name,
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 				{Name: "orders", SharedWith: sharedWith},
@@ -284,7 +283,7 @@ func TestCollectGrants_ConsumedResourceGrantedWhenSharedWithMatches(t *testing.T
 	}, "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders")
 
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Namespace: "default", Name: "fulfillment-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
@@ -307,7 +306,7 @@ func TestCollectGrants_ConsumedResourceDefaultsToReadOnly(t *testing.T) {
 	}, "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders")
 
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Namespace: "default", Name: "fulfillment-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
@@ -339,7 +338,7 @@ func encryptedProducer(encryption *depsv1alpha1.EncryptionSpec, keyLedgerName st
 
 func ordersConsumer() *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Namespace: "default", Name: "fulfillment-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
@@ -394,7 +393,7 @@ func TestCollectGrants_ConsumedResourceWhoseKeyIsNotReconciledYetIsSkipped(t *te
 // consumer needs no key permission.
 func TestCollectGrants_ConsumedEncryptedTableGrantsNoKey(t *testing.T) {
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			DynamoDB: &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{
 				Name:       "sessions",
@@ -408,7 +407,7 @@ func TestCollectGrants_ConsumedEncryptedTableGrantsNoKey(t *testing.T) {
 		}},
 	}
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Namespace: "default", Name: "fulfillment-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			DynamoDB: &depsv1alpha1.DynamoDBSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "default", Name: "checkout-service", ResourceName: "sessions"},
@@ -433,7 +432,7 @@ func findGrant(grants []grant, resourceType string) *grant {
 
 func TestCollectGrants_SkipsWhenProducerNotFound(t *testing.T) {
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Namespace: "default", Name: "fulfillment-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
@@ -452,11 +451,11 @@ func TestCollectGrants_SkipsWhenProducerNotFound(t *testing.T) {
 
 func TestCollectGrants_SkipsWhenResourceNotDeclaredOnProducer(t *testing.T) {
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
-		Spec:       depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{}}, // no "orders" declared
+		Namespace: "default", Name: "checkout-service",
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{}}, // no "orders" declared
 	}
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Namespace: "default", Name: "fulfillment-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
@@ -473,7 +472,7 @@ func TestCollectGrants_SkipsWhenResourceNotDeclaredOnProducer(t *testing.T) {
 func TestCollectGrants_SkipsWhenNotAuthorized(t *testing.T) {
 	producer := producerCR("default", "checkout-service", nil, "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders")
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Namespace: "default", Name: "fulfillment-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
@@ -489,7 +488,7 @@ func TestCollectGrants_SkipsWhenNotAuthorized(t *testing.T) {
 
 func TestCollectGrants_SkipsWhenProducerResourceNotYetReconciled(t *testing.T) {
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 				{Name: "orders", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "default", Name: "fulfillment-service"}}},
@@ -498,7 +497,7 @@ func TestCollectGrants_SkipsWhenProducerResourceNotYetReconciled(t *testing.T) {
 		// No ManagedResources yet.
 	}
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Namespace: "default", Name: "fulfillment-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "default", Name: "checkout-service", ResourceName: "orders"},
@@ -602,7 +601,7 @@ func keyReferencingCR(keyInLedger bool) *depsv1alpha1.AppDependencies {
 		ledger = append(ledger, depsv1alpha1.ManagedResource{Type: "kms", Name: "shared-key", ARN: "arn:aws:kms:us-east-1:123456789012:key/shared-id"})
 	}
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			KMS: &depsv1alpha1.KMSSpec{Resources: []depsv1alpha1.KMSKeySpec{{Name: "shared-key"}}},
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
@@ -679,7 +678,7 @@ func policyActions(t *testing.T, grants []grant) []string {
 func TestCollectGrants_TopicConsumersCannotSubscribeButOwnersCan(t *testing.T) {
 	const topicARN = "arn:aws:sns:us-east-1:123456789012:default-checkout-service-events"
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{SNS: &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{
 			Name: "events", SharedWith: []depsv1alpha1.SharedWithEntry{
 				{Namespace: "default", Name: "fulfillment-service", Access: depsv1alpha1.AccessLevelReadWrite},
@@ -690,7 +689,7 @@ func TestCollectGrants_TopicConsumersCannotSubscribeButOwnersCan(t *testing.T) {
 		}},
 	}
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "fulfillment-service"},
+		Namespace: "default", Name: "fulfillment-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{SNS: &depsv1alpha1.SNSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "default", Name: "checkout-service", ResourceName: "events"},
 		}}},

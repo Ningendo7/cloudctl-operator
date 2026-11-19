@@ -31,7 +31,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -258,7 +257,7 @@ func TestStartReconcileSpan_PutsTheTraceIDInTheLogger(t *testing.T) {
 	logger := funcr.New(func(prefix, args string) { lines = append(lines, prefix+args) }, funcr.Options{})
 	ctx := logf.IntoContext(context.Background(), logger)
 
-	ctx, end := startReconcileSpan(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: "checkout"}})
+	ctx, end := startReconcileSpan(ctx, ctrl.Request{Namespace: "team-a", Name: "checkout"})
 	logf.FromContext(ctx).Info("inside the reconcile")
 	end(nil)
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -92,9 +93,7 @@ type stubHTTP struct {
 func (s *stubHTTP) Do(r *http.Request) (*http.Response, error) {
 	status, body := s.respond(int(s.calls.Add(1)))
 	header := http.Header{"Content-Type": {"application/x-amz-json-1.0"}}
-	for k, v := range s.header {
-		header[k] = v
-	}
+	maps.Copy(header, s.header)
 	return &http.Response{
 		StatusCode: status,
 		Header:     header,

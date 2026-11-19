@@ -202,8 +202,7 @@ func ensureTable(
 		TableName: &tableName,
 	})
 
-	var notFound *types.ResourceNotFoundException
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.ResourceNotFoundException](err); ok {
 		// Creation only ever happens for a table this CR has never had. One
 		// the ledger knows but DynamoDB no longer has was deleted out-of-band,
 		// and a replacement would be an empty table reported Ready.

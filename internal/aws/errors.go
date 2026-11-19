@@ -62,8 +62,7 @@ const (
 )
 
 func IsPermissionDenied(err error) bool {
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 		switch apiErr.ErrorCode() {
 		case errCodeAccessDenied, errCodeAccessDeniedException, errCodeUnauthorizedException, errCodeUnauthorizedOperation, errCodeNotAuthorized, errCodeAuthorizationError:
 			return true
@@ -120,23 +119,19 @@ func IsRetryable(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrRateLimitWait) {
 		return true
 	}
-	var quota ratelimit.QuotaExceededError
-	if errors.As(err, &quota) {
+	if _, ok := errors.AsType[ratelimit.QuotaExceededError](err); ok {
 		return true
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if netErr, ok := errors.AsType[net.Error](err); ok {
 		return !IsEndpointUnreachable(err) && isTransientNetworkError(netErr, err)
 	}
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 		return isRetryableAPIError(apiErr)
 	}
 	// See IsPermissionDenied: a bare HTTP-status error (no smithy.APIError)
 	// can't be matched by error code at all. 429 and 5xx are AWS's own
 	// generic signals for "retry me" regardless of service.
-	var respErr *awshttp.ResponseError
-	if errors.As(err, &respErr) {
+	if respErr, ok := errors.AsType[*awshttp.ResponseError](err); ok {
 		status := respErr.HTTPStatusCode()
 		return status == 429 || status >= 500
 	}

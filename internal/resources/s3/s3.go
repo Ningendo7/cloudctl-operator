@@ -729,16 +729,13 @@ func isNotFoundError(err error) bool {
 	// with different ErrorCode() values, not different names for the same
 	// thing, so all three have to be checked to correctly recognize
 	// "already gone" across every call site that uses this.
-	var notFound *types.NotFound
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.NotFound](err); ok {
 		return true
 	}
-	var noSuchBucket *types.NoSuchBucket
-	if errors.As(err, &noSuchBucket) {
+	if _, ok := errors.AsType[*types.NoSuchBucket](err); ok {
 		return true
 	}
-	var noSuchUpload *types.NoSuchUpload
-	if errors.As(err, &noSuchUpload) {
+	if _, ok := errors.AsType[*types.NoSuchUpload](err); ok {
 		return true
 	}
 	var responseErr *awshttp.ResponseError

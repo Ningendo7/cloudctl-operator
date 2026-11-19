@@ -36,8 +36,7 @@ func MetricResult(err error) string {
 }
 
 func isThrottled(err error) bool {
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 		switch code := apiErr.ErrorCode(); code {
 		case errCodeThrottling, errCodeRequestLimitExceeded, errCodeTooManyRequestsException:
 			return true
@@ -54,8 +53,7 @@ func isThrottled(err error) bool {
 // SQS reports a missing queue under its legacy code,
 // AWS.SimpleQueueService.NonExistentQueue.
 func isNotFound(err error) bool {
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 		code := apiErr.ErrorCode()
 		return strings.Contains(code, "NotFound") || strings.Contains(code, "NoSuch") ||
 			strings.Contains(code, "DoesNotExist") || strings.Contains(code, "NonExistent")

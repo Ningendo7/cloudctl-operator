@@ -37,12 +37,11 @@ type Option func(*depsv1alpha1.AppDependencies)
 
 // CR builds a CR at generation 12 that was created five days before Now.
 func CR(namespace, name string, opts ...Option) *depsv1alpha1.AppDependencies {
-	cr := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{
+	cr := &depsv1alpha1.AppDependencies{
 		Namespace:         namespace,
 		Name:              name,
 		Generation:        12,
-		CreationTimestamp: metav1.NewTime(Now.Add(-5 * 24 * time.Hour)),
-	}}
+		CreationTimestamp: metav1.NewTime(Now.Add(-5 * 24 * time.Hour))}
 	for _, opt := range opts {
 		opt(cr)
 	}

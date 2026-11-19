@@ -1,6 +1,6 @@
 # Build the manager binary. Both base images are pinned by digest so two builds
 # of one commit match; Dependabot proposes the new digest.
-FROM golang:1.26@sha256:24a707af49702fa44f02785475d02fb752f6982d3e9c0afb7696e1f0204e7ce9 AS builder
+FROM golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

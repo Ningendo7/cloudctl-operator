@@ -34,7 +34,6 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -89,10 +88,8 @@ var _ = Describe("AppDependencies Controller", func() {
 	Context("reconciling a new CR with a declared queue", func() {
 		It("adds the finalizer, creates the queue, and reports Ready", func() {
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "controller-create-",
-					Namespace:    "default",
-				},
+				GenerateName: "controller-create-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}},
@@ -100,7 +97,7 @@ var _ = Describe("AppDependencies Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -124,13 +121,13 @@ var _ = Describe("AppDependencies Controller", func() {
 		It("traces a reconcile as one tree: root, finalizer, every section, connection info, status patch", func() {
 			recorder := useSpanRecorder(GinkgoT())
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-traced-", Namespace: "default"},
+				GenerateName: "controller-traced-", Namespace: "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -159,13 +156,13 @@ var _ = Describe("AppDependencies Controller", func() {
 
 		It("counts and times every section it runs", func() {
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-metrics-", Namespace: "default"},
+				GenerateName: "controller-metrics-", Namespace: "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			sections := []string{"kms", "sqs", "sns", "dynamodb", "s3", "rds", "alarms", "iam"}
 			durations := map[string]uint64{}
@@ -189,10 +186,8 @@ var _ = Describe("AppDependencies Controller", func() {
 	Context("reconciling a new CR with a declared KMS key", func() {
 		It("creates the key, aliases it, enables rotation, and reports Ready", func() {
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "controller-kms-create-",
-					Namespace:    "default",
-				},
+				GenerateName: "controller-kms-create-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					KMS: &depsv1alpha1.KMSSpec{
 						Resources: []depsv1alpha1.KMSKeySpec{{Name: "primary"}},
@@ -200,7 +195,7 @@ var _ = Describe("AppDependencies Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -233,10 +228,8 @@ var _ = Describe("AppDependencies Controller", func() {
 			fakeSQS.createQueueErr = &fakeAWSError{code: "AccessDenied"}
 
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "controller-permdenied-",
-					Namespace:    "default",
-				},
+				GenerateName: "controller-permdenied-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}},
@@ -244,7 +237,7 @@ var _ = Describe("AppDependencies Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).To(HaveOccurred())
@@ -262,10 +255,8 @@ var _ = Describe("AppDependencies Controller", func() {
 	Context("deleting a CR", func() {
 		It("removes the finalizer once the queue is empty and deletionPolicy is Delete", func() {
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "controller-delete-clean-",
-					Namespace:    "default",
-				},
+				GenerateName: "controller-delete-clean-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{
@@ -275,7 +266,7 @@ var _ = Describe("AppDependencies Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -317,10 +308,8 @@ var _ = Describe("AppDependencies Controller", func() {
 
 		It("keeps the finalizer when a Delete-policy queue is still non-empty", func() {
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "controller-delete-pending-",
-					Namespace:    "default",
-				},
+				GenerateName: "controller-delete-pending-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SQS: &depsv1alpha1.SQSSpec{
 						Resources: []depsv1alpha1.SQSQueueSpec{
@@ -330,7 +319,7 @@ var _ = Describe("AppDependencies Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -355,10 +344,8 @@ var _ = Describe("AppDependencies Controller", func() {
 	Context("reconciling a new CR with a declared topic", func() {
 		It("creates the topic and reports Ready via SNSReady and the aggregate condition", func() {
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "controller-sns-create-",
-					Namespace:    "default",
-				},
+				GenerateName: "controller-sns-create-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SNS: &depsv1alpha1.SNSSpec{
 						Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}},
@@ -366,7 +353,7 @@ var _ = Describe("AppDependencies Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -390,10 +377,8 @@ var _ = Describe("AppDependencies Controller", func() {
 	Context("deleting a CR with a topic that has active subscriptions", func() {
 		It("keeps the finalizer until the topic is safe to delete", func() {
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: "controller-sns-delete-pending-",
-					Namespace:    "default",
-				},
+				GenerateName: "controller-sns-delete-pending-",
+				Namespace:    "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{
 					SNS: &depsv1alpha1.SNSSpec{
 						Resources: []depsv1alpha1.SNSTopicSpec{
@@ -403,7 +388,7 @@ var _ = Describe("AppDependencies Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -428,21 +413,21 @@ var _ = Describe("AppDependencies Controller", func() {
 	Context("reconciling a new CR with a declared RDS instance", func() {
 		It("creates the instance and its security group, and reports Ready", func() {
 			grant := &depsv1alpha1.RDSSubnetGroupGrant{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-grant-happy-"},
-				Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "happy-path-subnet-group", AllowedNamespaces: []string{"default"}},
+				GenerateName: "rds-grant-happy-",
+				Spec:         depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "happy-path-subnet-group", AllowedNamespaces: []string{"default"}},
 			}
 			Expect(k8sClient.Create(ctx, grant)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, grant) })
 
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-rds-create-", Namespace: "default"},
+				GenerateName: "controller-rds-create-", Namespace: "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 					Name: "orders-db", DBSubnetGroupName: "happy-path-subnet-group",
 					Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
 				}}}},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -481,21 +466,21 @@ var _ = Describe("AppDependencies Controller", func() {
 		// rds.WithDescribeCache.
 		It("shares one DescribeDBInstances call per reconcile pass instead of one per call site", func() {
 			grant := &depsv1alpha1.RDSSubnetGroupGrant{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-grant-describecache-"},
-				Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "describecache-subnet-group", AllowedNamespaces: []string{"default"}},
+				GenerateName: "rds-grant-describecache-",
+				Spec:         depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "describecache-subnet-group", AllowedNamespaces: []string{"default"}},
 			}
 			Expect(k8sClient.Create(ctx, grant)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, grant) })
 
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-rds-describecache-", Namespace: "default"},
+				GenerateName: "controller-rds-describecache-", Namespace: "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 					Name: "orders-db", DBSubnetGroupName: "describecache-subnet-group",
 					Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
 				}}}},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			// First two passes create, then verify ownership - get past
 			// both before measuring the steady-state pass below, so this
@@ -519,14 +504,14 @@ var _ = Describe("AppDependencies Controller", func() {
 		// instance, its security group and their policies need the API server.
 		It("writes nothing to AWS on an idle pass or at the recheck", func() {
 			grant := &depsv1alpha1.RDSSubnetGroupGrant{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-grant-idle-"},
-				Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "idle-subnet-group", AllowedNamespaces: []string{"default"}},
+				GenerateName: "rds-grant-idle-",
+				Spec:         depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "idle-subnet-group", AllowedNamespaces: []string{"default"}},
 			}
 			Expect(k8sClient.Create(ctx, grant)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, grant) })
 
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-rds-idle-", Namespace: "default"},
+				GenerateName: "controller-rds-idle-", Namespace: "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 					Name: "orders-db", DBSubnetGroupName: "idle-subnet-group",
 					Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
@@ -534,7 +519,7 @@ var _ = Describe("AppDependencies Controller", func() {
 				}}}},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 			calls := countAWSCalls(reconciler.AWSClients)
 			pass := func() {
 				clear(calls)
@@ -566,14 +551,14 @@ var _ = Describe("AppDependencies Controller", func() {
 	Context("reconciling a declared RDS instance with no authorizing grant", func() {
 		It("reports RDSReady=False without creating anything in AWS", func() {
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-rds-unauthorized-", Namespace: "default"},
+				GenerateName: "controller-rds-unauthorized-", Namespace: "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 					Name: "orders-db", DBSubnetGroupName: "no-grant-subnet-group",
 					Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
 				}}}},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			// A retryable ReconcileError, so Reconcile itself reports no Go
 			// error (it requeues internally) - only the condition reflects
@@ -594,14 +579,14 @@ var _ = Describe("AppDependencies Controller", func() {
 	Context("an RDS instance removed from spec and left stuck past the grace period", func() {
 		It("surfaces InstanceStuckPendingDeletion without Reconcile itself returning an error", func() {
 			grant := &depsv1alpha1.RDSSubnetGroupGrant{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "rds-grant-stuck-"},
-				Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "stuck-subnet-group", AllowedNamespaces: []string{"default"}},
+				GenerateName: "rds-grant-stuck-",
+				Spec:         depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "stuck-subnet-group", AllowedNamespaces: []string{"default"}},
 			}
 			Expect(k8sClient.Create(ctx, grant)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, grant) })
 
 			cr := &depsv1alpha1.AppDependencies{
-				ObjectMeta: metav1.ObjectMeta{GenerateName: "controller-rds-stuck-", Namespace: "default"},
+				GenerateName: "controller-rds-stuck-", Namespace: "default",
 				Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 					Name: "orders-db", DBSubnetGroupName: "stuck-subnet-group",
 					Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
@@ -609,7 +594,7 @@ var _ = Describe("AppDependencies Controller", func() {
 				}}}},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -705,14 +690,14 @@ func newCountingReconciler(t testing.TB, patchCount *int, objs ...client.Object)
 // checkpointing unconditionally.
 func TestEnsureDesiredState_UnchangedReconcile_SkipsRedundantCheckpoints(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
 	}
 	patchCount := 0
 	r := newCountingReconciler(t, &patchCount, cr)
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+	req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("first Reconcile() error = %v", err)
@@ -738,14 +723,14 @@ func TestEnsureDesiredState_UnchangedReconcile_SkipsRedundantCheckpoints(t *test
 // swallowed by whatever the "skip if unchanged" logic is comparing against.
 func TestEnsureDesiredState_ChangedSection_StillCheckpoints(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
 	}
 	patchCount := 0
 	r := newCountingReconciler(t, &patchCount, cr)
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+	req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -765,7 +750,7 @@ func TestEnsureDesiredState_ChangedSection_StillCheckpoints(t *testing.T) {
 func TestCheckpointFor_SurvivesConcurrentSpecEdit(t *testing.T) {
 	scheme := newSharedWithScheme(t)
 	seed := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -831,7 +816,7 @@ func TestJitteredDriftRequeue_WithinBoundsAndVaries(t *testing.T) {
 }
 
 func TestStatusPatch_DoesNotCarryResourceVersion(t *testing.T) {
-	original := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", ResourceVersion: "1"}}
+	original := &depsv1alpha1.AppDependencies{Name: "a", Namespace: "ns", ResourceVersion: "1"}
 	cr := original.DeepCopy()
 	cr.ResourceVersion = "7"
 	cr.Status.IAMRoleARN = "arn:aws:iam::123456789012:role/x"
@@ -851,7 +836,7 @@ func TestStatusPatch_DoesNotCarryResourceVersion(t *testing.T) {
 func TestCheckpointFor_LaterCheckpointSurvivesAConcurrentSpecEdit(t *testing.T) {
 	scheme := newSharedWithScheme(t)
 	seed := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -890,11 +875,11 @@ func TestCheckpointFor_LaterCheckpointSurvivesAConcurrentSpecEdit(t *testing.T) 
 // with the spec, so the fake has to report what a real instance does.
 func TestReconcile_AnRDSInstanceSettlesAcrossTwoPasses(t *testing.T) {
 	grant := &depsv1alpha1.RDSSubnetGroupGrant{
-		ObjectMeta: metav1.ObjectMeta{Name: "rds-grant"},
-		Spec:       depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "happy-path-subnet-group", AllowedNamespaces: []string{"default"}},
+		Name: "rds-grant",
+		Spec: depsv1alpha1.RDSSubnetGroupGrantSpec{DBSubnetGroupName: "happy-path-subnet-group", AllowedNamespaces: []string{"default"}},
 	}
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "rds-cr", UID: "uid-1", Finalizers: []string{finalizerName}},
+		Namespace: "default", Name: "rds-cr", UID: "uid-1", Finalizers: []string{finalizerName},
 		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
 			Name: "orders-db", DBSubnetGroupName: "happy-path-subnet-group",
 			Engine: "postgres", EngineVersion: "16.3", InstanceClass: "db.t4g.micro", AllocatedStorage: 20,
@@ -904,7 +889,7 @@ func TestReconcile_AnRDSInstanceSettlesAcrossTwoPasses(t *testing.T) {
 	r := newCountingReconciler(t, &patches, cr, grant)
 	r.AWSClients.RDS = newFakeRDSClient()
 	r.AWSClients.EC2 = newFakeEC2Client()
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+	req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 	for pass := 1; pass <= 2; pass++ {
 		if _, err := r.Reconcile(context.Background(), req); err != nil {
@@ -947,7 +932,7 @@ func TestStatusNeedsPatch(t *testing.T) {
 	base := depsv1alpha1.AppDependenciesStatus{IAMRoleARN: "arn:aws:iam::123456789012:role/r"}
 	other := depsv1alpha1.AppDependenciesStatus{IAMRoleARN: "arn:aws:iam::123456789012:role/other"}
 	cr := func(version string, s depsv1alpha1.AppDependenciesStatus) *depsv1alpha1.AppDependencies {
-		return &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{ResourceVersion: version}, Status: s}
+		return &depsv1alpha1.AppDependencies{ResourceVersion: version, Status: s}
 	}
 	tests := []struct {
 		name string
@@ -1006,7 +991,7 @@ func TestReconcile_ACRWithResourcesInAnotherRegionIsRefused(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cr := newCR(deleting)
 			r, sqsFake := throttledReconciler(t, cr)
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+			req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 			res, err := r.Reconcile(context.Background(), req)
 			if err != nil {
@@ -1096,7 +1081,7 @@ func TestSetSectionCondition_NoSecondEventForAReasonThatRecordsItsOwn(t *testing
 
 func TestReconcile_StampsWhatWillHappenOnDeleteOnEveryEntry(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "checkout-service"},
+		Namespace: "default", Name: "checkout-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 				{Name: "orders", DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
@@ -1106,7 +1091,7 @@ func TestReconcile_StampsWhatWillHappenOnDeleteOnEveryEntry(t *testing.T) {
 	}
 	patchCount := 0
 	r := newCountingReconciler(t, &patchCount, cr)
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}}
+	req := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
 
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)

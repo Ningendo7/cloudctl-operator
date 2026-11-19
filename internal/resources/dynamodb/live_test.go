@@ -144,8 +144,7 @@ func waitForTableGone(t *testing.T, client *dynamodb.Client, tableName string, t
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		_, err := client.DescribeTable(context.Background(), &dynamodb.DescribeTableInput{TableName: &tableName})
-		var notFound *types.ResourceNotFoundException
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*types.ResourceNotFoundException](err); ok {
 			return
 		}
 		time.Sleep(3 * time.Second)
@@ -245,8 +244,7 @@ func TestLive_Ensure_MissingTableErrorsUseDifferentExceptionTypesByOperation(t *
 	tableName := cloudctlaws.ResourceName("live", liveUniqueSuffix(t), resourceType, "never-created", 255)
 
 	_, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &tableName})
-	var nf1 *types.ResourceNotFoundException
-	if !errors.As(err, &nf1) {
+	if _, ok := errors.AsType[*types.ResourceNotFoundException](err); !ok {
 		t.Errorf("real DescribeTable on a nonexistent table: errors.As(ResourceNotFoundException) = false, got %v", err)
 	}
 
@@ -254,15 +252,13 @@ func TestLive_Ensure_MissingTableErrorsUseDifferentExceptionTypesByOperation(t *
 		TableName:                        &tableName,
 		PointInTimeRecoverySpecification: &types.PointInTimeRecoverySpecification{PointInTimeRecoveryEnabled: aws.Bool(true)},
 	})
-	var nf2 *types.TableNotFoundException
-	if !errors.As(err, &nf2) {
+	if _, ok := errors.AsType[*types.TableNotFoundException](err); !ok {
 		t.Errorf("real UpdateContinuousBackups on a nonexistent table: errors.As(TableNotFoundException) = false, got %v", err)
 	}
 
 	arn := fmt.Sprintf("arn:aws:dynamodb:%s:%s:table/%s", region, accountID, tableName)
 	_, err = client.ListTagsOfResource(ctx, &dynamodb.ListTagsOfResourceInput{ResourceArn: &arn})
-	var nf3 *types.ResourceNotFoundException
-	if !errors.As(err, &nf3) {
+	if _, ok := errors.AsType[*types.ResourceNotFoundException](err); !ok {
 		t.Errorf("real ListTagsOfResource on a nonexistent table: errors.As(ResourceNotFoundException) = false, got %v", err)
 	}
 }

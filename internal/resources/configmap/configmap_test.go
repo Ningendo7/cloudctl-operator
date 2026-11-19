@@ -65,7 +65,7 @@ func getConfigMap(t *testing.T, c client.Client, namespace, name string) *corev1
 func TestEnsure_PopulatesOwnedResourceKeys(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 			SNS: &depsv1alpha1.SNSSpec{Resources: []depsv1alpha1.SNSTopicSpec{{Name: "events"}}},
@@ -104,7 +104,7 @@ func TestEnsure_PopulatesOwnedResourceKeys(t *testing.T) {
 
 func TestEnsure_MirrorsAuthorizedConsumedResource(t *testing.T) {
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
+		Namespace: "team-b", Name: "platform-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 				{Name: "shared-cache", SharedWith: []depsv1alpha1.SharedWithEntry{
@@ -121,7 +121,7 @@ func TestEnsure_MirrorsAuthorizedConsumedResource(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer).Build()
 
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-cache"},
@@ -146,7 +146,7 @@ func TestEnsure_MirrorsAuthorizedConsumedResource(t *testing.T) {
 func TestEnsure_ConsumedResourcesFromSameNamedProducersInDifferentNamespaces(t *testing.T) {
 	newProducer := func(namespace string) *depsv1alpha1.AppDependencies {
 		return &depsv1alpha1.AppDependencies{
-			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "checkout-service"},
+			Namespace: namespace, Name: "checkout-service",
 			Spec: depsv1alpha1.AppDependenciesSpec{
 				SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 					{Name: "orders", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "platform", Name: "analytics"}}},
@@ -162,7 +162,7 @@ func TestEnsure_ConsumedResourcesFromSameNamedProducersInDifferentNamespaces(t *
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producerA, producerB).Build()
 
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "analytics", UID: "uid-1"},
+		Namespace: "platform", Name: "analytics", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "team-a", Name: "checkout-service", ResourceName: "orders"},
@@ -232,7 +232,7 @@ func TestSetRDSConnectionKeys(t *testing.T) {
 func TestEnsure_OmitsUnauthorizedConsumedResource(t *testing.T) {
 	// Same as above, but the producer never granted this consumer access.
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
+		Namespace: "team-b", Name: "platform-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "shared-cache"}}},
 		},
@@ -245,7 +245,7 @@ func TestEnsure_OmitsUnauthorizedConsumedResource(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer).Build()
 
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 				{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-cache"},
@@ -269,7 +269,7 @@ func TestEnsure_OmitsUnauthorizedConsumedResource(t *testing.T) {
 func TestEnsure_SetsOwnerReferenceForNativeGC(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -294,7 +294,7 @@ func TestEnsure_SetsOwnerReferenceForNativeGC(t *testing.T) {
 func TestEnsure_UpdatesExistingConfigMapOnDataChange(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -325,7 +325,7 @@ func TestEnsure_UpdatesExistingConfigMapOnDataChange(t *testing.T) {
 func TestEnsure_SanitizesKeysForEnvVarCompatibility(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			S3: &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "old-invoices"}}},
 		},
@@ -349,7 +349,7 @@ func TestEnsure_SanitizesKeysForEnvVarCompatibility(t *testing.T) {
 func TestEnsure_KeepsAnEmptyConfigMapWhenNothingRemainsToReport(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -382,8 +382,8 @@ func TestEnsure_KeepsAnEmptyConfigMapWhenNothingRemainsToReport(t *testing.T) {
 func TestEnsure_ACRWithNothingToReportYetStillGetsAConfigMap(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
-		Spec:       depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}},
 		// No ledger entry yet: the queue is not created.
 	}
 
@@ -401,15 +401,13 @@ func TestEnsure_ACRWithNothingToReportYetStillGetsAConfigMap(t *testing.T) {
 // overwriting a same-named ConfigMap this CR doesn't own.
 func TestEnsure_PreExistingForeignConfigMap_Refused(t *testing.T) {
 	foreign := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "team-a",
-			Name:      ConfigMapName("checkout-service"),
-		},
-		Data: map[string]string{"UNRELATED": "keep-me"},
+		Namespace: "team-a",
+		Name:      ConfigMapName("checkout-service"),
+		Data:      map[string]string{"UNRELATED": "keep-me"},
 	}
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(foreign).Build()
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -436,13 +434,13 @@ func TestEnsure_PreExistingForeignConfigMap_Refused(t *testing.T) {
 // same guard on the delete path, which is more severe than an overwrite.
 func TestEnsure_ForeignConfigMapHiddenFromCache_Refused(t *testing.T) {
 	foreign := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: ConfigMapName("checkout-service")},
-		Data:       map[string]string{"UNRELATED": "keep-me"},
+		Namespace: "team-a", Name: ConfigMapName("checkout-service"),
+		Data: map[string]string{"UNRELATED": "keep-me"},
 	}
 	cached := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	apiServer := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(foreign).Build()
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -464,7 +462,7 @@ func TestEnsure_ForeignConfigMapHiddenFromCache_Refused(t *testing.T) {
 func TestEnsure_LabelsConfigMapAsManaged(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -491,15 +489,13 @@ func TestEnsure_LabelsConfigMapAsManaged(t *testing.T) {
 
 func TestEnsure_PreExistingForeignConfigMap_EmptyData_NotDeleted(t *testing.T) {
 	foreign := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "team-a",
-			Name:      ConfigMapName("checkout-service"),
-		},
-		Data: map[string]string{"UNRELATED": "keep-me"},
+		Namespace: "team-a",
+		Name:      ConfigMapName("checkout-service"),
+		Data:      map[string]string{"UNRELATED": "keep-me"},
 	}
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(foreign).Build()
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 	}
 
 	if err := Ensure(context.Background(), c, c, nil, testRegion, testAccountID, cr); err == nil {
@@ -537,7 +533,7 @@ func withFailingCRReadsCM(c client.WithWatch, failing *bool) client.Client {
 // var away from pods that restart before the next pass.
 func TestEnsure_KeepsConsumedKeysWhenAProducerCannotBeRead(t *testing.T) {
 	producer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "platform-service"},
+		Namespace: "team-b", Name: "platform-service",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 			{Name: "shared-cache", SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "team-a", Name: "checkout-service"}}},
 		}}},
@@ -548,7 +544,7 @@ func TestEnsure_KeepsConsumedKeysWhenAProducerCannotBeRead(t *testing.T) {
 	failing := false
 	c := withFailingCRReadsCM(fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer).Build(), &failing)
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "team-b", Name: "platform-service", ResourceName: "shared-cache"},
 		}}},
@@ -569,7 +565,7 @@ func TestEnsure_KeepsConsumedKeysWhenAProducerCannotBeRead(t *testing.T) {
 
 func sqsProducer(namespace, crName, queue string, shareWith ...depsv1alpha1.SharedWithEntry) *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: crName},
+		Namespace: namespace, Name: crName,
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 			{Name: queue, SharedWith: shareWith},
 		}}},
@@ -601,7 +597,7 @@ func TestEnsure_RefusesConsumedResourcesWhoseKeysCollide(t *testing.T) {
 		sqsProducer("team-a", "orders", "q", share), sqsProducer("team", "a-orders", "q", share),
 	).Build()
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "consumer-ns", Name: "app", UID: "uid-1"},
+		Namespace: "consumer-ns", Name: "app", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "team-a", Name: "orders", ResourceName: "q"},
 			{Namespace: "team", Name: "a-orders", ResourceName: "q"},
@@ -619,7 +615,7 @@ func TestEnsure_RefusesAnOwnedResourceWhoseKeyCollidesWithAConsumedOne(t *testin
 	share := depsv1alpha1.SharedWithEntry{Namespace: "consumer-ns", Name: "app"}
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(sqsProducer("team-a", "orders", "q", share)).Build()
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "consumer-ns", Name: "app", UID: "uid-1"},
+		Namespace: "consumer-ns", Name: "app", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{
 			Resources: []depsv1alpha1.SQSQueueSpec{{Name: "team-a-orders-q"}},
 			Consumes:  []depsv1alpha1.ConsumeRef{{Namespace: "team-a", Name: "orders", ResourceName: "q"}},
@@ -640,7 +636,7 @@ func TestEnsure_DistinctAndRepeatedConsumedResourcesAreNotCollisions(t *testing.
 		sqsProducer("team-a", "orders", "q", share), sqsProducer("team-b", "orders", "q", share),
 	).Build()
 	consumer := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "consumer-ns", Name: "app", UID: "uid-1"},
+		Namespace: "consumer-ns", Name: "app", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
 			{Namespace: "team-a", Name: "orders", ResourceName: "q"},
 			{Namespace: "team-b", Name: "orders", ResourceName: "q"},
@@ -661,7 +657,7 @@ func TestEnsure_DistinctAndRepeatedConsumedResourcesAreNotCollisions(t *testing.
 func TestAddConsumedRDS_AFailedReadOfTheProducerIsAnError(t *testing.T) {
 	failing := true
 	c := withFailingCRReadsCM(fake.NewClientBuilder().WithScheme(newScheme(t)).Build(), &failing)
-	consumer := &depsv1alpha1.AppDependencies{ObjectMeta: metav1.ObjectMeta{Namespace: "consumer-ns", Name: "app"}}
+	consumer := &depsv1alpha1.AppDependencies{Namespace: "consumer-ns", Name: "app"}
 	ref := depsv1alpha1.ConsumeRef{Namespace: "team-a", Name: "orders", ResourceName: "db"}
 
 	if err := addConsumedRDS(context.Background(), c, nil, rds.NewKeyedData(), consumer, ref); err == nil {
@@ -687,7 +683,7 @@ func countingApplies(t *testing.T, objs ...client.Object) (client.WithWatch, *in
 func TestEnsure_AppliesOnlyWhenSomethingDiffers(t *testing.T) {
 	c, applies := countingApplies(t)
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -734,7 +730,7 @@ func TestEnsure_AppliesWhenMatchingDataWasWrittenByAnotherManager(t *testing.T) 
 	// Taking the fields over matters: a later apply that drops a key only
 	// removes it if this operator's manager owns it.
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},
@@ -746,14 +742,12 @@ func TestEnsure_AppliesWhenMatchingDataWasWrittenByAnotherManager(t *testing.T) 
 	}
 	isController := true
 	restored := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "team-a", Name: ConfigMapName("checkout-service"),
-			Labels: map[string]string{depsv1alpha1.ManagedLabelKey: depsv1alpha1.ManagedLabelValue},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: depsv1alpha1.GroupVersion.String(), Kind: "AppDependencies",
-				Name: "checkout-service", UID: "uid-1", Controller: &isController,
-			}},
-		},
+		Namespace: "team-a", Name: ConfigMapName("checkout-service"),
+		Labels: map[string]string{depsv1alpha1.ManagedLabelKey: depsv1alpha1.ManagedLabelValue},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: depsv1alpha1.GroupVersion.String(), Kind: "AppDependencies",
+			Name: "checkout-service", UID: "uid-1", Controller: &isController,
+		}},
 		Data: map[string]string{"SQS_ORDERS_URL": "https://sqs.us-east-1.amazonaws.com/123456789012/team-a-checkout-service-orders"},
 	}
 	c, applies := countingApplies(t, restored)
@@ -767,7 +761,7 @@ func TestEnsure_AppliesWhenMatchingDataWasWrittenByAnotherManager(t *testing.T) 
 
 func connectionCR() *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout-service", UID: "uid-1"},
+		Namespace: "team-a", Name: "checkout-service", UID: "uid-1",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}},
 		},

@@ -31,7 +31,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -445,7 +444,7 @@ func (c awsCalls) writes() map[string]int {
 // repeated forever usually means a comparison that can never match.
 func TestReconcile_AnIdlePassWritesNothingToAWS(t *testing.T) {
 	cr := &depsv1alpha1.AppDependencies{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "app"},
+		Namespace: "default", Name: "app",
 		Spec: depsv1alpha1.AppDependenciesSpec{
 			SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{
 				{Name: "orders", DLQ: true, Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true}},
@@ -458,7 +457,7 @@ func TestReconcile_AnIdlePassWritesNothingToAWS(t *testing.T) {
 	patches := 0
 	r := newCountingReconciler(t, &patches, cr)
 	calls := countAWSCalls(r.AWSClients)
-	request := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "app"}}
+	request := reconcile.Request{Namespace: "default", Name: "app"}
 	pass := func() {
 		t.Helper()
 		clear(calls)

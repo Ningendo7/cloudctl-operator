@@ -60,8 +60,7 @@ func checkAdoptable(
 	}
 	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, namespace, crName, resourceType, r.Name, 63)
 	out, err := describeDBInstanceCached(ctx, awsClient, instanceID)
-	var notFound *types.DBInstanceNotFoundFault
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.DBInstanceNotFoundFault](err); ok {
 		return nil
 	}
 	if err != nil {

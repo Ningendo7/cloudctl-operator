@@ -196,8 +196,7 @@ func ensureKey(
 	describeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &alias,
 	})
-	var notFound *types.NotFoundException
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.NotFoundException](err); ok {
 		return createKey(ctx, kmsClient, namespace, crName, crUID, alias, resourceName, opts, ledger, checkpoint, recordEvent)
 	}
 	if err != nil {
@@ -297,8 +296,7 @@ func resumeKey(
 	describeOut, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{
 		KeyId: &entry.ARN,
 	})
-	var notFound *types.NotFoundException
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.NotFoundException](err); ok {
 		return ledger, keyMissingError(entry, recordEvent)
 	}
 	if err != nil {
@@ -590,8 +588,7 @@ func ensureAlias(ctx context.Context, kmsClient kmsAPI, alias, arn, keyID string
 	if err == nil {
 		return nil
 	}
-	var alreadyExists *types.AlreadyExistsException
-	if !errors.As(err, &alreadyExists) {
+	if _, ok := errors.AsType[*types.AlreadyExistsException](err); !ok {
 		return wrapAWSError(err, fmt.Sprintf("creating KMS key alias %q", alias))
 	}
 
@@ -620,8 +617,7 @@ func aliasTakenError(alias, holder, arn string) error {
 // looked up first and created only when it is missing.
 func ensureExistingKeyAlias(ctx context.Context, kmsClient kmsAPI, alias, arn, keyID string) error {
 	out, err := kmsClient.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: &alias})
-	var notFound *types.NotFoundException
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*types.NotFoundException](err); ok {
 		return ensureAlias(ctx, kmsClient, alias, arn, keyID)
 	}
 	if err != nil {
