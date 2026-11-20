@@ -39,13 +39,22 @@ func maxedOutSectionGrants(resourceType string) []grant {
 	return grants
 }
 
-// TestEnsurePermissionsPolicy_RefusesOversizedPolicyWithClearError confirms
-// the proactive size check actually fires for a realistic, reachable case:
-// a single section maxed out at its own CRD-declared limit renders a
-// 32,758-character document (confirmed via this exact grant set), well
-// over PutRolePolicy's 10,240-character ceiling.
+// One section at its CRD limits used to need 32,758 characters, one
+// statement per grant; grouped by action set it fits.
+func TestEnsurePermissionsPolicy_OneFullSectionFits(t *testing.T) {
+	if _, err := ensurePermissionsPolicy(maxedOutSectionGrants("sqs")); err != nil {
+		t.Fatalf("ensurePermissionsPolicy() for one full section = %v, want it to fit", err)
+	}
+}
+
+// The size check still fires for a CR that reaches it: several sections at
+// their CRD limits.
 func TestEnsurePermissionsPolicy_RefusesOversizedPolicyWithClearError(t *testing.T) {
-	grants := maxedOutSectionGrants("sqs")
+	sections := []string{"sqs", "sns", "dynamodb"}
+	grants := make([]grant, 0, len(sections)*len(maxedOutSectionGrants("sqs")))
+	for _, resourceType := range sections {
+		grants = append(grants, maxedOutSectionGrants(resourceType)...)
+	}
 
 	policy, err := ensurePermissionsPolicy(grants)
 	if err == nil {

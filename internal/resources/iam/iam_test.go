@@ -55,7 +55,7 @@ func TestEnsure_ReturnsNoRoleWhenNothingNeedsIAM(t *testing.T) {
 	client := newFakeIAM()
 	cr := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "empty-cr", UID: "uid-1"}
 
-	ledger, arn, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	ledger, arn, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -74,7 +74,7 @@ func TestEnsure_ErrorsWhenOIDCNotConfiguredButNeeded(t *testing.T) {
 	client := newFakeIAM()
 	cr := ownedCR("checkout-service")
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), "", "", cr, nil)
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{}, cr, nil)
 	if err == nil {
 		t.Fatal("expected an error when OIDC config is missing but a role is actually needed")
 	}
@@ -87,7 +87,7 @@ func TestEnsure_CreatesRoleWithTrustPolicyAndPermissions(t *testing.T) {
 	client := newFakeIAM()
 	cr := ownedCR("checkout-service")
 
-	ledger, arn, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	ledger, arn, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -131,7 +131,7 @@ func TestEnsure_UsesConfiguredServiceAccountName(t *testing.T) {
 	cr := ownedCR("checkout-service")
 	cr.Spec.ServiceAccountName = "custom-sa"
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -147,13 +147,13 @@ func TestEnsure_IsIdempotentAndPreservesCreatedAt(t *testing.T) {
 	client := newFakeIAM()
 	cr := ownedCR("checkout-service")
 
-	ledger, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	ledger, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 	firstEntry, _ := status.FindManagedResource(ledger, "iam", "role")
 
-	ledger, _, err = Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, ledger)
+	ledger, _, err = Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, ledger)
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -181,7 +181,7 @@ func TestEnsure_CorrectsTrustPolicyDriftOnExistingRole(t *testing.T) {
 		policies:    map[string]string{},
 	}
 
-	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil); err != nil {
+	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil); err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 
@@ -218,7 +218,7 @@ func TestEnsure_DoesNotUpdateTrustPolicyWhenAlreadyCorrect(t *testing.T) {
 	}
 	client.updateAssumeRolePolicyErr = &fakeAWSError{code: "ShouldNotBeCalled"}
 
-	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil); err != nil {
+	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil); err != nil {
 		t.Fatalf("Ensure() error = %v — expected no UpdateAssumeRolePolicy call when the trust policy already matches", err)
 	}
 }
@@ -231,7 +231,7 @@ func TestEnsure_DoesNotCallPutRolePolicyWhenAlreadyCorrect(t *testing.T) {
 	client := newFakeIAM()
 	cr := ownedCR("checkout-service")
 
-	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil); err != nil {
+	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil); err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 	callsAfterFirst := client.putRolePolicyCalls
@@ -239,7 +239,7 @@ func TestEnsure_DoesNotCallPutRolePolicyWhenAlreadyCorrect(t *testing.T) {
 		t.Fatal("expected the first Ensure() to write the policy at least once")
 	}
 
-	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil); err != nil {
+	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 	if client.putRolePolicyCalls != callsAfterFirst {
@@ -253,7 +253,7 @@ func TestEnsure_CallsPutRolePolicyWhenGrantsChange(t *testing.T) {
 	client := newFakeIAM()
 	cr := ownedCR("checkout-service")
 
-	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil); err != nil {
+	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil); err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 	callsAfterFirst := client.putRolePolicyCalls
@@ -262,7 +262,7 @@ func TestEnsure_CallsPutRolePolicyWhenGrantsChange(t *testing.T) {
 	cr.Status.ManagedResources = append(cr.Status.ManagedResources,
 		depsv1alpha1.ManagedResource{Type: "sns", Name: "events", ARN: "arn:aws:sns:us-east-1:123456789012:default-checkout-service-events"})
 
-	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil); err != nil {
+	if _, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 	if client.putRolePolicyCalls != callsAfterFirst+1 {
@@ -284,7 +284,7 @@ func TestEnsure_RefusesRoleOwnedByDifferentCR(t *testing.T) {
 		policies:    map[string]string{},
 	}
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err == nil {
 		t.Fatal("expected an error for a role name collision with a differently-owned role")
 	}
@@ -295,7 +295,7 @@ func TestEnsure_ClassifiesPermissionErrorsAsNotRetryable(t *testing.T) {
 	client.createRoleErr = &fakeAWSError{code: "AccessDenied", fault: smithy.FaultClient}
 	cr := ownedCR("checkout-service")
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -309,7 +309,7 @@ func TestEnsure_ClassifiesTransientErrorsAsRetryable(t *testing.T) {
 	client.createRoleErr = &fakeAWSError{code: "ServiceFailure", fault: smithy.FaultServer}
 	cr := ownedCR("checkout-service")
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -328,7 +328,7 @@ func TestEnsure_ClassifiesConcurrentModificationAsRetryable(t *testing.T) {
 	client.createRoleErr = &fakeAWSError{code: "ConcurrentModification", fault: smithy.FaultClient}
 	cr := ownedCR("checkout-service")
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -347,7 +347,7 @@ func TestEnsure_ClassifiesEntityAlreadyExistsAsNotRetryable(t *testing.T) {
 	client.createRoleErr = &fakeAWSError{code: "EntityAlreadyExists", fault: smithy.FaultClient}
 	cr := ownedCR("checkout-service")
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -361,7 +361,7 @@ func TestEnsure_ClassifiesLimitExceededAsNotRetryable(t *testing.T) {
 	client.createRoleErr = &fakeAWSError{code: "LimitExceeded", fault: smithy.FaultClient}
 	cr := ownedCR("checkout-service")
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -375,7 +375,7 @@ func TestEnsure_ClassifiesInvalidInputAsNotRetryable(t *testing.T) {
 	client.createRoleErr = &fakeAWSError{code: "InvalidInput", fault: smithy.FaultClient}
 	cr := ownedCR("checkout-service")
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -389,7 +389,7 @@ func TestEnsure_ClassifiesMalformedPolicyDocumentAsNotRetryable(t *testing.T) {
 	client.putRolePolicyErr = &fakeAWSError{code: "MalformedPolicyDocument", fault: smithy.FaultClient}
 	cr := ownedCR("checkout-service")
 
-	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, _, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -402,7 +402,7 @@ func TestEnsure_TruncatesRoleNameExceedingIAMLimit(t *testing.T) {
 	client := newFakeIAM()
 	cr := ownedCR(strings.Repeat("a", 70))
 
-	_, arn, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, arn, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -429,7 +429,7 @@ func TestEnsure_GrantsConsumedResourceFromAnotherCR(t *testing.T) {
 		},
 	}
 
-	_, arn, err := Ensure(context.Background(), client, newFakeK8sClient(producer), testOIDCArn, testOIDCURL, consumer, nil)
+	_, arn, err := Ensure(context.Background(), client, newFakeK8sClient(producer), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, consumer, nil)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -485,7 +485,7 @@ func TestEnsure_ReportsSkippedConsumesButStillCreatesRoleForResolvedGrants(t *te
 	}
 	client := newFakeIAM()
 
-	_, arn, err := Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, nil)
+	_, arn, err := Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, nil)
 	if arn == "" {
 		t.Fatal("expected the role to still be created for the resolved owned grant")
 	}
@@ -504,7 +504,7 @@ func TestEnsure_ReadsTagsAndPolicyOnlyOncePerTrustWindow(t *testing.T) {
 	pass := func() {
 		t.Helper()
 		var err error
-		if ledger, _, err = Ensure(context.Background(), client, newFakeK8sClient(), testOIDCArn, testOIDCURL, cr, ledger); err != nil {
+		if ledger, _, err = Ensure(context.Background(), client, newFakeK8sClient(), RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, ledger); err != nil {
 			t.Fatalf("Ensure() error = %v", err)
 		}
 	}
@@ -569,7 +569,7 @@ func TestEnsure_RevokingOneOfTwoGrantsNarrowsThePolicy(t *testing.T) {
 			{Namespace: "default", Name: "billing-service", ResourceName: "orders"},
 		}}},
 	}
-	ledger, _, err := Ensure(context.Background(), iamClient, k8s, testOIDCArn, testOIDCURL, consumer, nil)
+	ledger, _, err := Ensure(context.Background(), iamClient, k8s, RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, consumer, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
@@ -584,7 +584,7 @@ func TestEnsure_RevokingOneOfTwoGrantsNarrowsThePolicy(t *testing.T) {
 	if err := k8s.Update(context.Background(), billing); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Ensure(context.Background(), iamClient, k8s, testOIDCArn, testOIDCURL, consumer, ledger); err == nil {
+	if _, _, err := Ensure(context.Background(), iamClient, k8s, RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, consumer, ledger); err == nil {
 		t.Error("expected the revoked queue to be reported as not granted")
 	}
 

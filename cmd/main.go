@@ -47,12 +47,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/controller"
 	"github.com/Ningendo7/cloudctl-operator/internal/observability"
+	"github.com/Ningendo7/cloudctl-operator/internal/version"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -140,7 +140,6 @@ func init() {
 type config struct {
 	metricsAddr                                      string
 	metricsCertPath, metricsCertName, metricsCertKey string
-	webhookCertPath, webhookCertName, webhookCertKey string
 	enableLeaderElection                             bool
 	probeAddr                                        string
 	pprofAddr                                        string
@@ -148,6 +147,8 @@ type config struct {
 	enableHTTP2                                      bool
 	oidcProviderARN                                  string
 	oidcProviderURL                                  string
+	iamPermissionsBoundaryARN                        string
+	iamRolePath                                      string
 	podBaseSecurityGroupIDs                          string
 	maxConcurrentReconciles                          int
 	releaseTags                                      bool
@@ -167,21 +168,24 @@ func parseFlags() config {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&c.secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
-	flag.StringVar(&c.webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
-	flag.StringVar(&c.webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
-	flag.StringVar(&c.webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.StringVar(&c.metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&c.metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
 	flag.StringVar(&c.metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&c.enableHTTP2, "enable-http2", false,
-		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+		"If set, HTTP/2 will be enabled for the metrics server")
 	flag.StringVar(&c.oidcProviderARN, "oidc-provider-arn", "",
 		"ARN of this cluster's IAM OIDC identity provider, required for the "+
 			"IRSA trust policy on every IAM role this operator derives.")
 	flag.StringVar(&c.oidcProviderURL, "oidc-provider-url", "",
 		"URL (without https://) of this cluster's IAM OIDC identity provider, "+
 			"required for the IRSA trust policy on every IAM role this operator derives.")
+	flag.StringVar(&c.iamPermissionsBoundaryARN, "iam-permissions-boundary-arn", "",
+		"ARN of a managed policy set as the permissions boundary of every IAM role the operator manages. "+
+			"With it, the operator's own IAM permissions can be limited to roles that carry the boundary.")
+	flag.StringVar(&c.iamRolePath, "iam-role-path", "",
+		"Path for IAM roles the operator creates, such as /cloudctl/, so its permissions can be scoped "+
+			"to role/cloudctl/*. Existing roles keep their path.")
 	flag.StringVar(&c.podBaseSecurityGroupIDs, "pod-base-security-group-ids", "",
 		"Comma-separated security group IDs that the pods of a CR using rds.consumes keep next to the "+
 			"database group, normally the EKS cluster security group. Security Groups for Pods replaces a "+
@@ -200,14 +204,21 @@ func parseFlags() config {
 	return c
 }
 
+// flushTraces is replaced once tracing starts; os.Exit skips deferred calls,
+// so fatal runs it itself.
+var flushTraces = func() {}
+
 func fatal(err error, msg string) {
 	setupLog.Error(err, msg)
+	flushTraces()
 	os.Exit(1)
 }
 
 func main() {
 	c := parseFlags()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&c.zapOpts)))
+	build := version.Current()
+	setupLog.Info("Starting cloudctl-operator", "version", build.Version, "commit", build.Commit, "go", build.GoVersion)
 
 	if c.oidcProviderARN == "" || c.oidcProviderURL == "" {
 		setupLog.Info("Starting without --oidc-provider-arn/--oidc-provider-url set - " +
@@ -218,6 +229,13 @@ func main() {
 	if err != nil {
 		fatal(err, "Invalid --pod-base-security-group-ids")
 	}
+	if err := checkIAMRoleFlags(c.iamPermissionsBoundaryARN, c.iamRolePath); err != nil {
+		fatal(err, "Invalid IAM role flags")
+	}
+	if c.iamPermissionsBoundaryARN == "" {
+		setupLog.Info("Starting without --iam-permissions-boundary-arn: the operator's IAM permissions can't be " +
+			"limited to its own roles, so its credentials could put any policy on any role they can reach")
+	}
 
 	if limit := limitMemoryFromCgroup(cgroupRoot); limit > 0 {
 		setupLog.Info("Set the Go memory limit from the container's", "bytes", limit)
@@ -226,14 +244,14 @@ func main() {
 	ctx := ctrl.SetupSignalHandler()
 
 	restConfig := ctrl.GetConfigOrDie()
-	defer setupTracing(ctx, restConfig)()
+	flushTraces = setupTracing(ctx, restConfig)
+	defer flushTraces()
 
-	webhookOpts, metricsOpts := serverOptions(c)
+	metricsOpts := serverOptions(c)
 	gracefulShutdownTimeout := 30 * time.Second
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsOpts,
-		WebhookServer:          webhook.NewServer(webhookOpts),
 		HealthProbeBindAddress: c.probeAddr,
 		PprofBindAddress:       c.pprofAddr,
 		LeaderElection:         c.enableLeaderElection,
@@ -298,8 +316,8 @@ func setupTracing(ctx context.Context, restConfig *rest.Config) (flush func()) {
 	}
 }
 
-// serverOptions builds the webhook and metrics server options from the flags.
-func serverOptions(c config) (webhook.Options, metricsserver.Options) {
+// serverOptions builds the metrics server options from the flags.
+func serverOptions(c config) metricsserver.Options {
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
@@ -312,16 +330,6 @@ func serverOptions(c config) (webhook.Options, metricsserver.Options) {
 			setupLog.Info("Disabling HTTP/2")
 			cfg.NextProtos = []string{"http/1.1"}
 		})
-	}
-
-	webhookOpts := webhook.Options{TLSOpts: tlsOpts}
-	if len(c.webhookCertPath) > 0 {
-		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
-			"webhook-cert-path", c.webhookCertPath, "webhook-cert-name", c.webhookCertName, "webhook-cert-key", c.webhookCertKey)
-
-		webhookOpts.CertDir = c.webhookCertPath
-		webhookOpts.CertName = c.webhookCertName
-		webhookOpts.KeyName = c.webhookCertKey
 	}
 
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
@@ -341,14 +349,8 @@ func serverOptions(c config) (webhook.Options, metricsserver.Options) {
 		metricsOpts.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
-	//
-	// TODO(user): If you enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
+	// Without a certificate, controller-runtime serves metrics with a
+	// self-signed one.
 	if len(c.metricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", c.metricsCertPath, "metrics-cert-name", c.metricsCertName, "metrics-cert-key", c.metricsCertKey)
@@ -357,7 +359,7 @@ func serverOptions(c config) (webhook.Options, metricsserver.Options) {
 		metricsOpts.CertName = c.metricsCertName
 		metricsOpts.KeyName = c.metricsCertKey
 	}
-	return webhookOpts, metricsOpts
+	return metricsOpts
 }
 
 // newAWSBootstrap builds what brings up the AWS clients and, once they are
@@ -374,16 +376,18 @@ func newAWSBootstrap(
 		interval:   awsClientInitRetryInterval,
 		onReady: func(ctx context.Context, awsClients *cloudctlaws.Clients) error {
 			if err := (&controller.AppDependenciesReconciler{
-				Client:                  mgr.GetClient(),
-				APIReader:               mgr.GetAPIReader(),
-				Scheme:                  mgr.GetScheme(),
-				AWSClients:              awsClients,
-				Recorder:                mgr.GetEventRecorder("appdependencies-controller"),
-				OIDCProviderARN:         c.oidcProviderARN,
-				OIDCProviderURL:         c.oidcProviderURL,
-				PodBaseSecurityGroupIDs: baseSecurityGroups,
-				MaxConcurrentReconciles: c.maxConcurrentReconciles,
-				DisableReleaseTags:      !c.releaseTags,
+				Client:                    mgr.GetClient(),
+				APIReader:                 mgr.GetAPIReader(),
+				Scheme:                    mgr.GetScheme(),
+				AWSClients:                awsClients,
+				Recorder:                  mgr.GetEventRecorder("appdependencies-controller"),
+				OIDCProviderARN:           c.oidcProviderARN,
+				OIDCProviderURL:           c.oidcProviderURL,
+				IAMPermissionsBoundaryARN: c.iamPermissionsBoundaryARN,
+				IAMRolePath:               c.iamRolePath,
+				PodBaseSecurityGroupIDs:   baseSecurityGroups,
+				MaxConcurrentReconciles:   c.maxConcurrentReconciles,
+				DisableReleaseTags:        !c.releaseTags,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("creating appdependencies controller: %w", err)
 			}
@@ -428,6 +432,25 @@ func addHealthChecks(mgr ctrl.Manager, bootstrap *awsBootstrap, credHealth *clou
 			fatal(err, check.failMsg)
 		}
 	}
+}
+
+var (
+	policyARNPattern = regexp.MustCompile(`^arn:aws[a-z-]*:iam::(\d{12}|aws):policy/[\w+=,.@/-]+$`)
+	rolePathPattern  = regexp.MustCompile(`^(/|/[\x21-\x7E]+/)$`)
+)
+
+// rolePathMaxLen is IAM's limit on a path.
+const rolePathMaxLen = 512
+
+// checkIAMRoleFlags rejects values IAM would refuse on every CreateRole.
+func checkIAMRoleFlags(boundaryARN, path string) error {
+	if boundaryARN != "" && !policyARNPattern.MatchString(boundaryARN) {
+		return fmt.Errorf("--iam-permissions-boundary-arn %q is not a managed policy ARN", boundaryARN)
+	}
+	if path != "" && (len(path) > rolePathMaxLen || !rolePathPattern.MatchString(path)) {
+		return fmt.Errorf("--iam-role-path %q must start and end with / and be at most %d characters", path, rolePathMaxLen)
+	}
+	return nil
 }
 
 var securityGroupIDPattern = regexp.MustCompile(`^sg-[0-9a-f]{8,17}$`)

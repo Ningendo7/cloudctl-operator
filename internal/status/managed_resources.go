@@ -125,7 +125,10 @@ func NeedsRevalidation(entry depsv1alpha1.ManagedResource) bool {
 	if entry.LastVerifiedAt == nil {
 		return true
 	}
-	return time.Since(entry.LastVerifiedAt.Time) > TrustWindow
+	// A time in the future was not written by this operator's clock, so it
+	// proves nothing; trusting it would never expire.
+	age := time.Since(entry.LastVerifiedAt.Time)
+	return age < 0 || age > TrustWindow
 }
 
 // VerifiedSince reports whether after was verified against AWS later than

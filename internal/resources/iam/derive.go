@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -75,7 +76,9 @@ var actionSets = map[string]actionSet{
 		readWrite: []string{"sns:Publish"},
 	},
 	resourceTypeDynamoDB: {
-		baseline:  []string{"dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem"},
+		// DescribeTable: many mappers and SDK helpers read the table's key
+		// schema before their first request.
+		baseline:  []string{"dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem", "dynamodb:DescribeTable"},
 		readWrite: []string{"dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:ConditionCheckItem"},
 	},
 	// kms grants are for a resource's own encryption key (dedicated or
@@ -98,7 +101,8 @@ var actionSets = map[string]actionSet{
 // with a "/*" suffix for everything else), so one Resource per statement
 // like every other type here doesn't fit.
 var (
-	s3BucketLevelActions = []string{"s3:ListBucket"}
+	// GetBucketLocation: SDKs and tools ask for it to find the bucket's region.
+	s3BucketLevelActions = []string{"s3:ListBucket", "s3:GetBucketLocation"}
 	s3ObjectBaseline     = []string{"s3:GetObject"}
 	s3ObjectReadWrite    = []string{"s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"}
 )
@@ -195,6 +199,17 @@ func collectGrants(ctx context.Context, k8sClient client.Client, cr *depsv1alpha
 	}
 
 	return grants, skipped, nil
+}
+
+// declaresIAMWork reports whether the spec declares anything the CR's role
+// would grant: a resource it owns, one it consumes, or a key.
+func declaresIAMWork(cr *depsv1alpha1.AppDependencies) bool {
+	for _, sec := range grantSections(cr) {
+		if len(sec.owned) > 0 || len(sec.consumes) > 0 {
+			return true
+		}
+	}
+	return cr.Spec.KMS != nil && len(cr.Spec.KMS.Resources) > 0
 }
 
 // grantSection is what one declared section contributes: the resources the
@@ -400,6 +415,37 @@ func ResolveConsumeARN(ctx context.Context, k8sClient client.Client, consumer *d
 	return grants[0].arn, true, nil
 }
 
+// statementGroups puts resources that get the same actions into one
+// statement. One statement per grant reaches the 10,240-character inline
+// policy limit several times sooner. Statements keep the order their first
+// grant came in, so the same grants always give the same document.
+type statementGroups struct {
+	statements []policyStatement
+	index      map[string]int
+}
+
+func (g *statementGroups) add(kind string, actions []string, resources ...string) {
+	key := kind + "\x00" + strings.Join(actions, ",")
+	i, ok := g.index[key]
+	if !ok {
+		if g.index == nil {
+			g.index = map[string]int{}
+		}
+		i = len(g.statements)
+		g.index[key] = i
+		g.statements = append(g.statements, policyStatement{
+			Sid:    fmt.Sprintf("%s%d", kind, i),
+			Effect: effectAllow,
+			Action: actions,
+		})
+	}
+	for _, r := range resources {
+		if !slices.Contains(g.statements[i].Resource, r) {
+			g.statements[i].Resource = append(g.statements[i].Resource, r)
+		}
+	}
+}
+
 // producerEntry is one resource a CR owns, as far as another CR's access to
 // it is concerned.
 type producerEntry struct {
@@ -493,23 +539,11 @@ type policyDocument struct {
 
 // buildPolicyDocument turns resolved grants into an IAM policy document.
 func buildPolicyDocument(grants []grant) (string, error) {
-	doc := policyDocument{Version: iamPolicyVersion}
-	for i, g := range grants {
+	var groups statementGroups
+	for _, g := range grants {
 		if g.resourceType == resourceTypeS3 {
-			doc.Statement = append(doc.Statement,
-				policyStatement{
-					Sid:      fmt.Sprintf("s3Bucket%d", i),
-					Effect:   effectAllow,
-					Action:   s3BucketLevelActions,
-					Resource: []string{g.arn},
-				},
-				policyStatement{
-					Sid:      fmt.Sprintf("s3Object%d", i),
-					Effect:   effectAllow,
-					Action:   s3ObjectActions(g.readWrite),
-					Resource: []string{g.arn + "/*"},
-				},
-			)
+			groups.add("s3Bucket", s3BucketLevelActions, g.arn)
+			groups.add("s3Object", s3ObjectActions(g.readWrite), g.arn+"/*")
 			continue
 		}
 		resources := []string{g.arn}
@@ -518,14 +552,10 @@ func buildPolicyDocument(grants []grant) (string, error) {
 			// index's ARN, not the table's.
 			resources = append(resources, g.arn+"/index/*")
 		}
-		doc.Statement = append(doc.Statement, policyStatement{
-			Sid:      fmt.Sprintf("%s%d", g.resourceType, i),
-			Effect:   effectAllow,
-			Action:   grantActions(g),
-			Resource: resources,
-		})
+		groups.add(g.resourceType, grantActions(g), resources...)
 	}
 
+	doc := policyDocument{Version: iamPolicyVersion, Statement: groups.statements}
 	encoded, err := json.Marshal(doc)
 	if err != nil {
 		return "", fmt.Errorf("encoding IAM policy document: %w", err)

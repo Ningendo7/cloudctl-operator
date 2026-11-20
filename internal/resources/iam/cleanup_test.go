@@ -343,8 +343,8 @@ func TestCleanup_KeepsAConsumerOnlyRoleWhenTheProducerCannotBeRead(t *testing.T)
 	c := withFailingCRReads(newFakeK8sClient(producer).(client.WithWatch), &failing)
 
 	ledger, err := Cleanup(context.Background(), iamClient, c, cr, roleLedger(arn), false)
-	if err == nil {
-		t.Fatal("expected an error, not a cleanup decision, when the producer can't be read")
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v; a CR that still declares consumes keeps its role without reading the producer", err)
 	}
 	if _, kept := iamClient.roles[name]; !kept || !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
 		t.Error("the role was deleted because the producer couldn't be read")
@@ -416,10 +416,11 @@ func TestCleanup_ARoleConflictIsStillReportedWhenTheAttachmentsCannotBeListed(t 
 	}
 }
 
-// A consumer whose last grant is revoked keeps nothing: Ensure stops early,
-// and Cleanup in the same pass deletes the role, so the revoked access does
-// not outlive the revocation.
-func TestCleanup_AConsumerWhoseOnlyGrantIsRevokedLosesItsRole(t *testing.T) {
+// A consumer whose last grant is revoked loses the access in the same pass:
+// Ensure removes the role's policy. The role itself stays while the spec
+// still consumes something, so pods keep a role with nothing on it rather
+// than falling back to the node's.
+func TestCleanup_AConsumerWhoseOnlyGrantIsRevokedLosesItsPolicy(t *testing.T) {
 	iamClient := newFakeIAM()
 	cr := ordersConsumer()
 	name := roleName(cr.Namespace, cr.Name)
@@ -432,14 +433,28 @@ func TestCleanup_AConsumerWhoseOnlyGrantIsRevokedLosesItsRole(t *testing.T) {
 	revoked := producerCR("default", "checkout-service", nil, "arn:aws:sqs:us-east-1:123456789012:default-checkout-service-orders")
 	k8s := newFakeK8sClient(revoked)
 
-	if _, _, err := Ensure(context.Background(), iamClient, k8s, testOIDCArn, testOIDCURL, cr, roleLedger(arn)); err == nil {
+	if _, _, err := Ensure(context.Background(), iamClient, k8s, RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}, cr, roleLedger(arn)); err == nil {
 		t.Fatal("expected Ensure to report the consumed resource as not granted")
 	}
 	ledger, err := Cleanup(context.Background(), iamClient, k8s, cr, roleLedger(arn), false)
 	if err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
+	role, kept := iamClient.roles[name]
+	if !kept || !status.HasManagedResource(ledger, resourceType, roleLedgerName) {
+		t.Fatal("the role was deleted while the spec still consumes the queue")
+	}
+	if _, has := role.policies[roleInlinePolicyName]; has {
+		t.Error("the policy granting the revoked queue was kept")
+	}
+
+	// Once the spec stops consuming anything, the role goes.
+	cr.Spec.SQS = nil
+	ledger, err = Cleanup(context.Background(), iamClient, k8s, cr, ledger, false)
+	if err != nil {
+		t.Fatalf("Cleanup() after removing consumes error = %v", err)
+	}
 	if _, kept := iamClient.roles[name]; kept || status.HasManagedResource(ledger, resourceType, roleLedgerName) {
-		t.Error("the role that granted the revoked queue was kept")
+		t.Error("the role was kept after the spec stopped needing one")
 	}
 }

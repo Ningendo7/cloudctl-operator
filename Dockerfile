@@ -3,6 +3,9 @@
 FROM golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf AS builder
 ARG TARGETOS
 ARG TARGETARCH
+# Stamped into the binary; empty gives "dev".
+ARG VERSION
+ARG COMMIT
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
@@ -20,7 +23,9 @@ COPY . .
 # was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -trimpath \
+    -ldflags "-s -w -X github.com/Ningendo7/cloudctl-operator/internal/version.Version=${VERSION} -X github.com/Ningendo7/cloudctl-operator/internal/version.Commit=${COMMIT}" \
+    -o manager cmd/main.go
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details

@@ -33,7 +33,7 @@ import (
 	"github.com/Ningendo7/cloudctl-operator/internal/cli/clitest"
 	"github.com/Ningendo7/cloudctl-operator/internal/cli/cmd"
 	"github.com/Ningendo7/cloudctl-operator/internal/cli/kube"
-	"github.com/Ningendo7/cloudctl-operator/internal/cli/version"
+	"github.com/Ningendo7/cloudctl-operator/internal/version"
 )
 
 type run struct {

@@ -348,7 +348,8 @@ func tableIsEmpty(ctx context.Context, client dynamodbAPI, tableArn string) (boo
 	if err != nil {
 		return false, err
 	}
-	return out.Count == 0, nil
+	// A page that ends early leaves the rest of the table unread.
+	return out.Count == 0 && len(out.LastEvaluatedKey) == 0, nil
 }
 
 // tableNameFromARN extracts the table name from a stored ARN

@@ -133,7 +133,7 @@ func TestLive_Ensure_CreatesRealRoleWithTrustPolicyAndTags(t *testing.T) {
 	name := roleName(namespace, crName)
 	t.Cleanup(func() { deleteRoleIfExists(t, client, name) })
 
-	ledger, arn, err := Ensure(ctx, client, nil, liveOIDCProviderARN, liveOIDCProviderURL, cr, cr.Status.ManagedResources)
+	ledger, arn, err := Ensure(ctx, client, nil, RoleSettings{OIDCProviderARN: liveOIDCProviderARN, OIDCProviderURL: liveOIDCProviderURL}, cr, cr.Status.ManagedResources)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -191,7 +191,7 @@ func TestLive_Ensure_RefusesForeignRoleWithNoAdoptEscapeHatch(t *testing.T) {
 	}
 
 	cr := crWithOneOwnedQueue(namespace, crName, "uid-1")
-	_, _, err := Ensure(ctx, client, nil, liveOIDCProviderARN, liveOIDCProviderURL, cr, cr.Status.ManagedResources)
+	_, _, err := Ensure(ctx, client, nil, RoleSettings{OIDCProviderARN: liveOIDCProviderARN, OIDCProviderURL: liveOIDCProviderURL}, cr, cr.Status.ManagedResources)
 	if err == nil {
 		t.Fatal("expected Ensure() to refuse a real foreign, untagged role with no adopt:true path")
 	}
@@ -205,7 +205,7 @@ func TestLive_Ensure_CorrectsTrustPolicyDriftOnRealRole(t *testing.T) {
 	name := roleName(namespace, crName)
 	t.Cleanup(func() { deleteRoleIfExists(t, client, name) })
 
-	ledger, _, err := Ensure(ctx, client, nil, liveOIDCProviderARN, liveOIDCProviderURL, cr, cr.Status.ManagedResources)
+	ledger, _, err := Ensure(ctx, client, nil, RoleSettings{OIDCProviderARN: liveOIDCProviderARN, OIDCProviderURL: liveOIDCProviderURL}, cr, cr.Status.ManagedResources)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
@@ -219,7 +219,7 @@ func TestLive_Ensure_CorrectsTrustPolicyDriftOnRealRole(t *testing.T) {
 		t.Fatalf("real UpdateAssumeRolePolicy() (setup) error = %v", err)
 	}
 
-	if _, _, err := Ensure(ctx, client, nil, liveOIDCProviderARN, liveOIDCProviderURL, cr, ledger); err != nil {
+	if _, _, err := Ensure(ctx, client, nil, RoleSettings{OIDCProviderARN: liveOIDCProviderARN, OIDCProviderURL: liveOIDCProviderURL}, cr, ledger); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
@@ -244,7 +244,7 @@ func TestLive_Cleanup_DeletesRealRoleAndItsInlinePolicy(t *testing.T) {
 	name := roleName(namespace, crName)
 	t.Cleanup(func() { deleteRoleIfExists(t, client, name) })
 
-	ledger, _, err := Ensure(ctx, client, nil, liveOIDCProviderARN, liveOIDCProviderURL, cr, cr.Status.ManagedResources)
+	ledger, _, err := Ensure(ctx, client, nil, RoleSettings{OIDCProviderARN: liveOIDCProviderARN, OIDCProviderURL: liveOIDCProviderURL}, cr, cr.Status.ManagedResources)
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -371,7 +371,7 @@ func TestLive_ConcurrentRoleChangesFailWithRetryableErrors(t *testing.T) {
 	cr := crWithOneOwnedQueue(namespace, crName, "uid-1")
 	name := roleName(namespace, crName)
 	t.Cleanup(func() { deleteRoleIfExists(t, client, name) })
-	if _, _, err := Ensure(ctx, client, nil, liveOIDCProviderARN, liveOIDCProviderURL, cr, cr.Status.ManagedResources); err != nil {
+	if _, _, err := Ensure(ctx, client, nil, RoleSettings{OIDCProviderARN: liveOIDCProviderARN, OIDCProviderURL: liveOIDCProviderURL}, cr, cr.Status.ManagedResources); err != nil {
 		t.Fatalf("Ensure() (setup) error = %v", err)
 	}
 

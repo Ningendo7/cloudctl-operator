@@ -64,6 +64,7 @@ func TestNeedsRevalidation(t *testing.T) {
 	now := time.Now()
 	stale := metav1.NewTime(now.Add(-2 * TrustWindow))
 	fresh := metav1.NewTime(now.Add(-1 * time.Minute))
+	future := metav1.NewTime(now.Add(24 * time.Hour))
 
 	cases := []struct {
 		name  string
@@ -74,6 +75,7 @@ func TestNeedsRevalidation(t *testing.T) {
 		{"tag pending is always revalidated", depsv1alpha1.ManagedResource{State: depsv1alpha1.ManagedResourceStateTagPending, LastVerifiedAt: &fresh}, true},
 		{"verified and fresh", depsv1alpha1.ManagedResource{State: depsv1alpha1.ManagedResourceStateVerified, LastVerifiedAt: &fresh}, false},
 		{"verified but stale", depsv1alpha1.ManagedResource{State: depsv1alpha1.ManagedResourceStateVerified, LastVerifiedAt: &stale}, true},
+		{"verified in the future", depsv1alpha1.ManagedResource{State: depsv1alpha1.ManagedResourceStateVerified, LastVerifiedAt: &future}, true},
 	}
 
 	for _, tc := range cases {

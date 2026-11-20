@@ -82,7 +82,7 @@ func Ensure(
 	ctx context.Context,
 	iamClient iamAPI,
 	k8sClient client.Client,
-	oidcProviderARN, oidcProviderURL string,
+	settings RoleSettings,
 	cr *depsv1alpha1.AppDependencies,
 	ledger []depsv1alpha1.ManagedResource,
 ) (updatedLedger []depsv1alpha1.ManagedResource, roleARN string, err error) {
@@ -91,12 +91,12 @@ func Ensure(
 		return ledger, "", err
 	}
 	if len(grants) == 0 {
-		return ledger, "", skippedToError(skipped)
+		return ledger, "", errors.Join(emptyRole(ctx, iamClient, cr, ledger), skippedToError(skipped))
 	}
 
 	name := roleName(cr.Namespace, cr.Name)
 
-	trustPolicy, err := ensureTrustPolicy(oidcProviderARN, oidcProviderURL, cr)
+	trustPolicy, err := ensureTrustPolicy(settings.OIDCProviderARN, settings.OIDCProviderURL, cr)
 	if err != nil {
 		return ledger, "", err
 	}
@@ -111,7 +111,8 @@ func Ensure(
 	entry, found := status.FindManagedResource(ledger, resourceType, roleLedgerName)
 	trusted := found && !status.NeedsRevalidation(entry)
 
-	arn, created, err := ensureRole(ctx, iamClient, cr.Namespace, cr.Name, string(cr.UID), name, trustPolicy, !trusted)
+	want := desiredRole{name: name, trustPolicy: trustPolicy, boundaryARN: settings.PermissionsBoundaryARN, path: settings.Path}
+	arn, created, err := ensureRole(ctx, iamClient, cr.Namespace, cr.Name, string(cr.UID), want, !trusted)
 	if err != nil {
 		return ledger, "", err
 	}
@@ -125,6 +126,52 @@ func Ensure(
 
 	updatedLedger = recordVerified(ledger, arn, digest, trusted && !created)
 	return updatedLedger, arn, skippedToError(skipped)
+}
+
+// emptyRole removes the policy from the role of a CR that has no grants right
+// now but still declares something needing IAM, for example while a producer
+// it consumes is being recreated. Cleanup keeps the role, so the
+// ServiceAccount keeps its annotation and pods started meanwhile don't fall
+// back to the node's role; removing the policy keeps a revoked grant revoked.
+func emptyRole(ctx context.Context, iamClient iamAPI, cr *depsv1alpha1.AppDependencies, ledger []depsv1alpha1.ManagedResource) error {
+	if !status.HasManagedResource(ledger, resourceType, roleLedgerName) || !declaresIAMWork(cr) {
+		return nil
+	}
+	name := roleName(cr.Namespace, cr.Name)
+	if err := verifyRoleOwnership(ctx, iamClient, cr.Namespace, cr.Name, string(cr.UID), name); err != nil {
+		if _, gone := errors.AsType[*types.NoSuchEntityException](err); gone {
+			return nil
+		}
+		return err
+	}
+	if _, err := iamClient.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{
+		RoleName:   &name,
+		PolicyName: strPtr(roleInlinePolicyName),
+	}); err != nil {
+		if _, gone := errors.AsType[*types.NoSuchEntityException](err); !gone {
+			return wrapAWSError(err, "removing the policy from a role with no grants")
+		}
+	}
+	return nil
+}
+
+// RoleSettings applies to every role the operator manages.
+type RoleSettings struct {
+	OIDCProviderARN string
+	OIDCProviderURL string
+	// PermissionsBoundaryARN caps what any policy on the role can grant, so
+	// the operator's own credentials can't be used to make an admin role.
+	// It is set on new roles and added to existing ones that have none; a
+	// boundary already on a role is left as it is.
+	PermissionsBoundaryARN string
+	// Path is given to a role when it is created. IAM can't change a role's
+	// path, so existing roles keep theirs.
+	Path string
+}
+
+// desiredRole is what ensureRole converges a role on.
+type desiredRole struct {
+	name, trustPolicy, boundaryARN, path string
 }
 
 func policyDigest(document string) string {
@@ -204,46 +251,73 @@ func skippedToError(skipped []string) error {
 }
 
 // ensureRole creates the role if it doesn't exist, or verifies ownership
-// and corrects trust-policy drift if it does. Unlike every other resource
+// and corrects trust-policy and boundary drift if it does. Any write re-reads
+// the ownership tags first, inside the trust window or not. Unlike every other resource
 // type, there's no adopt:true escape hatch here — this role's name is
 // entirely derived, never user-supplied, so finding it already exists
 // under different ownership means something else in this account claimed
 // the exact deterministic name this CR needs, not a resource this CR could
 // ever legitimately want to take over.
-func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID, name, trustPolicy string, verifyOwnership bool) (arn string, created bool, err error) {
+func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID string, want desiredRole, verifyOwnership bool) (arn string, created bool, err error) {
+	name := want.name
 	getOut, err := iamClient.GetRole(ctx, &iam.GetRoleInput{RoleName: &name})
 
 	if _, ok := errors.AsType[*types.NoSuchEntityException](err); ok {
-		createOut, cErr := iamClient.CreateRole(ctx, &iam.CreateRoleInput{
-			RoleName:                 &name,
-			AssumeRolePolicyDocument: &trustPolicy,
-			Tags:                     mapToTags(ownerTags(namespace, crName, crUID)),
-		})
-		if cErr != nil {
-			return "", false, wrapAWSError(cErr, "creating IAM role")
-		}
-		return *createOut.Role.Arn, true, nil
+		arn, err := createRole(ctx, iamClient, ownerTags(namespace, crName, crUID), want)
+		return arn, err == nil, err
 	}
 	if err != nil {
 		return "", false, wrapAWSError(err, "looking up IAM role")
 	}
 
-	if verifyOwnership {
+	role := getOut.Role
+	trustDrift := role.AssumeRolePolicyDocument == nil || !policyDocumentEquivalent(*role.AssumeRolePolicyDocument, want.trustPolicy)
+	boundaryMissing := want.boundaryARN != "" && role.PermissionsBoundary == nil
+
+	if verifyOwnership || trustDrift || boundaryMissing {
 		if err := verifyRoleOwnership(ctx, iamClient, namespace, crName, crUID, name); err != nil {
 			return "", false, err
 		}
 	}
 
-	if getOut.Role.AssumeRolePolicyDocument == nil || !policyDocumentEquivalent(*getOut.Role.AssumeRolePolicyDocument, trustPolicy) {
+	if boundaryMissing {
+		if _, err := iamClient.PutRolePermissionsBoundary(ctx, &iam.PutRolePermissionsBoundaryInput{
+			RoleName:            &name,
+			PermissionsBoundary: &want.boundaryARN,
+		}); err != nil {
+			return "", false, wrapAWSError(err, "setting IAM role permissions boundary")
+		}
+	}
+
+	if trustDrift {
 		if _, err := iamClient.UpdateAssumeRolePolicy(ctx, &iam.UpdateAssumeRolePolicyInput{
 			RoleName:       &name,
-			PolicyDocument: &trustPolicy,
+			PolicyDocument: &want.trustPolicy,
 		}); err != nil {
 			return "", false, wrapAWSError(err, "correcting IAM role trust policy")
 		}
 	}
 
 	return *getOut.Role.Arn, false, nil
+}
+
+func createRole(ctx context.Context, iamClient iamAPI, tags map[string]string, want desiredRole) (string, error) {
+	input := &iam.CreateRoleInput{
+		RoleName:                 &want.name,
+		AssumeRolePolicyDocument: &want.trustPolicy,
+		Tags:                     mapToTags(tags),
+	}
+	if want.boundaryARN != "" {
+		input.PermissionsBoundary = &want.boundaryARN
+	}
+	if want.path != "" {
+		input.Path = &want.path
+	}
+	out, err := iamClient.CreateRole(ctx, input)
+	if err != nil {
+		return "", wrapAWSError(err, "creating IAM role")
+	}
+	return *out.Role.Arn, nil
 }
 
 // verifyRoleOwnership refuses a role tagged for anyone else, and takes over
