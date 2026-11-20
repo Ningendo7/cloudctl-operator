@@ -463,6 +463,12 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
         {{- end }}\
         {{- with .Values.manager.oidcProviderUrl }}\
         - --oidc-provider-url={{ . }}\
+        {{- end }}\
+        {{- with .Values.manager.iamPermissionsBoundaryArn }}\
+        - --iam-permissions-boundary-arn={{ . }}\
+        {{- end }}\
+        {{- with .Values.manager.iamRolePath }}\
+        - --iam-role-path={{ . }}\
         {{- end }}' charts/chart/templates/manager/manager.yaml
 	@# Default pod anti-affinity (the plugin emits an empty one), used only
 	@# when manager.affinity is unset and replicas > 1.

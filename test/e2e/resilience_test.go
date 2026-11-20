@@ -549,15 +549,16 @@ spec:
 		_, err = kubectlApplyStdin(producer(false))
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(consumerKeys, 3*time.Minute, 3*time.Second).ShouldNot(ContainSubstring(consumerKey))
-		Eventually(func(g Gomega) {
-			cr, err := getCR(consumerNS, "share-consumer")
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(cr.Status.IAMRoleARN).To(BeEmpty())
-		}, 3*time.Minute, 3*time.Second).Should(Succeed())
-		Expect(runAWSCLIPod(nextAWSPod("share-roles"), "iam", "list-roles")).NotTo(ContainSubstring(roleName),
-			"a consumer with nothing left to access must not keep an IAM role")
+		// The consumer still declares consumes, so its role stays, with no
+		// policy: pods keep a role rather than falling back to the node's.
+		Eventually(func() string {
+			return runAWSCLIPod(nextAWSPod("share-revoked"), "iam", "list-role-policies", "--role-name", roleName)
+		}, 3*time.Minute, 10*time.Second).ShouldNot(ContainSubstring("cloudctl-derived-policy"),
+			"the revoked access must leave the role at once")
 
 		mustKubectl("delete", "appdependencies", "share-consumer", "-n", consumerNS, "--wait=true", "--timeout=3m")
+		Expect(runAWSCLIPod(nextAWSPod("share-roles"), "iam", "list-roles")).NotTo(ContainSubstring(roleName),
+			"a deleted consumer must not leave its IAM role behind")
 		mustKubectl("delete", "appdependencies", "share-producer", "-n", resilienceNamespace, "--wait=true", "--timeout=3m")
 	})
 
