@@ -78,6 +78,9 @@ type AppDependenciesReconciler struct {
 	// transientDelay. Created on first use, so a zero-valued reconciler works.
 	transientBackoff     workqueue.TypedRateLimiter[reconcile.Request]
 	transientBackoffOnce sync.Once
+	// verifiedIDs remembers which AWS-chosen IDs in ledgers this process has
+	// seen carry their CR's owner tags; see verifyChosenIDs.
+	verifiedIDs sync.Map
 }
 
 const defaultMaxConcurrentReconciles = 5

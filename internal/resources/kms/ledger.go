@@ -17,6 +17,11 @@ limitations under the License.
 package kms
 
 import (
+	"context"
+	"errors"
+
+	"github.com/aws/aws-sdk-go-v2/service/kms/types"
+
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 )
@@ -26,4 +31,17 @@ import (
 // used.
 func CheckLedgerEntry(id cloudctlaws.Identity, _, _ string, entry depsv1alpha1.ManagedResource) error {
 	return cloudctlaws.CheckLedgerARNPrefix(entry.Type, entry.Name, entry.ARN, id.RegionalARN("kms", "key/"))
+}
+
+// KeyOwnedBy reads a key's tags and reports whether it is this CR's. found is
+// false when the key no longer exists.
+func KeyOwnedBy(ctx context.Context, client cloudctlaws.KMSClient, keyARN, namespace, crName, crUID string) (owned, found bool, err error) {
+	tags, err := listAllResourceTags(ctx, client, keyARN)
+	if _, gone := errors.AsType[*types.NotFoundException](err); gone {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, true, wrapAWSError(err, "reading a key's tags to check whose it is")
+	}
+	return cloudctlaws.OwnedOrTransferable(ctx, tagsToMap(tags), namespace, crName, crUID), true, nil
 }

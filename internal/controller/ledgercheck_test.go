@@ -179,3 +179,105 @@ func TestCheckLedger(t *testing.T) {
 		})
 	}
 }
+
+// A key entry pointing at another CR's real key, in this account and region,
+// passes the ARN check; its tags stop it.
+func TestLedgerCheck_AForgedKeyEntryIsCaughtByItsTags(t *testing.T) {
+	cr := ledgerTestCR()
+	patches := 0
+	r := newCountingReconciler(t, &patches, cr)
+	kmsFake := r.AWSClients.KMS.(*fakeKMSClient)
+	calls := countAWSCalls(r.AWSClients)
+	request := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	foreign := testIdentity.RegionalARN("kms", "key/0f0f0f0f-1111-2222-3333-444444444444")
+	kmsFake.keys[foreign] = &fakeKey{
+		arn: foreign, keyID: "0f0f0f0f-1111-2222-3333-444444444444",
+		tags: map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("payments", "billing"), cloudctlaws.OwnerUIDTagKey: "uid-billing"},
+	}
+	var stored depsv1alpha1.AppDependencies
+	if err := r.Get(context.Background(), request.NamespacedName, &stored); err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range stored.Status.ManagedResources {
+		if e.Type == resourceTypeKMS && e.Name == "shared" {
+			stored.Status.ManagedResources[i].ARN = foreign
+		}
+	}
+	if err := r.Status().Update(context.Background(), &stored); err != nil {
+		t.Fatal(err)
+	}
+
+	clear(calls)
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if writes := calls.writes(); len(writes) != 0 {
+		t.Errorf("a pass with a forged key wrote to AWS: %v", writes)
+	}
+	if err := r.Get(context.Background(), request.NamespacedName, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if c := apimeta.FindStatusCondition(stored.Status.Conditions, conditionTypeKMSReady); c == nil || c.Reason != reasons.LedgerTampered {
+		t.Errorf("KMSReady = %+v, want %s", c, reasons.LedgerTampered)
+	}
+}
+
+func TestVerifyChosenIDs(t *testing.T) {
+	const ns, name = "default", "app"
+	keyARN := testIdentity.RegionalARN("kms", "key/0a0a0a0a-1111-2222-3333-444444444444")
+	setup := func(tags map[string]string) (*AppDependenciesReconciler, *depsv1alpha1.AppDependencies, awsCalls) {
+		kmsClient := newFakeKMSClient()
+		kmsClient.keys[keyARN] = &fakeKey{arn: keyARN, keyID: "0a0a0a0a-1111-2222-3333-444444444444", tags: tags}
+		r := &AppDependenciesReconciler{AWSClients: &cloudctlaws.Clients{KMS: kmsClient}}
+		calls := countAWSCalls(r.AWSClients)
+		cr := &depsv1alpha1.AppDependencies{Namespace: ns, Name: name, UID: "uid-now"}
+		cr.Status.ManagedResources = []depsv1alpha1.ManagedResource{{Type: resourceTypeKMS, Name: "shared", ARN: keyARN}}
+		return r, cr, calls
+	}
+	owner := func(uid string) map[string]string {
+		return map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue(ns, name), cloudctlaws.OwnerUIDTagKey: uid}
+	}
+
+	t.Run("its own key is read once per process", func(t *testing.T) {
+		r, cr, calls := setup(owner("uid-now"))
+		for range 3 {
+			if err := r.verifyChosenIDs(context.Background(), cr); err != nil {
+				t.Fatalf("verifyChosenIDs() = %v", err)
+			}
+		}
+		if n := calls["kms.ListResourceTags"]; n != 1 {
+			t.Errorf("ListResourceTags called %d times, want 1", n)
+		}
+	})
+	t.Run("a key from an earlier CR is refused", func(t *testing.T) {
+		r, cr, _ := setup(owner("uid-before"))
+		if err := r.verifyChosenIDs(context.Background(), cr); err == nil {
+			t.Fatal("verifyChosenIDs() accepted a key tagged with another UID")
+		}
+	})
+	t.Run("unless the CR was told to take over from it", func(t *testing.T) {
+		r, cr, _ := setup(owner("uid-before"))
+		ctx := cloudctlaws.WithAdoptFromUID(context.Background(), "uid-before")
+		if err := r.verifyChosenIDs(ctx, cr); err != nil {
+			t.Fatalf("verifyChosenIDs() = %v, want the takeover allowed", err)
+		}
+	})
+	t.Run("a relinquished key is not read", func(t *testing.T) {
+		r, cr, calls := setup(nil)
+		cr.Status.ManagedResources[0].State = depsv1alpha1.ManagedResourceStateRelinquished
+		if err := r.verifyChosenIDs(context.Background(), cr); err != nil || calls["kms.ListResourceTags"] != 0 {
+			t.Fatalf("verifyChosenIDs() = %v after %d reads, want nil and none", err, calls["kms.ListResourceTags"])
+		}
+	})
+	t.Run("a key that is gone is left to the KMS section", func(t *testing.T) {
+		r, cr, _ := setup(nil)
+		cr.Status.ManagedResources[0].ARN = testIdentity.RegionalARN("kms", "key/ffffffff-1111-2222-3333-444444444444")
+		if err := r.verifyChosenIDs(context.Background(), cr); err != nil {
+			t.Fatalf("verifyChosenIDs() = %v, want nil", err)
+		}
+	})
+}

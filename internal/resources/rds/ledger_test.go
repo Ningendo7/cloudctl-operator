@@ -62,3 +62,40 @@ func TestCheckLedgerEntry_PassesWhatEnsureRecordsAndRefusesAnotherInstance(t *te
 		t.Errorf("another CR's instance %s passed the check", forged.ARN)
 	}
 }
+
+func TestSecurityGroupOwnedBy(t *testing.T) {
+	id := cloudctlaws.NewIdentity("us-east-1", "123456789012")
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+	ledger, err := Ensure(context.Background(), newFakeRDS(), kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", id.Region, id.AccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	var groupARN string
+	for _, e := range ledger {
+		if e.Type == SecurityGroupResourceType {
+			groupARN = e.ARN
+		}
+	}
+	if groupARN == "" {
+		t.Fatal("Ensure recorded no security group")
+	}
+
+	for name, tc := range map[string]struct {
+		arn, crName, uid string
+		owned, found     bool
+	}{
+		"its own group":           {groupARN, "checkout-service", "uid-1", true, true},
+		"another CR's view of it": {groupARN, "billing", "uid-2", false, true},
+		"a group that is gone":    {id.RegionalARN("ec2", "security-group/sg-00000000000000000"), "checkout-service", "uid-1", false, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			owned, found, err := SecurityGroupOwnedBy(context.Background(), ec2Client, tc.arn, "default", tc.crName, tc.uid)
+			if err != nil || owned != tc.owned || found != tc.found {
+				t.Errorf("SecurityGroupOwnedBy() = %v, %v, %v; want %v, %v, nil", owned, found, err, tc.owned, tc.found)
+			}
+		})
+	}
+}

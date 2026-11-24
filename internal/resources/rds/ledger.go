@@ -17,6 +17,10 @@ limitations under the License.
 package rds
 
 import (
+	"context"
+
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 )
@@ -45,4 +49,20 @@ func CheckSecurityGroupEntry(id cloudctlaws.Identity, _, _ string, entry depsv1a
 // checked before it is retired.
 func CheckSnapshotEntry(cloudctlaws.Identity, string, string, depsv1alpha1.ManagedResource) error {
 	return nil
+}
+
+// SecurityGroupOwnedBy reads a security group's tags and reports whether it is
+// this CR's. found is false when the group no longer exists.
+func SecurityGroupOwnedBy(ctx context.Context, client cloudctlaws.EC2Client, groupARN, namespace, crName, crUID string) (owned, found bool, err error) {
+	out, err := client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: []string{SecurityGroupIDFromARN(groupARN)}})
+	if isGroupNotFound(err) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, true, wrapAWSError(err, "reading a security group's tags to check whose it is")
+	}
+	if len(out.SecurityGroups) == 0 {
+		return false, false, nil
+	}
+	return cloudctlaws.OwnedOrTransferable(ctx, ec2TagsToMap(out.SecurityGroups[0].Tags), namespace, crName, crUID), true, nil
 }
