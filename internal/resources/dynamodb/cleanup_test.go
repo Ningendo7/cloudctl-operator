@@ -658,3 +658,18 @@ func TestCleanup_DoesNotTurnOffProtectionWhileTheTableIsStillBlocked(t *testing.
 		t.Error("deletion protection was turned off before the table was approved for deletion")
 	}
 }
+
+// Deleting a table rests on this check, so a page that stops before reaching
+// an item proves nothing.
+func TestTableIsEmpty_APageThatEndsEarlyIsNotEmpty(t *testing.T) {
+	client := newFakeDynamoDB()
+	client.tables["orders"] = &fakeTable{arn: "arn:aws:dynamodb:us-east-1:123456789012:table/orders", pageEndsEarly: true}
+
+	empty, err := tableIsEmpty(context.Background(), client, "arn:aws:dynamodb:us-east-1:123456789012:table/orders")
+	if err != nil {
+		t.Fatalf("tableIsEmpty() error = %v", err)
+	}
+	if empty {
+		t.Error("tableIsEmpty() = true for a page with a LastEvaluatedKey, want false")
+	}
+}

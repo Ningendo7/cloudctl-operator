@@ -20,7 +20,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/Ningendo7/cloudctl-operator/internal/cli/version"
+	"github.com/Ningendo7/cloudctl-operator/internal/version"
 )
 
 func set(t *testing.T, v, commit string) {

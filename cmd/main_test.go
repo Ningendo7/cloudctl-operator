@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -290,4 +291,32 @@ func TestLimitMemoryFromCgroup(t *testing.T) {
 			t.Errorf("limitMemoryFromCgroup() = %d, want 0", got)
 		}
 	})
+}
+
+func TestCheckIAMRoleFlags(t *testing.T) {
+	for name, tc := range map[string]struct {
+		boundary, path string
+		wantErr        bool
+	}{
+		"both unset":                 {},
+		"a customer managed policy":  {boundary: "arn:aws:iam::123456789012:policy/cloudctl-boundary"},
+		"a policy under a path":      {boundary: "arn:aws:iam::123456789012:policy/team/cloudctl-boundary"},
+		"an AWS managed policy":      {boundary: "arn:aws:iam::aws:policy/PowerUserAccess"},
+		"a GovCloud policy":          {boundary: "arn:aws-us-gov:iam::123456789012:policy/b"},
+		"a role ARN, not a policy":   {boundary: "arn:aws:iam::123456789012:role/b", wantErr: true},
+		"a policy name, not an ARN":  {boundary: "cloudctl-boundary", wantErr: true},
+		"a path":                     {path: "/cloudctl/"},
+		"a nested path":              {path: "/platform/cloudctl/"},
+		"the root path":              {path: "/"},
+		"a path without the slashes": {path: "cloudctl", wantErr: true},
+		"a path missing the end":     {path: "/cloudctl", wantErr: true},
+		"a path with a space":        {path: "/cloud ctl/", wantErr: true},
+		"a path over 512 characters": {path: "/" + strings.Repeat("a", 511) + "/", wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := checkIAMRoleFlags(tc.boundary, tc.path); (err != nil) != tc.wantErr {
+				t.Errorf("checkIAMRoleFlags(%q, %q) = %v, want error %v", tc.boundary, tc.path, err, tc.wantErr)
+			}
+		})
+	}
 }

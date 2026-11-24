@@ -87,7 +87,7 @@ jobs:
       - name: Build and push the multi-platform manager image
         env:
           TAG: ${{ github.ref_name }}
-        run: make docker-buildx IMG="$IMAGE:$TAG"
+        run: make docker-buildx IMG="$IMAGE:$TAG" VERSION="$TAG"
 
       - name: Read the digest that was pushed
         id: digest

@@ -45,7 +45,10 @@ func (e *fakeAWSError) ErrorFault() smithy.ErrorFault { return e.fault }
 // DynamoDB client, implementing just the dynamodbAPI methods this package
 // calls, so Ensure/Cleanup can be tested without hitting real AWS.
 type fakeTable struct {
-	arn           string
+	arn string
+	// pageEndsEarly makes Scan return no items but a LastEvaluatedKey, as a
+	// page can when it stops before reaching an item.
+	pageEndsEarly bool
 	tags          map[string]string
 	status        types.TableStatus
 	billingMode   types.BillingMode
@@ -281,6 +284,9 @@ func (f *fakeDynamoDB) Scan(_ context.Context, in *dynamodb.ScanInput, _ ...func
 	t, ok := f.tables[*in.TableName]
 	if !ok {
 		return nil, &types.ResourceNotFoundException{}
+	}
+	if t.pageEndsEarly {
+		return &dynamodb.ScanOutput{Count: 0, LastEvaluatedKey: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "next"}}}, nil
 	}
 	if t.itemCount == 0 {
 		return &dynamodb.ScanOutput{Count: 0}, nil

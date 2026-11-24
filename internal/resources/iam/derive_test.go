@@ -748,7 +748,7 @@ func TestEnsureRole_TakesOverARoleFromTheUIDItWasTold(t *testing.T) {
 				},
 			}
 			ctx := cloudctlaws.WithAdoptFromUID(context.Background(), tc.from)
-			_, _, err := ensureRole(ctx, iamClient, "default", "checkout-service", "new-uid", role, "{}", true)
+			_, _, err := ensureRole(ctx, iamClient, "default", "checkout-service", "new-uid", desiredRole{name: role, trustPolicy: "{}"}, true)
 
 			tags := iamClient.roles[role].tags
 			if !tc.transferred {

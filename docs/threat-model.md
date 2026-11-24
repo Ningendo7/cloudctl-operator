@@ -140,11 +140,11 @@ an installer can build the narrowest policy for the services they use.
 
 ### AWS actions the manager's role needs
 
-Grant only the services you declare in CRs. Every resource name is derived
-from the CR, so each action can be scoped by resource ARN prefix; tag
-conditions (`aws:ResourceTag/cloudctl.io/owner`) are worth adding for the
-destructive ones, so leaked credentials can't touch resources this operator
-didn't create.
+Grant only the services you declare in CRs. Resource names start with the CR's
+namespace, so a prefix only narrows them per namespace; tag conditions
+(`aws:ResourceTag/cloudctl.io/owner`) are worth adding for the destructive
+actions, so leaked credentials can't touch resources this operator didn't
+create. IAM needs more, below.
 
 These are IAM action names without the service prefix, so `CreateQueue` under
 SQS is `sqs:CreateQueue`. Several S3 actions differ from the API operation
@@ -160,11 +160,51 @@ in step with the operations the code can call.
 | S3 | `CreateBucket`, `ListBucket`, `DeleteBucket`, `GetBucketTagging`, `PutBucketTagging`, `GetBucketVersioning`, `PutBucketVersioning`, `GetLifecycleConfiguration`, `PutLifecycleConfiguration`, `GetEncryptionConfiguration`, `PutEncryptionConfiguration`, `GetBucketPolicy`, `PutBucketPolicy`, `DeleteBucketPolicy`, `GetBucketWebsite`, `GetBucketPolicyStatus`, `GetBucketPublicAccessBlock`, `GetBucketAcl`, `ListBucketVersions`, `DeleteObject`, `DeleteObjectVersion`, `ListBucketMultipartUploads`, `AbortMultipartUpload`, `TagResource` (creating a bucket with tags) |
 | DynamoDB | `DescribeTable`, `CreateTable`, `DeleteTable`, `UpdateTable`, `ListTagsOfResource`, `TagResource`, `UntagResource`, `DescribeContinuousBackups`, `UpdateContinuousBackups`, `Scan` (emptiness check), `GetResourcePolicy`, `PutResourcePolicy`, `DeleteResourcePolicy` (the write-blocking policy on a table waiting to be deleted) |
 | KMS | `CreateKey`, `DescribeKey`, `CreateAlias`, `EnableKey`, `EnableKeyRotation`, `GetKeyRotationStatus`, `GetKeyPolicy`, `PutKeyPolicy`, `ListResourceTags`, `TagResource`, `UntagResource`, `ScheduleKeyDeletion`, `CancelKeyDeletion`, `CreateGrant` (RDS and DynamoDB create a grant when encrypting with a customer key) |
-| IAM | `GetRole`, `CreateRole`, `UpdateAssumeRolePolicy`, `ListRoleTags`, `GetRolePolicy`, `PutRolePolicy`, `DeleteRolePolicy`, `DeleteRole`, `ListAttachedRolePolicies`, `ListInstanceProfilesForRole`, `TagRole` |
+| IAM | `GetRole`, `CreateRole`, `UpdateAssumeRolePolicy`, `ListRoleTags`, `GetRolePolicy`, `PutRolePolicy`, `DeleteRolePolicy`, `DeleteRole`, `ListAttachedRolePolicies`, `ListInstanceProfilesForRole`, `TagRole`, `PutRolePermissionsBoundary` (only with `--iam-permissions-boundary-arn`) |
 | CloudWatch | `DescribeAlarms`, `PutMetricAlarm`, `DeleteAlarms`, `ListTagsForResource`, `TagResource` (alarms are created with tags; AWS documents it as required, though a call without it worked in a live check, so grant it) |
 | RDS | `CreateDBInstance`, `ModifyDBInstance`, `DescribeDBInstances`, `DescribeDBSubnetGroups`, `DescribeDBEngineVersions`, `ListTagsForResource`, `AddTagsToResource`, `RemoveTagsFromResource`, `CreateDBSnapshot`, `DescribeDBSnapshots`, `DeleteDBSnapshot` (never `DeleteDBInstance`) |
 | EC2 (RDS security groups) | `CreateSecurityGroup`, `DescribeSecurityGroups`, `AuthorizeSecurityGroupIngress`, `RevokeSecurityGroupIngress`, `DeleteSecurityGroup`, `CreateTags` |
 | Secrets Manager (RDS) | `GetSecretValue`, scoped to the `rds!db-*` secrets AWS creates |
+
+### Limiting the IAM actions
+
+Without limits, `iam:PutRolePolicy` on `role/*` lets anyone holding the
+operator's credentials put any policy on any role in the account. Set
+`--iam-permissions-boundary-arn` and `--iam-role-path`, then allow the IAM
+actions only on that path, and the policy writes only with that boundary:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WritesOnlyWithTheBoundary",
+      "Effect": "Allow",
+      "Action": ["iam:CreateRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:PutRolePermissionsBoundary"],
+      "Resource": "arn:aws:iam::<account>:role/cloudctl/*",
+      "Condition": {"StringEquals": {"iam:PermissionsBoundary": "arn:aws:iam::<account>:policy/<boundary>"}}
+    },
+    {
+      "Sid": "OwnRolesOnly",
+      "Effect": "Allow",
+      "Action": ["iam:GetRole", "iam:ListRoleTags", "iam:GetRolePolicy", "iam:UpdateAssumeRolePolicy",
+                 "iam:TagRole", "iam:DeleteRole", "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole"],
+      "Resource": "arn:aws:iam::<account>:role/cloudctl/*"
+    }
+  ]
+}
+```
+
+- The boundary caps every role: no inline policy can grant more than it
+  allows. Write it to cover the services your CRs use.
+- Don't grant `iam:DeleteRolePermissionsBoundary`; the operator never calls it.
+- The path matters for the actions IAM can't condition on a boundary, such as
+  `UpdateAssumeRolePolicy`: without it, the credentials could make any role
+  assumable.
+- The operator adds the boundary to existing roles that have none. It can't
+  move them to the path, so on an existing install both statements need
+  `role/*` until those roles are replaced; the boundary condition still holds
+  for the writes.
 
 The RDS rows were exercised against real AWS with a broadly-privileged
 user, so whether `ManageMasterUserPassword` needs further actions on the

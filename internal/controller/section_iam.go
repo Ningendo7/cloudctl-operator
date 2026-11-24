@@ -95,7 +95,12 @@ func iamSection(r *AppDependenciesReconciler) section {
 
 			ledger, roleARN, ensureErr := iam.Ensure(
 				ctx, r.AWSClients.IAM, r.Client,
-				r.OIDCProviderARN, r.OIDCProviderURL,
+				iam.RoleSettings{
+					OIDCProviderARN:        r.OIDCProviderARN,
+					OIDCProviderURL:        r.OIDCProviderURL,
+					PermissionsBoundaryARN: r.IAMPermissionsBoundaryARN,
+					Path:                   r.IAMRolePath,
+				},
 				cr, cr.Status.ManagedResources,
 			)
 			cr.Status.ManagedResources = ledger

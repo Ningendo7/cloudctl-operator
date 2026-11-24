@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -175,25 +176,61 @@ func TestBuildPolicyDocument_EveryGrantARNIsCoveredExactlyOnce(t *testing.T) {
 	})
 }
 
-// TestBuildPolicyDocument_StatementCountMatchesGrantShape checks the
-// structural count independently of statement content: every non-S3 grant
-// contributes exactly one statement, every S3 grant contributes exactly
-// two (bucket-level and object-level).
-func TestBuildPolicyDocument_StatementCountMatchesGrantShape(t *testing.T) {
+// Grants that get the same actions share a statement: no two statements of
+// one kind repeat an action set, and there are never more statements than one
+// per grant (two per S3 grant).
+func TestBuildPolicyDocument_GrantsWithTheSameActionsShareAStatement(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		grants := rapid.SliceOfN(grantGen(), 0, 12).Draw(t, "grants")
 		doc := decodePolicy(t, grants)
 
-		want := 0
+		most := 0
 		for _, g := range grants {
 			if g.resourceType == "s3" {
-				want += 2
+				most += 2
 			} else {
-				want++
+				most++
 			}
 		}
-		if len(doc.Statement) != want {
-			t.Fatalf("got %d statements for %d grants, want %d", len(doc.Statement), len(grants), want)
+		if len(doc.Statement) > most {
+			t.Fatalf("got %d statements for %d grants, want at most %d", len(doc.Statement), len(grants), most)
+		}
+		seen := map[string]string{}
+		for _, s := range doc.Statement {
+			key := strings.TrimRight(s.Sid, "0123456789") + " " + strings.Join(s.Action, ",")
+			if other, dup := seen[key]; dup {
+				t.Fatalf("statements %s and %s grant the same actions", other, s.Sid)
+			}
+			seen[key] = s.Sid
+		}
+	})
+}
+
+// Grouping must not hand a resource another grant's actions: each grant's
+// resource sits in a statement with exactly that grant's actions.
+func TestBuildPolicyDocument_EachResourceGetsItsOwnGrantsActions(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		grants := rapid.SliceOfN(grantGen(), 1, 12).Draw(t, "grants")
+		doc := decodePolicy(t, grants)
+
+		has := func(resource string, actions []string) bool {
+			for _, s := range doc.Statement {
+				if slices.Equal(s.Action, actions) && slices.Contains(s.Resource, resource) {
+					return true
+				}
+			}
+			return false
+		}
+		for _, g := range grants {
+			if g.resourceType == "s3" {
+				if !has(g.arn, s3BucketLevelActions) || !has(g.arn+"/*", s3ObjectActions(g.readWrite)) {
+					t.Fatalf("S3 grant %+v lacks a statement with its own actions", g)
+				}
+				continue
+			}
+			if !has(g.arn, grantActions(g)) {
+				t.Fatalf("grant %+v lacks a statement with its own actions", g)
+			}
 		}
 	})
 }

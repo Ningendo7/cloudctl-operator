@@ -79,6 +79,10 @@ func (f *fakeIAMClient) CreateRole(_ context.Context, in *iam.CreateRoleInput, _
 	return &iam.CreateRoleOutput{Role: &types.Role{RoleName: &name, Arn: &arn}}, nil
 }
 
+func (f *fakeIAMClient) PutRolePermissionsBoundary(_ context.Context, _ *iam.PutRolePermissionsBoundaryInput, _ ...func(*iam.Options)) (*iam.PutRolePermissionsBoundaryOutput, error) {
+	return &iam.PutRolePermissionsBoundaryOutput{}, nil
+}
+
 func (f *fakeIAMClient) UpdateAssumeRolePolicy(_ context.Context, in *iam.UpdateAssumeRolePolicyInput, _ ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error) {
 	r, ok := f.roles[*in.RoleName]
 	if !ok {

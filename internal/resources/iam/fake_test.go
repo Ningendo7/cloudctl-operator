@@ -48,6 +48,8 @@ type fakeRole struct {
 	tags        map[string]string
 	trustPolicy string
 	policies    map[string]string // policyName -> policyDocument
+	boundary    string
+	path        string
 
 	// Attached by someone other than the operator, which is what stops
 	// DeleteRole in AWS.
@@ -72,6 +74,8 @@ type fakeIAM struct {
 	// diff-before-write check actually skips the call when nothing
 	// changed, not just trusts it does.
 	putRolePolicyCalls int
+	putBoundaryCalls   int
+	updateTrustCalls   int
 	listRoleTagsCalls  int
 	getRolePolicyCalls int
 }
@@ -88,7 +92,12 @@ func (f *fakeIAM) GetRole(_ context.Context, in *iam.GetRoleInput, _ ...func(*ia
 	name := *in.RoleName
 	arn := r.arn
 	trust := r.trustPolicy
-	return &iam.GetRoleOutput{Role: &types.Role{RoleName: &name, Arn: &arn, AssumeRolePolicyDocument: &trust}}, nil
+	role := &types.Role{RoleName: &name, Arn: &arn, AssumeRolePolicyDocument: &trust}
+	if r.boundary != "" {
+		boundary := r.boundary
+		role.PermissionsBoundary = &types.AttachedPermissionsBoundary{PermissionsBoundaryArn: &boundary}
+	}
+	return &iam.GetRoleOutput{Role: role}, nil
 }
 
 func (f *fakeIAM) CreateRole(_ context.Context, in *iam.CreateRoleInput, _ ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
@@ -102,8 +111,20 @@ func (f *fakeIAM) CreateRole(_ context.Context, in *iam.CreateRoleInput, _ ...fu
 		tags:        tagsToMap(in.Tags),
 		trustPolicy: *in.AssumeRolePolicyDocument,
 		policies:    map[string]string{},
+		boundary:    aws.ToString(in.PermissionsBoundary),
+		path:        aws.ToString(in.Path),
 	}
 	return &iam.CreateRoleOutput{Role: &types.Role{RoleName: &name, Arn: &arn}}, nil
+}
+
+func (f *fakeIAM) PutRolePermissionsBoundary(_ context.Context, in *iam.PutRolePermissionsBoundaryInput, _ ...func(*iam.Options)) (*iam.PutRolePermissionsBoundaryOutput, error) {
+	f.putBoundaryCalls++
+	r, ok := f.roles[*in.RoleName]
+	if !ok {
+		return nil, &types.NoSuchEntityException{}
+	}
+	r.boundary = *in.PermissionsBoundary
+	return &iam.PutRolePermissionsBoundaryOutput{}, nil
 }
 
 func (f *fakeIAM) UpdateAssumeRolePolicy(_ context.Context, in *iam.UpdateAssumeRolePolicyInput, _ ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error) {
@@ -114,6 +135,7 @@ func (f *fakeIAM) UpdateAssumeRolePolicy(_ context.Context, in *iam.UpdateAssume
 	if !ok {
 		return nil, &types.NoSuchEntityException{}
 	}
+	f.updateTrustCalls++
 	r.trustPolicy = *in.PolicyDocument
 	return &iam.UpdateAssumeRolePolicyOutput{}, nil
 }
