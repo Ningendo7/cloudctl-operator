@@ -138,6 +138,29 @@ func QueueOrTopicName(namespace, crName, resourceType string, fifo bool, maxLen 
 	return name
 }
 
+// The name limits of SQS queues, SNS topics and DynamoDB tables.
+const (
+	queueNameMaxLen = 80
+	topicNameMaxLen = 256
+	tableNameMaxLen = 255
+)
+
+// QueueName names the SQS queue for a key, or for a key and role such as a
+// DLQ's.
+func QueueName(namespace, crName string, fifo bool, keyParts ...string) string {
+	return QueueOrTopicName(namespace, crName, "sqs", fifo, queueNameMaxLen, keyParts...)
+}
+
+// TableName names the DynamoDB table for a key.
+func TableName(namespace, crName, key string) string {
+	return ResourceName(namespace, crName, "dynamodb", key, tableNameMaxLen)
+}
+
+// TopicName names the SNS topic for a key.
+func TopicName(namespace, crName string, fifo bool, key string) string {
+	return QueueOrTopicName(namespace, crName, "sns", fifo, topicNameMaxLen, key)
+}
+
 // CheckFIFOUnchanged refuses an entry whose queue or topic, named by arn, is
 // not the type the spec now asks for. fifo can't be edited on an entry, but
 // removing it and adding it back passes that rule while its old entry is

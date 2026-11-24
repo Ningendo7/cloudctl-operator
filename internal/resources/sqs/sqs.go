@@ -308,12 +308,11 @@ func ensureQueueExists(
 		ledger = trustedLedger
 	}
 
-	const sqsNameMaxLen = 80
 	keyParts := []string{resourceName}
 	if opts.derivedRole != "" {
 		keyParts = []string{opts.derivedFromKey, opts.derivedRole}
 	}
-	queueName := cloudctlaws.QueueOrTopicName(namespace, crName, resourceType, opts.fifo, sqsNameMaxLen, keyParts...)
+	queueName := cloudctlaws.QueueName(namespace, crName, opts.fifo, keyParts...)
 	ownerTags := map[string]string{
 		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
 		cloudctlaws.OwnerUIDTagKey: crUID,

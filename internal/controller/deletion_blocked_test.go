@@ -33,6 +33,10 @@ import (
 // in spec (removed, the common real-world path into this state) - the
 // minimal fixture for F9: a non-empty, force:false resource with nothing
 // left in spec to ever flip force back to true.
+// stuckQueueName is the queue the operator names for newStuckDeletionCR's
+// "orders", so its ledger entry passes the ledger check.
+var stuckQueueName = cloudctlaws.QueueName("default", "checkout-service", false, "orders")
+
 func newStuckDeletionCR() *depsv1alpha1.AppDependencies {
 	return &depsv1alpha1.AppDependencies{
 		Namespace:         "default",
@@ -48,7 +52,7 @@ func newStuckDeletionCR() *depsv1alpha1.AppDependencies {
 				{
 					Type:           "sqs",
 					Name:           "orders",
-					ARN:            "arn:aws:sqs:us-east-1:123456789012:orders",
+					ARN:            "arn:aws:sqs:us-east-1:123456789012:" + stuckQueueName,
 					State:          depsv1alpha1.ManagedResourceStateVerified,
 					DeletionPolicy: depsv1alpha1.DeletionPolicyDelete,
 					Force:          false,
@@ -58,12 +62,12 @@ func newStuckDeletionCR() *depsv1alpha1.AppDependencies {
 	}
 }
 
-// seedOwnedNonEmptyQueue makes f.queues["orders"] exist, tagged as owned by
+// seedOwnedNonEmptyQueue makes the "orders" queue exist, tagged as owned by
 // cr, and non-empty - the real-AWS-side half of the stuck-deletion fixture.
 func seedOwnedNonEmptyQueue(f *fakeSQSClient, cr *depsv1alpha1.AppDependencies) {
-	f.queues["orders"] = &fakeQueue{
-		url: "https://sqs.us-east-1.amazonaws.com/123456789012/orders",
-		arn: "arn:aws:sqs:us-east-1:123456789012:orders",
+	f.queues[stuckQueueName] = &fakeQueue{
+		url: "https://sqs.us-east-1.amazonaws.com/123456789012/" + stuckQueueName,
+		arn: "arn:aws:sqs:us-east-1:123456789012:" + stuckQueueName,
 		tags: map[string]string{
 			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(cr.Namespace, cr.Name),
 			cloudctlaws.OwnerUIDTagKey: string(cr.UID),
@@ -134,7 +138,7 @@ func TestReconcileDelete_ForceDeleteAllAnnotation_UnsticksBlockedDeletion(t *tes
 	if hasFinalizer(cr) {
 		t.Error("expected the finalizer to be removed once the override forced the blocked resource through")
 	}
-	if _, stillExists := fakeSQS.queues["orders"]; stillExists {
+	if _, stillExists := fakeSQS.queues[stuckQueueName]; stillExists {
 		t.Error("expected the non-empty queue to actually be deleted under the override, not just marked done internally")
 	}
 
@@ -157,7 +161,7 @@ func TestReconcileDelete_WithoutForceDeleteAllAnnotation_QueueSurvives(t *testin
 		t.Fatalf("reconcileDelete() error = %v", err)
 	}
 
-	if _, stillExists := fakeSQS.queues["orders"]; !stillExists {
+	if _, stillExists := fakeSQS.queues[stuckQueueName]; !stillExists {
 		t.Error("expected the non-empty queue to survive without the override annotation")
 	}
 }
@@ -165,7 +169,7 @@ func TestReconcileDelete_WithoutForceDeleteAllAnnotation_QueueSurvives(t *testin
 // The reason has to be on the CR, not only in the logs: that is where
 // whoever is waiting on the deletion will look.
 func TestReconcileDelete_ARoleWithExternalAttachmentsShowsOnTheCR(t *testing.T) {
-	roleName := "default-checkout-service-iam"
+	roleName := cloudctlaws.ResourceName("default", "checkout-service", "iam", "role", 64)
 	cr := newStuckDeletionCR()
 	cr.Status.ManagedResources = []depsv1alpha1.ManagedResource{{
 		Type: "iam", Name: "role", ARN: "arn:aws:iam::123456789012:role/" + roleName,

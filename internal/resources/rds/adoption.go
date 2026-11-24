@@ -58,7 +58,7 @@ func checkAdoptable(
 	if entry, tracked := status.FindManagedResource(ledger, resourceType, r.Name); tracked && entry.State != depsv1alpha1.ManagedResourceStateRelinquished {
 		return nil
 	}
-	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, namespace, crName, resourceType, r.Name, 63)
+	instanceID := instanceIdentifier(namespace, crName, r.Name)
 	out, err := describeDBInstanceCached(ctx, awsClient, instanceID)
 	if _, ok := errors.AsType[*types.DBInstanceNotFoundFault](err); ok {
 		return nil

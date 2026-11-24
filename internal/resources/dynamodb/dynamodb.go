@@ -196,7 +196,7 @@ func ensureTable(
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, 255)
+	tableName := cloudctlaws.TableName(namespace, crName, resourceName)
 
 	describeOut, err := awsClient.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: &tableName,

@@ -125,8 +125,7 @@ func ensureTopicExists(
 	checkpoint status.Checkpoint,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	const snsNameMaxLen = 256
-	topicName := cloudctlaws.QueueOrTopicName(namespace, crName, resourceType, t.FIFO, snsNameMaxLen, t.Name)
+	topicName := cloudctlaws.TopicName(namespace, crName, t.FIFO, t.Name)
 	topicArn := cloudctlaws.TopicARN(region, accountID, topicName)
 
 	kmsKeyARN, ledger, err := resolveTopicKey(ctx, kmsClient, namespace, crName, crUID, t, ledger, checkpoint, recordEvent)

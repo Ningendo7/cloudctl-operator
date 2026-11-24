@@ -190,7 +190,7 @@ func TestReconcileDelete_AnUnchangedStatusIsNotWritten(t *testing.T) {
 
 func deletingCRIn(region string) *depsv1alpha1.AppDependencies {
 	cr := newStuckDeletionCR()
-	cr.Status.ManagedResources[0].ARN = "arn:aws:sqs:" + region + ":123456789012:orders"
+	cr.Status.ManagedResources[0].ARN = "arn:aws:sqs:" + region + ":123456789012:" + stuckQueueName
 	return cr
 }
 
@@ -227,12 +227,12 @@ func TestReconcileDelete_AbandonOtherRegionReleasesTheCRAndLeavesTheResources(t 
 	if hasFinalizer(cr) {
 		t.Error("the finalizer should be released")
 	}
-	if _, stillThere := fakeSQS.queues["orders"]; !stillThere {
+	if _, stillThere := fakeSQS.queues[stuckQueueName]; !stillThere {
 		t.Error("abandoning must not touch the resources")
 	}
 	select {
 	case got := <-recorder.Events:
-		if !strings.Contains(got, "ResourcesAbandoned") || !strings.Contains(got, "arn:aws:sqs:eu-west-1:123456789012:orders") {
+		if !strings.Contains(got, "ResourcesAbandoned") || !strings.Contains(got, "arn:aws:sqs:eu-west-1:123456789012:"+stuckQueueName) {
 			t.Errorf("the event should name what is left behind, got %q", got)
 		}
 	default:

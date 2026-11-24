@@ -47,7 +47,11 @@ import (
 // resolved yet (the consumer hasn't reconciled its own pod identity) is
 // tolerated the same way every other cross-CR reference in this project
 // is: skipped silently, picked up on a later pass once it exists.
-const podNetworkIdentityResourceType = "ec2-securitygroup"
+const podNetworkIdentityResourceType = SecurityGroupResourceType
+
+// SecurityGroupResourceType is the ledger type of every security group the
+// operator creates: an instance's, and a consumer's pod group.
+const SecurityGroupResourceType = "ec2-securitygroup"
 const podNetworkIdentityLedgerName = "pod-network-identity"
 
 // enginePort maps a declared engine to its standard listener port -

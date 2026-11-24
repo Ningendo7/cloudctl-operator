@@ -137,7 +137,7 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	if refused, err := refuseLegacyKMSKeyRef(ctx, r, cr, original); refused || err != nil {
 		return ctrl.Result{}, err
 	}
-	if refused, err := refuseOtherRegion(ctx, r, cr, original); err != nil {
+	if refused, err := refuseLedger(ctx, r, cr, original); err != nil {
 		return ctrl.Result{}, err
 	} else if refused {
 		return ctrl.Result{RequeueAfter: jitteredDriftRequeue()}, nil
@@ -208,7 +208,7 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 		return ctrl.Result{}, err
 	}
 
-	if refused, err := refuseOtherRegion(ctx, r, cr, original); err != nil {
+	if refused, err := refuseLedger(ctx, r, cr, original); err != nil {
 		return ctrl.Result{}, err
 	} else if refused {
 		return ctrl.Result{RequeueAfter: jitteredDriftRequeue()}, nil

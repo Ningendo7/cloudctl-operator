@@ -360,7 +360,7 @@ func ensureInstanceObserving(
 	recordEvent status.EventRecorder,
 	observed *string,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	instanceID := cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, namespace, crName, resourceType, resourceName, 63)
+	instanceID := instanceIdentifier(namespace, crName, resourceName)
 
 	instance, found, err := lookupInstance(ctx, awsClient, instanceID)
 	if err != nil {
