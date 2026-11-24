@@ -48,6 +48,17 @@ override (unlike `serviceAccountName`), so it's 1:1 tied to the CR's own
 `(namespace, name)` identity, which Kubernetes already guarantees is
 unique — two different CRs can't collide on it structurally.
 
+## Who may write status
+
+The operator acts on the ARNs and IDs in `status.managedResources` with its own
+AWS permissions, so **writing a CR's status is as good as AWS access**. Each
+pass checks every entry against the ARN it would have built for that CR, and
+reads the tags of KMS keys and security groups, before acting; an entry that
+fails stops the CR with `LedgerTampered`. The chart's `status` admission
+policy, on by default, also refuses status writes from anyone but the operator
+and cluster admins. Don't grant `appdependencies/status` otherwise; note that
+`resources: ["*"]` includes it.
+
 ## Who may create CRs
 
 Nobody can until an admin binds a role, so bind it per team with a

@@ -27,12 +27,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -54,6 +56,7 @@ const (
 	limitsPolicy     = "cloudctl-operator-limits"
 	productionPolicy = "cloudctl-operator-protect-production"
 	encryptionPolicy = "cloudctl-operator-require-encryption"
+	statusPolicy     = "cloudctl-operator-protect-status"
 	policyNamespace  = "cloudctl-system"
 )
 
@@ -622,5 +625,73 @@ func TestWarnMode_LetsTheRequestThroughWithAWarning(t *testing.T) {
 	}
 	if seen.count() == before {
 		t.Error("expected a warning telling the user the namespace is not labelled")
+	}
+}
+
+// Writing a CR's status is as good as AWS access, since the operator acts on
+// the ARNs there. With RBAC to write it, a tenant is still refused; the
+// operator and cluster admins are not.
+func TestStatusPolicy_OnlyTheOperatorAndAdminsWriteStatus(t *testing.T) {
+	needCluster(t)
+	const ns = "policy-status"
+	namespace(t, ns, true)
+	if err := admin.Create(ctx, appDeps(ns, "app")); err != nil {
+		t.Fatal(err)
+	}
+	operator := "system:serviceaccount:" + policyNamespace + ":cloudctl-operator-controller-manager"
+	grantStatusWrite(t, operator, "tenant")
+	writeStatus := func(user string, groups ...string) error {
+		cfg := rest.CopyConfig(envCfg)
+		cfg.Impersonate = rest.ImpersonationConfig{UserName: user, Groups: groups}
+		c, err := client.New(cfg, client.Options{Scheme: scheme})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cr depsv1alpha1.AppDependencies
+		if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: "app"}, &cr); err != nil {
+			return err
+		}
+		cr.Status.IAMRoleARN = "arn:aws:iam::123456789012:role/" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		return c.Status().Update(ctx, &cr)
+	}
+
+	docs := chartDocs(t, []string{"protect-status"}, nil, statusPolicy)
+	install(t, docs, func() error { return writeStatus("tenant") }, "only the cloudctl operator")
+
+	if err := writeStatus("tenant"); !denied(err) {
+		t.Errorf("a tenant with RBAC on status: got %v, want it refused", err)
+	}
+	if err := writeStatus(operator); err != nil {
+		t.Errorf("the operator's ServiceAccount: got %v, want it allowed", err)
+	}
+	if err := writeStatus("cluster-admin", "system:masters"); err != nil {
+		t.Errorf("a member of system:masters: got %v, want it allowed", err)
+	}
+}
+
+// grantStatusWrite lets users read CRs and write their status, so only the
+// policy can refuse them.
+func grantStatusWrite(t *testing.T, users ...string) {
+	t.Helper()
+	const group = "deps.cloudctl.io"
+	role := &rbacv1.ClusterRole{
+		Name: "policy-status-writer",
+		Rules: []rbacv1.PolicyRule{
+			{APIGroups: []string{group}, Resources: []string{"appdependencies"}, Verbs: []string{"get"}},
+			{APIGroups: []string{group}, Resources: []string{"appdependencies/status"}, Verbs: []string{"update", "patch"}},
+		},
+	}
+	binding := &rbacv1.ClusterRoleBinding{
+		Name:    "policy-status-writer",
+		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: role.Name},
+	}
+	for _, u := range users {
+		binding.Subjects = append(binding.Subjects, rbacv1.Subject{APIGroup: rbacv1.GroupName, Kind: "User", Name: u})
+	}
+	for _, obj := range []client.Object{role, binding} {
+		if err := admin.Create(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = admin.Delete(ctx, obj) })
 	}
 }
