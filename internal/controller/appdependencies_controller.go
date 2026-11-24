@@ -58,6 +58,9 @@ type AppDependenciesReconciler struct {
 	// clear error at that point rather than refusing to start without them.
 	OIDCProviderARN string
 	OIDCProviderURL string
+	// IgnoreUnlabelled keeps this operator off CRs without the deployment
+	// label. Of several operators in one cluster, all but one should set it.
+	IgnoreUnlabelled bool
 	// IAMPermissionsBoundaryARN and IAMRolePath, see iam.RoleSettings.
 	IAMPermissionsBoundaryARN string
 	IAMRolePath               string
@@ -108,6 +111,10 @@ func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		return ctrl.Result{}, err
 	}
+	// The cross-CR watches queue CRs whatever deployment handles them.
+	if !predicates.Handles(&cr, cloudctlaws.Deployment(), !r.IgnoreUnlabelled) {
+		return ctrl.Result{}, nil
+	}
 
 	// A CR told which previous UID to take resources over from (a restore,
 	// a new cluster) carries it to every section through the context.
@@ -155,6 +162,10 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 		log.Error(err, "Reconcile failed", "duration", time.Since(start))
 		return ctrl.Result{}, err
 	}
+	// The name the CR's resources get or already have: refuseLedger let the
+	// pass through. Set after the finalizer update, which replaces the status
+	// in memory with the stored one.
+	cr.Status.Deployment = cloudctlaws.Deployment()
 	// Adding a finalizer only touches metadata, not spec, so it won't bump
 	// generation and re-trigger our predicate on its own - keep going in
 	// this same pass (rather than returning) or a freshly created CR would
@@ -272,7 +283,10 @@ func (r *AppDependenciesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&depsv1alpha1.AppDependencies{}, builder.WithPredicates(predicates.AppDependenciesPredicate())).
+		For(&depsv1alpha1.AppDependencies{}, builder.WithPredicates(
+			predicates.AppDependenciesPredicate(),
+			predicates.HandledBy(cloudctlaws.Deployment(), !r.IgnoreUnlabelled),
+		)).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(

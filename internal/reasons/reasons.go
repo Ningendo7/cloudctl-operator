@@ -259,6 +259,9 @@ var (
 	ConnectionKeyCollision = register("ConnectionKeyCollision", Failing,
 		"Two sources map to one ConfigMap or Secret key once upper-cased with other characters turned into underscores.",
 		"Rename one of the resources.")
+	DeploymentChanged = register("DeploymentChanged", Failing,
+		"The CR's resources are named for another operator deployment name (--cluster-name) than this operator's. Names built under this one would point at new, empty resources, so nothing is reconciled.",
+		"Run the operator with the deployment name the CR records in status.deployment, or let the operator that has it handle the CR with the cloudctl.io/deployment label.")
 	LedgerTampered = register("LedgerTampered", Failing,
 		"An entry in status.managedResources names an ARN the operator would not have given this CR, such as another CR's resource or one in another account. Writing status needs only RBAC, so nothing is reconciled while it is there.",
 		"Find out what wrote the CR's status; only the operator's ServiceAccount should. Correct or remove the entry with kubectl edit --subresource=status.")

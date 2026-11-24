@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
@@ -52,6 +53,7 @@ type Clients struct {
 	RDS            RDSClient
 	EC2            EC2Client
 	SecretsManager SecretsManagerClient
+	EKS            EKSClient
 
 	// STS is built from the same config as every other client, so it shares
 	// their credentials. The periodic credential check uses it, to test the
@@ -103,6 +105,7 @@ const serviceNameCloudWatch = "cloudwatch"
 const serviceNameRDS = "rds"
 const serviceNameEC2 = "ec2"
 const serviceNameSecretsManager = "secretsmanager"
+const serviceNameEKS = "eks"
 
 var rateLimiterDefaults = []rateLimiterDefault{
 	{serviceNameSQS, "AWS_SQS_RATE_LIMIT_QPS", "AWS_SQS_RATE_LIMIT_BURST", 20, 40},
@@ -119,6 +122,7 @@ var rateLimiterDefaults = []rateLimiterDefault{
 	{serviceNameRDS, "AWS_RDS_RATE_LIMIT_QPS", "AWS_RDS_RATE_LIMIT_BURST", 20, 40},
 	{serviceNameEC2, "AWS_EC2_RATE_LIMIT_QPS", "AWS_EC2_RATE_LIMIT_BURST", 20, 40},
 	{serviceNameSecretsManager, "AWS_SECRETSMANAGER_RATE_LIMIT_QPS", "AWS_SECRETSMANAGER_RATE_LIMIT_BURST", 20, 40},
+	{serviceNameEKS, "AWS_EKS_RATE_LIMIT_QPS", "AWS_EKS_RATE_LIMIT_BURST", 5, 10},
 }
 
 func newRateLimiters() map[string]*rate.Limiter {
@@ -127,6 +131,12 @@ func newRateLimiters() map[string]*rate.Limiter {
 		limiters[d.name] = NewLimiter(envFloat(d.qpsEnv, d.defaultQPS), envInt(d.burstEnv, d.defaultBurst))
 	}
 	return limiters
+}
+
+// EKSClient is the one EKS call the operator makes: finding the cluster's
+// security group, for pods that get a database security group.
+type EKSClient interface {
+	DescribeCluster(ctx context.Context, in *eks.DescribeClusterInput, optFns ...func(*eks.Options)) (*eks.DescribeClusterOutput, error)
 }
 
 // NewClients loads the default AWS config (region/credentials resolved from
@@ -198,6 +208,10 @@ func NewClients(ctx context.Context) (*Clients, error) {
 		}),
 		SecretsManager: secretsmanager.NewFromConfig(cfg, func(o *secretsmanager.Options) {
 			o.APIOptions = withObservability(o.APIOptions, serviceNameSecretsManager, limiters[serviceNameSecretsManager])
+			o.TracerProvider = tracerProvider()
+		}),
+		EKS: eks.NewFromConfig(cfg, func(o *eks.Options) {
+			o.APIOptions = withObservability(o.APIOptions, serviceNameEKS, limiters[serviceNameEKS])
 			o.TracerProvider = tracerProvider()
 		}),
 		STS:          stsClient,

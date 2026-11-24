@@ -34,9 +34,26 @@ const identityHashLen = 12
 // resourceKey pattern can legally contain, so two different tuples can
 // never produce the same hash input.
 func identityHash(fields ...string) string {
+	if deployment != "" {
+		// "=" can't appear in a Kubernetes name, so this field can't be
+		// mistaken for a namespace or CR name of another tuple.
+		fields = append([]string{"deployment=" + deployment}, fields...)
+	}
 	sum := sha256.Sum256([]byte(strings.Join(fields, "\x00")))
 	return hex.EncodeToString(sum[:])[:identityHashLen]
 }
+
+// deployment is this process's deployment name, --cluster-name. It is part of
+// every name's hash, so two deployments in one account never build the same
+// name; empty gives the names earlier versions built. Set once, before
+// anything is named.
+var deployment string
+
+// SetDeployment sets the deployment name every name is built with.
+func SetDeployment(name string) { deployment = name }
+
+// Deployment returns the deployment name names are built with.
+func Deployment() string { return deployment }
 
 // derivedKeySeparator marks a resourceKey as one this operator computed
 // itself rather than one a user typed — '#' appears in none of this CRD's

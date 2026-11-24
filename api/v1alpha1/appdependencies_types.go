@@ -1075,6 +1075,12 @@ type AppDependenciesStatus struct {
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 
+	// Deployment is the operator deployment name (--cluster-name) this CR's
+	// AWS resources are named with. An operator with another name stops
+	// instead of naming new resources and losing track of these.
+	// +optional
+	Deployment string `json:"deployment,omitempty"`
+
 	// alarmsMayExist is false once a pass found no alarms owned by this CR,
 	// so they aren't listed every pass. Unset means unknown.
 	// +optional

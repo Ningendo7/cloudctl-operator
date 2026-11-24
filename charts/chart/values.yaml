@@ -60,6 +60,22 @@ manager:
   iamPermissionsBoundaryArn: ""
   iamRolePath: ""
 
+  ## This operator deployment's name, such as prod-use1. It is part of every
+  ## AWS name the operator builds, so deployments sharing an account never
+  ## collide, and CRs labelled cloudctl.io/deployment=<name> are handled by this
+  ## deployment only. Set it at install: changing it later stops every CR that
+  ## has resources. reconcileUnlabelled: of several operators in one cluster,
+  ## at most one should handle CRs without the label.
+  ##
+  clusterName: ""
+  reconcileUnlabelled: true
+
+  ## The EKS cluster the operator runs in. Without podBaseSecurityGroupIds, its
+  ## cluster security group is looked up and kept on pods given a database
+  ## security group.
+  ##
+  eksClusterName: ""
+
   ## Extra volumes and volume mounts for the manager pod, as Kubernetes
   ## volume and volumeMount entries.
   ##
