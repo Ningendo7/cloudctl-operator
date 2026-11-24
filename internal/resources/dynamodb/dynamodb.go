@@ -196,7 +196,7 @@ func ensureTable(
 	ledger []depsv1alpha1.ManagedResource,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	tableName := cloudctlaws.ResourceName(namespace, crName, resourceType, resourceName, 255)
+	tableName := cloudctlaws.TableName(namespace, crName, resourceName)
 
 	describeOut, err := awsClient.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: &tableName,
@@ -733,4 +733,11 @@ func tableMissingError(entry depsv1alpha1.ManagedResource, tableName string, rec
 			"or remove it from spec and add it again to start fresh", tableName, entry.ARN),
 		Reason: reasons.TableMissing,
 	}
+}
+
+// CheckLedgerEntry refuses a table entry whose ARN is not the table this CR
+// would have.
+func CheckLedgerEntry(id cloudctlaws.Identity, namespace, crName string, entry depsv1alpha1.ManagedResource) error {
+	want := id.RegionalARN("dynamodb", "table/"+cloudctlaws.TableName(namespace, crName, entry.Name))
+	return cloudctlaws.CheckLedgerARN(entry.Type, entry.Name, entry.ARN, want)
 }

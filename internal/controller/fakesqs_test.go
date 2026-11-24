@@ -70,10 +70,10 @@ func (f *fakeSQSClient) CreateQueue(ctx context.Context, in *sqs.CreateQueueInpu
 		return nil, f.createQueueErr
 	}
 	name := *in.QueueName
-	url := "https://sqs.us-east-1.amazonaws.com/000000000000/" + name
+	url := "https://sqs.us-east-1.amazonaws.com/123456789012/" + name
 	f.queues[name] = &fakeQueue{
 		url:                   url,
-		arn:                   "arn:aws:sqs:us-east-1:000000000000:" + name,
+		arn:                   "arn:aws:sqs:us-east-1:123456789012:" + name,
 		tags:                  in.Tags,
 		approxMessages:        "0",
 		approxMessagesHidden:  "0",

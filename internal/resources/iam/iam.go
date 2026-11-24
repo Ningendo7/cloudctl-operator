@@ -486,3 +486,14 @@ func wrapAWSError(err error, errContext string) error {
 		Retryable: cloudctlaws.IsRetryable(err),
 	}
 }
+
+// CheckLedgerEntry refuses a role entry that isn't this CR's role. The role
+// may sit under any path, since --iam-role-path applies to new roles only.
+func CheckLedgerEntry(id cloudctlaws.Identity, namespace, crName string, entry depsv1alpha1.ManagedResource) error {
+	name := roleName(namespace, crName)
+	prefix := id.GlobalARN("iam", "role/")
+	if entry.Name == roleLedgerName && strings.HasPrefix(entry.ARN, prefix) && strings.HasSuffix(entry.ARN, "/"+name) {
+		return nil
+	}
+	return &cloudctlaws.LedgerMismatchError{Type: entry.Type, Name: entry.Name, ARN: entry.ARN, Want: prefix + "[path/]" + name}
+}

@@ -45,6 +45,16 @@ func IsOwnedBy(tags map[string]string, namespace, name, uid string) bool {
 	return tags[OwnerTagKey] == OwnerTagValue(namespace, name) && tags[OwnerUIDTagKey] == uid
 }
 
+// OwnedOrTransferable reports whether tags show the CR's ownership, or that of
+// an earlier CR of the same name it was told to take over from.
+func OwnedOrTransferable(ctx context.Context, tags map[string]string, namespace, name, uid string) bool {
+	if IsOwnedBy(tags, namespace, name, uid) {
+		return true
+	}
+	stale, ok := IsStaleUID(tags, namespace, name, uid)
+	return ok && MayTransferFrom(ctx, stale)
+}
+
 // IsStaleUID reports whether tags carry this exact CR's own owner-name tag
 // (namespace/name) but a different UID — a deleted-and-recreated CR
 // reusing the same name found a resource left over from its previous

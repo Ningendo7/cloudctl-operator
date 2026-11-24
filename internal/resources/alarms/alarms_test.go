@@ -162,7 +162,7 @@ func TestEnsure_CreatesSQSAgeAlarm(t *testing.T) {
 	if got := aws.ToString(alarm.input.MetricName); got != "ApproximateAgeOfOldestMessage" {
 		t.Errorf("MetricName = %q, want ApproximateAgeOfOldestMessage", got)
 	}
-	if len(alarm.input.Dimensions) != 1 || aws.ToString(alarm.input.Dimensions[0].Value) != cloudctlaws.QueueOrTopicName("default", "checkout-service", "sqs", false, sqsNameMaxLen, "orders") {
+	if len(alarm.input.Dimensions) != 1 || aws.ToString(alarm.input.Dimensions[0].Value) != cloudctlaws.QueueName("default", "checkout-service", false, "orders") {
 		t.Errorf("unexpected dimensions: %+v", alarm.input.Dimensions)
 	}
 	if alarm.tags[cloudctlaws.OwnerTagKey] != cloudctlaws.OwnerTagValue("default", "checkout-service") {
@@ -183,7 +183,7 @@ func TestEnsure_FIFOQueueUsesFIFODimensionValue(t *testing.T) {
 	if alarm == nil {
 		t.Fatal("expected the age alarm to exist")
 	}
-	if got := aws.ToString(alarm.input.Dimensions[0].Value); got != cloudctlaws.QueueOrTopicName("default", "checkout-service", "sqs", true, sqsNameMaxLen, "orders") {
+	if got := aws.ToString(alarm.input.Dimensions[0].Value); got != cloudctlaws.QueueName("default", "checkout-service", true, "orders") {
 		t.Errorf("dimension value = %q, want the .fifo-suffixed queue name", got)
 	}
 }

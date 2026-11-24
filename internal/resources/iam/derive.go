@@ -19,6 +19,7 @@ package iam
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -302,6 +303,9 @@ func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *deps
 	if !found {
 		return nil, prefix + ": not reconciled there yet", nil
 	}
+	if reason, err := untrusted(ctx, producer, entry, prefix); reason != "" || err != nil {
+		return nil, reason, err
+	}
 
 	readWrite := grantedTo.Access == depsv1alpha1.AccessLevelReadWrite
 	grants := []grant{{resourceType: resourceType, arn: entry.ARN, readWrite: readWrite, consumed: true}}
@@ -312,9 +316,24 @@ func resolveConsume(ctx context.Context, k8sClient client.Client, consumer *deps
 		if !found {
 			return nil, prefix + ": its encryption key is not reconciled there yet", nil
 		}
+		if reason, err := untrusted(ctx, producer, key, prefix+"'s key"); reason != "" || err != nil {
+			return nil, reason, err
+		}
 		grants = append(grants, grant{resourceType: resourceTypeKMS, arn: key.ARN, readWrite: readWrite})
 	}
 	return grants, "", nil
+}
+
+// untrusted checks an entry read from the producer's ledger. One the operator
+// would not have written is a reason, like any other unresolved reference, so
+// nothing is granted on it and the consumer's own CR carries on. A failed
+// check, such as an unreadable tag, is an error.
+func untrusted(ctx context.Context, producer *depsv1alpha1.AppDependencies, entry depsv1alpha1.ManagedResource, prefix string) (string, error) {
+	err := status.VerifyEntry(ctx, producer, entry)
+	if _, tampered := errors.AsType[*cloudctlaws.LedgerMismatchError](err); tampered {
+		return prefix + ": the producer's ledger entry is not one the operator wrote (" + err.Error() + ")", nil
+	}
+	return "", err
 }
 
 // ReferenceProblem says why a consumes-style reference does not resolve yet.

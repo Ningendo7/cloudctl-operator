@@ -2519,3 +2519,108 @@ func TestEnsure_DoesNotReportStorageAutoscalingMadeLargerThanTheSpec(t *testing.
 		})
 	}
 }
+
+func TestCheckLedgerEntry_PassesWhatEnsureRecordsAndRefusesAnotherInstance(t *testing.T) {
+	id := cloudctlaws.NewIdentity("us-east-1", "123456789012")
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+	ledger, err := Ensure(context.Background(), newFakeRDS(), kmsWithRDSKey(), newFakeEC2(), k8sClient, "default", "checkout-service", "uid-1", id.Region, id.AccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	checks := map[string]func(cloudctlaws.Identity, string, string, depsv1alpha1.ManagedResource) error{
+		resourceType:              CheckLedgerEntry,
+		SecurityGroupResourceType: CheckSecurityGroupEntry,
+	}
+	seen := map[string]bool{}
+	for _, e := range ledger {
+		check, ok := checks[e.Type]
+		if !ok || e.ARN == "" {
+			continue
+		}
+		seen[e.Type] = true
+		if err := check(id, "default", "checkout-service", e); err != nil {
+			t.Errorf("the entry Ensure recorded fails the check: %v", err)
+		}
+	}
+	for typ := range checks {
+		if !seen[typ] {
+			t.Errorf("Ensure recorded no %s entry; the test no longer covers it", typ)
+		}
+	}
+
+	forged := depsv1alpha1.ManagedResource{Type: resourceType, Name: "orders-db", ARN: id.RegionalARN("rds", "db:"+instanceIdentifier("payments", "billing", "orders-db"))}
+	if CheckLedgerEntry(id, "default", "checkout-service", forged) == nil {
+		t.Errorf("another CR's instance %s passed the check", forged.ARN)
+	}
+}
+
+func TestSecurityGroupOwnedBy(t *testing.T) {
+	id := cloudctlaws.NewIdentity("us-east-1", "123456789012")
+	grant := newAuthorizedSubnetGroupGrant("prod-private-data-tier", "default")
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
+	ec2Client := newFakeEC2()
+	spec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{baseInstanceSpec("orders-db")}}
+	ledger, err := Ensure(context.Background(), newFakeRDS(), kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", id.Region, id.AccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	var groupARN string
+	for _, e := range ledger {
+		if e.Type == SecurityGroupResourceType {
+			groupARN = e.ARN
+		}
+	}
+	if groupARN == "" {
+		t.Fatal("Ensure recorded no security group")
+	}
+
+	for name, tc := range map[string]struct {
+		arn, crName, uid string
+		owned, found     bool
+	}{
+		"its own group":           {groupARN, "checkout-service", "uid-1", true, true},
+		"another CR's view of it": {groupARN, "billing", "uid-2", false, true},
+		"a group that is gone":    {id.RegionalARN("ec2", "security-group/sg-00000000000000000"), "checkout-service", "uid-1", false, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			owned, found, err := SecurityGroupOwnedBy(context.Background(), ec2Client, tc.arn, "default", tc.crName, tc.uid)
+			if err != nil || owned != tc.owned || found != tc.found {
+				t.Errorf("SecurityGroupOwnedBy() = %v, %v, %v; want %v, %v, nil", owned, found, err, tc.owned, tc.found)
+			}
+		})
+	}
+}
+
+// A consumer's ledger can name any security group; only one the verifier
+// accepts is given ingress.
+func TestConsumerPodSecurityGroupARN_AGroupTheOperatorDidNotWriteGetsNoIngress(t *testing.T) {
+	instance := depsv1alpha1.ConsumeRef{Namespace: "default", Name: "checkout-service", ResourceName: "orders-db"}
+	nodeGroup := "arn:aws:ec2:us-east-1:123456789012:security-group/sg-0node0group0000000"
+	consumer := &depsv1alpha1.AppDependencies{
+		Namespace: "team-b", Name: "reporting",
+		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Consumes: []depsv1alpha1.ConsumeRef{instance}}},
+	}
+	consumer.Status.ManagedResources = []depsv1alpha1.ManagedResource{
+		{Type: podNetworkIdentityResourceType, Name: podNetworkIdentityLedgerName, ARN: nodeGroup},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(consumer).Build()
+
+	refuse := func(context.Context, *depsv1alpha1.AppDependencies, depsv1alpha1.ManagedResource) error {
+		return &cloudctlaws.LedgerMismatchError{Type: podNetworkIdentityResourceType, Name: podNetworkIdentityLedgerName, ARN: nodeGroup}
+	}
+	arn, ok, err := consumerPodSecurityGroupARN(status.WithEntryVerifier(context.Background(), refuse), k8sClient, "team-b", "reporting", instance)
+	if err != nil || ok || arn != "" {
+		t.Fatalf("consumerPodSecurityGroupARN() = %q, %v, %v; want no group", arn, ok, err)
+	}
+
+	unreadable := errors.New("tags could not be read")
+	failing := func(context.Context, *depsv1alpha1.AppDependencies, depsv1alpha1.ManagedResource) error {
+		return unreadable
+	}
+	if _, _, err := consumerPodSecurityGroupARN(status.WithEntryVerifier(context.Background(), failing), k8sClient, "team-b", "reporting", instance); !errors.Is(err, unreadable) {
+		t.Fatalf("consumerPodSecurityGroupARN() error = %v, want the check's own error", err)
+	}
+}

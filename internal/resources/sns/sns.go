@@ -26,6 +26,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"strings"
+
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/kms"
@@ -125,8 +127,7 @@ func ensureTopicExists(
 	checkpoint status.Checkpoint,
 	recordEvent status.EventRecorder,
 ) ([]depsv1alpha1.ManagedResource, error) {
-	const snsNameMaxLen = 256
-	topicName := cloudctlaws.QueueOrTopicName(namespace, crName, resourceType, t.FIFO, snsNameMaxLen, t.Name)
+	topicName := cloudctlaws.TopicName(namespace, crName, t.FIFO, t.Name)
 	topicArn := cloudctlaws.TopicARN(region, accountID, topicName)
 
 	kmsKeyARN, ledger, err := resolveTopicKey(ctx, kmsClient, namespace, crName, crUID, t, ledger, checkpoint, recordEvent)
@@ -456,4 +457,12 @@ func checkFIFOUnchanged(ledger []depsv1alpha1.ManagedResource, resourceName stri
 		return nil
 	}
 	return cloudctlaws.CheckFIFOUnchanged("topic", existing.ARN, fifo)
+}
+
+// CheckLedgerEntry refuses a topic entry whose ARN is not the topic this CR
+// would have.
+func CheckLedgerEntry(id cloudctlaws.Identity, namespace, crName string, entry depsv1alpha1.ManagedResource) error {
+	fifo := strings.HasSuffix(entry.ARN, ".fifo")
+	want := id.RegionalARN("sns", cloudctlaws.TopicName(namespace, crName, fifo, entry.Name))
+	return cloudctlaws.CheckLedgerARN(entry.Type, entry.Name, entry.ARN, want)
 }

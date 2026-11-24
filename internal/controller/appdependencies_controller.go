@@ -39,6 +39,7 @@ import (
 	"github.com/Ningendo7/cloudctl-operator/internal/controller/predicates"
 	"github.com/Ningendo7/cloudctl-operator/internal/controller/watches"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/serviceaccount"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 // AppDependenciesReconciler reconciles a AppDependencies object
@@ -78,6 +79,9 @@ type AppDependenciesReconciler struct {
 	// transientDelay. Created on first use, so a zero-valued reconciler works.
 	transientBackoff     workqueue.TypedRateLimiter[reconcile.Request]
 	transientBackoffOnce sync.Once
+	// verifiedIDs remembers which AWS-chosen IDs in ledgers this process has
+	// seen carry their CR's owner tags; see verifyChosenIDs.
+	verifiedIDs sync.Map
 }
 
 const defaultMaxConcurrentReconciles = 5
@@ -109,6 +113,7 @@ func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// a new cluster) carries it to every section through the context.
 	ctx = cloudctlaws.WithAdoptFromUID(ctx, cr.Annotations[cloudctlaws.AdoptFromUIDAnnotation])
 	ctx = cloudctlaws.WithReleaseTags(ctx, !r.DisableReleaseTags)
+	ctx = status.WithEntryVerifier(ctx, r.verifyEntry)
 
 	if !cr.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, &cr)
@@ -137,7 +142,7 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 	if refused, err := refuseLegacyKMSKeyRef(ctx, r, cr, original); refused || err != nil {
 		return ctrl.Result{}, err
 	}
-	if refused, err := refuseOtherRegion(ctx, r, cr, original); err != nil {
+	if refused, err := refuseLedger(ctx, r, cr, original); err != nil {
 		return ctrl.Result{}, err
 	} else if refused {
 		return ctrl.Result{RequeueAfter: jitteredDriftRequeue()}, nil
@@ -208,7 +213,7 @@ func (r *AppDependenciesReconciler) reconcileDelete(ctx context.Context, cr *dep
 		return ctrl.Result{}, err
 	}
 
-	if refused, err := refuseOtherRegion(ctx, r, cr, original); err != nil {
+	if refused, err := refuseLedger(ctx, r, cr, original); err != nil {
 		return ctrl.Result{}, err
 	} else if refused {
 		return ctrl.Result{RequeueAfter: jitteredDriftRequeue()}, nil

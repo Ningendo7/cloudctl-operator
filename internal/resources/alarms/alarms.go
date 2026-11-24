@@ -219,7 +219,7 @@ func desiredAlarms(
 
 	if sqsSpec != nil {
 		for _, q := range sqsSpec.Resources {
-			queueName := cloudctlaws.QueueOrTopicName(namespace, crName, "sqs", q.FIFO, sqsNameMaxLen, q.Name)
+			queueName := cloudctlaws.QueueName(namespace, crName, q.FIFO, q.Name)
 			defs = append(defs, alarmDef{
 				name:               cloudctlaws.ResourceName(namespace, crName, "sqs", cloudctlaws.DerivedKey(q.Name, sqsAgeAlarmSuffix), alarmNameMaxLen),
 				description:        fmt.Sprintf("Queue %q has a message older than 15 minutes - processing is falling behind.", q.Name),
@@ -241,7 +241,7 @@ func desiredAlarms(
 
 			if q.DLQ {
 				dlqKey := cloudctlaws.DerivedKey(q.Name, "dlq")
-				dlqName := cloudctlaws.QueueOrTopicName(namespace, crName, "sqs", q.FIFO, sqsNameMaxLen, q.Name, "dlq")
+				dlqName := cloudctlaws.QueueName(namespace, crName, q.FIFO, q.Name, "dlq")
 				defs = append(defs, alarmDef{
 					name:               cloudctlaws.ResourceName(namespace, crName, "sqs", cloudctlaws.DerivedKey(dlqKey, sqsDLQBackLogAlarmSuffix), alarmNameMaxLen),
 					description:        fmt.Sprintf("Queue %q's dead-letter queue has at least one message - something is failing repeatedly.", q.Name),
@@ -262,7 +262,7 @@ func desiredAlarms(
 
 	if snsSpec != nil {
 		for _, t := range snsSpec.Resources {
-			topicName := cloudctlaws.QueueOrTopicName(namespace, crName, "sns", t.FIFO, snsNameMaxLen, t.Name)
+			topicName := cloudctlaws.TopicName(namespace, crName, t.FIFO, t.Name)
 			defs = append(defs, alarmDef{
 				name:               cloudctlaws.ResourceName(namespace, crName, "sns", cloudctlaws.DerivedKey(t.Name, snsDeliveryFailedSuffix), alarmNameMaxLen),
 				description:        fmt.Sprintf("Topic %q failed to deliver at least one notification.", t.Name),
@@ -282,7 +282,7 @@ func desiredAlarms(
 
 	if dynamodbSpec != nil {
 		for _, tbl := range dynamodbSpec.Resources {
-			tableName := cloudctlaws.ResourceName(namespace, crName, "dynamodb", tbl.Name, dynamoNameMaxLen)
+			tableName := cloudctlaws.TableName(namespace, crName, tbl.Name)
 			// TreatMissingData is left unset for both: AWS/DynamoDB metrics
 			// always ignore missing data regardless of what's configured, so
 			// setting it here would be a no-op AWS silently overrides anyway.
@@ -321,10 +321,7 @@ func desiredAlarms(
 }
 
 const (
-	sqsNameMaxLen    = 80
-	snsNameMaxLen    = 256
-	dynamoNameMaxLen = 255
-	alarmNameMaxLen  = 255
+	alarmNameMaxLen = 255
 )
 
 // alarmARN constructs an alarm's ARN deterministically — confirmed format

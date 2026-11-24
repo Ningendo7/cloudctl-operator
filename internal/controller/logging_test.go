@@ -407,7 +407,7 @@ func TestReconcileDelete_RetryableError_LogsInfoNotError(t *testing.T) {
 				{
 					Type:           "sqs",
 					Name:           "orders",
-					ARN:            "arn:aws:sqs:us-east-1:123456789012:orders",
+					ARN:            "arn:aws:sqs:us-east-1:123456789012:" + cloudctlaws.QueueName("default", "checkout-service", false, "orders"),
 					State:          depsv1alpha1.ManagedResourceStateVerified,
 					DeletionPolicy: depsv1alpha1.DeletionPolicyDelete,
 				},

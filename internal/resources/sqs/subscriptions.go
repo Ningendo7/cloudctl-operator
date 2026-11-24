@@ -38,7 +38,10 @@ import (
 )
 
 const resourceTypeSNS = "sns"
-const subscriptionResourceType = "sqssubscription"
+const subscriptionResourceType = SubscriptionResourceType
+
+// SubscriptionResourceType is the ledger type of a queue's SNS subscription.
+const SubscriptionResourceType = "sqssubscription"
 const subscriptionLedgerSeparator = "/subscribes-to/"
 
 // subscriptionLedgerName derives a deterministic, unique ledger key for

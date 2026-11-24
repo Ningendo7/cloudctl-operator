@@ -24,6 +24,7 @@ import (
 
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -823,5 +824,35 @@ func TestEnsure_AConfigMapWithOnlyTheOldLabelGetsTheNewOne(t *testing.T) {
 	}
 	if got := getConfigMap(t, c, "team-a", ConfigMapName("checkout-service")).Labels[depsv1alpha1.ManagedLabelKey]; got != depsv1alpha1.ManagedLabelValue {
 		t.Errorf("label %s = %q, want %q", depsv1alpha1.ManagedLabelKey, got, depsv1alpha1.ManagedLabelValue)
+	}
+}
+
+// A producer's ledger can name any instance; one the verifier refuses gets no
+// connection keys, and the connection info is never looked up.
+func TestAddConsumedRDS_AnEntryTheOperatorDidNotWriteIsLeftOut(t *testing.T) {
+	consumer := &depsv1alpha1.AppDependencies{Namespace: "consumer-ns", Name: "app"}
+	producer := &depsv1alpha1.AppDependencies{
+		Namespace: "team-a", Name: "orders",
+		Spec: depsv1alpha1.AppDependenciesSpec{RDS: &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{
+			Name:       "db",
+			SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "consumer-ns", Name: "app"}},
+		}}}},
+	}
+	producer.Status.ManagedResources = []depsv1alpha1.ManagedResource{
+		{Type: "rds", Name: "db", ARN: "arn:aws:rds:us-east-1:123456789012:db:billing-prod"},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(producer).Build()
+	refuse := func(_ context.Context, _ *depsv1alpha1.AppDependencies, e depsv1alpha1.ManagedResource) error {
+		return &cloudctlaws.LedgerMismatchError{Type: e.Type, Name: e.Name, ARN: e.ARN}
+	}
+	data := rds.NewKeyedData()
+	ref := depsv1alpha1.ConsumeRef{Namespace: "team-a", Name: "orders", ResourceName: "db"}
+
+	// A nil RDS client: reaching ResolveConnectionInfo would panic.
+	if err := addConsumedRDS(status.WithEntryVerifier(context.Background(), refuse), c, nil, data, consumer, ref); err != nil {
+		t.Fatalf("addConsumedRDS() = %v, want the entry left out without an error", err)
+	}
+	if got := data.Values(); len(got) != 0 {
+		t.Errorf("connection keys = %v, want none", got)
 	}
 }

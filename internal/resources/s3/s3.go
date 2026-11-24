@@ -789,3 +789,10 @@ func wrapAWSError(err error, errContext string) error {
 		Retryable: cloudctlaws.IsRetryable(err),
 	}
 }
+
+// CheckLedgerEntry refuses a bucket entry whose ARN is not the bucket this CR
+// would have.
+func CheckLedgerEntry(id cloudctlaws.Identity, namespace, crName string, entry depsv1alpha1.ManagedResource) error {
+	want := id.S3BucketARN(bucketName(namespace, crName, entry.Name, id.AccountID))
+	return cloudctlaws.CheckLedgerARN(entry.Type, entry.Name, entry.ARN, want)
+}

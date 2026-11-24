@@ -21,6 +21,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"context"
+
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 )
 
@@ -179,4 +181,26 @@ func emptyCheckInterval(age time.Duration) time.Duration {
 		}
 	}
 	return interval
+}
+
+// EntryVerifier decides whether a ledger entry may be acted on: whether it is
+// one the operator would have written for cr. Anyone allowed to write a CR's
+// status can write its ledger, so a package that reads another CR's ledger
+// asks this first. The controller provides it.
+type EntryVerifier func(ctx context.Context, cr *depsv1alpha1.AppDependencies, entry depsv1alpha1.ManagedResource) error
+
+type entryVerifierKey struct{}
+
+// WithEntryVerifier carries v to everything a pass calls.
+func WithEntryVerifier(ctx context.Context, v EntryVerifier) context.Context {
+	return context.WithValue(ctx, entryVerifierKey{}, v)
+}
+
+// VerifyEntry runs the verifier ctx carries. Without one, as in a single
+// package's tests, every entry passes; the controller always sets one.
+func VerifyEntry(ctx context.Context, cr *depsv1alpha1.AppDependencies, entry depsv1alpha1.ManagedResource) error {
+	if v, ok := ctx.Value(entryVerifierKey{}).(EntryVerifier); ok && v != nil {
+		return v(ctx, cr, entry)
+	}
+	return nil
 }

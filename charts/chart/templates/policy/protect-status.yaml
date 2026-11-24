@@ -1,0 +1,41 @@
+{{- /*
+  Only the operator writes a CR's status. It acts on the ARNs in
+  status.managedResources with its own AWS permissions, so whoever may write
+  status may reach those resources. On by default and always refusing,
+  whatever policies.enabled and policies.action say. Not gated on the API
+  being there: an offline helm template can't see it, and a policy left out
+  without a word is worse than an install that fails on Kubernetes < 1.30.
+*/ -}}
+{{- if .Values.policies.status.enabled }}
+{{- $name := include "cloudctl-operator.resourceName" (dict "suffix" "protect-status" "context" $) }}
+{{- $operator := printf "system:serviceaccount:%s:%s" .Release.Namespace (include "cloudctl-operator.serviceAccountName" .) }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cloudctl-operator.policyLabels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["deps.cloudctl.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["UPDATE"]
+        resources: ["appdependencies/status"]
+  validations:
+    - expression: >-
+        request.userInfo.username == {{ $operator | quote }} ||
+        (has(request.userInfo.groups) && {{ toJson .Values.policies.status.allowedGroups }}.exists(g, g in request.userInfo.groups))
+      message: "only the cloudctl operator writes AppDependencies status: it acts on the ARNs there with its own AWS permissions"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cloudctl-operator.policyLabels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: [Deny, Audit]
+{{- end }}

@@ -6,6 +6,17 @@
 policies:
   enabled: false
 
+  ## Only the operator's ServiceAccount, and these groups, may write a CR's
+  ## status. On by default and always refusing, whatever enabled and action
+  ## say: the operator acts on the ARNs in status with its own AWS
+  ## permissions, so whoever may write status may reach those resources.
+  ## Needs Kubernetes 1.30 or later; set enabled: false on an older cluster.
+  ##
+  status:
+    enabled: true
+    allowedGroups:
+      - system:masters
+
   ## Deny refuses a request. Warn lets it through and shows the user the
   ## message. Audit only records it in the API server's audit log. Start with
   ## Warn to see what would be refused.

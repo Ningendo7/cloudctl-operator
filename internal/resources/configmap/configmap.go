@@ -280,6 +280,14 @@ func addConsumedRDS(ctx context.Context, k8sClient client.Client, rdsClient clou
 	if !entryFound {
 		return nil
 	}
+	// An entry the operator would not have written is left out, like an
+	// unresolved reference; the producer's own pass reports it.
+	if err := status.VerifyEntry(ctx, &producer, entry); err != nil {
+		if _, tampered := errors.AsType[*cloudctlaws.LedgerMismatchError](err); tampered {
+			return nil
+		}
+		return err
+	}
 	info, ok, err := rds.ResolveConnectionInfo(ctx, rdsClient, entry.ARN)
 	if err != nil {
 		return err

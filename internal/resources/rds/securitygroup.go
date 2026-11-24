@@ -47,7 +47,11 @@ import (
 // resolved yet (the consumer hasn't reconciled its own pod identity) is
 // tolerated the same way every other cross-CR reference in this project
 // is: skipped silently, picked up on a later pass once it exists.
-const podNetworkIdentityResourceType = "ec2-securitygroup"
+const podNetworkIdentityResourceType = SecurityGroupResourceType
+
+// SecurityGroupResourceType is the ledger type of every security group the
+// operator creates: an instance's, and a consumer's pod group.
+const SecurityGroupResourceType = "ec2-securitygroup"
 const podNetworkIdentityLedgerName = "pod-network-identity"
 
 // enginePort maps a declared engine to its standard listener port -
@@ -472,7 +476,19 @@ func consumerPodSecurityGroupARN(ctx context.Context, k8sClient client.Client, n
 		return "", false, nil
 	}
 	arn, ok := PodNetworkIdentityARN(&consumer)
-	return arn, ok, nil
+	if !ok {
+		return "", false, nil
+	}
+	// A group the consumer's ledger names but the operator didn't create for
+	// it, such as a node group's, is not given access.
+	entry, _ := status.FindManagedResource(consumer.Status.ManagedResources, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if err := status.VerifyEntry(ctx, &consumer, entry); err != nil {
+		if _, tampered := errors.AsType[*cloudctlaws.LedgerMismatchError](err); tampered {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return arn, true, nil
 }
 
 func isDuplicateGroup(err error) bool {

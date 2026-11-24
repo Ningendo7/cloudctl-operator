@@ -259,6 +259,9 @@ var (
 	ConnectionKeyCollision = register("ConnectionKeyCollision", Failing,
 		"Two sources map to one ConfigMap or Secret key once upper-cased with other characters turned into underscores.",
 		"Rename one of the resources.")
+	LedgerTampered = register("LedgerTampered", Failing,
+		"An entry in status.managedResources names an ARN the operator would not have given this CR, such as another CR's resource or one in another account. Writing status needs only RBAC, so nothing is reconciled while it is there.",
+		"Find out what wrote the CR's status; only the operator's ServiceAccount should. Correct or remove the entry with kubectl edit --subresource=status.")
 	RegionChanged = register("RegionChanged", Failing,
 		"The CR has resources in a different region than this operator's. Nothing was touched.",
 		"Run an operator in that region for it. To delete the CR from here, leaving its resources in AWS as they are, annotate it with cloudctl.io/abandon-other-region=true.")
