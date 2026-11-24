@@ -734,3 +734,10 @@ func tableMissingError(entry depsv1alpha1.ManagedResource, tableName string, rec
 		Reason: reasons.TableMissing,
 	}
 }
+
+// CheckLedgerEntry refuses a table entry whose ARN is not the table this CR
+// would have.
+func CheckLedgerEntry(id cloudctlaws.Identity, namespace, crName string, entry depsv1alpha1.ManagedResource) error {
+	want := id.RegionalARN("dynamodb", "table/"+cloudctlaws.TableName(namespace, crName, entry.Name))
+	return cloudctlaws.CheckLedgerARN(entry.Type, entry.Name, entry.ARN, want)
+}

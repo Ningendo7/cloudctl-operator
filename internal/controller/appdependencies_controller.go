@@ -39,6 +39,7 @@ import (
 	"github.com/Ningendo7/cloudctl-operator/internal/controller/predicates"
 	"github.com/Ningendo7/cloudctl-operator/internal/controller/watches"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/serviceaccount"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 // AppDependenciesReconciler reconciles a AppDependencies object
@@ -112,6 +113,7 @@ func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// a new cluster) carries it to every section through the context.
 	ctx = cloudctlaws.WithAdoptFromUID(ctx, cr.Annotations[cloudctlaws.AdoptFromUIDAnnotation])
 	ctx = cloudctlaws.WithReleaseTags(ctx, !r.DisableReleaseTags)
+	ctx = status.WithEntryVerifier(ctx, r.verifyEntry)
 
 	if !cr.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, &cr)

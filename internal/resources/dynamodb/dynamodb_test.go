@@ -1391,3 +1391,24 @@ func TestEnsure_ReplicationNotAuthorizedIsTreatedAsActive(t *testing.T) {
 		t.Fatalf("Ensure() error = %v", err)
 	}
 }
+
+func TestCheckLedgerEntry_PassesWhatEnsureRecordsAndRefusesAnotherTable(t *testing.T) {
+	id := cloudctlaws.NewIdentity("us-east-1", "123456789012")
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{{Name: "sessions", PartitionKey: "id"}}}
+	ledger, err := Ensure(context.Background(), newFakeDynamoDB(), nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if len(ledger) == 0 {
+		t.Fatal("Ensure() recorded nothing")
+	}
+	for _, e := range ledger {
+		if err := CheckLedgerEntry(id, "default", "checkout-service", e); err != nil {
+			t.Errorf("the entry Ensure recorded fails the check: %v", err)
+		}
+		e.ARN = id.RegionalARN("dynamodb", "table/"+cloudctlaws.TableName("payments", "billing", e.Name))
+		if CheckLedgerEntry(id, "default", "checkout-service", e) == nil {
+			t.Errorf("another CR's table %s passed the check", e.ARN)
+		}
+	}
+}

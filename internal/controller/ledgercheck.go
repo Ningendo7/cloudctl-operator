@@ -53,22 +53,38 @@ var ledgerChecks = map[string]ledgerCheck{
 	resourceTypeIAM:                     iam.CheckLedgerEntry,
 }
 
-// checkLedger returns the first entry of cr's ledger that fails its check. An
-// entry of a type no check knows is skipped: no code acts on it either.
+// checkLedger returns the first entry of cr's ledger that fails its ARN check.
 func checkLedger(id cloudctlaws.Identity, cr *depsv1alpha1.AppDependencies) error {
-	if !id.Known() {
-		return nil
-	}
 	for _, entry := range cr.Status.ManagedResources {
-		check, known := ledgerChecks[entry.Type]
-		if !known || entry.ARN == "" {
-			continue
-		}
-		if err := check(id, cr.Namespace, cr.Name, entry); err != nil {
+		if err := checkEntry(id, cr, entry); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// checkEntry checks one entry's ARN against the one the operator would have
+// built. An entry of a type no check knows is skipped: no code acts on it
+// either.
+func checkEntry(id cloudctlaws.Identity, cr *depsv1alpha1.AppDependencies, entry depsv1alpha1.ManagedResource) error {
+	check, known := ledgerChecks[entry.Type]
+	if !id.Known() || !known || entry.ARN == "" {
+		return nil
+	}
+	return check(id, cr.Namespace, cr.Name, entry)
+}
+
+// verifyEntry is the status.EntryVerifier a pass carries: the ARN check, then
+// for an ID AWS chose, its tags.
+func (r *AppDependenciesReconciler) verifyEntry(ctx context.Context, cr *depsv1alpha1.AppDependencies, entry depsv1alpha1.ManagedResource) error {
+	if err := checkEntry(r.identity(), cr, entry); err != nil {
+		return err
+	}
+	return r.verifyChosenID(ctx, cr, entry)
+}
+
+func (r *AppDependenciesReconciler) identity() cloudctlaws.Identity {
+	return cloudctlaws.NewIdentity(r.AWSClients.Region, r.AWSClients.AccountID)
 }
 
 // refuseLedger stops a pass before any section when the ledger can't be acted
@@ -86,9 +102,13 @@ func refuseLedger(ctx context.Context, r *AppDependenciesReconciler, cr, origina
 // the ARNs the ledger holds, with the operator's own AWS permissions, and
 // anyone who may write the CR's status can write them.
 func refuseTamperedLedger(ctx context.Context, r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) (bool, error) {
-	err := checkLedger(cloudctlaws.NewIdentity(r.AWSClients.Region, r.AWSClients.AccountID), cr)
-	if err == nil {
-		err = r.verifyChosenIDs(ctx, cr)
+	// Every ARN first, so a forged one stops the pass before any AWS call.
+	err := checkLedger(r.identity(), cr)
+	for _, entry := range cr.Status.ManagedResources {
+		if err != nil {
+			break
+		}
+		err = r.verifyChosenID(ctx, cr, entry)
 	}
 	if err == nil {
 		return false, nil
@@ -121,32 +141,29 @@ var chosenIDChecks = map[string]ownedBy{
 	},
 }
 
-// verifyChosenIDs checks, by its tags, that each KMS key and security group in
-// cr's ledger is cr's, once per ARN per process. What it has checked is kept
-// in memory, where nothing written to status can add to it. A relinquished
-// entry is skipped: it no longer carries the owner tags, and nothing acts on
-// it as the CR's. A resource that no longer exists is left to its section to
-// report.
-func (r *AppDependenciesReconciler) verifyChosenIDs(ctx context.Context, cr *depsv1alpha1.AppDependencies) error {
-	for _, entry := range cr.Status.ManagedResources {
-		check, ok := chosenIDChecks[entry.Type]
-		if !ok || entry.ARN == "" || entry.State == depsv1alpha1.ManagedResourceStateRelinquished {
-			continue
-		}
-		key := string(cr.UID) + "\x00" + entry.Type + "\x00" + entry.Name
-		if seen, ok := r.verifiedIDs.Load(key); ok && seen == entry.ARN {
-			continue
-		}
-		owned, found, err := check(ctx, r, entry.ARN, cr.Namespace, cr.Name, string(cr.UID))
-		switch {
-		case err != nil:
-			return err
-		case !found:
-			continue
-		case !owned:
-			return &cloudctlaws.LedgerMismatchError{Type: entry.Type, Name: entry.Name, ARN: entry.ARN, Want: "a resource tagged as this CR's"}
-		}
-		r.verifiedIDs.Store(key, entry.ARN)
+// verifyChosenID checks, by its tags, that a KMS key or security group in cr's
+// ledger is cr's, once per ARN per process. What it has checked is kept in
+// memory, where nothing written to status can add to it. A relinquished entry
+// is skipped: it no longer carries the owner tags, and nothing acts on it as
+// the CR's. A resource that no longer exists is left to its section to report.
+func (r *AppDependenciesReconciler) verifyChosenID(ctx context.Context, cr *depsv1alpha1.AppDependencies, entry depsv1alpha1.ManagedResource) error {
+	check, ok := chosenIDChecks[entry.Type]
+	if !ok || entry.ARN == "" || entry.State == depsv1alpha1.ManagedResourceStateRelinquished {
+		return nil
 	}
+	key := string(cr.UID) + "\x00" + entry.Type + "\x00" + entry.Name
+	if seen, ok := r.verifiedIDs.Load(key); ok && seen == entry.ARN {
+		return nil
+	}
+	owned, found, err := check(ctx, r, entry.ARN, cr.Namespace, cr.Name, string(cr.UID))
+	switch {
+	case err != nil:
+		return err
+	case !found:
+		return nil
+	case !owned:
+		return &cloudctlaws.LedgerMismatchError{Type: entry.Type, Name: entry.Name, ARN: entry.ARN, Want: "a resource tagged as this CR's"}
+	}
+	r.verifiedIDs.Store(key, entry.ARN)
 	return nil
 }

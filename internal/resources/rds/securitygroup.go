@@ -476,7 +476,19 @@ func consumerPodSecurityGroupARN(ctx context.Context, k8sClient client.Client, n
 		return "", false, nil
 	}
 	arn, ok := PodNetworkIdentityARN(&consumer)
-	return arn, ok, nil
+	if !ok {
+		return "", false, nil
+	}
+	// A group the consumer's ledger names but the operator didn't create for
+	// it, such as a node group's, is not given access.
+	entry, _ := status.FindManagedResource(consumer.Status.ManagedResources, podNetworkIdentityResourceType, podNetworkIdentityLedgerName)
+	if err := status.VerifyEntry(ctx, &consumer, entry); err != nil {
+		if _, tampered := errors.AsType[*cloudctlaws.LedgerMismatchError](err); tampered {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return arn, true, nil
 }
 
 func isDuplicateGroup(err error) bool {

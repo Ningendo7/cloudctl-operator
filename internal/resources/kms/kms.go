@@ -704,3 +704,23 @@ func wrapAWSError(err error, errContext string) error {
 		Retryable: cloudctlaws.IsRetryable(err),
 	}
 }
+
+// CheckLedgerEntry refuses a key entry outside this account and region. A key
+// ID is AWS's, so whose key it is is checked through its alias where it is
+// used.
+func CheckLedgerEntry(id cloudctlaws.Identity, _, _ string, entry depsv1alpha1.ManagedResource) error {
+	return cloudctlaws.CheckLedgerARNPrefix(entry.Type, entry.Name, entry.ARN, id.RegionalARN("kms", "key/"))
+}
+
+// KeyOwnedBy reads a key's tags and reports whether it is this CR's. found is
+// false when the key no longer exists.
+func KeyOwnedBy(ctx context.Context, kmsClient cloudctlaws.KMSClient, keyARN, namespace, crName, crUID string) (owned, found bool, err error) {
+	tags, err := listAllResourceTags(ctx, kmsClient, keyARN)
+	if _, gone := errors.AsType[*types.NotFoundException](err); gone {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, true, wrapAWSError(err, "reading a key's tags to check whose it is")
+	}
+	return cloudctlaws.OwnedOrTransferable(ctx, tagsToMap(tags), namespace, crName, crUID), true, nil
+}

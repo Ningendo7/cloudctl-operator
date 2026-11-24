@@ -19,9 +19,11 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
@@ -226,7 +228,7 @@ func TestLedgerCheck_AForgedKeyEntryIsCaughtByItsTags(t *testing.T) {
 	}
 }
 
-func TestVerifyChosenIDs(t *testing.T) {
+func TestVerifyChosenID(t *testing.T) {
 	const ns, name = "default", "app"
 	keyARN := testIdentity.RegionalARN("kms", "key/0a0a0a0a-1111-2222-3333-444444444444")
 	setup := func(tags map[string]string) (*AppDependenciesReconciler, *depsv1alpha1.AppDependencies, awsCalls) {
@@ -245,8 +247,8 @@ func TestVerifyChosenIDs(t *testing.T) {
 	t.Run("its own key is read once per process", func(t *testing.T) {
 		r, cr, calls := setup(owner("uid-now"))
 		for range 3 {
-			if err := r.verifyChosenIDs(context.Background(), cr); err != nil {
-				t.Fatalf("verifyChosenIDs() = %v", err)
+			if err := r.verifyChosenID(context.Background(), cr, cr.Status.ManagedResources[0]); err != nil {
+				t.Fatalf("verifyChosenID() = %v", err)
 			}
 		}
 		if n := calls["kms.ListResourceTags"]; n != 1 {
@@ -255,29 +257,144 @@ func TestVerifyChosenIDs(t *testing.T) {
 	})
 	t.Run("a key from an earlier CR is refused", func(t *testing.T) {
 		r, cr, _ := setup(owner("uid-before"))
-		if err := r.verifyChosenIDs(context.Background(), cr); err == nil {
-			t.Fatal("verifyChosenIDs() accepted a key tagged with another UID")
+		if err := r.verifyChosenID(context.Background(), cr, cr.Status.ManagedResources[0]); err == nil {
+			t.Fatal("verifyChosenID() accepted a key tagged with another UID")
 		}
 	})
 	t.Run("unless the CR was told to take over from it", func(t *testing.T) {
 		r, cr, _ := setup(owner("uid-before"))
 		ctx := cloudctlaws.WithAdoptFromUID(context.Background(), "uid-before")
-		if err := r.verifyChosenIDs(ctx, cr); err != nil {
-			t.Fatalf("verifyChosenIDs() = %v, want the takeover allowed", err)
+		if err := r.verifyChosenID(ctx, cr, cr.Status.ManagedResources[0]); err != nil {
+			t.Fatalf("verifyChosenID() = %v, want the takeover allowed", err)
 		}
 	})
 	t.Run("a relinquished key is not read", func(t *testing.T) {
 		r, cr, calls := setup(nil)
 		cr.Status.ManagedResources[0].State = depsv1alpha1.ManagedResourceStateRelinquished
-		if err := r.verifyChosenIDs(context.Background(), cr); err != nil || calls["kms.ListResourceTags"] != 0 {
-			t.Fatalf("verifyChosenIDs() = %v after %d reads, want nil and none", err, calls["kms.ListResourceTags"])
+		if err := r.verifyChosenID(context.Background(), cr, cr.Status.ManagedResources[0]); err != nil || calls["kms.ListResourceTags"] != 0 {
+			t.Fatalf("verifyChosenID() = %v after %d reads, want nil and none", err, calls["kms.ListResourceTags"])
 		}
 	})
 	t.Run("a key that is gone is left to the KMS section", func(t *testing.T) {
 		r, cr, _ := setup(nil)
 		cr.Status.ManagedResources[0].ARN = testIdentity.RegionalARN("kms", "key/ffffffff-1111-2222-3333-444444444444")
-		if err := r.verifyChosenIDs(context.Background(), cr); err != nil {
-			t.Fatalf("verifyChosenIDs() = %v, want nil", err)
+		if err := r.verifyChosenID(context.Background(), cr, cr.Status.ManagedResources[0]); err != nil {
+			t.Fatalf("verifyChosenID() = %v, want nil", err)
+		}
+	})
+}
+
+// A producer's ledger is read for the consumer's grants. An entry in it the
+// operator would not have written grants nothing, and the consumer waits for
+// it like an unresolved reference rather than being stopped.
+func TestLedgerCheck_AForgedProducerEntryGrantsTheConsumerNothing(t *testing.T) {
+	r := sharingReconciler(t)
+	ctx := context.Background()
+	role := cloudctlaws.ResourceName("default", "consumer", "iam", "role", 64)
+	policy := func() string {
+		return r.AWSClients.IAM.(*fakeIAMClient).roles[role].policies["cloudctl-derived-policy"]
+	}
+	queueARN, keyARN := producerARNs(t, r)
+	if !strings.Contains(policy(), queueARN) || !strings.Contains(policy(), keyARN) {
+		t.Fatalf("setup: the consumer's policy %s lacks the queue %s or key %s", policy(), queueARN, keyARN)
+	}
+
+	foreignKey := testIdentity.RegionalARN("kms", "key/0f0f0f0f-1111-2222-3333-444444444444")
+	r.AWSClients.KMS.(*fakeKMSClient).keys[foreignKey] = &fakeKey{
+		arn: foreignKey, keyID: "0f0f0f0f-1111-2222-3333-444444444444",
+		tags: map[string]string{cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("payments", "billing"), cloudctlaws.OwnerUIDTagKey: "uid-billing"},
+	}
+	for name, forged := range map[string]struct{ entryType, arn string }{
+		"another CR's queue": {resourceTypeSQS, testIdentity.RegionalARN("sqs", cloudctlaws.QueueName("payments", "billing", false, "ledger"))},
+		"another CR's key":   {resourceTypeKMS, foreignKey},
+	} {
+		t.Run(name, func(t *testing.T) {
+			forgeProducer(t, r, forged.entryType, forged.arn)
+
+			// An unresolved consumes is a wait, as for a producer not found yet.
+			_, err := r.Reconcile(ctx, reconcile.Request{Namespace: "default", Name: "consumer"})
+			if wait, ok := errors.AsType[*cloudctlaws.ReconcileError](err); !ok || !wait.WakesOnChange || !strings.Contains(err.Error(), "not one the operator wrote") {
+				t.Fatalf("Reconcile(consumer) = %v; want the wait for an unresolved consumes", err)
+			}
+			if got := policy(); strings.Contains(got, forged.arn) {
+				t.Errorf("the consumer's policy grants the forged entry: %s", got)
+			}
+		})
+	}
+}
+
+// sharingReconciler reconciles a producer sharing an encrypted queue and the
+// consumer of it.
+func sharingReconciler(t *testing.T) *AppDependenciesReconciler {
+	t.Helper()
+	producer := &depsv1alpha1.AppDependencies{
+		Namespace: "default", Name: "producer",
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{
+			Name:       "orders",
+			Encryption: &depsv1alpha1.EncryptionSpec{Enabled: true},
+			SharedWith: []depsv1alpha1.SharedWithEntry{{Namespace: "default", Name: "consumer", Access: depsv1alpha1.AccessLevelReadWrite}},
+		}}}},
+	}
+	consumer := &depsv1alpha1.AppDependencies{
+		Namespace: "default", Name: "consumer",
+		Spec: depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Consumes: []depsv1alpha1.ConsumeRef{
+			{Namespace: "default", Name: "producer", ResourceName: "orders"},
+		}}},
+	}
+	patches := 0
+	r := newCountingReconciler(t, &patches, producer, consumer)
+	for _, name := range []string{"producer", "consumer"} {
+		if _, err := r.Reconcile(context.Background(), reconcile.Request{Namespace: "default", Name: name}); err != nil {
+			t.Fatalf("Reconcile(%s) error = %v", name, err)
+		}
+	}
+	return r
+}
+
+func producerARNs(t *testing.T, r *AppDependenciesReconciler) (queueARN, keyARN string) {
+	t.Helper()
+	var p depsv1alpha1.AppDependencies
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "producer"}, &p); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range p.Status.ManagedResources {
+		switch e.Type {
+		case resourceTypeSQS:
+			queueARN = e.ARN
+		case resourceTypeKMS:
+			keyARN = e.ARN
+		}
+	}
+	return queueARN, keyARN
+}
+
+// forgeProducer sets the ARN of the producer's entries of one type, and puts
+// them back when the test ends.
+func forgeProducer(t *testing.T, r *AppDependenciesReconciler, entryType, arn string) {
+	t.Helper()
+	ctx := context.Background()
+	key := client.ObjectKey{Namespace: "default", Name: "producer"}
+	var p depsv1alpha1.AppDependencies
+	if err := r.Get(ctx, key, &p); err != nil {
+		t.Fatal(err)
+	}
+	original := p.Status.DeepCopy().ManagedResources
+	for i := range p.Status.ManagedResources {
+		if p.Status.ManagedResources[i].Type == entryType {
+			p.Status.ManagedResources[i].ARN = arn
+		}
+	}
+	if err := r.Status().Update(ctx, &p); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		var back depsv1alpha1.AppDependencies
+		if err := r.Get(ctx, key, &back); err != nil {
+			t.Fatal(err)
+		}
+		back.Status.ManagedResources = original
+		if err := r.Status().Update(ctx, &back); err != nil {
+			t.Fatal(err)
 		}
 	})
 }
