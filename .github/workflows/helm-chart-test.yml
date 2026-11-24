@@ -105,12 +105,18 @@ jobs:
           helm template ./charts/chart --set prometheus.enabled=true --set prometheus.rules.enabled=true | grep -q "kind: PrometheusRule"
           helm template ./charts/chart --set grafana.dashboard.enabled=true | grep -q 'grafana_dashboard: "1"'
 
-      # The admission policies are opt-in, and a cluster older than 1.30 has
-      # no API for them.
-      - name: Admission policies are not rendered by default
+      # The guardrail policies are opt-in. The status policy is the exception:
+      # writing status is as good as AWS access, so it is on unless turned off
+      # (a cluster older than 1.30 has no API for it).
+      - name: Only the status policy is rendered by default
         run: |
-          if helm template ./charts/chart | grep -q "kind: ValidatingAdmissionPolicy"; then
-            echo "chart renders admission policies by default; they must be opt-in"
+          policies=$(helm template ./charts/chart | awk '/^kind: ValidatingAdmissionPolicy$/{getline; getline; print $2}')
+          if [ "$policies" != "release-name-cloudctl-operator-protect-status" ]; then
+            echo "chart renders these admission policies by default: ${policies:-none}; only protect-status may be"
+            exit 1
+          fi
+          if helm template ./charts/chart --set policies.status.enabled=false | grep -q "kind: ValidatingAdmissionPolicy"; then
+            echo "policies.status.enabled=false still renders an admission policy"
             exit 1
           fi
 
