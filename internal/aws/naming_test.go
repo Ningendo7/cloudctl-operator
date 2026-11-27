@@ -417,3 +417,37 @@ func TestCheckFIFOUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// withDeployment builds names as an operator started with --cluster-name name.
+func withDeployment(t *testing.T, name string) {
+	t.Helper()
+	before := Deployment()
+	SetDeployment(name)
+	t.Cleanup(func() { SetDeployment(before) })
+}
+
+func TestDeployment_SeparatesNamesAndKeepsThemReadable(t *testing.T) {
+	plain := ResourceName("default", "checkout-service", "sqs", "orders", 80)
+	queue := QueueName("default", "checkout-service", false, "orders")
+
+	withDeployment(t, "staging")
+	staging := ResourceName("default", "checkout-service", "sqs", "orders", 80)
+	if staging == plain {
+		t.Fatalf("a deployment name left the name unchanged: %s", staging)
+	}
+	if prefix := "default-checkout-service-orders-"; !strings.HasPrefix(staging, prefix) || !strings.HasPrefix(plain, prefix) {
+		t.Errorf("names %s and %s lost their readable prefix %s", plain, staging, prefix)
+	}
+	if QueueName("default", "checkout-service", false, "orders") == queue {
+		t.Error("QueueName ignores the deployment name")
+	}
+
+	SetDeployment("production")
+	if ResourceName("default", "checkout-service", "sqs", "orders", 80) == staging {
+		t.Error("two deployment names built the same name")
+	}
+	SetDeployment("")
+	if got := ResourceName("default", "checkout-service", "sqs", "orders", 80); got != plain {
+		t.Errorf("no deployment name gives %s, want the earlier %s", got, plain)
+	}
+}

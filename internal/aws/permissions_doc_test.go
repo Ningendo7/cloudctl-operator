@@ -42,6 +42,7 @@ var clientInterfaces = map[string][]struct{ dir, name string }{
 	"RDS":                       {{".", "RDSClient"}},
 	"EC2 (RDS security groups)": {{".", "EC2Client"}},
 	"Secrets Manager (RDS)":     {{".", "SecretsManagerClient"}},
+	"EKS (pod security groups)": {{".", "EKSClient"}},
 }
 
 // iamActionFor maps an API operation to the IAM actions that authorize it. Most

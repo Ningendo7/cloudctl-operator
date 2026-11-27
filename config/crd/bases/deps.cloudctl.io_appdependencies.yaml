@@ -1364,6 +1364,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              deployment:
+                description: |-
+                  Deployment is the operator deployment name (--cluster-name) this CR's
+                  AWS resources are named with. An operator with another name stops
+                  instead of naming new resources and losing track of these.
+                type: string
               iamRoleARN:
                 description: |-
                   iamRoleARN is the ARN of the IAM role this operator derived and

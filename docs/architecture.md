@@ -110,16 +110,23 @@ bound the final name. FIFO queues and topics get AWS's required `.fifo`
 suffix. S3 bucket names, which are unique across every AWS account, also get
 an 8-character hash of the account ID.
 
-No name includes the cluster or the region, so **an AWS account supports one
-cluster per CR identity** (namespace and name). IAM role and S3 bucket names
-are account-wide and collide at once; the regional types collide between two
-clusters in the same region. A second cluster applying the same CR is refused
-with `PreviousIncarnation`, and if it is told to take over, both operators
-rewrite the role's trust policy to their own cluster in turn, so pods lose AWS
-access back and forth. To move a CR to another cluster, stop the old cluster's
-operator first (see [Moving to a new
-cluster](resources.md#moving-to-a-new-cluster-or-restoring-a-cr)). Use different namespace or CR names for clusters
-that share an account and run side by side.
+**Deployments.** `--cluster-name` names an operator deployment, such as
+`prod-use1`. The name goes into every name's hash, not its readable prefix, so
+deployments sharing an account never build the same name; empty gives the
+names earlier versions built. A CR's resources stay named for the deployment
+that created them, recorded in `status.deployment`: an operator with another
+name stops the CR with `DeploymentChanged` instead of building new names. In a
+cluster running more than one operator, the `cloudctl.io/deployment` label says
+which one handles a CR, and `--reconcile-unlabelled=false` keeps an operator off
+CRs without it.
+
+Two clusters of the **same** deployment, as in a blue/green move, still share
+each CR's names, IAM role included. A second cluster applying the same CR is
+refused with `PreviousIncarnation`; told to take over, it does, and the old
+cluster's operator, which re-reads the role's tags before writing, stops
+managing it, while the old cluster's pods lose AWS access once their
+credentials expire. To move a CR to another cluster, see [Moving to a new
+cluster](resources.md#moving-to-a-new-cluster-or-restoring-a-cr).
 
 ## Resource identity delivery to workloads
 

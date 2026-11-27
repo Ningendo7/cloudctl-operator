@@ -20,6 +20,7 @@ import (
 	"maps"
 	"slices"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -44,6 +45,29 @@ const ForceDeleteAllAnnotation = "cloudctl.io/force-delete-all"
 // reason ForceDeleteAllAnnotation does.
 const AbandonOtherRegionAnnotation = "cloudctl.io/abandon-other-region"
 
+// DeploymentLabel names the operator deployment (its --cluster-name) that
+// handles a CR, for clusters that run more than one. A CR without it is
+// handled by whichever operator takes unlabelled CRs.
+const DeploymentLabel = "cloudctl.io/deployment"
+
+// HandledBy keeps the events of CRs another operator deployment handles from
+// reaching this one: those labelled with another deployment name, and, unless
+// unlabelled is set, those with no label.
+func HandledBy(deployment string, unlabelled bool) predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		return Handles(obj, deployment, unlabelled)
+	})
+}
+
+// Handles reports whether the operator deployment named deployment handles obj.
+func Handles(obj client.Object, deployment string, unlabelled bool) bool {
+	label, set := obj.GetLabels()[DeploymentLabel]
+	if !set || label == "" {
+		return unlabelled
+	}
+	return label == deployment
+}
+
 // AppDependenciesPredicate reconciles on spec changes (the standard
 // generation-changed check) or when specifically the force-reconcile
 // annotation's value changes, or the force-delete-all annotation is set,
@@ -56,6 +80,11 @@ func AppDependenciesPredicate() predicate.Predicate {
 			UpdateFunc: func(e event.UpdateEvent) bool {
 				oldAnn, newAnn := e.ObjectOld.GetAnnotations(), e.ObjectNew.GetAnnotations()
 				if oldAnn[ForceReconcileAnnotation] != newAnn[ForceReconcileAnnotation] {
+					return true
+				}
+				// A CR moved to this deployment has to be picked up now, not at
+				// the next resync.
+				if e.ObjectOld.GetLabels()[DeploymentLabel] != e.ObjectNew.GetLabels()[DeploymentLabel] {
 					return true
 				}
 				// Taking either of these off changes nothing, so only setting

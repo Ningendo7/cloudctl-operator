@@ -118,6 +118,15 @@ spec:
         {{- with .Values.manager.iamRolePath }}
         - --iam-role-path={{ . }}
         {{- end }}
+        {{- with .Values.manager.clusterName }}
+        - --cluster-name={{ . }}
+        {{- end }}
+        {{- if eq (toString .Values.manager.reconcileUnlabelled) "false" }}
+        - --reconcile-unlabelled=false
+        {{- end }}
+        {{- with .Values.manager.eksClusterName }}
+        - --eks-cluster-name={{ . }}
+        {{- end }}
         command:
         - /manager
         image: "{{ .Values.manager.image.repository }}{{- if not (contains "@" .Values.manager.image.repository) }}:{{ .Values.manager.image.tag | default (ternary "latest" (printf "v%s" .Chart.AppVersion) (eq .Chart.AppVersion "0.0.0-dev")) }}{{- end }}"

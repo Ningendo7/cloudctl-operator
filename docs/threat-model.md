@@ -176,6 +176,7 @@ in step with the operations the code can call.
 | RDS | `CreateDBInstance`, `ModifyDBInstance`, `DescribeDBInstances`, `DescribeDBSubnetGroups`, `DescribeDBEngineVersions`, `ListTagsForResource`, `AddTagsToResource`, `RemoveTagsFromResource`, `CreateDBSnapshot`, `DescribeDBSnapshots`, `DeleteDBSnapshot` (never `DeleteDBInstance`) |
 | EC2 (RDS security groups) | `CreateSecurityGroup`, `DescribeSecurityGroups`, `AuthorizeSecurityGroupIngress`, `RevokeSecurityGroupIngress`, `DeleteSecurityGroup`, `CreateTags` |
 | Secrets Manager (RDS) | `GetSecretValue`, scoped to the `rds!db-*` secrets AWS creates |
+| EKS (pod security groups) | `DescribeCluster`, only with `--eks-cluster-name` and no `--pod-base-security-group-ids` |
 
 ### Limiting the IAM actions
 

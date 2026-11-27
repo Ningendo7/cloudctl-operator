@@ -469,6 +469,15 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
         {{- end }}\
         {{- with .Values.manager.iamRolePath }}\
         - --iam-role-path={{ . }}\
+        {{- end }}\
+        {{- with .Values.manager.clusterName }}\
+        - --cluster-name={{ . }}\
+        {{- end }}\
+        {{- if eq (toString .Values.manager.reconcileUnlabelled) "false" }}\
+        - --reconcile-unlabelled=false\
+        {{- end }}\
+        {{- with .Values.manager.eksClusterName }}\
+        - --eks-cluster-name={{ . }}\
         {{- end }}' charts/chart/templates/manager/manager.yaml
 	@# Default pod anti-affinity (the plugin emits an empty one), used only
 	@# when manager.affinity is unset and replicas > 1.

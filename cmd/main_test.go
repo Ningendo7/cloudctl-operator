@@ -22,10 +22,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/eks"
+	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
 
 	dto "github.com/prometheus/client_model/go"
 
@@ -318,5 +322,83 @@ func TestCheckIAMRoleFlags(t *testing.T) {
 				t.Errorf("checkIAMRoleFlags(%q, %q) = %v, want error %v", tc.boundary, tc.path, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestCheckDeploymentFlags(t *testing.T) {
+	for name, tc := range map[string]struct {
+		deployment string
+		unlabelled bool
+		wantErr    bool
+	}{
+		"no name":                           {"", true, false},
+		"a name":                            {"prod-use1", true, false},
+		"a name, unlabelled left to others": {"prod-euw1", false, false},
+		"no name and no unlabelled CRs":     {"", false, true},
+		"not a label value":                 {"prod use1", true, true},
+		"too long for a label":              {strings.Repeat("a", 64), true, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := checkDeploymentFlags(tc.deployment, tc.unlabelled); (err != nil) != tc.wantErr {
+				t.Errorf("checkDeploymentFlags(%q, %v) = %v, want error %v", tc.deployment, tc.unlabelled, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+type fakeEKS struct {
+	group string
+	err   error
+	calls int
+}
+
+func (f *fakeEKS) DescribeCluster(
+	_ context.Context, in *eks.DescribeClusterInput, _ ...func(*eks.Options),
+) (*eks.DescribeClusterOutput, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &eks.DescribeClusterOutput{Cluster: &ekstypes.Cluster{
+		Name:               in.Name,
+		ResourcesVpcConfig: &ekstypes.VpcConfigResponse{ClusterSecurityGroupId: &f.group},
+	}}, nil
+}
+
+func TestPodBaseSecurityGroups(t *testing.T) {
+	const configured, clusterGroup = "sg-0a1b2c3d4e5f60718", "sg-0aaaaaaaaaaaaaaaa"
+	for name, tc := range map[string]struct {
+		cluster    string
+		configured []string
+		eks        *fakeEKS
+		want       []string
+		wantErr    bool
+		wantCalls  int
+	}{
+		"configured groups win": {
+			"prod", []string{configured}, &fakeEKS{group: clusterGroup}, []string{configured}, false, 0,
+		},
+		"no cluster name, no lookup":  {"", nil, &fakeEKS{group: clusterGroup}, nil, false, 0},
+		"the cluster's group":         {"prod", nil, &fakeEKS{group: clusterGroup}, []string{clusterGroup}, false, 1},
+		"a failed lookup is an error": {"prod", nil, &fakeEKS{err: errors.New("AccessDenied")}, nil, true, 1},
+		"a cluster without a group":   {"prod", nil, &fakeEKS{}, nil, true, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := podBaseSecurityGroups(context.Background(), tc.eks, tc.cluster, tc.configured)
+			if (err != nil) != tc.wantErr || !slices.Equal(got, tc.want) || tc.eks.calls != tc.wantCalls {
+				t.Errorf("podBaseSecurityGroups() = %v, %v after %d calls; want %v, error %v, %d calls",
+					got, err, tc.eks.calls, tc.want, tc.wantErr, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func TestEKSClusterNamePattern(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"prod": true, "prod-v2_east": true, "-prod": false, "prod.v2": false, strings.Repeat("a", 101): false,
+	} {
+		if eksClusterNamePattern.MatchString(name) != ok {
+			t.Errorf("eksClusterNamePattern.MatchString(%q) = %v, want %v", name, !ok, ok)
+		}
 	}
 }

@@ -35,8 +35,11 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -147,6 +150,9 @@ type config struct {
 	enableHTTP2                                      bool
 	oidcProviderARN                                  string
 	oidcProviderURL                                  string
+	deployment                                       string
+	eksClusterName                                   string
+	reconcileUnlabelled                              bool
 	iamPermissionsBoundaryARN                        string
 	iamRolePath                                      string
 	podBaseSecurityGroupIDs                          string
@@ -180,6 +186,16 @@ func parseFlags() config {
 	flag.StringVar(&c.oidcProviderURL, "oidc-provider-url", "",
 		"URL (without https://) of this cluster's IAM OIDC identity provider, "+
 			"required for the IRSA trust policy on every IAM role this operator derives.")
+	flag.StringVar(&c.deployment, "cluster-name", "",
+		"This operator deployment's name, such as prod-use1. It is part of every AWS name the operator builds, "+
+			"so deployments sharing an account never collide, and CRs labelled cloudctl.io/deployment=<name> are "+
+			"handled by this deployment only. Empty gives the names earlier versions built. Changing it on a running "+
+			"install stops every CR that has resources.")
+	flag.StringVar(&c.eksClusterName, "eks-cluster-name", "",
+		"The EKS cluster this operator runs in. Without --pod-base-security-group-ids, its cluster security "+
+			"group is looked up with eks:DescribeCluster and kept on pods given a database security group.")
+	flag.BoolVar(&c.reconcileUnlabelled, "reconcile-unlabelled", true,
+		"Handle CRs without the cloudctl.io/deployment label. Of several operators in one cluster, at most one should.")
 	flag.StringVar(&c.iamPermissionsBoundaryARN, "iam-permissions-boundary-arn", "",
 		"ARN of a managed policy set as the permissions boundary of every IAM role the operator manages. "+
 			"With it, the operator's own IAM permissions can be limited to roles that carry the boundary.")
@@ -232,6 +248,14 @@ func main() {
 	if err := checkIAMRoleFlags(c.iamPermissionsBoundaryARN, c.iamRolePath); err != nil {
 		fatal(err, "Invalid IAM role flags")
 	}
+	if err := checkDeploymentFlags(c.deployment, c.reconcileUnlabelled); err != nil {
+		fatal(err, "Invalid deployment flags")
+	}
+	if c.eksClusterName != "" && !eksClusterNamePattern.MatchString(c.eksClusterName) {
+		fatal(fmt.Errorf("%q is not an EKS cluster name", c.eksClusterName), "Invalid --eks-cluster-name")
+	}
+	cloudctlaws.SetDeployment(c.deployment)
+	setupLog.Info("Deployment", "name", c.deployment, "reconcileUnlabelled", c.reconcileUnlabelled)
 	if c.iamPermissionsBoundaryARN == "" {
 		setupLog.Info("Starting without --iam-permissions-boundary-arn: the operator's IAM permissions can't be " +
 			"limited to its own roles, so its credentials could put any policy on any role they can reach")
@@ -372,8 +396,20 @@ func newAWSBootstrap(
 ) *awsBootstrap {
 	const rateLimitRampDuration = 30 * time.Second
 	return &awsBootstrap{
-		newClients: cloudctlaws.NewClients,
-		interval:   awsClientInitRetryInterval,
+		// Retried with the clients until it works, so a failed lookup of the
+		// cluster's security group is retried, not fatal.
+		newClients: func(ctx context.Context) (*cloudctlaws.Clients, error) {
+			clients, err := cloudctlaws.NewClients(ctx)
+			if err != nil {
+				return nil, err
+			}
+			baseSecurityGroups, err = podBaseSecurityGroups(ctx, clients.EKS, c.eksClusterName, baseSecurityGroups)
+			if err != nil {
+				return nil, err
+			}
+			return clients, nil
+		},
+		interval: awsClientInitRetryInterval,
 		onReady: func(ctx context.Context, awsClients *cloudctlaws.Clients) error {
 			if err := (&controller.AppDependenciesReconciler{
 				Client:                    mgr.GetClient(),
@@ -383,6 +419,7 @@ func newAWSBootstrap(
 				Recorder:                  mgr.GetEventRecorder("appdependencies-controller"),
 				OIDCProviderARN:           c.oidcProviderARN,
 				OIDCProviderURL:           c.oidcProviderURL,
+				IgnoreUnlabelled:          !c.reconcileUnlabelled,
 				IAMPermissionsBoundaryARN: c.iamPermissionsBoundaryARN,
 				IAMRolePath:               c.iamRolePath,
 				PodBaseSecurityGroupIDs:   baseSecurityGroups,
@@ -441,6 +478,47 @@ var (
 
 // rolePathMaxLen is IAM's limit on a path.
 const rolePathMaxLen = 512
+
+// eksClusterNamePattern is what EKS accepts as a cluster name.
+var eksClusterNamePattern = regexp.MustCompile(`^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$`)
+
+// podBaseSecurityGroups returns the security groups pods keep next to a
+// database's: those configured, which always win, else the EKS cluster's own
+// security group, else none.
+func podBaseSecurityGroups(
+	ctx context.Context, client cloudctlaws.EKSClient, clusterName string, configured []string,
+) ([]string, error) {
+	if len(configured) > 0 || clusterName == "" {
+		return configured, nil
+	}
+	out, err := client.DescribeCluster(ctx, &eks.DescribeClusterInput{Name: &clusterName})
+	if err != nil {
+		return nil, fmt.Errorf("looking up the security group of EKS cluster %q: %w", clusterName, err)
+	}
+	var group string
+	if out.Cluster != nil && out.Cluster.ResourcesVpcConfig != nil {
+		group = aws.ToString(out.Cluster.ResourcesVpcConfig.ClusterSecurityGroupId)
+	}
+	if group == "" {
+		return nil, fmt.Errorf("EKS cluster %q reports no cluster security group; set --pod-base-security-group-ids",
+			clusterName)
+	}
+	setupLog.Info("Pods given a database security group keep the EKS cluster's", "securityGroup", group)
+	return []string{group}, nil
+}
+
+// checkDeploymentFlags refuses a deployment name a CR's label can't carry, and
+// an operator that would handle no CR at all.
+func checkDeploymentFlags(deployment string, unlabelled bool) error {
+	if errs := validation.IsValidLabelValue(deployment); len(errs) > 0 {
+		return fmt.Errorf("--cluster-name %q can't be a label value: %s", deployment, strings.Join(errs, "; "))
+	}
+	if deployment == "" && !unlabelled {
+		return errors.New("--reconcile-unlabelled=false needs --cluster-name: " +
+			"without a name, only unlabelled CRs can be this operator's")
+	}
+	return nil
+}
 
 // checkIAMRoleFlags rejects values IAM would refuse on every CreateRole.
 func checkIAMRoleFlags(boundaryARN, path string) error {

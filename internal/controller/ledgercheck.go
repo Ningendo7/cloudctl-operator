@@ -94,7 +94,27 @@ func refuseLedger(ctx context.Context, r *AppDependenciesReconciler, cr, origina
 	if refused, err := refuseOtherRegion(ctx, r, cr, original); refused || err != nil {
 		return refused, err
 	}
+	if refused, err := refuseOtherDeployment(ctx, r, cr, original); refused || err != nil {
+		return refused, err
+	}
 	return refuseTamperedLedger(ctx, r, cr, original)
+}
+
+// refuseOtherDeployment stops a CR whose resources were named under another
+// deployment name than this operator's: building names under this one would
+// create new resources and lose track of the old. A CR with nothing in its
+// ledger yet may take this operator's name.
+func refuseOtherDeployment(ctx context.Context, r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) (bool, error) {
+	ours := cloudctlaws.Deployment()
+	if len(cr.Status.ManagedResources) == 0 || cr.Status.Deployment == ours {
+		return false, nil
+	}
+	setSectionCondition(ctx, cr, sectionForEntryType(cr.Status.ManagedResources[0].Type), &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("this CR's resources are named for deployment %q, but this operator is deployment %q; nothing is reconciled, "+
+			"since its names would point at new resources", cr.Status.Deployment, ours),
+		Reason: reasons.DeploymentChanged,
+	}, eventRecorderFor(r, cr))
+	return true, r.Status().Patch(ctx, cr, statusPatch(original, cr))
 }
 
 // refuseTamperedLedger stops a pass before it reaches AWS when the ledger

@@ -242,3 +242,48 @@ func TestSpecOrDeletionChangedPredicate(t *testing.T) {
 		t.Error("generic events are not changes")
 	}
 }
+
+func labelled(deployment string, set bool) *depsv1alpha1.AppDependencies {
+	cr := &depsv1alpha1.AppDependencies{}
+	if set {
+		cr.Labels = map[string]string{DeploymentLabel: deployment}
+	}
+	return cr
+}
+
+func TestHandles(t *testing.T) {
+	for name, tc := range map[string]struct {
+		label            string
+		labelSet         bool
+		deployment       string
+		unlabelled, want bool
+	}{
+		"unlabelled, taken by an unnamed operator": {"", false, "", true, true},
+		"unlabelled, taken by a named operator":    {"", false, "prod", true, true},
+		"unlabelled, left to another operator":     {"", false, "prod", false, false},
+		"an empty label counts as none":            {"", true, "prod", false, false},
+		"labelled for this deployment":             {"prod", true, "prod", false, true},
+		"labelled for another deployment":          {"staging", true, "prod", true, false},
+		"labelled, unnamed operator":               {"prod", true, "", true, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := Handles(labelled(tc.label, tc.labelSet), tc.deployment, tc.unlabelled); got != tc.want {
+				t.Errorf("Handles() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A CR relabelled to another deployment is picked up at once.
+func TestAppDependenciesPredicate_ReactsToTheDeploymentLabel(t *testing.T) {
+	pred := AppDependenciesPredicate()
+	if !pred.Update(event.UpdateEvent{ObjectOld: labelled("", false), ObjectNew: labelled("prod", true)}) {
+		t.Error("adding the deployment label was not let through")
+	}
+	if !pred.Update(event.UpdateEvent{ObjectOld: labelled("staging", true), ObjectNew: labelled("prod", true)}) {
+		t.Error("changing the deployment label was not let through")
+	}
+	if pred.Update(event.UpdateEvent{ObjectOld: labelled("prod", true), ObjectNew: labelled("prod", true)}) {
+		t.Error("an unchanged label was let through")
+	}
+}

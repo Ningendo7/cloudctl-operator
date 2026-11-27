@@ -28,6 +28,7 @@ import (
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
+	"github.com/Ningendo7/cloudctl-operator/internal/controller/predicates"
 	"github.com/Ningendo7/cloudctl-operator/internal/reasons"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
@@ -397,4 +398,63 @@ func forgeProducer(t *testing.T, r *AppDependenciesReconciler, entryType, arn st
 			t.Fatal(err)
 		}
 	})
+}
+
+// withDeployment runs the test as an operator started with --cluster-name.
+func withDeployment(t *testing.T, name string) {
+	t.Helper()
+	before := cloudctlaws.Deployment()
+	cloudctlaws.SetDeployment(name)
+	t.Cleanup(func() { cloudctlaws.SetDeployment(before) })
+}
+
+func TestDeployment_ACRLabelledForAnotherDeploymentIsLeftAlone(t *testing.T) {
+	withDeployment(t, "prod")
+	cr := ledgerTestCR()
+	cr.Labels = map[string]string{predicates.DeploymentLabel: "staging"}
+	patches := 0
+	r := newCountingReconciler(t, &patches, cr)
+	calls := countAWSCalls(r.AWSClients)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(calls) != 0 || patches != 0 {
+		t.Errorf("another deployment's CR got %d AWS calls and %d status writes", len(calls), patches)
+	}
+}
+
+func TestDeployment_ANewCRTakesTheOperatorsNameAndKeepsIt(t *testing.T) {
+	withDeployment(t, "prod")
+	cr := ledgerTestCR()
+	patches := 0
+	r := newCountingReconciler(t, &patches, cr)
+	request := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	var stored depsv1alpha1.AppDependencies
+	if err := r.Get(context.Background(), request.NamespacedName, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.Deployment != "prod" || len(stored.Status.ManagedResources) == 0 {
+		t.Fatalf("status.deployment = %q with %d resources, want prod and some", stored.Status.Deployment, len(stored.Status.ManagedResources))
+	}
+
+	// The same CR seen by an operator with another name: nothing is touched.
+	cloudctlaws.SetDeployment("staging")
+	calls := countAWSCalls(r.AWSClients)
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("an operator with another deployment name called AWS: %v", calls)
+	}
+	if err := r.Get(context.Background(), request.NamespacedName, &stored); err != nil {
+		t.Fatal(err)
+	}
+	ready := apimeta.FindStatusCondition(stored.Status.Conditions, status.ConditionTypeReady)
+	if ready == nil || ready.Reason != reasons.DeploymentChanged {
+		t.Errorf("Ready = %+v, want %s", ready, reasons.DeploymentChanged)
+	}
 }
