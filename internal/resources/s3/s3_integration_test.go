@@ -90,7 +90,7 @@ func createTaggedBucket(t *testing.T, client *s3sdk.Client, namespace, crName, c
 	}
 	if _, err := client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
 		Bucket:  &bucket,
-		Tagging: &types.Tagging{TagSet: mapToTags(ownerTags(namespace, crName, crUID))},
+		Tagging: &types.Tagging{TagSet: mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID))},
 	}); err != nil {
 		t.Fatalf("real PutBucketTagging() (setup) error = %v", err)
 	}

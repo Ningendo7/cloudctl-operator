@@ -535,7 +535,7 @@ func createInstance(
 		// a fraction of gp3's at about the same price. Only a new instance
 		// gets it; an existing or adopted one keeps the storage it has.
 		StorageType: aws.String("gp3"),
-		Tags:        mapToTags(ownerTags(namespace, crName, crUID)),
+		Tags:        mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
 	}
 	if opts.backupEnabled {
 		input.BackupRetentionPeriod = aws.Int32(defaultBackupRetentionDays)
@@ -851,13 +851,6 @@ func recordVerified(ledger []depsv1alpha1.ManagedResource, ledgerName, arn strin
 	return ledger
 }
 
-func ownerTags(namespace, crName, crUID string) map[string]string {
-	return map[string]string{
-		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
-		cloudctlaws.OwnerUIDTagKey: crUID,
-	}
-}
-
 func mapToTags(m map[string]string) []types.Tag {
 	tags := make([]types.Tag, 0, len(m))
 	for k, v := range m {
@@ -910,8 +903,8 @@ func trackedInstance(ledger []depsv1alpha1.ManagedResource, resourceName string)
 }
 
 // ensureInstanceOwnership refuses an instance tagged for another CR, or for
-// an earlier UID this CR wasn't told to take over, and tags an untagged one
-// when adopt is set.
+// an earlier owner this CR wasn't told to take over from, tags an untagged one
+// when adopt is set, and claims its own for this cluster.
 func ensureInstanceOwnership(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID, instanceID, instanceARN string, adopt bool, recordEvent status.EventRecorder) error {
 	tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &instanceARN})
 	if tErr != nil {
@@ -919,22 +912,13 @@ func ensureInstanceOwnership(ctx context.Context, awsClient rdsAPI, namespace, c
 	}
 	currentTags := tagsToMap(tagsOut.TagList)
 
-	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
-		if existingOwner, ok := currentTags[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return cloudctlaws.OwnedByAnotherCRError("instance", instanceID, existingOwner)
-		}
-		transferred := false
-		if staleUID, stale := cloudctlaws.IsStaleUID(currentTags, namespace, crName, crUID); stale {
-			if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-				return cloudctlaws.PreviousIncarnationError("instance", instanceID, staleUID)
-			}
-			transferred = true
-		}
-		if !transferred && !adopt {
-			return cloudctlaws.AdoptRequiredError("instance", instanceID)
+	if !cloudctlaws.IsClaimedBy(currentTags, namespace, crName, crUID) {
+		how, err := cloudctlaws.CheckExistingOwnership(ctx, "instance", instanceID, currentTags, namespace, crName, crUID, adopt)
+		if err != nil {
+			return err
 		}
 
-		merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
+		merged := cloudctlaws.MergeTags(currentTags, cloudctlaws.OwnerTags(namespace, crName, crUID))
 		if _, tagErr := awsClient.AddTagsToResource(ctx, &rds.AddTagsToResourceInput{
 			ResourceName: &instanceARN,
 			Tags:         mapToTags(merged),
@@ -947,10 +931,13 @@ func ensureInstanceOwnership(ctx context.Context, awsClient rdsAPI, namespace, c
 			}
 		}
 		if recordEvent != nil {
-			if transferred {
-				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over RDS instance %s from a previous incarnation of this CR", instanceARN))
-			} else {
+			switch how {
+			case cloudctlaws.Transferred:
+				recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over RDS instance %s from a previous owner", instanceARN))
+			case cloudctlaws.Adopted:
 				recordEvent("Normal", "InstanceAdopted", fmt.Sprintf("Adopted existing RDS instance %s under management", instanceARN))
+			case cloudctlaws.Claimed:
+				// Only this cluster's tag was added.
 			}
 		}
 	}

@@ -269,7 +269,7 @@ func ensureTable(
 	}
 	currentTags := tagsToMap(tags)
 
-	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
+	if !cloudctlaws.IsClaimedBy(currentTags, namespace, crName, crUID) {
 		if err := adoptTable(ctx, awsClient, namespace, crName, crUID, tableName, opts, table, currentTags, recordEvent); err != nil {
 			return ledger, err
 		}
@@ -298,7 +298,7 @@ func adoptTable(
 	recordEvent status.EventRecorder,
 ) error {
 	tableArn := *table.TableArn
-	transferred, err := cloudctlaws.CheckExistingOwnership(ctx, "table", tableName, currentTags, namespace, crName, crUID, opts.adopt)
+	how, err := cloudctlaws.CheckExistingOwnership(ctx, "table", tableName, currentTags, namespace, crName, crUID, opts.adopt)
 	if err != nil {
 		return err
 	}
@@ -308,7 +308,7 @@ func adoptTable(
 		return err
 	}
 
-	if opts.checkAdoptedKey != nil {
+	if opts.checkAdoptedKey != nil && how != cloudctlaws.Claimed {
 		currentKey := ""
 		if table.SSEDescription != nil {
 			currentKey = aws.ToString(table.SSEDescription.KMSMasterKeyArn)
@@ -318,7 +318,7 @@ func adoptTable(
 		}
 	}
 
-	merged := cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID))
+	merged := cloudctlaws.MergeTags(currentTags, cloudctlaws.OwnerTags(namespace, crName, crUID))
 	if _, tagErr := awsClient.TagResource(ctx, &dynamodb.TagResourceInput{
 		ResourceArn: &tableArn,
 		Tags:        mapToTags(merged),
@@ -331,10 +331,13 @@ func adoptTable(
 		}
 	}
 	if recordEvent != nil {
-		if transferred {
-			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over DynamoDB table %s from a previous incarnation of this CR", tableArn))
-		} else {
+		switch how {
+		case cloudctlaws.Transferred:
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over DynamoDB table %s from a previous owner", tableArn))
+		case cloudctlaws.Adopted:
 			recordEvent("Normal", "TableAdopted", fmt.Sprintf("Adopted existing DynamoDB table %s under management", tableArn))
+		case cloudctlaws.Claimed:
+			// Only this cluster's tag was added.
 		}
 	}
 	return nil
@@ -395,7 +398,7 @@ func createTable(
 		AttributeDefinitions: attrDefs,
 		KeySchema:            keySchema,
 		BillingMode:          billingModeFor(opts.billingMode),
-		Tags:                 mapToTags(ownerTags(namespace, crName, crUID)),
+		Tags:                 mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
 		// The operator never recreates a table that disappears, so a delete
 		// made by hand loses the data for good.
 		DeletionProtectionEnabled: aws.Bool(opts.deletionProtection == nil || *opts.deletionProtection),
@@ -548,13 +551,6 @@ func listAllTags(ctx context.Context, awsClient dynamodbAPI, resourceArn string)
 			return all, nil
 		}
 		nextToken = out.NextToken
-	}
-}
-
-func ownerTags(namespace, crName, crUID string) map[string]string {
-	return map[string]string{
-		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
-		cloudctlaws.OwnerUIDTagKey: crUID,
 	}
 }
 

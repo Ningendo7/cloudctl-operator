@@ -117,6 +117,18 @@ func ResourceNameFor(style NameStyle, namespace, crName, resourceType, key strin
 	return buildName(style, fmt.Sprintf("%s-%s-%s", namespace, crName, key), hash, maxLen)
 }
 
+// ClusterResourceName is ResourceName for a resource each cluster keeps its
+// own of, such as an IAM role, which pods in only one cluster can use. A
+// non-empty cluster goes into the hash; the readable part is unchanged, and
+// an empty one gives ResourceName.
+func ClusterResourceName(cluster, namespace, crName, resourceType, key string, maxLen int) string {
+	if cluster == "" {
+		return ResourceName(namespace, crName, resourceType, key, maxLen)
+	}
+	hash := identityHash(namespace, crName, resourceType, key, "cluster="+cluster)
+	return buildName(NameStyleAny, fmt.Sprintf("%s-%s-%s", namespace, crName, key), hash, maxLen)
+}
+
 // DerivedResourceName is ResourceName's counterpart for a resource this
 // operator derives from another one it owns (an SQS queue's DLQ, a
 // dedicated KMS key for some other resource's encryption). Each of

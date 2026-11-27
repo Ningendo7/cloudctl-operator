@@ -226,7 +226,11 @@ func (c *tableCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.Manag
 		}
 		return false, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of table %q before delete", entry.Name))
 	}
-	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), c.namespace, c.crName, c.crUID) {
+	tagMap := tagsToMap(tags)
+	if cloudctlaws.LeftToOtherCluster(c.recordEvent, tagMap, c.namespace, c.crName, "table", entry.Name) {
+		return true, nil
+	}
+	if !cloudctlaws.IsOwnedBy(tagMap, c.namespace, c.crName, c.crUID) {
 		return false, cloudctlaws.OwnershipLostError("table", entry.Name, "delete it")
 	}
 	return false, nil
@@ -387,7 +391,7 @@ func relinquishIfStillTagged(ctx context.Context, client dynamodbAPI, namespace,
 	}
 	if _, uErr := client.UntagResource(ctx, &dynamodb.UntagResourceInput{
 		ResourceArn: &entry.ARN,
-		TagKeys:     []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
+		TagKeys:     cloudctlaws.OwnerTagKeys(),
 	}); uErr != nil {
 		return false, false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained table %q", entry.Name))
 	}

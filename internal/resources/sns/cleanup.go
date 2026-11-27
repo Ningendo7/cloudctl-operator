@@ -216,7 +216,11 @@ func (c *topicCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.Manag
 		}
 		return false, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of topic %q before delete", entry.Name))
 	}
-	if !cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.Tags), c.namespace, c.crName, c.crUID) {
+	tags := tagsToMap(tagsOut.Tags)
+	if cloudctlaws.LeftToOtherCluster(c.recordEvent, tags, c.namespace, c.crName, "topic", entry.Name) {
+		return true, nil
+	}
+	if !cloudctlaws.IsOwnedBy(tags, c.namespace, c.crName, c.crUID) {
 		return false, cloudctlaws.OwnershipLostError("topic", entry.Name, "delete it")
 	}
 	return false, nil
@@ -340,7 +344,7 @@ func relinquishIfStillTagged(ctx context.Context, client snsAPI, namespace, crNa
 	}
 	if _, uErr := client.UntagResource(ctx, &sns.UntagResourceInput{
 		ResourceArn: &entry.ARN,
-		TagKeys:     []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
+		TagKeys:     cloudctlaws.OwnerTagKeys(),
 	}); uErr != nil {
 		return false, false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained topic %q", entry.Name))
 	}

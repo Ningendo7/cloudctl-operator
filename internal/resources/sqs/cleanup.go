@@ -284,6 +284,9 @@ func (c *queueCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.Manag
 	if err != nil {
 		return "", false, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of queue %q before delete", entry.Name))
 	}
+	if cloudctlaws.LeftToOtherCluster(c.recordEvent, tagsOut.Tags, c.namespace, c.crName, "queue", entry.Name) {
+		return "", true, nil
+	}
 	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, c.namespace, c.crName, c.crUID) {
 		return "", false, cloudctlaws.OwnershipLostError("queue", entry.Name, "delete it")
 	}
@@ -512,7 +515,7 @@ func relinquishIfStillTagged(ctx context.Context, sqsClient sqsAPI, namespace, c
 	}
 	if _, uErr := sqsClient.UntagQueue(ctx, &sqs.UntagQueueInput{
 		QueueUrl: urlOut.QueueUrl,
-		TagKeys:  []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
+		TagKeys:  cloudctlaws.OwnerTagKeys(),
 	}); uErr != nil {
 		return false, false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained queue %q", entry.Name))
 	}

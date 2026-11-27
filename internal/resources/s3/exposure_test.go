@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
@@ -139,7 +140,9 @@ func TestEnsure_ADeclaredBucketLosesALeftoverDeletionDeny(t *testing.T) {
 	}
 }
 
-func ownerTagsFor() map[string]string { return ownerTags("default", "checkout-service", "uid-1") }
+func ownerTagsFor() map[string]string {
+	return cloudctlaws.OwnerTags("default", "checkout-service", "uid-1")
+}
 
 func TestEnsure_AnAdoptedBucketGetsTheStatementToo_AndOthersAreKept(t *testing.T) {
 	client := newFakeS3()

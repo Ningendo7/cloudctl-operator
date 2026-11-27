@@ -224,7 +224,7 @@ func createKey(
 ) ([]depsv1alpha1.ManagedResource, error) {
 	createOut, err := kmsClient.CreateKey(ctx, &kms.CreateKeyInput{
 		Description: aws.String(fmt.Sprintf("cloudctl: %s/%s %s", namespace, crName, resourceName)),
-		Tags:        mapToTags(ownerTags(namespace, crName, crUID)),
+		Tags:        mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
 	})
 	if err != nil {
 		return ledger, wrapAWSError(err, "creating KMS key")
@@ -314,7 +314,7 @@ func resumeKey(
 		return ledger, nil
 	}
 
-	if err := verifyOrTakeOverKey(ctx, kmsClient, namespace, crName, crUID, entry, recordEvent); err != nil {
+	if err := verifyOrTakeOverKey(ctx, kmsClient, namespace, crName, crUID, entry, pendingDeletion, recordEvent); err != nil {
 		return ledger, err
 	}
 	if pendingDeletion {
@@ -354,28 +354,32 @@ func keyMissingError(entry depsv1alpha1.ManagedResource, recordEvent status.Even
 }
 
 // verifyOrTakeOverKey re-checks the key's ownership tags. A key left by an
-// earlier incarnation of this CR is taken over when that is allowed.
-func verifyOrTakeOverKey(ctx context.Context, kmsClient kmsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) error {
+// earlier owner is taken over when that is allowed. AWS refuses to tag a key
+// pending deletion, so claiming one for this cluster waits for a later check.
+func verifyOrTakeOverKey(ctx context.Context, kmsClient kmsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, pendingDeletion bool, recordEvent status.EventRecorder) error {
 	tags, err := listAllResourceTags(ctx, kmsClient, entry.ARN)
 	if err != nil {
 		return wrapAWSError(err, fmt.Sprintf("re-verifying ownership of KMS key %q", entry.Name))
 	}
 	tagMap := tagsToMap(tags)
-	if cloudctlaws.IsOwnedBy(tagMap, namespace, crName, crUID) {
+	owned := cloudctlaws.IsOwnedBy(tagMap, namespace, crName, crUID)
+	if owned && (!cloudctlaws.NeedsClaim(tagMap) || pendingDeletion) {
 		return nil
 	}
-	staleUID, stale := cloudctlaws.IsStaleUID(tagMap, namespace, crName, crUID)
-	if !stale || !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-		return cloudctlaws.OwnershipLostError("KMS key", entry.Name, "manage it further")
+	if !owned {
+		from, stale := cloudctlaws.PreviousOwner(tagMap, namespace, crName, crUID)
+		if !stale || !cloudctlaws.MayTransferFrom(ctx, from) {
+			return cloudctlaws.OwnershipLostError("KMS key", entry.Name, "manage it further")
+		}
 	}
 	if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
 		KeyId: &entry.ARN,
-		Tags:  mapToTags(cloudctlaws.MergeTags(tagMap, ownerTags(namespace, crName, crUID))),
+		Tags:  mapToTags(cloudctlaws.MergeTags(tagMap, cloudctlaws.OwnerTags(namespace, crName, crUID))),
 	}); err != nil {
 		return wrapAWSError(err, fmt.Sprintf("taking over KMS key %q (tagging)", entry.Name))
 	}
-	if recordEvent != nil {
-		recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over KMS key %s from a previous incarnation of this CR", entry.ARN))
+	if !owned && recordEvent != nil {
+		recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over KMS key %s from a previous owner", entry.ARN))
 	}
 	return nil
 }
@@ -427,21 +431,13 @@ func adoptKey(
 	}
 	tagMap := tagsToMap(tags)
 
-	if cloudctlaws.IsOwnedBy(tagMap, namespace, crName, crUID) {
+	// A key pending deletion can't be tagged; it is claimed once revived.
+	if cloudctlaws.IsOwnedBy(tagMap, namespace, crName, crUID) && (!cloudctlaws.NeedsClaim(tagMap) || meta.KeyState == types.KeyStatePendingDeletion) {
 		return recordKey(ledger, resourceName, arn, opts.deletionPolicy, depsv1alpha1.ManagedResourceStateVerified), nil
 	}
-	if existingOwner, ok := tagMap[cloudctlaws.OwnerTagKey]; ok && existingOwner != cloudctlaws.OwnerTagValue(namespace, crName) {
-		return ledger, cloudctlaws.OwnedByAnotherCRError("KMS alias", alias, existingOwner)
-	}
-	transferred := false
-	if staleUID, stale := cloudctlaws.IsStaleUID(tagMap, namespace, crName, crUID); stale {
-		if !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-			return ledger, cloudctlaws.PreviousIncarnationError("KMS alias", alias, staleUID)
-		}
-		transferred = true
-	}
-	if !transferred && !opts.adopt {
-		return ledger, cloudctlaws.AdoptRequiredError("KMS alias", alias)
+	how, err := cloudctlaws.CheckExistingOwnership(ctx, "KMS alias", alias, tagMap, namespace, crName, crUID, opts.adopt)
+	if err != nil {
+		return ledger, err
 	}
 
 	// AWS refuses to tag a key that is pending deletion, so the deletion is
@@ -456,7 +452,7 @@ func adoptKey(
 		meta.KeyState = types.KeyStateEnabled
 	}
 
-	merged := cloudctlaws.MergeTags(tagMap, ownerTags(namespace, crName, crUID))
+	merged := cloudctlaws.MergeTags(tagMap, cloudctlaws.OwnerTags(namespace, crName, crUID))
 	if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
 		KeyId: &arn,
 		Tags:  mapToTags(merged),
@@ -469,10 +465,13 @@ func adoptKey(
 		}
 	}
 	if recordEvent != nil {
-		if transferred {
-			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over KMS key %s (alias %s) from a previous incarnation of this CR", arn, alias))
-		} else {
+		switch how {
+		case cloudctlaws.Transferred:
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over KMS key %s (alias %s) from a previous owner", arn, alias))
+		case cloudctlaws.Adopted:
 			recordEvent("Normal", "KeyAdopted", fmt.Sprintf("Adopted existing KMS key %s (alias %s) under management", arn, alias))
+		case cloudctlaws.Claimed:
+			// Only this cluster's tag was added.
 		}
 	}
 
@@ -650,13 +649,6 @@ func recordKey(
 		State:          state,
 	})
 	return ledger
-}
-
-func ownerTags(namespace, crName, crUID string) map[string]string {
-	return map[string]string{
-		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
-		cloudctlaws.OwnerUIDTagKey: crUID,
-	}
 }
 
 // mapToTags/tagsToMap use KMS's own Tag shape (TagKey/TagValue) — unlike

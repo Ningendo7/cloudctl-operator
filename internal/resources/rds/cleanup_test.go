@@ -801,7 +801,7 @@ func TestCleanup_SupersededEpisode_PropagatesRetireFailure(t *testing.T) {
 	// superseded path in ensureFinalSnapshot without relying on timing.
 	client.snapshots["some-older-snapshot-id"] = &fakeSnapshot{
 		id: "some-older-snapshot-id", arn: "arn:aws:rds:us-east-1:123456789012:snapshot:some-older-snapshot-id",
-		instanceID: "x", status: "available", tags: ownerTags("default", "checkout-service", "uid-1"),
+		instanceID: "x", status: "available", tags: cloudctlaws.OwnerTags("default", "checkout-service", "uid-1"),
 	}
 	status.UpsertManagedResource(&ledger, depsv1alpha1.ManagedResource{
 		Type: snapshotResourceType, Name: "orders-db", ARN: "some-older-snapshot-id",

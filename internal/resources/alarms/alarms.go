@@ -388,7 +388,8 @@ func reconcileAlarm(
 ) error {
 	matches := exists && alarmMatches(current, d, alarmActions)
 	// An unchanged alarm is not read, except while taking over: its tags
-	// may still carry the previous UID.
+	// may still carry the previous owner. Alarms hold no data, so one is
+	// not claimed for this cluster until it changes.
 	if matches && !cloudctlaws.TakingOver(ctx) {
 		return nil
 	}
@@ -528,8 +529,8 @@ func listAlarmsByPrefix(ctx context.Context, cwClient cloudctlaws.CloudWatchClie
 type alarmOwner struct {
 	// ours: tagged with this CR's name and UID.
 	ours bool
-	// transferable: tagged with this CR's name and exactly the UID the CR
-	// was told to take over from.
+	// transferable: tagged with this CR's name and exactly the previous
+	// owner the CR was told to take over from.
 	transferable bool
 }
 
@@ -548,8 +549,8 @@ func alarmOwnership(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, 
 	if cloudctlaws.IsOwnedBy(tags, own.namespace, own.crName, own.crUID) {
 		return alarmOwner{ours: true}, nil
 	}
-	staleUID, stale := cloudctlaws.IsStaleUID(tags, own.namespace, own.crName, own.crUID)
-	return alarmOwner{transferable: stale && cloudctlaws.MayTransferFrom(ctx, staleUID)}, nil
+	from, stale := cloudctlaws.PreviousOwner(tags, own.namespace, own.crName, own.crUID)
+	return alarmOwner{transferable: stale && cloudctlaws.MayTransferFrom(ctx, from)}, nil
 }
 
 func isAlarmOwnedByUs(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ownership, alarmName string) (bool, error) {
@@ -585,9 +586,8 @@ func putAlarm(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ow
 		input.TreatMissingData = aws.String(d.treatMissingData)
 	}
 	if isCreate {
-		input.Tags = []types.Tag{
-			{Key: aws.String(cloudctlaws.OwnerTagKey), Value: aws.String(cloudctlaws.OwnerTagValue(own.namespace, own.crName))},
-			{Key: aws.String(cloudctlaws.OwnerUIDTagKey), Value: aws.String(own.crUID)},
+		for key, value := range cloudctlaws.OwnerTags(own.namespace, own.crName, own.crUID) {
+			input.Tags = append(input.Tags, types.Tag{Key: aws.String(key), Value: aws.String(value)})
 		}
 	}
 

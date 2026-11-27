@@ -313,10 +313,7 @@ func ensureQueueExists(
 		keyParts = []string{opts.derivedFromKey, opts.derivedRole}
 	}
 	queueName := cloudctlaws.QueueName(namespace, crName, opts.fifo, keyParts...)
-	ownerTags := map[string]string{
-		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
-		cloudctlaws.OwnerUIDTagKey: crUID,
-	}
+	ownerTags := cloudctlaws.OwnerTags(namespace, crName, crUID)
 
 	getOut, err := awsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 		QueueName: &queueName,
@@ -337,7 +334,7 @@ func ensureQueueExists(
 		return ledger, "", nil, wrapAWSError(tErr, "reading queue tags")
 	}
 
-	if !cloudctlaws.IsOwnedBy(tagsOut.Tags, namespace, crName, crUID) {
+	if !cloudctlaws.IsClaimedBy(tagsOut.Tags, namespace, crName, crUID) {
 		if err := adoptQueue(ctx, awsClient, namespace, crName, crUID, queueName, queueURL, tagsOut.Tags, ownerTags, opts, recordEvent); err != nil {
 			return ledger, "", nil, err
 		}
@@ -467,11 +464,11 @@ func adoptQueue(
 	opts queueOptions,
 	recordEvent status.EventRecorder,
 ) error {
-	transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "queue", queueName, currentTags, namespace, crName, crUID, opts.adopt)
+	how, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "queue", queueName, currentTags, namespace, crName, crUID, opts.adopt)
 	if ownErr != nil {
 		return ownErr
 	}
-	if opts.checkAdoptedKey != nil {
+	if opts.checkAdoptedKey != nil && how != cloudctlaws.Claimed {
 		attrs, aErr := awsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl:       &queueURL,
 			AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameKmsMasterKeyId},
@@ -497,10 +494,13 @@ func adoptQueue(
 		}
 	}
 	if recordEvent != nil {
-		if transferred {
-			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SQS queue %s from a previous incarnation of this CR", queueName))
-		} else {
+		switch how {
+		case cloudctlaws.Transferred:
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SQS queue %s from a previous owner", queueName))
+		case cloudctlaws.Adopted:
 			recordEvent("Normal", "QueueAdopted", fmt.Sprintf("Adopted existing SQS queue %s under management", queueName))
+		case cloudctlaws.Claimed:
+			// Only this cluster's tag was added.
 		}
 	}
 	return nil

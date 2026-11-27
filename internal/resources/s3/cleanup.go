@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -225,6 +226,9 @@ func (c *bucketCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.Mana
 	// NoSuchTagSet: bucket exists but is untagged - not owned by anyone,
 	// falls through to the IsOwnedBy check below, which will correctly
 	// refuse to delete it.
+	if cloudctlaws.LeftToOtherCluster(c.recordEvent, currentTags, c.namespace, c.crName, "bucket", entry.Name) {
+		return true, nil
+	}
 	if !cloudctlaws.IsOwnedBy(currentTags, c.namespace, c.crName, c.crUID) {
 		return false, cloudctlaws.OwnershipLostError("bucket", entry.Name, "delete it")
 	}
@@ -497,7 +501,7 @@ func relinquishIfStillTagged(ctx context.Context, client s3API, namespace, crNam
 
 	remaining := map[string]string{}
 	for k, v := range currentTags {
-		if k != cloudctlaws.OwnerTagKey && k != cloudctlaws.OwnerUIDTagKey {
+		if !slices.Contains(cloudctlaws.OwnerTagKeys(), k) {
 			remaining[k] = v
 		}
 	}

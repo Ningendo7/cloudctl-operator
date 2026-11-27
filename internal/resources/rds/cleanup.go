@@ -161,7 +161,7 @@ func (c *cleaner) pendDeletion(ctx context.Context, entry depsv1alpha1.ManagedRe
 	// word: the ARN is a deterministic name, so a replaced or
 	// re-tagged instance would otherwise get this CR's snapshot and
 	// its "stuck" report.
-	owned, gone, err := verifyInstanceOwned(ctx, c.awsClient, c.namespace, c.crName, c.crUID, entry)
+	owned, gone, err := verifyInstanceOwned(ctx, c.awsClient, c.namespace, c.crName, c.crUID, entry, c.recordEvent)
 	if err != nil {
 		return ledger, results, err
 	}
@@ -311,7 +311,7 @@ func ensureFinalSnapshot(
 		_, createErr := awsClient.CreateDBSnapshot(ctx, &rds.CreateDBSnapshotInput{
 			DBInstanceIdentifier: &instanceID,
 			DBSnapshotIdentifier: &snapshotID,
-			Tags:                 mapToTags(ownerTags(namespace, crName, crUID)),
+			Tags:                 mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
 		})
 		var alreadyExists *types.DBSnapshotAlreadyExistsFault
 		if createErr != nil && !errors.As(createErr, &alreadyExists) {
@@ -428,8 +428,8 @@ func retireFinalSnapshot(
 }
 
 // verifyInstanceOwned reads the instance's ownership tags fresh. gone is
-// true when the instance no longer exists.
-func verifyInstanceOwned(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource) (owned, gone bool, err error) {
+// true when the instance no longer exists, or another cluster took it over.
+func verifyInstanceOwned(ctx context.Context, awsClient rdsAPI, namespace, crName, crUID string, entry depsv1alpha1.ManagedResource, recordEvent status.EventRecorder) (owned, gone bool, err error) {
 	tagsOut, tErr := awsClient.ListTagsForResource(ctx, &rds.ListTagsForResourceInput{ResourceName: &entry.ARN})
 	if tErr != nil {
 		if _, ok := errors.AsType[*types.DBInstanceNotFoundFault](tErr); ok {
@@ -437,7 +437,11 @@ func verifyInstanceOwned(ctx context.Context, awsClient rdsAPI, namespace, crNam
 		}
 		return false, false, wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of instance %q", entry.Name))
 	}
-	return cloudctlaws.IsOwnedBy(tagsToMap(tagsOut.TagList), namespace, crName, crUID), false, nil
+	tags := tagsToMap(tagsOut.TagList)
+	if cloudctlaws.LeftToOtherCluster(recordEvent, tags, namespace, crName, "instance", entry.Name) {
+		return false, true, nil
+	}
+	return cloudctlaws.IsOwnedBy(tags, namespace, crName, crUID), false, nil
 }
 
 // instanceIDFromARN extracts the instance identifier from a stored RDS
@@ -474,7 +478,7 @@ func relinquishIfStillTagged(ctx context.Context, awsClient rdsAPI, namespace, c
 	}
 	if _, uErr := awsClient.RemoveTagsFromResource(ctx, &rds.RemoveTagsFromResourceInput{
 		ResourceName: &entry.ARN,
-		TagKeys:      []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
+		TagKeys:      cloudctlaws.OwnerTagKeys(),
 	}); uErr != nil {
 		return false, false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained instance %q", entry.Name))
 	}

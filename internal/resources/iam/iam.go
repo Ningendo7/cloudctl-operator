@@ -55,12 +55,28 @@ const iamRoleNameMaxLen = 64
 // CR fails with a specific, actionable message instead of AWS's generic LimitExceededException.
 const rolePolicySizeLimit = 10240
 
-// roleName derives this CR's IAM role name. Namespace is folded in for the
-// same reason SQS/SNS/DynamoDB/S3's naming does — IAM role names are
-// unique per AWS account, not per Kubernetes namespace, so two same-named
-// CRs in different namespaces would otherwise collide on one shared role.
+// roleName is the name a new role for this CR gets. With --eks-cluster-name
+// each cluster has its own role, so two clusters sharing a CR's data can both
+// serve it.
 func roleName(namespace, crName string) string {
+	return cloudctlaws.ClusterResourceName(cloudctlaws.EKSClusterName(), namespace, crName, resourceType, roleLedgerName, iamRoleNameMaxLen)
+}
+
+// sharedRoleName is the name roles got before --eks-cluster-name was set.
+func sharedRoleName(namespace, crName string) string {
 	return cloudctlaws.ResourceName(namespace, crName, resourceType, roleLedgerName, iamRoleNameMaxLen)
+}
+
+// roleInUse is the role the CR has, or roleName for a new one. A role named
+// before --eks-cluster-name was set keeps its name: pods keep the role ARN
+// they started with, and deleting it would cut them off.
+func roleInUse(namespace, crName string, ledger []depsv1alpha1.ManagedResource) string {
+	if entry, found := status.FindManagedResource(ledger, resourceType, roleLedgerName); found {
+		if name, err := roleNameFromARN(entry.ARN); err == nil && name == sharedRoleName(namespace, crName) {
+			return name
+		}
+	}
+	return roleName(namespace, crName)
 }
 
 // Ensure derives this CR's least-privilege IAM policy from its owned and
@@ -94,7 +110,7 @@ func Ensure(
 		return ledger, "", errors.Join(emptyRole(ctx, iamClient, cr, ledger), skippedToError(skipped))
 	}
 
-	name := roleName(cr.Namespace, cr.Name)
+	name := roleInUse(cr.Namespace, cr.Name, ledger)
 
 	trustPolicy, err := ensureTrustPolicy(settings.OIDCProviderARN, settings.OIDCProviderURL, cr)
 	if err != nil {
@@ -137,7 +153,7 @@ func emptyRole(ctx context.Context, iamClient iamAPI, cr *depsv1alpha1.AppDepend
 	if !status.HasManagedResource(ledger, resourceType, roleLedgerName) || !declaresIAMWork(cr) {
 		return nil
 	}
-	name := roleName(cr.Namespace, cr.Name)
+	name := roleInUse(cr.Namespace, cr.Name, ledger)
 	if err := verifyRoleOwnership(ctx, iamClient, cr.Namespace, cr.Name, string(cr.UID), name); err != nil {
 		if _, gone := errors.AsType[*types.NoSuchEntityException](err); gone {
 			return nil
@@ -263,7 +279,7 @@ func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID 
 	getOut, err := iamClient.GetRole(ctx, &iam.GetRoleInput{RoleName: &name})
 
 	if _, ok := errors.AsType[*types.NoSuchEntityException](err); ok {
-		arn, err := createRole(ctx, iamClient, ownerTags(namespace, crName, crUID), want)
+		arn, err := createRole(ctx, iamClient, cloudctlaws.OwnerTags(namespace, crName, crUID), want)
 		return arn, err == nil, err
 	}
 	if err != nil {
@@ -320,25 +336,30 @@ func createRole(ctx context.Context, iamClient iamAPI, tags map[string]string, w
 	return *out.Role.Arn, nil
 }
 
-// verifyRoleOwnership refuses a role tagged for anyone else, and takes over
-// one tagged with the previous UID this CR was told to take over from.
+// verifyRoleOwnership refuses a role tagged for anyone else, takes over one
+// tagged with the previous owner this CR was told to take over from, and
+// claims its own for this cluster.
 func verifyRoleOwnership(ctx context.Context, iamClient iamAPI, namespace, crName, crUID, name string) error {
 	tags, tErr := listAllRoleTags(ctx, iamClient, name)
 	if tErr != nil {
 		return wrapAWSError(tErr, "reading role tags")
 	}
-	if roleTags := tagsToMap(tags); !cloudctlaws.IsOwnedBy(roleTags, namespace, crName, crUID) {
-		staleUID, stale := cloudctlaws.IsStaleUID(roleTags, namespace, crName, crUID)
-		if !stale || !cloudctlaws.MayTransferFrom(ctx, staleUID) {
-			msg := fmt.Sprintf("IAM role %q already exists and is not owned by this CR — this looks like a naming collision", name)
-			if stale {
-				msg += fmt.Sprintf("; it is tagged with an earlier UID (%s), and to take it over, annotate this CR with %s=%s", staleUID, cloudctlaws.AdoptFromUIDAnnotation, staleUID)
-			}
-			return errors.New(msg)
+	roleTags := tagsToMap(tags)
+	owned := cloudctlaws.IsOwnedBy(roleTags, namespace, crName, crUID)
+	if owned && !cloudctlaws.NeedsClaim(roleTags) {
+		return nil
+	}
+	if !owned {
+		from, stale := cloudctlaws.PreviousOwner(roleTags, namespace, crName, crUID)
+		if stale && !cloudctlaws.MayTransferFrom(ctx, from) {
+			return cloudctlaws.PreviousIncarnationError("IAM role", name, from)
 		}
-		if _, err := iamClient.TagRole(ctx, &iam.TagRoleInput{RoleName: &name, Tags: mapToTags(ownerTags(namespace, crName, crUID))}); err != nil {
-			return wrapAWSError(err, "taking over IAM role (tagging)")
+		if !stale {
+			return fmt.Errorf("IAM role %q already exists and is not owned by this CR — this looks like a naming collision", name)
 		}
+	}
+	if _, err := iamClient.TagRole(ctx, &iam.TagRoleInput{RoleName: &name, Tags: mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID))}); err != nil {
+		return wrapAWSError(err, "tagging IAM role")
 	}
 	return nil
 }
@@ -450,13 +471,6 @@ func recordVerified(ledger []depsv1alpha1.ManagedResource, arn, digest string, k
 	return ledger
 }
 
-func ownerTags(namespace, crName, crUID string) map[string]string {
-	return map[string]string{
-		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
-		cloudctlaws.OwnerUIDTagKey: crUID,
-	}
-}
-
 func mapToTags(m map[string]string) []types.Tag {
 	tags := make([]types.Tag, 0, len(m))
 	for k, v := range m {
@@ -488,11 +502,13 @@ func wrapAWSError(err error, errContext string) error {
 }
 
 // CheckLedgerEntry refuses a role entry that isn't this CR's role. The role
-// may sit under any path, since --iam-role-path applies to new roles only.
+// may sit under any path, since --iam-role-path applies to new roles only, and
+// may have the name roles had before --eks-cluster-name was set.
 func CheckLedgerEntry(id cloudctlaws.Identity, namespace, crName string, entry depsv1alpha1.ManagedResource) error {
 	name := roleName(namespace, crName)
 	prefix := id.GlobalARN("iam", "role/")
-	if entry.Name == roleLedgerName && strings.HasPrefix(entry.ARN, prefix) && strings.HasSuffix(entry.ARN, "/"+name) {
+	if entry.Name == roleLedgerName && strings.HasPrefix(entry.ARN, prefix) &&
+		(strings.HasSuffix(entry.ARN, "/"+name) || strings.HasSuffix(entry.ARN, "/"+sharedRoleName(namespace, crName))) {
 		return nil
 	}
 	return &cloudctlaws.LedgerMismatchError{Type: entry.Type, Name: entry.Name, ARN: entry.ARN, Want: prefix + "[path/]" + name}

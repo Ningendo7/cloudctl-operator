@@ -458,3 +458,31 @@ func TestCleanup_AConsumerWhoseOnlyGrantIsRevokedLosesItsPolicy(t *testing.T) {
 		t.Error("the role was kept after the spec stopped needing one")
 	}
 }
+
+// After a handover the role belongs to the cluster that took it; deleting
+// the old CR must not delete it.
+func TestCleanup_LeavesARoleAnotherClusterTookOver(t *testing.T) {
+	iamClient := newFakeIAM()
+	name := roleName("default", "checkout-service")
+	arn := "arn:aws:iam::123456789012:role/" + name
+	iamClient.roles[name] = &fakeRole{arn: arn, policies: map[string]string{roleInlinePolicyName: "{}"}, tags: map[string]string{
+		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+		cloudctlaws.OwnerUIDTagKey: "uid-1",
+		cloudctlaws.ClusterTagKey:  "green",
+	}}
+	cloudctlaws.SetCluster("blue", "uid-blue")
+	t.Cleanup(func() { cloudctlaws.SetCluster("", "") })
+	cr := &depsv1alpha1.AppDependencies{Namespace: "default", Name: "checkout-service", UID: "uid-1"}
+	ledger := []depsv1alpha1.ManagedResource{{Type: "iam", Name: "role", ARN: arn}}
+
+	updated, err := Cleanup(context.Background(), iamClient, newFakeK8sClient(), cr, ledger, true)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if status.HasManagedResource(updated, "iam", "role") {
+		t.Error("expected the role dropped from the ledger")
+	}
+	if _, exists := iamClient.roles[name]; !exists {
+		t.Error("expected green's role left in place")
+	}
+}

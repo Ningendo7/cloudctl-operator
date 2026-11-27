@@ -148,10 +148,7 @@ func ensureTopicExists(
 		ledger = trustedLedger
 	}
 
-	ownerTags := map[string]string{
-		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
-		cloudctlaws.OwnerUIDTagKey: crUID,
-	}
+	ownerTags := cloudctlaws.OwnerTags(namespace, crName, crUID)
 
 	tagsOut, err := awsClient.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{
 		ResourceArn: &topicArn,
@@ -170,7 +167,7 @@ func ensureTopicExists(
 
 	// Topic already exists — verify we actually own it before trusting it.
 	currentTags := tagsToMap(tagsOut.Tags)
-	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
+	if !cloudctlaws.IsClaimedBy(currentTags, namespace, crName, crUID) {
 		if err := adoptTopic(ctx, awsClient, kmsClient, namespace, crName, crUID, topicName, topicArn, currentTags, ownerTags, t, kmsKeyARN, recordEvent); err != nil {
 			return ledger, err
 		}
@@ -307,16 +304,18 @@ func adoptTopic(
 	kmsKeyARN *string,
 	recordEvent status.EventRecorder,
 ) error {
-	transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "topic", topicName, currentTags, namespace, crName, crUID, t.Adopt)
+	how, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "topic", topicName, currentTags, namespace, crName, crUID, t.Adopt)
 	if ownErr != nil {
 		return ownErr
 	}
-	attrsOut, aErr := awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
-	if aErr != nil {
-		return wrapAWSError(aErr, "reading the topic's encryption before adopting it")
-	}
-	if err := kms.CheckAdoptedKey(ctx, kmsClient, attrsOut.Attributes["KmsMasterKeyId"], aws.ToString(kmsKeyARN)); err != nil {
-		return fmt.Errorf("topic %q can't be adopted: %w", topicName, err)
+	if how != cloudctlaws.Claimed {
+		attrsOut, aErr := awsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: &topicArn})
+		if aErr != nil {
+			return wrapAWSError(aErr, "reading the topic's encryption before adopting it")
+		}
+		if err := kms.CheckAdoptedKey(ctx, kmsClient, attrsOut.Attributes["KmsMasterKeyId"], aws.ToString(kmsKeyARN)); err != nil {
+			return fmt.Errorf("topic %q can't be adopted: %w", topicName, err)
+		}
 	}
 
 	merged := cloudctlaws.MergeTags(currentTags, ownerTags)
@@ -329,10 +328,13 @@ func adoptTopic(
 		}
 	}
 	if recordEvent != nil {
-		if transferred {
-			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SNS topic %s from a previous incarnation of this CR", topicArn))
-		} else {
+		switch how {
+		case cloudctlaws.Transferred:
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over SNS topic %s from a previous owner", topicArn))
+		case cloudctlaws.Adopted:
 			recordEvent("Normal", "TopicAdopted", fmt.Sprintf("Adopted existing SNS topic %s under management", topicArn))
+		case cloudctlaws.Claimed:
+			// Only this cluster's tag was added.
 		}
 	}
 	return nil

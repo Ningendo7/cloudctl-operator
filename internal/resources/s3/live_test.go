@@ -390,7 +390,7 @@ func TestLive_RelinquishIfStillTagged_TellsGoneFromUntaggedFromOwned(t *testing.
 		createRealBucket(t, client, bucket, region)
 		if _, err := client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
 			Bucket:  &bucket,
-			Tagging: &types.Tagging{TagSet: mapToTags(ownerTags(namespace, crName, "uid-1"))},
+			Tagging: &types.Tagging{TagSet: mapToTags(cloudctlaws.OwnerTags(namespace, crName, "uid-1"))},
 		}); err != nil {
 			t.Fatalf("real PutBucketTagging() (setup) error = %v", err)
 		}

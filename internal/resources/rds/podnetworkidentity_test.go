@@ -302,7 +302,7 @@ func TestEnsurePodNetworkIdentity_StaysInExistingVPC_WhenStillJustified(t *testi
 		GroupName: &groupName, VpcId: aws.String("vpc-vpc-a-subnets"),
 		TagSpecifications: []ec2types.TagSpecification{{
 			ResourceType: ec2types.ResourceTypeSecurityGroup,
-			Tags:         mapToEC2Tags(ownerTags("fulfillment", "fulfillment-service", "uid-1")),
+			Tags:         mapToEC2Tags(cloudctlaws.OwnerTags("fulfillment", "fulfillment-service", "uid-1")),
 		}},
 	})
 	if err != nil {
@@ -352,7 +352,7 @@ func TestEnsurePodNetworkIdentity_MigratesVPC_WhenNoLongerJustified(t *testing.T
 		GroupName: &groupName, VpcId: aws.String("vpc-vpc-a-subnets"),
 		TagSpecifications: []ec2types.TagSpecification{{
 			ResourceType: ec2types.ResourceTypeSecurityGroup,
-			Tags:         mapToEC2Tags(ownerTags("fulfillment", "fulfillment-service", "uid-1")),
+			Tags:         mapToEC2Tags(cloudctlaws.OwnerTags("fulfillment", "fulfillment-service", "uid-1")),
 		}},
 	})
 	if err != nil {
@@ -405,7 +405,7 @@ func TestEnsurePodNetworkIdentity_SkipsVPCRecheckWithinTrustWindow(t *testing.T)
 		GroupName: &groupName, VpcId: aws.String("vpc-vpc-a-subnets"),
 		TagSpecifications: []ec2types.TagSpecification{{
 			ResourceType: ec2types.ResourceTypeSecurityGroup,
-			Tags:         mapToEC2Tags(ownerTags("fulfillment", "fulfillment-service", "uid-1")),
+			Tags:         mapToEC2Tags(cloudctlaws.OwnerTags("fulfillment", "fulfillment-service", "uid-1")),
 		}},
 	})
 	if err != nil {
@@ -456,7 +456,7 @@ func TestEnsurePodNetworkIdentity_RechecksVPCOnceTrustWindowExpires(t *testing.T
 		GroupName: &groupName, VpcId: aws.String("vpc-vpc-a-subnets"),
 		TagSpecifications: []ec2types.TagSpecification{{
 			ResourceType: ec2types.ResourceTypeSecurityGroup,
-			Tags:         mapToEC2Tags(ownerTags("fulfillment", "fulfillment-service", "uid-1")),
+			Tags:         mapToEC2Tags(cloudctlaws.OwnerTags("fulfillment", "fulfillment-service", "uid-1")),
 		}},
 	})
 	if err != nil {
@@ -699,7 +699,7 @@ func TestCleanupPodNetworkIdentity_DoesNotDeleteAGroupItNoLongerOwns(t *testing.
 		GroupName: &groupName, VpcId: aws.String("vpc-a"),
 		TagSpecifications: []ec2types.TagSpecification{{
 			ResourceType: ec2types.ResourceTypeSecurityGroup,
-			Tags:         mapToEC2Tags(ownerTags("someone", "else", "uid-9")),
+			Tags:         mapToEC2Tags(cloudctlaws.OwnerTags("someone", "else", "uid-9")),
 		}},
 	})
 	if err != nil {

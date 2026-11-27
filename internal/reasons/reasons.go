@@ -262,6 +262,12 @@ var (
 	DeploymentChanged = register("DeploymentChanged", Failing,
 		"The CR's resources are named for another operator deployment name (--cluster-name) than this operator's. Names built under this one would point at new, empty resources, so nothing is reconciled.",
 		"Run the operator with the deployment name the CR records in status.deployment, or let the operator that has it handle the CR with the cloudctl.io/deployment label.")
+	ClusterChanged = register("ClusterChanged", Failing,
+		"The CR's resources were built by the operator in another cluster (status.cluster), as when this cluster was restored from that one's etcd backup. Both would act on the same resources, so nothing is reconciled.",
+		"If this cluster replaces that one, annotate the CR with cloudctl.io/adopt-from-uid=<cluster>/<uid> as the message gives it, and remove the annotation afterwards.")
+	OwnedByAnotherCluster = register("OwnedByAnotherCluster", Failing,
+		"A resource carries this CR's name but is managed by the operator in another cluster (the cloudctl.io/cluster tag).",
+		"If this cluster replaces that one, annotate the CR with cloudctl.io/adopt-from-uid=<value in the message>, and remove the annotation afterwards.")
 	LedgerTampered = register("LedgerTampered", Failing,
 		"An entry in status.managedResources names an ARN the operator would not have given this CR, such as another CR's resource or one in another account. Writing status needs only RBAC, so nothing is reconciled while it is there.",
 		"Find out what wrote the CR's status; only the operator's ServiceAccount should. Correct or remove the entry with kubectl edit --subresource=status.")
