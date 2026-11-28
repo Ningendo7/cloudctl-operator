@@ -76,6 +76,12 @@ manager:
   ##
   eksClusterName: ""
 
+  ## Tags written on every AWS resource the operator creates, adopts or
+  ## claims, such as {env: prod, cost-center: "1234"}. A value already on a
+  ## resource is kept. Keys starting with cloudctl.io/ or aws: are refused.
+  ##
+  defaultTags: {}
+
   ## Extra volumes and volume mounts for the manager pod, as Kubernetes
   ## volume and volumeMount entries.
   ##

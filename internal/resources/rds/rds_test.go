@@ -1049,21 +1049,22 @@ func TestEnsure_UpdatesBackupRetentionWhenBackupToggled(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
 	ec2Client := newFakeEC2()
 	spec := baseInstanceSpec("orders-db")
+	spec.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: false}
 	rdsSpec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
 	ledger, err := Ensure(context.Background(), client, kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 
-	spec.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: true}
+	spec.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: true, RetentionDays: aws.Int32(14)}
 	rdsSpec = &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
 	if _, err := Ensure(context.Background(), client, kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, ledger, nil, nil); err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
 
 	in := client.lastModifyDBInstanceInput
-	if in == nil || in.BackupRetentionPeriod == nil || *in.BackupRetentionPeriod != defaultBackupRetentionDays {
-		t.Errorf("expected BackupRetentionPeriod=%d in the Modify call, got %v", defaultBackupRetentionDays, in)
+	if in == nil || in.BackupRetentionPeriod == nil || *in.BackupRetentionPeriod != 14 {
+		t.Errorf("expected BackupRetentionPeriod=14 in the Modify call, got %v", in)
 	}
 }
 
@@ -1133,6 +1134,7 @@ func TestEnsure_ModifiesMultipleAttributesInOneCall(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(grant).Build()
 	ec2Client := newFakeEC2()
 	spec := baseInstanceSpec("orders-db")
+	spec.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: false}
 	rdsSpec := &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}
 	ledger, err := Ensure(context.Background(), client, kmsWithRDSKey(), ec2Client, k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", rdsSpec, nil, nil, nil)
 	if err != nil {
@@ -1522,12 +1524,16 @@ func TestEnsure_BackupsAreNeverTurnedOffByDrift(t *testing.T) {
 		t.Fatalf("first Ensure() error = %v", err)
 	}
 
-	for name, backup := range map[string]*depsv1alpha1.RDSBackupSpec{
-		"omitted":  nil,
-		"disabled": {Enabled: false},
+	for name, tc := range map[string]struct {
+		backup *depsv1alpha1.RDSBackupSpec
+		warns  bool
+	}{
+		"omitted, which means on": {nil, false},
+		"disabled":                {&depsv1alpha1.RDSBackupSpec{Enabled: false}, true},
+		"a shorter retention":     {&depsv1alpha1.RDSBackupSpec{Enabled: true, RetentionDays: aws.Int32(3)}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			spec.Backup = backup
+			spec.Backup = tc.backup
 			var recorded []string
 			if _, err := ensureRecording(t, client, spec, ledger, &recorded); err != nil {
 				t.Fatalf("Ensure() error = %v", err)
@@ -1539,8 +1545,32 @@ func TestEnsure_BackupsAreNeverTurnedOffByDrift(t *testing.T) {
 			if client.modifyDBInstanceCalls != 0 {
 				t.Errorf("expected no modify call, got %d", client.modifyDBInstanceCalls)
 			}
-			if !contains(recorded, "BackupsLeftEnabled") {
-				t.Errorf("expected a warning that backups were left on, got %v", recorded)
+			if got := contains(recorded, "BackupsLeftEnabled"); got != tc.warns {
+				t.Errorf("BackupsLeftEnabled warning = %v, want %v; events %v", got, tc.warns, recorded)
+			}
+		})
+	}
+}
+
+// Backups are on for an instance whose spec says nothing about them.
+func TestEnsure_ANewInstanceHasBackupsUnlessTheSpecTurnsThemOff(t *testing.T) {
+	for name, tc := range map[string]struct {
+		backup *depsv1alpha1.RDSBackupSpec
+		want   int32
+	}{
+		"omitted":            {nil, defaultBackupRetentionDays},
+		"a longer retention": {&depsv1alpha1.RDSBackupSpec{Enabled: true, RetentionDays: aws.Int32(21)}, 21},
+		"disabled":           {&depsv1alpha1.RDSBackupSpec{Enabled: false}, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeRDS()
+			spec := baseInstanceSpec("orders-db")
+			spec.Backup = tc.backup
+			if _, err := ensureOnce(t, client, spec, nil); err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			if got := aws.ToInt32(client.lastCreateDBInstanceInput.BackupRetentionPeriod); got != tc.want {
+				t.Errorf("BackupRetentionPeriod = %d, want %d", got, tc.want)
 			}
 		})
 	}

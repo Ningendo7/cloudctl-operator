@@ -107,3 +107,16 @@ func (f *fakeCloudWatchClient) ListTagsForResource(_ context.Context, in *cloudw
 	}
 	return &cloudwatch.ListTagsForResourceOutput{}, nil
 }
+
+func (f *fakeCloudWatchClient) TagResource(_ context.Context, in *cloudwatch.TagResourceInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.TagResourceOutput, error) {
+	arn := aws.ToString(in.ResourceARN)
+	for name, a := range f.alarms {
+		if strings.HasSuffix(arn, ":alarm:"+name) {
+			for _, t := range in.Tags {
+				a.tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+			}
+			return &cloudwatch.TagResourceOutput{}, nil
+		}
+	}
+	return nil, &types.ResourceNotFoundException{}
+}

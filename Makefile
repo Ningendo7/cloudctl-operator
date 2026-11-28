@@ -478,6 +478,10 @@ helm-generate: manifests generate ## Regenerate the Helm chart in charts/ from t
         {{- end }}\
         {{- with .Values.manager.eksClusterName }}\
         - --eks-cluster-name={{ . }}\
+        {{- end }}\
+        {{- with .Values.manager.defaultTags }}\
+        {{- $$tags := list }}{{- range $$key, $$value := . }}{{- $$tags = append $$tags (printf "%s=%s" $$key (toString $$value)) }}{{- end }}\
+        - --default-tags={{ join "," $$tags }}\
         {{- end }}' charts/chart/templates/manager/manager.yaml
 	@# Default pod anti-affinity (the plugin emits an empty one), used only
 	@# when manager.affinity is unset and replicas > 1.

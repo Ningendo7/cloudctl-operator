@@ -659,6 +659,9 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Entry("an autoscaling ceiling no larger than the storage", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) {
 				i.MaxAllocatedStorage = new(int32(20))
 			}), "must be larger than allocatedStorage"),
+			Entry("an RDS backup retention past AWS's 35 days", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) {
+				i.Backup = &depsv1alpha1.RDSBackupSpec{Enabled: true, RetentionDays: new(int32(36))}
+			}), "less than or equal to 35"),
 			Entry("an empty RDS subnet group name", rdsCR(func(i *depsv1alpha1.RDSInstanceSpec) { i.DBSubnetGroupName = "" }), "at least 1 chars long"),
 			Entry("an empty DynamoDB partition key", ddbCR(func(t *depsv1alpha1.DynamoDBTableSpec) { t.PartitionKey = "" }), "at least 1 chars long"),
 		)
@@ -684,6 +687,25 @@ var _ = Describe("AppDependencies CRD validation", func() {
 			Expect(k8sClient.Create(ctx, sqsCR(func(*depsv1alpha1.SQSQueueSpec) {}))).To(Succeed())
 			Expect(k8sClient.Create(ctx, s3CR(func(*depsv1alpha1.S3BucketSpec) {}))).To(Succeed())
 			Expect(k8sClient.Create(ctx, ddbCR(func(*depsv1alpha1.DynamoDBTableSpec) {}))).To(Succeed())
+		})
+
+		// A backup block that leaves enabled out gets backups, as a CR without
+		// one does. The Go type always writes enabled, so this is sent as JSON.
+		It("turns backups on when backup.enabled is left out", func() {
+			cr := rdsCR(func(*depsv1alpha1.RDSInstanceSpec) {})
+			raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cr)
+			Expect(err).NotTo(HaveOccurred())
+			obj := &unstructured.Unstructured{Object: raw}
+			obj.SetGroupVersionKind(depsv1alpha1.GroupVersion.WithKind("AppDependencies"))
+			resources, _, _ := unstructured.NestedSlice(raw, "spec", "rds", "resources")
+			resources[0].(map[string]any)["backup"] = map[string]any{"retentionDays": int64(14)}
+			Expect(unstructured.SetNestedSlice(raw, resources, "spec", "rds", "resources")).To(Succeed())
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			var stored depsv1alpha1.AppDependencies
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), &stored)).To(Succeed())
+			Expect(stored.Spec.RDS.Resources[0].Backup).NotTo(BeNil())
+			Expect(stored.Spec.RDS.Resources[0].Backup.Enabled).To(BeTrue())
 		})
 
 		It("rejects a subnet group grant with an empty subnet group name", func() {

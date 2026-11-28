@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -414,5 +415,32 @@ func TestKubeSystemUID(t *testing.T) {
 	// resources with nothing.
 	if _, err := kubeSystemUID(context.Background(), fake.NewClientBuilder().Build()); err == nil {
 		t.Error("expected an error when kube-system can't be read")
+	}
+}
+
+func TestParseDefaultTags(t *testing.T) {
+	got, err := parseDefaultTags("env=prod, cost-center=12=34")
+	if err != nil || len(got) != 2 || got["env"] != "prod" || got["cost-center"] != "12=34" {
+		t.Errorf("parseDefaultTags() = %v, %v", got, err)
+	}
+	if got, err := parseDefaultTags(""); err != nil || got != nil {
+		t.Errorf("parseDefaultTags(\"\") = %v, %v; want none", got, err)
+	}
+	many := make([]string, 0, maxDefaultTags+1)
+	for i := range maxDefaultTags + 1 {
+		many = append(many, fmt.Sprintf("k%d=v", i))
+	}
+	for _, bad := range []string{
+		"env",                         // no value separator
+		"=prod",                       // no key
+		"cloudctl.io/owner=other/app", // would fake ownership
+		"AWS:createdBy=me",            // reserved by AWS
+		"env=prod,env=dev",            // twice
+		"env=a;b",                     // a character AWS refuses
+		strings.Join(many, ","),       // too many
+	} {
+		if _, err := parseDefaultTags(bad); err == nil {
+			t.Errorf("parseDefaultTags(%q) accepted it", bad)
+		}
 	}
 }

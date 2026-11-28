@@ -127,6 +127,10 @@ spec:
         {{- with .Values.manager.eksClusterName }}
         - --eks-cluster-name={{ . }}
         {{- end }}
+        {{- with .Values.manager.defaultTags }}
+        {{- $tags := list }}{{- range $key, $value := . }}{{- $tags = append $tags (printf "%s=%s" $key (toString $value)) }}{{- end }}
+        - --default-tags={{ join "," $tags }}
+        {{- end }}
         command:
         - /manager
         image: "{{ .Values.manager.image.repository }}{{- if not (contains "@" .Values.manager.image.repository) }}:{{ .Values.manager.image.tag | default (ternary "latest" (printf "v%s" .Chart.AppVersion) (eq .Chart.AppVersion "0.0.0-dev")) }}{{- end }}"

@@ -81,7 +81,7 @@ const (
 )
 
 // defaultBackupRetentionDays is AWS's own long-standing default retention
-// window for automated backups, applied when backup.enabled is true.
+// window for automated backups, applied when backup.retentionDays is unset.
 const defaultBackupRetentionDays = int32(7)
 
 // ErrReplicationNotSupported is returned for any instance requesting
@@ -114,6 +114,7 @@ type instanceOptions struct {
 	dbSubnetGroupName   string
 	multiAZ             bool
 	backupEnabled       bool
+	backupRetentionDays int32
 	kmsKeyARN           *string
 	// encryptionOff is an explicit encryption: {enabled: false}; without
 	// it, an instance with no key is encrypted with AWS's RDS key.
@@ -272,8 +273,10 @@ func optionsFor(r depsv1alpha1.RDSInstanceSpec, sgARN string) instanceOptions {
 	if r.HighAvailability != nil {
 		opts.multiAZ = r.HighAvailability.Enabled
 	}
-	if r.Backup != nil {
-		opts.backupEnabled = r.Backup.Enabled
+	opts.backupEnabled = r.Backup == nil || r.Backup.Enabled
+	opts.backupRetentionDays = defaultBackupRetentionDays
+	if r.Backup != nil && r.Backup.RetentionDays != nil {
+		opts.backupRetentionDays = *r.Backup.RetentionDays
 	}
 	return opts
 }
@@ -535,10 +538,10 @@ func createInstance(
 		// a fraction of gp3's at about the same price. Only a new instance
 		// gets it; an existing or adopted one keeps the storage it has.
 		StorageType: aws.String("gp3"),
-		Tags:        mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
+		Tags:        mapToTags(cloudctlaws.CreationTags(namespace, crName, crUID)),
 	}
 	if opts.backupEnabled {
-		input.BackupRetentionPeriod = aws.Int32(defaultBackupRetentionDays)
+		input.BackupRetentionPeriod = aws.Int32(opts.backupRetentionDays)
 	} else {
 		input.BackupRetentionPeriod = aws.Int32(0)
 	}
@@ -623,7 +626,7 @@ func reconcileSizing(modify *rds.ModifyDBInstanceInput, cur instanceAttributes, 
 func reconcileBackupRetention(modify *rds.ModifyDBInstanceInput, cur instanceAttributes, opts instanceOptions, instanceARN string, recordEvent status.EventRecorder) (changed bool) {
 	desired := int32(0)
 	if opts.backupEnabled {
-		desired = defaultBackupRetentionDays
+		desired = opts.backupRetentionDays
 	}
 	switch {
 	case cur.backupRetention < desired:
@@ -918,7 +921,7 @@ func ensureInstanceOwnership(ctx context.Context, awsClient rdsAPI, namespace, c
 			return err
 		}
 
-		merged := cloudctlaws.MergeTags(currentTags, cloudctlaws.OwnerTags(namespace, crName, crUID))
+		merged := cloudctlaws.ClaimTags(currentTags, namespace, crName, crUID)
 		if _, tagErr := awsClient.AddTagsToResource(ctx, &rds.AddTagsToResourceInput{
 			ResourceName: &instanceARN,
 			Tags:         mapToTags(merged),
@@ -990,7 +993,7 @@ func reportStorageLargerThanSpec(instanceARN string, actual, want int32, recordE
 
 // instanceIdentifier is the DB instance identifier for a key.
 func instanceIdentifier(namespace, crName, key string) string {
-	return cloudctlaws.ResourceNameFor(cloudctlaws.NameStyleRDS, namespace, crName, resourceType, key, 63)
+	return cloudctlaws.DBInstanceIdentifier(namespace, crName, key)
 }
 
 // CheckLedgerEntry refuses an instance entry whose ARN is not the instance

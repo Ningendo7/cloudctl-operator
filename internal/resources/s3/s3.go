@@ -203,7 +203,7 @@ func ensureBucket(
 	}
 
 	bucket := bucketName(namespace, crName, resourceName, accountID)
-	bucketArn := "arn:aws:s3:::" + bucket
+	bucketArn := cloudctlaws.ARN("s3", "", "", bucket)
 
 	if existing, existingFound := status.FindManagedResource(ledger, resourceType, resourceName); existingFound && !status.NeedsRevalidation(existing) {
 		trustedLedger, present, trustErr := ensureWithinTrust(ctx, awsClient, bucket, existing, opts, ledger, recordEvent)
@@ -305,7 +305,7 @@ func createBucketIfMissing(
 	input := &s3sdk.CreateBucketInput{
 		Bucket: &bucket,
 		CreateBucketConfiguration: &types.CreateBucketConfiguration{
-			Tags: mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
+			Tags: mapToTags(cloudctlaws.CreationTags(namespace, crName, crUID)),
 		},
 	}
 	if region != regionUSEast1 {
@@ -364,7 +364,7 @@ func adoptBucket(
 		}
 	}
 
-	merged := cloudctlaws.WithoutReleaseTags(cloudctlaws.MergeTags(currentTags, cloudctlaws.OwnerTags(namespace, crName, crUID)))
+	merged := cloudctlaws.WithoutReleaseTags(cloudctlaws.ClaimTags(currentTags, namespace, crName, crUID))
 	if _, tagErr := awsClient.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
 		Bucket:  &bucket,
 		Tagging: &types.Tagging{TagSet: mapToTags(merged)},

@@ -138,7 +138,7 @@ func TestKeyServiceGrants_AlarmsThatPublishToATopicAreGrantedToTheTopicsKey(t *t
 	if err != nil {
 		t.Fatalf("keyServiceGrants() error = %v", err)
 	}
-	want := alarms.AlarmARNs("us-east-1", "123456789012", "shop", "checkout", alarmsOnEvents, checkoutQueueSQS, nil, nil)
+	want := alarms.AlarmARNs("us-east-1", "123456789012", "shop", "checkout", &depsv1alpha1.AppDependenciesSpec{Alarms: alarmsOnEvents, SQS: checkoutQueueSQS})
 	got := grants[platformKeyARN].AlarmARNs
 	if len(want) == 0 || strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("alarm grants = %v, want exactly shop/checkout's alarms %v (not reports', which publish nowhere, and not a CR that is gone)", got, want)

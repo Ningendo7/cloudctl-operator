@@ -60,7 +60,7 @@ func ensureAlarms(
 	snsSpec *depsv1alpha1.SNSSpec,
 	dynamodbSpec *depsv1alpha1.DynamoDBSpec,
 ) error {
-	_, err := Ensure(ctx, cwClient, k8sClient, namespace, crName, crUID, region, accountID, alarmsSpec, sqsSpec, snsSpec, dynamodbSpec, nil)
+	_, err := Ensure(ctx, cwClient, k8sClient, namespace, crName, crUID, region, accountID, &depsv1alpha1.AppDependenciesSpec{Alarms: alarmsSpec, SQS: sqsSpec, SNS: snsSpec, DynamoDB: dynamodbSpec}, nil)
 	return err
 }
 
@@ -71,8 +71,7 @@ func TestEnsure_ListsAlarmsOnlyWhileSomeMayExist(t *testing.T) {
 	var mayExist *bool
 	pass := func(alarmsSpec *depsv1alpha1.AlarmsSpec) {
 		t.Helper()
-		got, err := Ensure(context.Background(), cw, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
-			alarmsSpec, sqsSpec, nil, nil, mayExist)
+		got, err := Ensure(context.Background(), cw, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, &depsv1alpha1.AppDependenciesSpec{Alarms: alarmsSpec, SQS: sqsSpec}, mayExist)
 		if err != nil {
 			t.Fatalf("Ensure() error = %v", err)
 		}
@@ -120,8 +119,7 @@ func TestEnsure_AFailedPassAssumesAlarmsMayExist(t *testing.T) {
 		a.input.Threshold = aws.Float64(12345)
 	}
 	known := false
-	got, err := Ensure(context.Background(), cw, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID,
-		enabled, sqsSpec, nil, nil, &known)
+	got, err := Ensure(context.Background(), cw, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, &depsv1alpha1.AppDependenciesSpec{Alarms: enabled, SQS: sqsSpec}, &known)
 	if err == nil {
 		t.Fatal("expected the untagged alarm to be refused")
 	}
@@ -266,6 +264,38 @@ func TestEnsure_CreatesDynamoDBThrottleAlarms(t *testing.T) {
 	}
 	if _, ok := client.alarms[cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", cloudctlaws.DerivedKey("sessions", dynamoWriteThrottleSuffix), alarmNameMaxLen)]; !ok {
 		t.Error("expected a write-throttle alarm")
+	}
+}
+
+// An instance stops taking writes when its storage is full; the alarm fires
+// with a tenth of the declared storage left.
+func TestEnsure_CreatesRDSFreeStorageAlarm(t *testing.T) {
+	client := newFakeCloudWatch()
+	spec := &depsv1alpha1.AppDependenciesSpec{
+		Alarms: &depsv1alpha1.AlarmsSpec{Enabled: true},
+		RDS:    &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{{Name: "orders-db", AllocatedStorage: 50}}},
+	}
+	if _, err := Ensure(context.Background(), client, nil, "default", "checkout-service", "uid-1", testRegion, testAccountID, spec, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	name := cloudctlaws.ResourceName("default", "checkout-service", "rds", cloudctlaws.DerivedKey("orders-db", rdsFreeStorageSuffix), alarmNameMaxLen)
+	alarm, ok := client.alarms[name]
+	if !ok {
+		t.Fatalf("expected a free-storage alarm %q, got %v", name, client.alarms)
+	}
+	in := alarm.input
+	if aws.ToString(in.MetricName) != "FreeStorageSpace" || in.ComparisonOperator != types.ComparisonOperatorLessThanThreshold {
+		t.Errorf("alarm watches %s %s, want FreeStorageSpace below a threshold", aws.ToString(in.MetricName), in.ComparisonOperator)
+	}
+	if got := aws.ToString(in.Dimensions[0].Value); got != cloudctlaws.DBInstanceIdentifier("default", "checkout-service", "orders-db") {
+		t.Errorf("alarm watches instance %q, not the one the operator names", got)
+	}
+	if got, want := aws.ToFloat64(in.Threshold), 5.0*(1<<30); got != want {
+		t.Errorf("threshold = %v bytes, want %v (a tenth of 50 GiB)", got, want)
+	}
+	if got := AlarmARNs(testRegion, testAccountID, "default", "checkout-service", spec); !slices.Contains(got, alarmARN(testRegion, testAccountID, name)) {
+		t.Errorf("AlarmARNs() = %v, missing the free-storage alarm", got)
 	}
 }
 
@@ -554,9 +584,15 @@ func TestEnsure_TakesOverAnUnchangedAlarmWhenToldTo(t *testing.T) {
 		t.Fatalf("Ensure() (create) error = %v", err)
 	}
 
+	// Retagged in place, not replaced: a new alarm would lose its state and
+	// history.
+	before := client.putCalls
 	ctx := cloudctlaws.WithAdoptFromUID(context.Background(), "old-uid")
 	if err := ensureAlarms(ctx, client, nil, "default", "checkout-service", "new-uid", testRegion, testAccountID, enabled, spec, nil, nil); err != nil {
 		t.Fatalf("Ensure() (takeover) error = %v", err)
+	}
+	if client.putCalls != before {
+		t.Errorf("the takeover rewrote %d unchanged alarms instead of retagging them", client.putCalls-before)
 	}
 	for name, alarm := range client.alarms {
 		if alarm.tags[cloudctlaws.OwnerUIDTagKey] != "new-uid" {
@@ -591,7 +627,7 @@ func TestAlarmARNs_AreTheAlarmsEnsureCreates(t *testing.T) {
 	}
 	slices.Sort(want)
 
-	got := AlarmARNs(testRegion, testAccountID, "default", "checkout-service", alarmsSpec, sqsSpec, snsSpec, ddbSpec)
+	got := AlarmARNs(testRegion, testAccountID, "default", "checkout-service", &depsv1alpha1.AppDependenciesSpec{Alarms: alarmsSpec, SQS: sqsSpec, SNS: snsSpec, DynamoDB: ddbSpec})
 	slices.Sort(got)
 
 	if len(want) == 0 || !slices.Equal(got, want) {
@@ -602,7 +638,7 @@ func TestAlarmARNs_AreTheAlarmsEnsureCreates(t *testing.T) {
 func TestAlarmARNs_NoneWhenAlarmsAreNotEnabled(t *testing.T) {
 	sqsSpec := &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}
 	for name, spec := range map[string]*depsv1alpha1.AlarmsSpec{"nil": nil, "disabled": {Enabled: false}} {
-		if got := AlarmARNs(testRegion, testAccountID, "default", "checkout-service", spec, sqsSpec, nil, nil); len(got) != 0 {
+		if got := AlarmARNs(testRegion, testAccountID, "default", "checkout-service", &depsv1alpha1.AppDependenciesSpec{Alarms: spec, SQS: sqsSpec}); len(got) != 0 {
 			t.Errorf("%s: AlarmARNs() = %v, want none", name, got)
 		}
 	}

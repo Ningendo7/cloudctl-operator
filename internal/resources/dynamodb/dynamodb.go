@@ -137,6 +137,7 @@ func Ensure(
 			sortKey:        t.SortKey,
 
 			deletionProtection: t.DeletionProtection,
+			backupEnabled:      true,
 		}
 		if t.Backup != nil {
 			opts.backupEnabled = t.Backup.Enabled
@@ -318,7 +319,7 @@ func adoptTable(
 		}
 	}
 
-	merged := cloudctlaws.MergeTags(currentTags, cloudctlaws.OwnerTags(namespace, crName, crUID))
+	merged := cloudctlaws.ClaimTags(currentTags, namespace, crName, crUID)
 	if _, tagErr := awsClient.TagResource(ctx, &dynamodb.TagResourceInput{
 		ResourceArn: &tableArn,
 		Tags:        mapToTags(merged),
@@ -398,7 +399,7 @@ func createTable(
 		AttributeDefinitions: attrDefs,
 		KeySchema:            keySchema,
 		BillingMode:          billingModeFor(opts.billingMode),
-		Tags:                 mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
+		Tags:                 mapToTags(cloudctlaws.CreationTags(namespace, crName, crUID)),
 		// The operator never recreates a table that disappears, so a delete
 		// made by hand loses the data for good.
 		DeletionProtectionEnabled: aws.Bool(opts.deletionProtection == nil || *opts.deletionProtection),

@@ -322,6 +322,11 @@ func (w countingCloudWatch) DeleteAlarms(ctx context.Context, in *cloudwatch.Del
 	return w.client.DeleteAlarms(ctx, in, optFns...)
 }
 
+func (w countingCloudWatch) TagResource(ctx context.Context, in *cloudwatch.TagResourceInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.TagResourceOutput, error) {
+	w.calls["cloudwatch.TagResource"]++
+	return w.client.TagResource(ctx, in, optFns...)
+}
+
 func (w countingCloudWatch) ListTagsForResource(ctx context.Context, in *cloudwatch.ListTagsForResourceInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.ListTagsForResourceOutput, error) {
 	w.calls["cloudwatch.ListTagsForResource"]++
 	return w.client.ListTagsForResource(ctx, in, optFns...)

@@ -498,8 +498,11 @@ type S3Spec struct {
 // ---------------------------------------------------------------------------
 
 type DynamoDBBackupSpec struct {
+	// enabled turns on point-in-time recovery. On unless set to false, also
+	// when backup is left out.
 	// +optional
-	Enabled bool `json:"enabled,omitempty"`
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled"`
 
 	// retentionDays sets how far back point-in-time recovery can restore
 	// to. Only meaningful when enabled is true; AWS's own default (35
@@ -558,6 +561,8 @@ type DynamoDBTableSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="sortKey is immutable; AWS does not support changing a table's key schema after creation"
 	SortKey string `json:"sortKey,omitempty"`
 
+	// backup configures point-in-time recovery, which is on unless disabled
+	// here.
 	// +optional
 	Backup *DynamoDBBackupSpec `json:"backup,omitempty"`
 
@@ -633,9 +638,18 @@ type RDSHighAvailabilitySpec struct {
 
 // RDSBackupSpec enables automated backups and point-in-time recovery.
 type RDSBackupSpec struct {
+	// enabled turns on automated backups. On unless set to false, also when
+	// backup is left out.
 	// +optional
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled"`
+
+	// retentionDays is how many days of automated backups are kept, 7 when
+	// unset. It is raised to this value and never lowered.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=35
+	RetentionDays *int32 `json:"retentionDays,omitempty"`
 }
 
 // RDSReplicationSpec configures a cross-region read replica for disaster
@@ -771,9 +785,10 @@ type RDSInstanceSpec struct {
 	// +optional
 	HighAvailability *RDSHighAvailabilitySpec `json:"highAvailability,omitempty"`
 
-	// backup enables automated backups. They are only ever turned on or
-	// extended, never turned off or shortened: that deletes existing
-	// backups, so do it in AWS directly if intended.
+	// backup configures automated backups, which are on unless disabled
+	// here. They are only ever turned on or extended, never turned off or
+	// shortened: that deletes existing backups, so do it in AWS directly if
+	// intended.
 	// +optional
 	Backup *RDSBackupSpec `json:"backup,omitempty"`
 

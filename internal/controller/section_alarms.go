@@ -23,14 +23,8 @@ import (
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/alarms"
 )
 
-// alarmEligibleResourceCount sums how many SQS/SNS/DynamoDB resources this
-// CR declares — used only to scale alarmsSection's timeout budget, the same
-// way every other section scales on its own declared count. Alarms carry
-// no ledger entries of their own, so unlike every other section this is
-// the only signal of how much work a reconcile could actually do; there's
-// no ledger count to fall back on during finalize either, but Cleanup's
-// unconditional delete-everything-under-our-prefix shape doesn't scale
-// with declared resources anyway, so that's an acceptable gap.
+// alarmEligibleResourceCount is how many declared resources get alarms. It
+// scales the section's time budget: alarms have no ledger entries to count.
 func alarmEligibleResourceCount(cr *depsv1alpha1.AppDependencies) int {
 	count := 0
 	if cr.Spec.SQS != nil {
@@ -41,6 +35,9 @@ func alarmEligibleResourceCount(cr *depsv1alpha1.AppDependencies) int {
 	}
 	if cr.Spec.DynamoDB != nil {
 		count += len(cr.Spec.DynamoDB.Resources)
+	}
+	if cr.Spec.RDS != nil {
+		count += len(cr.Spec.RDS.Resources)
 	}
 	return count
 }
@@ -67,8 +64,7 @@ func alarmsSection(r *AppDependenciesReconciler) section {
 				ctx, r.AWSClients.CloudWatch, r.Client,
 				cr.Namespace, cr.Name, string(cr.UID),
 				r.AWSClients.Region, r.AWSClients.AccountID,
-				cr.Spec.Alarms, cr.Spec.SQS, cr.Spec.SNS, cr.Spec.DynamoDB,
-				cr.Status.AlarmsMayExist,
+				&cr.Spec, cr.Status.AlarmsMayExist,
 			)
 			cr.Status.AlarmsMayExist = &mayExist
 			setSectionCondition(ctx, cr, conditionTypeAlarmsReady, err, eventRecorderFor(r, cr))

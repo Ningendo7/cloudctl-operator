@@ -25,6 +25,7 @@ import (
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
 )
 
@@ -70,7 +71,7 @@ func addPendingDeletionDeny(ctx context.Context, client s3API, bucket string) er
 		Effect:    "Deny",
 		Principal: "*",
 		Action:    "s3:PutObject",
-		Resource:  "arn:aws:s3:::" + bucket + "/*",
+		Resource:  cloudctlaws.ARN("s3", "", "", bucket+"/*"),
 	})
 	if err != nil || !changed {
 		return err
@@ -99,7 +100,7 @@ func syncDeclaredPolicy(ctx context.Context, client s3API, bucket string, want b
 
 	var done policySync
 	if want {
-		stmt := awspolicy.DenyInsecureTransport("s3:*", "arn:aws:s3:::"+bucket, "arn:aws:s3:::"+bucket+"/*")
+		stmt := awspolicy.DenyInsecureTransport("s3:*", cloudctlaws.ARN("s3", "", "", bucket), cloudctlaws.ARN("s3", "", "", bucket+"/*"))
 		doc.Statement, done.transport, err = awspolicy.Upsert(doc.Statement, awspolicy.InsecureTransportSid, stmt)
 		if err != nil {
 			return policySync{}, err

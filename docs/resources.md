@@ -89,7 +89,7 @@ spec:
 | `adopt` | Same semantics as SQS/SNS, plus one DynamoDB-specific check: adoption is refused outright if the existing table's actual key schema doesn't match `partitionKey`/`sortKey` — AWS never allows changing a table's key schema, so adopting a mismatched table would otherwise succeed and only fail later, opaquely, at the workload's first `PutItem`/`Query`. The refusal is `KeySchemaMismatch`. |
 | `deletionProtection` | Makes AWS refuse to delete the table until it is turned off. Unset: on for a table the operator creates, and left as it is afterwards, adopted tables included. Set: kept in line while the table is declared, so `false` makes a table deletable by spec and `true` puts protection back if someone removes it. The operator still turns it off itself just before deleting a table it has decided to delete. |
 | `sharedWith` | Same semantics as SQS/SNS (see [IAM](#iam)). |
-| `backup.enabled` | Turns on point-in-time recovery (continuous backups). It is never turned off: `enabled: false` leaves it on and emits a `BackupsLeftEnabled` warning, since turning it off discards the restore window and something else (AWS Backup, an organisation rule) may rely on it. |
+| `backup.enabled` | Point-in-time recovery (continuous backups), on unless set to `false`, also when `backup` is left out. It is never turned off: `enabled: false` leaves it on and emits a `BackupsLeftEnabled` warning, since turning it off discards the restore window and something else (AWS Backup, an organisation rule) may rely on it. |
 | `backup.retentionDays` | 1–35, a minimum. Only meaningful with `enabled: true`; AWS's own default (35 days) applies when unset. The window is extended to this value and never shortened. |
 | `overrides.billingMode` | `PayPerRequest` (default) or `Provisioned`. A decision, not raw throughput config — a new `Provisioned` table gets AWS's own long-standing default capacity (5/5 RCU/WCU) rather than exposing tunable numbers. An existing on-demand table is not switched to `Provisioned` (`ProvisionedCapacityNeeded`), since that placeholder capacity would throttle it: switch it in AWS with the capacity it needs. |
 | `encryption.enabled` / `encryption.kmsKeyRef` | See [KMS](#kms) below. |
@@ -196,7 +196,8 @@ spec:
 | `instanceClass`, `highAvailability` | Instance class and Multi-AZ. Changes are drift-corrected (see below). |
 | `allocatedStorage` | GiB, 20–65536. Can only grow; AWS rounds a growth up to at least 10% more. A new instance uses gp3 storage; an existing or adopted one keeps the storage type it has. |
 | `maxAllocatedStorage` | Turns on storage autoscaling up to this many GiB, which must be above `allocatedStorage`. Off unless set, since growth is billed. An instance RDS has grown within the ceiling is not reported as larger than the spec. Removing the field leaves autoscaling as it is. |
-| `backup` | Automated backups with AWS's default 7-day retention. Only ever turned on or extended: omitting it or disabling it on an instance that has backups leaves them on and emits a `BackupsLeftEnabled` warning, since turning them off deletes the existing backups. |
+| `backup.enabled` | Automated backups, on unless set to `false`, also when `backup` is left out. Only ever turned on or extended: `enabled: false` on an instance that has backups leaves them on and emits a `BackupsLeftEnabled` warning, since turning them off deletes the existing backups. |
+| `backup.retentionDays` | 1–35, default 7. Retention is raised to this and never lowered. |
 | `encryption` | `enabled: true` provisions a dedicated key, or `kmsKeyRef` names a key under this CR's `kms.resources` (see [KMS](#kms)). **Immutable once set.** |
 | `applyImmediately` | See "Changing a running instance". |
 | `deletionPolicy`, `adopt`, `sharedWith` | See below. |
@@ -310,7 +311,7 @@ the entry, wait for it to be deleted, and add it again.
 ## Alarms
 
 A single CR-wide switch — not per-resource — that provisions opinionated
-CloudWatch alarms for whatever SQS/SNS/DynamoDB resources this CR
+CloudWatch alarms for whatever SQS/SNS/DynamoDB/RDS resources this CR
 declares:
 
 ```yaml
@@ -336,6 +337,7 @@ What gets created, per resource type:
 | SQS DLQ (`dlq: true`) | `ApproximateNumberOfMessagesVisible` | > 0 — a poison message existing at all is the signal, not its age |
 | SNS topic | `NumberOfNotificationsFailed` | > 0 |
 | DynamoDB table | `ReadThrottleEvents` and `WriteThrottleEvents` | > 0, one alarm each |
+| RDS instance | `FreeStorageSpace` | < 10% of `allocatedStorage` for 3 consecutive 5-minute periods; writes stop when storage is full. With `maxAllocatedStorage`, autoscaling starts at the same point, so the alarm means it did not help |
 
 S3 and KMS deliberately have no alarms: S3 has no free per-request
 CloudWatch metrics (they require opting into paid request metrics), and a
@@ -357,7 +359,8 @@ alarm a human (or another tool) created at the same name. There's no
 `adopt` escape hatch for that conflict specifically, unlike every other
 resource type — given alarms are pure derived config with next to no
 blast radius, an unresolvable naming collision isn't worth a whole
-adoption workflow.
+adoption workflow. An alarm taken over with `cloudctl.io/adopt-from-uid` is
+retagged in place, so it keeps its state and history.
 
 ## IAM
 
@@ -486,9 +489,13 @@ A move to another **region** is not supported: an operator refuses a CR whose re
   `cloudctl.io/released-at=<date>` on it, so a resource nobody remembers can be
   traced: `aws resourcegroupstaggingapi get-resources --tag-filters Key=cloudctl.io/released-from`.
   They are never used as ownership, and adopting the resource again removes
-  just those two. A failure to write them (an S3 bucket allows ten tags) is
+  just those two. A failure to write them (an S3 bucket holds at most 50 tags) is
   reported as `ReleaseTagFailed` and does not stop the release. Turn them off
   with `--release-tags=false` (chart: `manager.releaseTags: false`).
+- **Default tags** — `--default-tags=env=prod,cost-center=1234` (chart:
+  `manager.defaultTags`) writes those tags on every resource the operator
+  creates, adopts or claims, and keeps a value a resource already has. At most
+  10; `cloudctl.io/` and `aws:` keys are refused.
 - **Cost reporting** — every resource carries `cloudctl.io/owner=<namespace>/<cr>`, and `cloudctl.io/released-from` once the operator has let go of it. Activate both as cost allocation tags in AWS Billing to group spend by CR and to see what abandoned resources cost. The operator computes no prices.
 - **Ownership tagging, adoption, and the trust window** — see
   [architecture.md](architecture.md#ownership-a-resource-is-owned-by-exactly-one-cr).

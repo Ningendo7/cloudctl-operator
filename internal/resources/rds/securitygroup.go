@@ -145,7 +145,7 @@ func ensureInstanceSecurityGroup(
 			return "", err
 		}
 	}
-	arn := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, groupID)
+	arn := cloudctlaws.ARN("ec2", region, accountID, "security-group/"+groupID)
 
 	if err := reconcileIngress(ctx, ec2Client, k8sClient, groupID, currentIngress, engine, namespace, crName, resourceName, sharedWith, false); err != nil {
 		return arn, err
@@ -297,7 +297,7 @@ func describeOwnedGroup(ctx context.Context, ec2Client cloudctlaws.EC2Client, ar
 	if cloudctlaws.NeedsClaim(tags) {
 		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 			Resources: []string{aws.ToString(group.GroupId)},
-			Tags:      mapToEC2Tags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
+			Tags:      mapToEC2Tags(cloudctlaws.ClaimTags(tags, namespace, crName, crUID)),
 		}); err != nil {
 			return types.SecurityGroup{}, false
 		}
@@ -356,7 +356,7 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 		}
 		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 			Resources: []string{groupID},
-			Tags:      mapToEC2Tags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
+			Tags:      mapToEC2Tags(cloudctlaws.ClaimTags(tags, namespace, crName, crUID)),
 		}); err != nil {
 			return "", nil, wrapEC2Error(err, "adopting security group (tagging)")
 		}
@@ -369,7 +369,7 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 		VpcId:       &vpcID,
 		TagSpecifications: []types.TagSpecification{{
 			ResourceType: types.ResourceTypeSecurityGroup,
-			Tags:         mapToEC2Tags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
+			Tags:         mapToEC2Tags(cloudctlaws.CreationTags(namespace, crName, crUID)),
 		}},
 	})
 	if err != nil {

@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -385,8 +386,8 @@ func TestEnsure_NeverShortensPointInTimeRecoveryRetention(t *testing.T) {
 }
 
 // Something else (AWS Backup, an organisation rule) may have turned point-in-
-// time recovery on. A spec that says nothing about backup must not undo it, or
-// the two fight and each round discards the restore window.
+// time recovery on with a longer window. A spec that says nothing about backup
+// asks for it on, and must not shorten it either.
 func TestEnsure_LeavesPointInTimeRecoveryOnWhenTheSpecHasNoBackupSection(t *testing.T) {
 	client := newFakeDynamoDB()
 	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
@@ -413,8 +414,29 @@ func TestEnsure_LeavesPointInTimeRecoveryOnWhenTheSpecHasNoBackupSection(t *test
 	if !client.tables[tableName].pitrEnabled {
 		t.Error("point-in-time recovery was turned off")
 	}
-	if client.describeBackupCalls != 0 {
-		t.Errorf("expected no read of the backup status when the spec has no backup section, got %d", client.describeBackupCalls)
+}
+
+// Point-in-time recovery is on for a table whose spec says nothing about it.
+func TestEnsure_TurnsPointInTimeRecoveryOnWhenTheSpecHasNoBackupSection(t *testing.T) {
+	client := newFakeDynamoDB()
+	tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+	client.tables[tableName] = &fakeTable{
+		arn:         "arn:aws:dynamodb:us-east-1:123456789012:table/" + tableName,
+		status:      types.TableStatusActive,
+		billingMode: types.BillingModePayPerRequest,
+		tags: map[string]string{
+			cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "checkout-service"),
+			cloudctlaws.OwnerUIDTagKey: "uid-1",
+		},
+	}
+	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
+		{Name: "sessions", PartitionKey: "id"},
+	}}
+	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if table := client.tables[tableName]; !table.pitrEnabled || table.retentionDays != defaultPITRRetentionDays {
+		t.Errorf("point-in-time recovery = %v for %d days, want on for %d", table.pitrEnabled, table.retentionDays, defaultPITRRetentionDays)
 	}
 }
 
@@ -529,7 +551,7 @@ func TestEnsure_DoesNotCompareRetentionDaysWhilePITRDisabled(t *testing.T) {
 	client.updateContinuousBackupsErr = errors.New("should not be called: PITR is disabled, retention days is moot")
 
 	spec := &depsv1alpha1.DynamoDBSpec{Resources: []depsv1alpha1.DynamoDBTableSpec{
-		{Name: "sessions", PartitionKey: "id"}, // no Backup at all - disabled
+		{Name: "sessions", PartitionKey: "id", Backup: &depsv1alpha1.DynamoDBBackupSpec{Enabled: false, RetentionDays: aws.Int32(7)}},
 	}}
 	if _, err := Ensure(context.Background(), client, nil, nil, "default", "checkout-service", "uid-1", spec, nil, nil, nil); err != nil {
 		t.Fatalf("Ensure() error = %v — expected no UpdateContinuousBackups call while PITR stays disabled", err)

@@ -118,7 +118,7 @@ func EnsurePodNetworkIdentity(
 		// tolerance as every other cross-CR reference in this project.
 		return ledger, nil
 	}
-	arn := fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, accountID, groupID)
+	arn := cloudctlaws.ARN("ec2", region, accountID, "security-group/"+groupID)
 
 	if err := serviceaccount.EnsureNetworkIdentityLabel(ctx, k8sClient, namespace, crName, crUID, serviceAccountName); err != nil {
 		return ledger, fmt.Errorf("labeling ServiceAccount %q for network identity: %w", serviceAccountName, err)

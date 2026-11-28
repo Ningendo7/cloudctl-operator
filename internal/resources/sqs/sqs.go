@@ -313,7 +313,7 @@ func ensureQueueExists(
 		keyParts = []string{opts.derivedFromKey, opts.derivedRole}
 	}
 	queueName := cloudctlaws.QueueName(namespace, crName, opts.fifo, keyParts...)
-	ownerTags := cloudctlaws.OwnerTags(namespace, crName, crUID)
+	ownerTags := cloudctlaws.CreationTags(namespace, crName, crUID)
 
 	getOut, err := awsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 		QueueName: &queueName,
@@ -335,7 +335,7 @@ func ensureQueueExists(
 	}
 
 	if !cloudctlaws.IsClaimedBy(tagsOut.Tags, namespace, crName, crUID) {
-		if err := adoptQueue(ctx, awsClient, namespace, crName, crUID, queueName, queueURL, tagsOut.Tags, ownerTags, opts, recordEvent); err != nil {
+		if err := adoptQueue(ctx, awsClient, namespace, crName, crUID, queueName, queueURL, tagsOut.Tags, opts, recordEvent); err != nil {
 			return ledger, "", nil, err
 		}
 	}
@@ -460,7 +460,7 @@ func adoptQueue(
 	ctx context.Context,
 	awsClient sqsAPI,
 	namespace, crName, crUID, queueName, queueURL string,
-	currentTags, ownerTags map[string]string,
+	currentTags map[string]string,
 	opts queueOptions,
 	recordEvent status.EventRecorder,
 ) error {
@@ -481,7 +481,7 @@ func adoptQueue(
 		}
 	}
 
-	merged := cloudctlaws.MergeTags(currentTags, ownerTags)
+	merged := cloudctlaws.ClaimTags(currentTags, namespace, crName, crUID)
 	if _, tagErr := awsClient.TagQueue(ctx, &sqs.TagQueueInput{
 		QueueUrl: &queueURL,
 		Tags:     merged,

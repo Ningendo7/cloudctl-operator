@@ -153,8 +153,15 @@ spec:
                             as owned by this CR. Same semantics as sqs/sns's adopt field.
                           type: boolean
                         backup:
+                          description: |-
+                            backup configures point-in-time recovery, which is on unless disabled
+                            here.
                           properties:
                             enabled:
+                              default: true
+                              description: |-
+                                enabled turns on point-in-time recovery. On unless set to false, also
+                                when backup is left out.
                               type: boolean
                             retentionDays:
                               description: |-
@@ -446,13 +453,25 @@ spec:
                           type: boolean
                         backup:
                           description: |-
-                            backup enables automated backups. They are only ever turned on or
-                            extended, never turned off or shortened: that deletes existing
-                            backups, so do it in AWS directly if intended.
+                            backup configures automated backups, which are on unless disabled
+                            here. They are only ever turned on or extended, never turned off or
+                            shortened: that deletes existing backups, so do it in AWS directly if
+                            intended.
                           properties:
                             enabled:
-                              default: false
+                              default: true
+                              description: |-
+                                enabled turns on automated backups. On unless set to false, also when
+                                backup is left out.
                               type: boolean
+                            retentionDays:
+                              description: |-
+                                retentionDays is how many days of automated backups are kept, 7 when
+                                unset. It is raised to this value and never lowered.
+                              format: int32
+                              maximum: 35
+                              minimum: 1
+                              type: integer
                           type: object
                         dbSubnetGroupName:
                           description: |-

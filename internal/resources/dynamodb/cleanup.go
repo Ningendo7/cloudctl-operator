@@ -231,6 +231,14 @@ func (c *tableCleaner) verifyOwned(ctx context.Context, entry depsv1alpha1.Manag
 		return true, nil
 	}
 	if !cloudctlaws.IsOwnedBy(tagMap, c.namespace, c.crName, c.crUID) {
+		// DynamoDB tags asynchronously, so a table recorded moments ago may
+		// list none of its tags yet.
+		if _, tagged := tagMap[cloudctlaws.OwnerTagKey]; !tagged && time.Since(entry.CreatedAt.Time) < creationVisibilityGrace {
+			return false, &cloudctlaws.ReconcileError{
+				Err:       fmt.Errorf("table %q was just created and its tags are not visible yet", entry.Name),
+				Retryable: true,
+			}
+		}
 		return false, cloudctlaws.OwnershipLostError("table", entry.Name, "delete it")
 	}
 	return false, nil
