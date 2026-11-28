@@ -888,7 +888,7 @@ func TestCleanupInstanceSecurityGroups_WaitsWhileAConsumersRuleStillNamesTheGrou
 func TestCleanupInstanceSecurityGroups_NeverDeletesAGroupItNoLongerOwns(t *testing.T) {
 	ec2Client := newFakeEC2()
 	ledger, groupID := trackedInstanceGroup(t, ec2Client)
-	ec2Client.groups[groupID].tags = ownerTags("someone", "else", "uid-9")
+	ec2Client.groups[groupID].tags = cloudctlaws.OwnerTags("someone", "else", "uid-9")
 
 	ledger, err := CleanupInstanceSecurityGroups(context.Background(), ec2Client, "default", "checkout-service", "uid-1", &depsv1alpha1.RDSSpec{}, ledger, false)
 	if err != nil {
@@ -969,7 +969,7 @@ func TestFindOrCreateSecurityGroup_TakesOverAGroupFromTheUIDItWasTold(t *testing
 				GroupName: aws.String("shared-name"), VpcId: aws.String("vpc-a"),
 				TagSpecifications: []ec2types.TagSpecification{{
 					ResourceType: ec2types.ResourceTypeSecurityGroup,
-					Tags:         mapToEC2Tags(ownerTags("default", "checkout-service", "old-uid")),
+					Tags:         mapToEC2Tags(cloudctlaws.OwnerTags("default", "checkout-service", "old-uid")),
 				}},
 			})
 			if err != nil {
@@ -992,6 +992,36 @@ func TestFindOrCreateSecurityGroup_TakesOverAGroupFromTheUIDItWasTold(t *testing
 				t.Errorf("expected the group re-tagged, got %v", tags)
 			}
 		})
+	}
+}
+
+// adopt:true takes an untagged group, never another cluster's: that needs the
+// handover naming the cluster, as for every other resource.
+func TestFindOrCreateSecurityGroup_AnotherClustersGroupNeedsTheHandover(t *testing.T) {
+	cloudctlaws.SetCluster("blue", "uid-blue")
+	t.Cleanup(func() { cloudctlaws.SetCluster("", "") })
+	ec2Client := newFakeEC2()
+	created, err := ec2Client.CreateSecurityGroup(context.Background(), &ec2.CreateSecurityGroupInput{
+		GroupName: aws.String("shared-name"), VpcId: aws.String("vpc-a"),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeSecurityGroup,
+			Tags:         mapToEC2Tags(cloudctlaws.OwnerTags("default", "checkout-service", "uid-1")),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	cloudctlaws.SetCluster("green", "uid-green")
+	if _, _, err := findOrCreateSecurityGroup(context.Background(), ec2Client, "default", "checkout-service", "uid-1", "shared-name", "vpc-a", true); err == nil {
+		t.Fatal("expected adopt:true to refuse blue's group")
+	}
+	handover := cloudctlaws.WithAdoptFromUID(context.Background(), "blue/uid-1")
+	if _, _, err := findOrCreateSecurityGroup(handover, ec2Client, "default", "checkout-service", "uid-1", "shared-name", "vpc-a", false); err != nil {
+		t.Fatalf("findOrCreateSecurityGroup() with the handover error = %v", err)
+	}
+	if got := ec2Client.groups[*created.GroupId].tags[cloudctlaws.ClusterTagKey]; got != "green" {
+		t.Errorf("cluster tag = %q after the handover, want green", got)
 	}
 }
 

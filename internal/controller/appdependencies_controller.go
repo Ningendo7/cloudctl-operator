@@ -98,6 +98,7 @@ const defaultMaxConcurrentReconciles = 5
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=vpcresources.k8s.aws,resources=securitygrouppolicies,verbs=get;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=core,resources=namespaces,resourceNames=kube-system,verbs=get
 
 func (r *AppDependenciesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	ctx, endSpan := startReconcileSpan(ctx, req)
@@ -162,10 +163,11 @@ func (r *AppDependenciesReconciler) reconcileNormal(ctx context.Context, cr *dep
 		log.Error(err, "Reconcile failed", "duration", time.Since(start))
 		return ctrl.Result{}, err
 	}
-	// The name the CR's resources get or already have: refuseLedger let the
-	// pass through. Set after the finalizer update, which replaces the status
-	// in memory with the stored one.
+	// The name and cluster the CR's resources get or already have:
+	// refuseLedger let the pass through. Set after the finalizer update, which
+	// replaces the status in memory with the stored one.
 	cr.Status.Deployment = cloudctlaws.Deployment()
+	cr.Status.Cluster = cloudctlaws.Cluster()
 	// Adding a finalizer only touches metadata, not spec, so it won't bump
 	// generation and re-trigger our predicate on its own - keep going in
 	// this same pass (rather than returning) or a freshly created CR would

@@ -595,3 +595,55 @@ func TestEnsure_RevokingOneOfTwoGrantsNarrowsThePolicy(t *testing.T) {
 		t.Errorf("the queue still shared was dropped: %s", policy())
 	}
 }
+
+// Pods keep the role ARN they started with, so a role named before
+// --eks-cluster-name keeps its name; a CR's first role is the cluster's own.
+func TestEnsure_EachClusterGetsItsOwnRoleAndExistingRolesKeepTheirNames(t *testing.T) {
+	ctx := context.Background()
+	settings := RoleSettings{OIDCProviderARN: testOIDCArn, OIDCProviderURL: testOIDCURL}
+	client := newFakeIAM()
+	cr := ownedCR("checkout-service")
+	ledger, sharedARN, err := Ensure(ctx, client, newFakeK8sClient(), settings, cr, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	cloudctlaws.SetCluster("green", "uid-green")
+	t.Cleanup(func() { cloudctlaws.SetCluster("", "") })
+	entry, _ := status.FindManagedResource(ledger, "iam", "role")
+	entry.LastVerifiedAt = nil
+	status.UpsertManagedResource(&ledger, entry)
+	if _, arn, err := Ensure(ctx, client, newFakeK8sClient(), settings, cr, ledger); err != nil || arn != sharedARN {
+		t.Fatalf("Ensure() = %q, %v; want the existing role %q kept", arn, err, sharedARN)
+	}
+	if len(client.roles) != 1 {
+		t.Errorf("expected no second role for a CR that has one, got %d", len(client.roles))
+	}
+	if got := client.roles[sharedRoleName("default", "checkout-service")].tags[cloudctlaws.ClusterTagKey]; got != "green" {
+		t.Errorf("cluster tag on the kept role = %q, want it claimed for green", got)
+	}
+
+	newCR := ownedCR("payments")
+	_, arn, err := Ensure(ctx, client, newFakeK8sClient(), settings, newCR, nil)
+	if err != nil {
+		t.Fatalf("Ensure() for a new CR error = %v", err)
+	}
+	if name := roleName("default", "payments"); name == sharedRoleName("default", "payments") || !strings.HasSuffix(arn, "/"+name) {
+		t.Errorf("new CR's role = %q, want green's own name %q", arn, name)
+	}
+
+	id := cloudctlaws.NewIdentity("us-east-1", "123456789012")
+	for _, tc := range []struct {
+		cr, arn string
+		ok      bool
+	}{
+		{"checkout-service", sharedARN, true},
+		{"payments", arn, true},
+		{"payments", "arn:aws:iam::123456789012:role/" + cloudctlaws.ClusterResourceName("blue", "default", "payments", "iam", "role", iamRoleNameMaxLen), false},
+	} {
+		err := CheckLedgerEntry(id, "default", tc.cr, depsv1alpha1.ManagedResource{Type: "iam", Name: "role", ARN: tc.arn})
+		if (err == nil) != tc.ok {
+			t.Errorf("CheckLedgerEntry(%s) = %v, want ok=%v", tc.arn, err, tc.ok)
+		}
+	}
+}

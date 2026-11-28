@@ -1081,6 +1081,13 @@ type AppDependenciesStatus struct {
 	// +optional
 	Deployment string `json:"deployment,omitempty"`
 
+	// Cluster is the cluster whose operator built this CR's resources: its
+	// --eks-cluster-name, or its kube-system namespace UID. An operator in
+	// another cluster, such as one restored from this cluster's etcd backup,
+	// stops unless the CR is handed over to it.
+	// +optional
+	Cluster string `json:"cluster,omitempty"`
+
 	// alarmsMayExist is false once a pass found no alarms owned by this CR,
 	// so they aren't listed every pass. Unset means unknown.
 	// +optional

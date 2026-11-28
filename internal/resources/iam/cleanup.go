@@ -74,7 +74,14 @@ func Cleanup(
 		}
 		return ledger, wrapAWSError(tErr, fmt.Sprintf("re-verifying ownership of IAM role %q before delete", name))
 	}
-	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), cr.Namespace, cr.Name, string(cr.UID)) {
+	roleTags := tagsToMap(tags)
+	// Another cluster took the role over; it is that cluster's to delete.
+	if _, handedOver := cloudctlaws.HandedOver(roleTags, cr.Namespace, cr.Name); handedOver {
+		updatedLedger = ledger
+		status.RemoveManagedResource(&updatedLedger, resourceType, roleLedgerName)
+		return updatedLedger, nil
+	}
+	if !cloudctlaws.IsOwnedBy(roleTags, cr.Namespace, cr.Name, string(cr.UID)) {
 		return ledger, cloudctlaws.OwnershipLostError("IAM role", name, "delete it")
 	}
 

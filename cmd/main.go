@@ -37,6 +37,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -45,6 +47,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -397,7 +400,8 @@ func newAWSBootstrap(
 	const rateLimitRampDuration = 30 * time.Second
 	return &awsBootstrap{
 		// Retried with the clients until it works, so a failed lookup of the
-		// cluster's security group is retried, not fatal.
+		// cluster's security group or name is retried, not fatal. The cluster
+		// is set before the controller starts.
 		newClients: func(ctx context.Context) (*cloudctlaws.Clients, error) {
 			clients, err := cloudctlaws.NewClients(ctx)
 			if err != nil {
@@ -407,6 +411,11 @@ func newAWSBootstrap(
 			if err != nil {
 				return nil, err
 			}
+			uid, err := kubeSystemUID(ctx, mgr.GetAPIReader())
+			if err != nil {
+				return nil, err
+			}
+			cloudctlaws.SetCluster(c.eksClusterName, uid)
 			return clients, nil
 		},
 		interval: awsClientInitRetryInterval,
@@ -479,6 +488,17 @@ var (
 // rolePathMaxLen is IAM's limit on a path.
 const rolePathMaxLen = 512
 
+// kubeSystemUID is the UID of the kube-system namespace, which names this
+// cluster when --eks-cluster-name is not set: every cluster has one, and only
+// a restore of the cluster's etcd brings the same one back.
+func kubeSystemUID(ctx context.Context, reader client.Reader) (string, error) {
+	var ns corev1.Namespace
+	if err := reader.Get(ctx, client.ObjectKey{Name: metav1.NamespaceSystem}, &ns); err != nil {
+		return "", fmt.Errorf("reading the kube-system namespace, whose UID names this cluster: %w", err)
+	}
+	return string(ns.UID), nil
+}
+
 // eksClusterNamePattern is what EKS accepts as a cluster name.
 var eksClusterNamePattern = regexp.MustCompile(`^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$`)
 
@@ -486,12 +506,12 @@ var eksClusterNamePattern = regexp.MustCompile(`^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$
 // database's: those configured, which always win, else the EKS cluster's own
 // security group, else none.
 func podBaseSecurityGroups(
-	ctx context.Context, client cloudctlaws.EKSClient, clusterName string, configured []string,
+	ctx context.Context, eksClient cloudctlaws.EKSClient, clusterName string, configured []string,
 ) ([]string, error) {
 	if len(configured) > 0 || clusterName == "" {
 		return configured, nil
 	}
-	out, err := client.DescribeCluster(ctx, &eks.DescribeClusterInput{Name: &clusterName})
+	out, err := eksClient.DescribeCluster(ctx, &eks.DescribeClusterInput{Name: &clusterName})
 	if err != nil {
 		return nil, fmt.Errorf("looking up the security group of EKS cluster %q: %w", clusterName, err)
 	}

@@ -25,6 +25,14 @@ rules:
   - watch
 - apiGroups:
   - ""
+  resourceNames:
+  - kube-system
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
+  - ""
   resources:
   - serviceaccounts
   verbs:

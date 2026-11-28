@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	depsv1alpha1 "github.com/Ningendo7/cloudctl-operator/api/v1alpha1"
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
@@ -31,6 +32,7 @@ import (
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/s3"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/sns"
 	"github.com/Ningendo7/cloudctl-operator/internal/resources/sqs"
+	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
 
 // ledgerCheck reports whether a ledger entry's ARN is one the operator would
@@ -97,7 +99,38 @@ func refuseLedger(ctx context.Context, r *AppDependenciesReconciler, cr, origina
 	if refused, err := refuseOtherDeployment(ctx, r, cr, original); refused || err != nil {
 		return refused, err
 	}
+	if refused, err := refuseOtherCluster(ctx, r, cr, original); refused || err != nil {
+		return refused, err
+	}
 	return refuseTamperedLedger(ctx, r, cr, original)
+}
+
+// refuseOtherCluster stops a CR whose resources were built by the operator in
+// another cluster: a cluster restored from another's etcd backup has the same
+// CRs, with the same UIDs, and both operators would act on the same
+// resources. The handover annotation naming that cluster lets the pass
+// through; that cluster keeps its IAM role, which its pods use.
+func refuseOtherCluster(ctx context.Context, r *AppDependenciesReconciler, cr, original *depsv1alpha1.AppDependencies) (bool, error) {
+	recorded := cr.Status.Cluster
+	if len(cr.Status.ManagedResources) == 0 || recorded == "" || cloudctlaws.IsThisCluster(recorded) {
+		return false, nil
+	}
+	if from, _, found := strings.Cut(cr.Annotations[cloudctlaws.AdoptFromUIDAnnotation], "/"); found && from == recorded {
+		// That cluster's operator verified these entries; checking each
+		// again now is what takes it over.
+		for i := range cr.Status.ManagedResources {
+			cr.Status.ManagedResources[i].LastVerifiedAt = nil
+		}
+		status.RemoveManagedResource(&cr.Status.ManagedResources, resourceTypeIAM, "role")
+		return false, nil
+	}
+	setSectionCondition(ctx, cr, sectionForEntryType(cr.Status.ManagedResources[0].Type), &cloudctlaws.ReconcileError{
+		Err: fmt.Errorf("this CR's resources were built by the operator in cluster %s, not this one (%s); nothing is reconciled. "+
+			"If this cluster replaces that one, annotate the CR with %s=%s/%s; to delete the CR and leave its resources to that cluster, remove its finalizer",
+			recorded, cloudctlaws.Cluster(), cloudctlaws.AdoptFromUIDAnnotation, recorded, cr.UID),
+		Reason: reasons.ClusterChanged,
+	}, eventRecorderFor(r, cr))
+	return true, r.Status().Patch(ctx, cr, statusPatch(original, cr))
 }
 
 // refuseOtherDeployment stops a CR whose resources were named under another

@@ -288,10 +288,40 @@ func describeOwnedGroup(ctx context.Context, ec2Client cloudctlaws.EC2Client, ar
 		return types.SecurityGroup{}, false
 	}
 	group := out.SecurityGroups[0]
-	if !cloudctlaws.IsOwnedBy(ec2TagsToMap(group.Tags), namespace, crName, crUID) {
+	tags := ec2TagsToMap(group.Tags)
+	if !cloudctlaws.IsOwnedBy(tags, namespace, crName, crUID) {
 		return types.SecurityGroup{}, false
 	}
+	// A recorded group never reaches findOrCreateSecurityGroup, so it is
+	// claimed for this cluster here.
+	if cloudctlaws.NeedsClaim(tags) {
+		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
+			Resources: []string{aws.ToString(group.GroupId)},
+			Tags:      mapToEC2Tags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
+		}); err != nil {
+			return types.SecurityGroup{}, false
+		}
+	}
 	return group, true
+}
+
+// mayTakeGroup refuses an existing group findOrCreateSecurityGroup may not
+// take over.
+func mayTakeGroup(ctx context.Context, tags map[string]string, namespace, crName, crUID, groupID string, adopt bool) error {
+	if owner, ok := tags[cloudctlaws.OwnerTagKey]; ok && owner != cloudctlaws.OwnerTagValue(namespace, crName) {
+		return cloudctlaws.OwnedByAnotherCRError("security group", groupID, owner)
+	}
+	from, stale := cloudctlaws.PreviousOwner(tags, namespace, crName, crUID)
+	if stale && cloudctlaws.MayTransferFrom(ctx, from) {
+		return nil
+	}
+	if _, otherCluster := cloudctlaws.HandedOver(tags, namespace, crName); adopt && !otherCluster {
+		return nil
+	}
+	if stale {
+		return cloudctlaws.PreviousIncarnationError("security group", groupID, from)
+	}
+	return cloudctlaws.AdoptRequiredError("security group", groupID)
 }
 
 // findOrCreateSecurityGroup returns the group named groupName in vpcID,
@@ -299,7 +329,8 @@ func describeOwnedGroup(ctx context.Context, ec2Client cloudctlaws.EC2Client, ar
 // this CR's ownership tags: a name match alone is not ownership, and the
 // operator goes on to rewrite this group's ingress rules. adopt takes over
 // an untagged group, or one left by an earlier incarnation of this same CR
-// (a retained instance outlives its CR); another CR's group is never taken.
+// (a retained instance outlives its CR); another CR's group is never taken,
+// and another cluster's only with the handover annotation.
 func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Client, namespace, crName, crUID, groupName, vpcID string, adopt bool) (groupID string, ingress []types.IpPermission, err error) {
 	describeOut, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
 		Filters: []types.Filter{
@@ -314,22 +345,18 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 		existing := describeOut.SecurityGroups[0]
 		groupID = aws.ToString(existing.GroupId)
 		tags := ec2TagsToMap(existing.Tags)
-		if cloudctlaws.IsOwnedBy(tags, namespace, crName, crUID) {
+		owned := cloudctlaws.IsOwnedBy(tags, namespace, crName, crUID)
+		if owned && !cloudctlaws.NeedsClaim(tags) {
 			return groupID, existing.IpPermissions, nil
 		}
-		if owner, ok := tags[cloudctlaws.OwnerTagKey]; ok && owner != cloudctlaws.OwnerTagValue(namespace, crName) {
-			return "", nil, cloudctlaws.OwnedByAnotherCRError("security group", groupID, owner)
-		}
-		staleUID, stale := cloudctlaws.IsStaleUID(tags, namespace, crName, crUID)
-		if !adopt && (!stale || !cloudctlaws.MayTransferFrom(ctx, staleUID)) {
-			if stale {
-				return "", nil, cloudctlaws.PreviousIncarnationError("security group", groupID, staleUID)
+		if !owned {
+			if err := mayTakeGroup(ctx, tags, namespace, crName, crUID, groupID, adopt); err != nil {
+				return "", nil, err
 			}
-			return "", nil, cloudctlaws.AdoptRequiredError("security group", groupID)
 		}
 		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 			Resources: []string{groupID},
-			Tags:      mapToEC2Tags(ownerTags(namespace, crName, crUID)),
+			Tags:      mapToEC2Tags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
 		}); err != nil {
 			return "", nil, wrapEC2Error(err, "adopting security group (tagging)")
 		}
@@ -342,7 +369,7 @@ func findOrCreateSecurityGroup(ctx context.Context, ec2Client cloudctlaws.EC2Cli
 		VpcId:       &vpcID,
 		TagSpecifications: []types.TagSpecification{{
 			ResourceType: types.ResourceTypeSecurityGroup,
-			Tags:         mapToEC2Tags(ownerTags(namespace, crName, crUID)),
+			Tags:         mapToEC2Tags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
 		}},
 	})
 	if err != nil {

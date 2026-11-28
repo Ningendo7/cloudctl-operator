@@ -120,13 +120,20 @@ cluster running more than one operator, the `cloudctl.io/deployment` label says
 which one handles a CR, and `--reconcile-unlabelled=false` keeps an operator off
 CRs without it.
 
-Two clusters of the **same** deployment, as in a blue/green move, still share
-each CR's names, IAM role included. A second cluster applying the same CR is
-refused with `PreviousIncarnation`; told to take over, it does, and the old
-cluster's operator, which re-reads the role's tags before writing, stops
-managing it, while the old cluster's pods lose AWS access once their
-credentials expire. To move a CR to another cluster, see [Moving to a new
-cluster](resources.md#moving-to-a-new-cluster-or-restoring-a-cr).
+**Clusters.** Every resource is also tagged `cloudctl.io/cluster` with the
+cluster whose operator manages it: `--eks-cluster-name`, else the UID of the
+`kube-system` namespace. An operator acts only on its own cluster's resources;
+one tagged before the cluster was recorded is claimed by the first operator to
+re-check it. Two clusters of the same deployment, as in a blue/green move,
+share each CR's names, but the second is refused with `OwnedByAnotherCluster`
+until the CR is handed over to it. With `--eks-cluster-name`, each cluster gets
+its own IAM role for a CR, so pods in both keep AWS access during the move; a
+role named before the flag was set keeps its name, since running pods keep the
+role they started with. A cluster restored from another's etcd backup has the
+same `kube-system` UID, so only `--eks-cluster-name` tells the two apart; there,
+`status.cluster` records the cluster that built a CR's resources, and another
+cluster's operator stops the CR with `ClusterChanged`. To move a CR, see
+[Moving to a new cluster](resources.md#moving-to-a-new-cluster-or-restoring-a-cr).
 
 ## Resource identity delivery to workloads
 

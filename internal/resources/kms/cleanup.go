@@ -221,7 +221,12 @@ func (c *keyCleaner) scheduleDeletion(ctx context.Context, entry depsv1alpha1.Ma
 	if err != nil {
 		return ledger, results, wrapAWSError(err, fmt.Sprintf("re-verifying ownership of KMS key %q before delete", entry.Name))
 	}
-	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), c.namespace, c.crName, c.crUID) {
+	tagMap := tagsToMap(tags)
+	if cloudctlaws.LeftToOtherCluster(c.recordEvent, tagMap, c.namespace, c.crName, "KMS key", entry.Name) {
+		status.RemoveManagedResource(&ledger, resourceType, entry.Name)
+		return ledger, results, nil
+	}
+	if !cloudctlaws.IsOwnedBy(tagMap, c.namespace, c.crName, c.crUID) {
 		return ledger, results, cloudctlaws.OwnershipLostError("KMS key", entry.Name, "delete it")
 	}
 
@@ -346,7 +351,7 @@ func relinquishIfStillTagged(ctx context.Context, client kmsAPI, namespace, crNa
 	}
 	if _, uErr := client.UntagResource(ctx, &kms.UntagResourceInput{
 		KeyId:   &entry.ARN,
-		TagKeys: []string{cloudctlaws.OwnerTagKey, cloudctlaws.OwnerUIDTagKey},
+		TagKeys: cloudctlaws.OwnerTagKeys(),
 	}); uErr != nil {
 		return false, false, wrapAWSError(uErr, fmt.Sprintf("relinquishing ownership tag on retained KMS key %q", entry.Name))
 	}

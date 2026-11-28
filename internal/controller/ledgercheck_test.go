@@ -458,3 +458,76 @@ func TestDeployment_ANewCRTakesTheOperatorsNameAndKeepsIt(t *testing.T) {
 		t.Errorf("Ready = %+v, want %s", ready, reasons.DeploymentChanged)
 	}
 }
+
+// withCluster runs the rest of the test as the operator in the named cluster.
+func withCluster(t *testing.T, name string) {
+	t.Helper()
+	cloudctlaws.SetCluster(name, "uid-"+name)
+	t.Cleanup(func() { cloudctlaws.SetCluster("", "") })
+}
+
+// A cluster restored from another's etcd backup has the same CR, UID and
+// status; it must not act on the other cluster's resources until handed them.
+func TestCluster_ACRFromAnotherClusterIsStoppedUntilHandedOver(t *testing.T) {
+	withCluster(t, "blue")
+	cr := ledgerTestCR()
+	cr.UID = "uid-1"
+	patches := 0
+	r := newCountingReconciler(t, &patches, cr)
+	request := reconcile.Request{Namespace: cr.Namespace, Name: cr.Name}
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	var stored depsv1alpha1.AppDependencies
+	if err := r.Get(context.Background(), request.NamespacedName, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.Cluster != "blue" {
+		t.Fatalf("status.cluster = %q, want blue", stored.Status.Cluster)
+	}
+
+	withCluster(t, "green")
+	fakeSQS := r.AWSClients.SQS.(*fakeSQSClient)
+	calls := countAWSCalls(r.AWSClients)
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("green called AWS for blue's CR: %v", calls)
+	}
+	if err := r.Get(context.Background(), request.NamespacedName, &stored); err != nil {
+		t.Fatal(err)
+	}
+	ready := apimeta.FindStatusCondition(stored.Status.Conditions, status.ConditionTypeReady)
+	if ready == nil || ready.Reason != reasons.ClusterChanged || !strings.Contains(ready.Message, "adopt-from-uid=blue/uid-1") {
+		t.Fatalf("Ready = %+v, want %s naming the handover", ready, reasons.ClusterChanged)
+	}
+
+	// Blue's role, already in the ledger, stays blue's; green's pods get
+	// their own.
+	blueRole, _ := status.FindManagedResource(stored.Status.ManagedResources, "iam", "role")
+	if !strings.HasSuffix(blueRole.ARN, "/"+cloudctlaws.ClusterResourceName("blue", cr.Namespace, cr.Name, "iam", "role", 64)) {
+		t.Fatalf("test setup broken: blue's ledger has role %q", blueRole.ARN)
+	}
+	stored.Annotations = map[string]string{cloudctlaws.AdoptFromUIDAnnotation: "blue/uid-1"}
+	if err := r.Update(context.Background(), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() after the handover error = %v", err)
+	}
+	if err := r.Get(context.Background(), request.NamespacedName, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.Cluster != "green" {
+		t.Errorf("status.cluster = %q after the handover, want green", stored.Status.Cluster)
+	}
+	greenRole := cloudctlaws.ClusterResourceName("green", cr.Namespace, cr.Name, "iam", "role", 64)
+	if entry, _ := status.FindManagedResource(stored.Status.ManagedResources, "iam", "role"); !strings.HasSuffix(entry.ARN, "/"+greenRole) {
+		t.Errorf("green's ledger has role %q, want green's own %q", entry.ARN, greenRole)
+	}
+	ordersQueue := fakeSQS.queues[cloudctlaws.QueueName(cr.Namespace, cr.Name, false, "orders")]
+	if ordersQueue == nil || ordersQueue.tags[cloudctlaws.ClusterTagKey] != "green" {
+		t.Errorf("the queue was not taken over by green: %+v", ordersQueue)
+	}
+}

@@ -226,7 +226,7 @@ func ensureBucket(
 		return ledger, err
 	}
 
-	if !cloudctlaws.IsOwnedBy(currentTags, namespace, crName, crUID) {
+	if !cloudctlaws.IsClaimedBy(currentTags, namespace, crName, crUID) {
 		if err := adoptBucket(ctx, awsClient, namespace, crName, crUID, bucket, currentTags, opts, recordEvent); err != nil {
 			return ledger, err
 		}
@@ -305,7 +305,7 @@ func createBucketIfMissing(
 	input := &s3sdk.CreateBucketInput{
 		Bucket: &bucket,
 		CreateBucketConfiguration: &types.CreateBucketConfiguration{
-			Tags: mapToTags(ownerTags(namespace, crName, crUID)),
+			Tags: mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
 		},
 	}
 	if region != regionUSEast1 {
@@ -346,11 +346,11 @@ func adoptBucket(
 	opts bucketOptions,
 	recordEvent status.EventRecorder,
 ) error {
-	transferred, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "bucket", bucket, currentTags, namespace, crName, crUID, opts.adopt)
+	how, ownErr := cloudctlaws.CheckExistingOwnership(ctx, "bucket", bucket, currentTags, namespace, crName, crUID, opts.adopt)
 	if ownErr != nil {
 		return ownErr
 	}
-	if opts.checkAdoptedKey != nil {
+	if opts.checkAdoptedKey != nil && how != cloudctlaws.Claimed {
 		currentKey, keyErr := bucketKMSKey(ctx, awsClient, bucket)
 		if keyErr != nil {
 			return keyErr
@@ -364,7 +364,7 @@ func adoptBucket(
 		}
 	}
 
-	merged := cloudctlaws.WithoutReleaseTags(cloudctlaws.MergeTags(currentTags, ownerTags(namespace, crName, crUID)))
+	merged := cloudctlaws.WithoutReleaseTags(cloudctlaws.MergeTags(currentTags, cloudctlaws.OwnerTags(namespace, crName, crUID)))
 	if _, tagErr := awsClient.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
 		Bucket:  &bucket,
 		Tagging: &types.Tagging{TagSet: mapToTags(merged)},
@@ -372,10 +372,13 @@ func adoptBucket(
 		return wrapAWSError(tagErr, "tagging bucket")
 	}
 	if recordEvent != nil {
-		if transferred {
-			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over S3 bucket %s from a previous incarnation of this CR", bucket))
-		} else {
+		switch how {
+		case cloudctlaws.Transferred:
+			recordEvent("Normal", cloudctlaws.EventOwnershipTransferred, fmt.Sprintf("Took over S3 bucket %s from a previous owner", bucket))
+		case cloudctlaws.Adopted:
 			recordEvent("Normal", "BucketAdopted", fmt.Sprintf("Adopted existing S3 bucket %s under management", bucket))
+		case cloudctlaws.Claimed:
+			// Only this cluster's tag was added.
 		}
 	}
 	return nil
@@ -751,13 +754,6 @@ func isNotFoundError(err error) bool {
 func isNoSuchTagSet(err error) bool {
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchTagSet"
-}
-
-func ownerTags(namespace, crName, crUID string) map[string]string {
-	return map[string]string{
-		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue(namespace, crName),
-		cloudctlaws.OwnerUIDTagKey: crUID,
-	}
 }
 
 func mapToTags(m map[string]string) []types.Tag {

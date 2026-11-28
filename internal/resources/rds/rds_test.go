@@ -1877,7 +1877,7 @@ func TestEnsure_AdoptionConflictDoesNotMaskOwnershipRefusals(t *testing.T) {
 	spec.Adopt = true
 	existing := existingInstanceMatching(instanceID, spec)
 	existing.engine = "mysql"
-	existing.tags = ownerTags("other-ns", "other-cr", "uid-9")
+	existing.tags = cloudctlaws.OwnerTags("other-ns", "other-cr", "uid-9")
 	client.instances[instanceID] = existing
 
 	_, err := Ensure(context.Background(), client, kmsWithRDSKey(), newFakeEC2(), k8sClient, "default", "checkout-service", "uid-1", "us-east-1", "123456789012", &depsv1alpha1.RDSSpec{Resources: []depsv1alpha1.RDSInstanceSpec{spec}}, nil, nil, nil)
@@ -2622,5 +2622,32 @@ func TestConsumerPodSecurityGroupARN_AGroupTheOperatorDidNotWriteGetsNoIngress(t
 	}
 	if _, _, err := consumerPodSecurityGroupARN(status.WithEntryVerifier(context.Background(), failing), k8sClient, "team-b", "reporting", instance); !errors.Is(err, unreadable) {
 		t.Fatalf("consumerPodSecurityGroupARN() error = %v, want the check's own error", err)
+	}
+}
+
+// An instance tagged before clusters were recorded is claimed at its next
+// ownership check; one another cluster took over is not this cluster's.
+func TestEnsureInstanceOwnership_ClaimsItsOwnAndRefusesAnotherClusters(t *testing.T) {
+	cloudctlaws.SetCluster("green", "uid-green")
+	t.Cleanup(func() { cloudctlaws.SetCluster("", "") })
+	rdsClient := newFakeRDS()
+	arn := "arn:aws:rds:us-east-1:123456789012:db:orders"
+	instance := &fakeInstance{arn: arn, tags: map[string]string{
+		cloudctlaws.OwnerTagKey: cloudctlaws.OwnerTagValue("default", "checkout-service"), cloudctlaws.OwnerUIDTagKey: "uid-1",
+	}}
+	rdsClient.instances["orders"] = instance
+
+	if err := ensureInstanceOwnership(context.Background(), rdsClient, "default", "checkout-service", "uid-1", "orders", arn, false, nil); err != nil {
+		t.Fatalf("ensureInstanceOwnership() error = %v", err)
+	}
+	if instance.tags[cloudctlaws.ClusterTagKey] != "green" {
+		t.Fatalf("cluster tag = %q, want the instance claimed for green", instance.tags[cloudctlaws.ClusterTagKey])
+	}
+
+	instance.tags[cloudctlaws.ClusterTagKey] = "blue"
+	err := ensureInstanceOwnership(context.Background(), rdsClient, "default", "checkout-service", "uid-1", "orders", arn, true, nil)
+	var reconcileErr *cloudctlaws.ReconcileError
+	if !errors.As(err, &reconcileErr) || reconcileErr.Reason != reasons.OwnedByAnotherCluster {
+		t.Errorf("ensureInstanceOwnership() = %v, want %s even with adopt", err, reasons.OwnedByAnotherCluster)
 	}
 }

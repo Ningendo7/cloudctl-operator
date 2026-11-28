@@ -32,6 +32,8 @@ import (
 	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
 
 	dto "github.com/prometheus/client_model/go"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/observability"
@@ -400,5 +402,17 @@ func TestEKSClusterNamePattern(t *testing.T) {
 		if eksClusterNamePattern.MatchString(name) != ok {
 			t.Errorf("eksClusterNamePattern.MatchString(%q) = %v, want %v", name, !ok, ok)
 		}
+	}
+}
+
+func TestKubeSystemUID(t *testing.T) {
+	reader := fake.NewClientBuilder().WithObjects(&corev1.Namespace{Name: "kube-system", UID: "3b0f6c1e-cluster"}).Build()
+	if got, err := kubeSystemUID(context.Background(), reader); err != nil || got != "3b0f6c1e-cluster" {
+		t.Errorf("kubeSystemUID() = %q, %v; want the namespace's UID", got, err)
+	}
+	// Without it the cluster has no name, so startup waits rather than tag
+	// resources with nothing.
+	if _, err := kubeSystemUID(context.Background(), fake.NewClientBuilder().Build()); err == nil {
+		t.Error("expected an error when kube-system can't be read")
 	}
 }

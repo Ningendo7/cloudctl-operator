@@ -192,6 +192,123 @@ var scenarios = []struct {
 	{"OnDeleteDeleteMatchesCleanup", scenarioOnDeleteDeleteMatchesCleanup},
 	{"OnDeleteForcedMatchesCleanup", scenarioOnDeleteForcedMatchesCleanup},
 	{"CancelsPendingDeletionOnReappearance", scenarioCancelsPendingDeletionOnReappearance},
+	{"ClaimsItsOwnResourceForThisCluster", scenarioClaimsItsOwnResourceForThisCluster},
+	{"RefusesAnotherClustersResourceUntilHandedOver", scenarioRefusesAnotherClustersResourceUntilHandedOver},
+	{"CleanupLeavesAResourceAnotherClusterTookOver", scenarioCleanupLeavesAResourceAnotherClusterTookOver},
+}
+
+// thisCluster is the cluster the cluster scenarios run in; otherTool's value is
+// a tag someone else's tooling set.
+const (
+	thisCluster = "green"
+	otherTool   = "payments"
+)
+
+// inCluster runs the rest of the test as the operator in the named cluster.
+func inCluster(t *testing.T, eksName string) {
+	t.Helper()
+	cloudctlaws.SetCluster(eksName, "uid-"+eksName)
+	t.Cleanup(func() { cloudctlaws.SetCluster("", "") })
+}
+
+// dueForCheck makes the named entry's trust window lapse, so the next pass
+// re-reads its ownership tags.
+func dueForCheck(ledger []depsv1alpha1.ManagedResource, resourceType string) []depsv1alpha1.ManagedResource {
+	entry, found := status.FindManagedResource(ledger, resourceType, "widget")
+	if !found {
+		return ledger
+	}
+	entry.LastVerifiedAt = nil
+	status.UpsertManagedResource(&ledger, entry)
+	return ledger
+}
+
+// A resource made before clusters were recorded gets this cluster's tag at
+// its next ownership check, so a second cluster can no longer act on it.
+func scenarioClaimsItsOwnResourceForThisCluster(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	if err := s.PutTag("widget", "team", otherTool); err != nil {
+		t.Fatalf("PutTag() error = %v", err)
+	}
+	if _, tagged := s.Tags("widget")[cloudctlaws.ClusterTagKey]; tagged {
+		t.Fatal("test setup broken: no cluster was set, so none should be tagged")
+	}
+
+	inCluster(t, thisCluster)
+	if _, err := s.EnsureOne(ctx, dueForCheck(ledger, s.ResourceType()), "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}); err != nil {
+		t.Fatalf("EnsureOne() after the upgrade error = %v", err)
+	}
+	tags := s.Tags("widget")
+	if tags[cloudctlaws.ClusterTagKey] != thisCluster {
+		t.Errorf("cluster tag = %q, want the resource claimed for green", tags[cloudctlaws.ClusterTagKey])
+	}
+	if tags["team"] != otherTool {
+		t.Errorf("another tool's tag was lost: %v", tags)
+	}
+}
+
+// A cluster built from another's etcd backup has the same CR with the same
+// UID; adopt:true is not enough to take the other cluster's resource.
+func scenarioRefusesAnotherClustersResourceUntilHandedOver(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	inCluster(t, "blue")
+	ledger, err := s.EnsureOne(context.Background(), nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain})
+	if err != nil {
+		t.Fatalf("EnsureOne() in blue error = %v", err)
+	}
+	uid := s.Tags("widget")[cloudctlaws.OwnerUIDTagKey]
+
+	inCluster(t, thisCluster)
+	ledger = dueForCheck(ledger, s.ResourceType())
+	if _, err := s.EnsureOne(context.Background(), ledger, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true}); err == nil {
+		t.Fatal("expected green to refuse blue's resource without the handover annotation")
+	}
+	if got := s.Tags("widget")[cloudctlaws.ClusterTagKey]; got != "blue" {
+		t.Fatalf("the refusal changed the cluster tag to %q", got)
+	}
+
+	handover := cloudctlaws.WithAdoptFromUID(context.Background(), "blue/"+uid)
+	if _, err := s.EnsureOne(handover, ledger, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}); err != nil {
+		t.Fatalf("EnsureOne() with the handover error = %v", err)
+	}
+	if got := s.Tags("widget")[cloudctlaws.ClusterTagKey]; got != thisCluster {
+		t.Errorf("cluster tag = %q after the handover, want green", got)
+	}
+}
+
+// Once another cluster took a resource over, deleting the old CR drops it from
+// the ledger and leaves it in place, Delete policy or not.
+func scenarioCleanupLeavesAResourceAnotherClusterTookOver(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	ctx := context.Background()
+	inCluster(t, "blue")
+	ledger, err := s.EnsureOne(ctx, nil, "widget", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyDelete})
+	if err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	if err := s.SetNonEmpty("widget", false); err != nil && !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("SetNonEmpty() error = %v", err)
+	}
+	if err := s.PutTag("widget", cloudctlaws.ClusterTagKey, thisCluster); err != nil {
+		t.Fatalf("PutTag() error = %v", err)
+	}
+
+	for range 2 {
+		if ledger, _, err = s.Cleanup(ctx, markPastQuietWindow(ledger, s.ResourceType()), nil, true); err != nil {
+			t.Fatalf("Cleanup() error = %v, want the resource left to green", err)
+		}
+	}
+	if status.HasManagedResource(ledger, s.ResourceType(), "widget") {
+		t.Error("expected the entry dropped from the ledger")
+	}
+	if tags := s.Tags("widget"); tags == nil || tags[cloudctlaws.ClusterTagKey] != thisCluster {
+		t.Errorf("expected the resource still there, green's; tags = %v", tags)
+	}
 }
 
 func scenarioCreate(t *testing.T, newSubject func(t *testing.T) Subject) {
@@ -475,7 +592,7 @@ func scenarioLettingGoLeavesProvenanceAndKeepsOtherTags(t *testing.T, newSubject
 	if err != nil {
 		t.Fatalf("EnsureOne() error = %v", err)
 	}
-	if err := s.PutTag("widget", "team", "payments"); err != nil {
+	if err := s.PutTag("widget", "team", otherTool); err != nil {
 		t.Fatalf("PutTag() error = %v", err)
 	}
 	if _, _, err := s.Cleanup(ctx, ledger, nil, false); err != nil {
@@ -492,7 +609,7 @@ func scenarioLettingGoLeavesProvenanceAndKeepsOtherTags(t *testing.T, newSubject
 	if _, owned := tags[cloudctlaws.OwnerTagKey]; owned {
 		t.Error("the ownership tag should be gone")
 	}
-	if tags["team"] != "payments" {
+	if tags["team"] != otherTool {
 		t.Errorf("another tool's tag was lost: %v", tags)
 	}
 }
@@ -519,7 +636,7 @@ func scenarioAdoptingAgainRemovesOnlyTheReleasedTags(t *testing.T, newSubject fu
 	if err != nil {
 		t.Fatalf("EnsureOne() error = %v", err)
 	}
-	if err := s.PutTag("widget", "team", "payments"); err != nil {
+	if err := s.PutTag("widget", "team", otherTool); err != nil {
 		t.Fatalf("PutTag() error = %v", err)
 	}
 	if ledger, _, err = s.Cleanup(ctx, ledger, nil, false); err != nil {
@@ -538,7 +655,7 @@ func scenarioAdoptingAgainRemovesOnlyTheReleasedTags(t *testing.T, newSubject fu
 	if cloudctlaws.HasReleaseTags(tags) {
 		t.Errorf("the released tags should go when the resource is owned again, got %v", tags)
 	}
-	if tags["team"] != "payments" {
+	if tags["team"] != otherTool {
 		t.Errorf("another tool's tag was lost: %v", tags)
 	}
 	if tags[cloudctlaws.OwnerTagKey] != "default/lifecycle-test" {

@@ -85,7 +85,7 @@ func TestReleasedTagsAreNeverOwnership(t *testing.T) {
 	if IsOwnedBy(tags, "ns", "app", "uid") {
 		t.Error("the released tags must not make a resource look owned")
 	}
-	if _, stale := IsStaleUID(tags, "ns", "app", "uid"); stale {
+	if _, stale := PreviousOwner(tags, "ns", "app", "uid"); stale {
 		t.Error("the released tags must not look like a previous incarnation")
 	}
 }
