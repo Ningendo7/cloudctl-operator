@@ -42,6 +42,9 @@ import (
 // role's policy to take effect, which IAM applies eventually.
 func LimitedConfig(t *testing.T, cfg aws.Config, actions []string) aws.Config {
 	t.Helper()
+	// Only AWS enforces the role's policy; an emulator would pass the check
+	// without testing anything.
+	SkipUnlessRealAWS(t, cfg)
 	ctx := context.Background()
 	identity, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {

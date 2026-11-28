@@ -20,10 +20,21 @@ package livetest
 
 import (
 	"net/http"
+	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
+
+// SkipUnlessRealAWS skips the rest of a test that calls AWS's own addresses
+// directly, as the plain-HTTP checks do, when the SDK is pointed at an
+// emulator: those calls would leave it for AWS.
+func SkipUnlessRealAWS(t *testing.T, cfg aws.Config) {
+	t.Helper()
+	if cfg.BaseEndpoint != nil {
+		t.Skipf("AWS calls go to %s; this check needs AWS itself", *cfg.BaseEndpoint)
+	}
+}
 
 // FreshConnections returns an HTTP client that opens a new connection for every
 // request. S3 and DynamoDB answer a request on an open connection from the

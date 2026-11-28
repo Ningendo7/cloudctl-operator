@@ -100,6 +100,24 @@ func waitForTableActive(t *testing.T, client *dynamodb.Client, tableName string,
 	t.Fatalf("table %q never became ACTIVE within %s", tableName, timeout)
 }
 
+// waitForOwnership waits until the table's tags show this CR's ownership.
+// DynamoDB tags asynchronously, so a write can take seconds to be listed, as
+// on AWS.
+func waitForOwnership(t *testing.T, client *dynamodb.Client, arn, namespace, crName, crUID string) {
+	t.Helper()
+	var tags map[string]string
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(500 * time.Millisecond) {
+		listed, err := listAllTags(context.Background(), client, arn)
+		if err != nil {
+			t.Fatalf("real ListTagsOfResource() error = %v", err)
+		}
+		if tags = tagsToMap(listed); cloudctlaws.IsOwnedBy(tags, namespace, crName, crUID) {
+			return
+		}
+	}
+	t.Fatalf("table %s never showed this CR's ownership tags, got %v", arn, tags)
+}
+
 // ensureUntilActive drives Ensure through the CREATING retry loop
 // ensureTable's own async handling requires, rather than assuming a single
 // call suffices the way SQS/SNS/S3's synchronous creation does.
@@ -204,13 +222,7 @@ func TestIntegration_Ensure_AdoptsRealUntaggedTable(t *testing.T) {
 		t.Fatal("expected a ledger entry for sessions")
 	}
 
-	tags, err := listAllTags(ctx, client, entry.ARN)
-	if err != nil {
-		t.Fatalf("real ListTagsOfResource() error = %v", err)
-	}
-	if !cloudctlaws.IsOwnedBy(tagsToMap(tags), namespace, crName, "uid-1") {
-		t.Errorf("expected adopt:true to tag the pre-existing real table as owned, got tags %+v", tags)
-	}
+	waitForOwnership(t, client, entry.ARN, namespace, crName, "uid-1")
 }
 
 func TestIntegration_Ensure_CorrectsBillingModeDriftOnRealTable(t *testing.T) {
@@ -243,6 +255,8 @@ func TestIntegration_Ensure_CorrectsBillingModeDriftOnRealTable(t *testing.T) {
 	}
 
 	// Moving back would set a placeholder capacity on a table that may be busy.
+	// The switch above leaves the table UPDATING for a while, as on AWS.
+	waitForTableActive(t, client, tableName, 60*time.Second)
 	spec.Resources[0].Overrides = &depsv1alpha1.DynamoDBOverrides{BillingMode: depsv1alpha1.DynamoDBBillingModeProvisioned}
 	_, err := Ensure(context.Background(), client, nil, nil, namespace, crName, "uid-1", spec, ledger, nil, nil)
 	var reconcileErr *cloudctlaws.ReconcileError
@@ -264,6 +278,8 @@ func TestIntegration_Cleanup_DeletesRealTableImmediatelyWhenForced(t *testing.T)
 		{Name: "sessions", PartitionKey: "id", DeletionPolicy: depsv1alpha1.DeletionPolicyDelete, Force: true},
 	}}
 	ledger := ensureUntilActive(t, client, namespace, crName, "uid-1", spec, nil, tableName)
+	// Cleanup re-reads the tags before deleting.
+	waitForOwnership(t, client, findEntry(ledger, "sessions").ARN, namespace, crName, "uid-1")
 
 	ledger, _, err := Cleanup(context.Background(), client, namespace, crName, "uid-1", spec, ledger, true, false, nil)
 	if err != nil {
@@ -273,7 +289,14 @@ func TestIntegration_Cleanup_DeletesRealTableImmediatelyWhenForced(t *testing.T)
 		t.Errorf("expected the ledger entry to be removed, got %+v", ledger)
 	}
 
-	if _, err := client.DescribeTable(context.Background(), &dynamodb.DescribeTableInput{TableName: &tableName}); err == nil {
-		t.Error("expected the real table to be gone after Cleanup, but DescribeTable succeeded")
+	// DeleteTable returns while the table is still DELETING, as on AWS.
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+		_, err := client.DescribeTable(context.Background(), &dynamodb.DescribeTableInput{TableName: &tableName})
+		if _, gone := errors.AsType[*types.ResourceNotFoundException](err); gone {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected the real table to be gone after Cleanup, DescribeTable() error = %v", err)
+		}
 	}
 }

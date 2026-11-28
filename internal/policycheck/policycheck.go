@@ -67,13 +67,20 @@ type policyFinding struct {
 // principal in the wrong shape. IAM and the services themselves accept many of
 // those silently, so a policy that was written without complaint can still do
 // nothing. Warnings and suggestions are logged. The test is skipped when the
-// caller may not call access-analyzer:ValidatePolicy.
+// caller may not call access-analyzer:ValidatePolicy, and nothing is checked
+// when the SDK is pointed at another endpoint.
 //
 // The request is signed here rather than sent through the Access Analyzer SDK
 // module, which the rest of the code has no use for.
 func ValidatePolicy(t *testing.T, cfg aws.Config, policyType, resourceType, document string) {
 	t.Helper()
 	ctx := context.Background()
+	// An endpoint override means an emulator: its policies must not be sent
+	// to AWS, which is the only place that can validate them.
+	if cfg.BaseEndpoint != nil {
+		t.Logf("not validating the policy: AWS calls go to %s", *cfg.BaseEndpoint)
+		return
+	}
 
 	payload := map[string]string{"policyDocument": document, "policyType": policyType}
 	if resourceType != NoResourceType {

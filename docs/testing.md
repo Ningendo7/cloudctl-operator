@@ -84,6 +84,29 @@ file with a `//go:build integration` tag, added to
 `INTEGRATION_TEST_PACKAGES` in the `Makefile` and to the `go test` command
 in `.github/workflows/test.yml`.
 
+## AWS Emulator (`make test-emulator`, CI-gated on every push)
+
+Runs the KMS and alarm live tests, which LocalStack can't serve, and the
+SQS, S3, DynamoDB and IAM integration tests against
+[AWS Emulator](https://github.com/aws/aws-emulator). Needs only Docker: Go
+runs in a container.
+
+- **Pinned and verified.** The package version and its SHA-256 are in the
+  `Makefile`; the image build fails unless the package is signed by the key
+  whose fingerprint AWS publishes. To upgrade, change `EMULATOR_VERSION` and
+  both checksums together.
+- **No network.** The emulator runs with `--network none` and the tests share
+  its network namespace, so no request can reach AWS. Tests that need AWS
+  itself (policy validation, plain-HTTP refusals, permission checks with a
+  narrowed role) skip when an endpoint is set.
+- **Telemetry off**, and signature checks off so the tests' fixed test
+  credentials work.
+- **SNS is excluded** until
+  [aws/aws-emulator#459](https://github.com/aws/aws-emulator/issues/459) is
+  fixed: it applies `aws:SecureTransport` deny statements to HTTPS requests.
+  e2e stays on LocalStack, since the emulator's certificate covers only
+  `localhost` ([#23](https://github.com/aws/aws-emulator/issues/23)).
+
 ## Live (`make test-live`, never runs in CI)
 
 The same idea as the integration tier, one level up: real AWS instead of
