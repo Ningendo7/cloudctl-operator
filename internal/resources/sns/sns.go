@@ -148,7 +148,7 @@ func ensureTopicExists(
 		ledger = trustedLedger
 	}
 
-	ownerTags := cloudctlaws.OwnerTags(namespace, crName, crUID)
+	ownerTags := cloudctlaws.CreationTags(namespace, crName, crUID)
 
 	tagsOut, err := awsClient.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{
 		ResourceArn: &topicArn,
@@ -168,7 +168,7 @@ func ensureTopicExists(
 	// Topic already exists — verify we actually own it before trusting it.
 	currentTags := tagsToMap(tagsOut.Tags)
 	if !cloudctlaws.IsClaimedBy(currentTags, namespace, crName, crUID) {
-		if err := adoptTopic(ctx, awsClient, kmsClient, namespace, crName, crUID, topicName, topicArn, currentTags, ownerTags, t, kmsKeyARN, recordEvent); err != nil {
+		if err := adoptTopic(ctx, awsClient, kmsClient, namespace, crName, crUID, topicName, topicArn, currentTags, t, kmsKeyARN, recordEvent); err != nil {
 			return ledger, err
 		}
 	}
@@ -299,7 +299,7 @@ func adoptTopic(
 	awsClient snsAPI,
 	kmsClient cloudctlaws.KMSClient,
 	namespace, crName, crUID, topicName, topicArn string,
-	currentTags, ownerTags map[string]string,
+	currentTags map[string]string,
 	t depsv1alpha1.SNSTopicSpec,
 	kmsKeyARN *string,
 	recordEvent status.EventRecorder,
@@ -318,7 +318,7 @@ func adoptTopic(
 		}
 	}
 
-	merged := cloudctlaws.MergeTags(currentTags, ownerTags)
+	merged := cloudctlaws.ClaimTags(currentTags, namespace, crName, crUID)
 	if _, tagErr := awsClient.TagResource(ctx, &sns.TagResourceInput{ResourceArn: &topicArn, Tags: mapToTags(merged)}); tagErr != nil {
 		return wrapAWSError(tagErr, "adopting topic (tagging)")
 	}

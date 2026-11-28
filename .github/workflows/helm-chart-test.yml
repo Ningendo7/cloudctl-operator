@@ -136,6 +136,12 @@ jobs:
             | grep -q -- '--pod-base-security-group-ids=sg-0123456789abcdef0,sg-0fedcba987654321'
           ! helm template ./charts/chart | grep -q -- '--pod-base-security-group-ids'
 
+      - name: Default tags reach the manager flag
+        run: |
+          helm template ./charts/chart --set manager.defaultTags.env=prod --set manager.defaultTags.cost-center=1234 \
+            | grep -q -- '--default-tags=cost-center=1234,env=prod'
+          ! helm template ./charts/chart | grep -q -- '--default-tags'
+
       - name: OIDC values reach the manager flags
         run: |
           out=$(helm template ./charts/chart --set manager.oidcProviderArn=arn:aws:iam::123456789012:oidc-provider/oidc.example \

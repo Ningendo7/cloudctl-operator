@@ -89,6 +89,26 @@ func OwnerTags(namespace, name, uid string) map[string]string {
 	return tags
 }
 
+// defaultTags are --default-tags, such as a cost centre, written on every
+// resource the operator tags. Set once, at startup.
+var defaultTags map[string]string
+
+// SetDefaultTags sets the tags written on every resource the operator tags.
+func SetDefaultTags(tags map[string]string) { defaultTags = tags }
+
+// CreationTags are the tags a resource is created with: the default tags and
+// the owner tags.
+func CreationTags(namespace, name, uid string) map[string]string {
+	return MergeTags(defaultTags, OwnerTags(namespace, name, uid))
+}
+
+// ClaimTags are the tags to write on an existing resource the operator adopts,
+// takes over or claims. A value already there wins over a default tag, which
+// fills only what is missing; the owner tags win over both.
+func ClaimTags(current map[string]string, namespace, name, uid string) map[string]string {
+	return MergeTags(MergeTags(defaultTags, current), OwnerTags(namespace, name, uid))
+}
+
 // OwnerTagKeys are the keys removed when a resource is let go.
 func OwnerTagKeys() []string {
 	return []string{OwnerTagKey, OwnerUIDTagKey, ClusterTagKey}

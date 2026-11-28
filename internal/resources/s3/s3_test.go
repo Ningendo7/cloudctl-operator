@@ -1093,7 +1093,8 @@ func TestRelinquishIfStillTagged_StillLetsGoWhenTheReleasedTagsDoNotFit(t *testi
 		cloudctlaws.OwnerTagKey:    cloudctlaws.OwnerTagValue("default", "svc"),
 		cloudctlaws.OwnerUIDTagKey: "uid-1",
 	}
-	for i := range 9 {
+	// 49 other tags: with the two released tags, one more than a bucket holds.
+	for i := range 49 {
 		tags[fmt.Sprintf("team-%d", i)] = "x"
 	}
 	client.buckets["some-bucket"] = &fakeBucket{tags: tags}
@@ -1107,8 +1108,8 @@ func TestRelinquishIfStillTagged_StillLetsGoWhenTheReleasedTagsDoNotFit(t *testi
 		t.Fatalf("relinquishIfStillTagged() relinquished=%v gone=%v err=%v, want it let go", relinquished, gone, err)
 	}
 	got := client.buckets["some-bucket"].tags
-	if _, owned := got[cloudctlaws.OwnerTagKey]; owned || len(got) != 9 || cloudctlaws.HasReleaseTags(got) {
-		t.Errorf("expected the 9 other tags only, got %v", got)
+	if _, owned := got[cloudctlaws.OwnerTagKey]; owned || len(got) != 49 || cloudctlaws.HasReleaseTags(got) {
+		t.Errorf("expected the 49 other tags only, got %v", got)
 	}
 	if !slices.Contains(events, "Warning/ReleaseTagFailed") {
 		t.Errorf("expected a ReleaseTagFailed warning, got %v", events)
@@ -1137,6 +1138,27 @@ func TestCheckLedgerEntry_PassesWhatEnsureRecordsAndRefusesAnotherBucket(t *test
 			if CheckLedgerEntry(id, "default", "checkout-service", e) == nil {
 				t.Errorf("bucket %s passed the check", forged)
 			}
+		}
+	}
+}
+
+// A bucket recorded outside the aws partition must pass the operator's own
+// check, or every CR there would stop with LedgerTampered.
+func TestCheckLedgerEntry_PassesABucketRecordedInAnotherPartition(t *testing.T) {
+	cloudctlaws.SetPartition("aws-cn")
+	t.Cleanup(func() { cloudctlaws.SetPartition("") })
+	spec := &depsv1alpha1.S3Spec{Resources: []depsv1alpha1.S3BucketSpec{{Name: "receipts"}}}
+	ledger, err := Ensure(context.Background(), newFakeS3(), nil, nil, "default", "checkout-service", "uid-1", "cn-north-1", testAccountID, spec, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	id := cloudctlaws.NewIdentity("cn-north-1", testAccountID)
+	for _, e := range ledger {
+		if !strings.HasPrefix(e.ARN, "arn:aws-cn:") {
+			t.Errorf("recorded %s outside the aws-cn partition", e.ARN)
+		}
+		if err := CheckLedgerEntry(id, "default", "checkout-service", e); err != nil {
+			t.Errorf("the entry Ensure recorded fails the check: %v", err)
 		}
 	}
 }

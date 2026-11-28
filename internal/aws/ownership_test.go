@@ -215,3 +215,21 @@ func TestOwnershipLostError(t *testing.T) {
 		t.Errorf("unexpected message: %v", err)
 	}
 }
+
+func TestDefaultTags_FillWhatIsMissingAndNeverOwnership(t *testing.T) {
+	before := defaultTags
+	t.Cleanup(func() { defaultTags = before })
+	SetDefaultTags(map[string]string{"env": "prod", "team": "platform", OwnerUIDTagKey: "forged"})
+
+	created := CreationTags("ns", "app", "uid")
+	if created["env"] != "prod" || created[OwnerUIDTagKey] != "uid" {
+		t.Errorf("CreationTags() = %v, want the defaults with the real owner tags", created)
+	}
+	claimed := ClaimTags(map[string]string{"team": "payments", OwnerTagKey: "ns/other"}, "ns", "app", "uid")
+	if claimed["team"] != "payments" || claimed["env"] != "prod" {
+		t.Errorf("ClaimTags() = %v, want the existing team kept and env added", claimed)
+	}
+	if claimed[OwnerTagKey] != "ns/app" || claimed[OwnerUIDTagKey] != "uid" {
+		t.Errorf("ClaimTags() = %v, want the owner tags to win", claimed)
+	}
+}

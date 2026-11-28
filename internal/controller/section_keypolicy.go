@@ -177,7 +177,7 @@ func topicPublishingAlarms(ctx context.Context, k8sClient client.Client, owner *
 		return a != nil && a.Enabled && a.SnsTopicRef != nil && *a.SnsTopicRef == self
 	}
 	alarmARNsOf := func(c *depsv1alpha1.AppDependencies) []string {
-		return alarms.AlarmARNs(region, accountID, c.Namespace, c.Name, c.Spec.Alarms, c.Spec.SQS, c.Spec.SNS, c.Spec.DynamoDB)
+		return alarms.AlarmARNs(region, accountID, c.Namespace, c.Name, &c.Spec)
 	}
 
 	var arns []string

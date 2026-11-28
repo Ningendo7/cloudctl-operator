@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 
+	cloudctlaws "github.com/Ningendo7/cloudctl-operator/internal/aws"
 	"github.com/Ningendo7/cloudctl-operator/internal/awspolicy"
 	"github.com/Ningendo7/cloudctl-operator/internal/status"
 )
@@ -105,7 +106,7 @@ func mergeKeyPolicy(policy, account string, grants *ServiceGrants) (merged strin
 		root, err := json.Marshal(map[string]any{
 			"Sid":       "Enable IAM User Permissions",
 			"Effect":    "Allow",
-			"Principal": map[string]any{"AWS": "arn:aws:iam::" + account + ":root"},
+			"Principal": map[string]any{"AWS": cloudctlaws.ARN("iam", "", account, "root")},
 			"Action":    "kms:*",
 			"Resource":  "*",
 		})

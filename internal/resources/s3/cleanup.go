@@ -464,11 +464,11 @@ func abortMultipartUploads(ctx context.Context, client s3API, bucket string) err
 }
 
 // bucketNameFromARN extracts the bucket name from a stored
-// arn:aws:s3:::bucket-name ARN instead of recomputing it from
+// arn:<partition>:s3:::bucket-name ARN instead of recomputing it from
 // namespace/crName/key, so cleanup doesn't depend on spec context (or the
 // account ID) that may already be gone.
 func bucketNameFromARN(arn string) (string, error) {
-	const prefix = "arn:aws:s3:::"
+	prefix := cloudctlaws.ARN("s3", "", "", "")
 	if !strings.HasPrefix(arn, prefix) || len(arn) == len(prefix) {
 		return "", fmt.Errorf("unexpected bucket ARN format: %s", arn)
 	}
@@ -506,7 +506,7 @@ func relinquishIfStillTagged(ctx context.Context, client s3API, namespace, crNam
 		}
 	}
 	// PutBucketTagging replaces the whole tag set, so the released tags go in
-	// the same write. A bucket allows only ten tags: if they do not fit,
+	// the same write. A bucket holds at most 50 tags: if they do not fit,
 	// letting go still has to succeed, so the write is repeated without them.
 	released := cloudctlaws.ReleaseTags(ctx, namespace, crName, time.Now())
 	if released != nil {

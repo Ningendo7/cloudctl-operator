@@ -161,6 +161,7 @@ type config struct {
 	podBaseSecurityGroupIDs                          string
 	maxConcurrentReconciles                          int
 	releaseTags                                      bool
+	defaultTags                                      string
 	zapOpts                                          zap.Options
 }
 
@@ -213,6 +214,9 @@ func parseFlags() config {
 	flag.BoolVar(&c.releaseTags, "release-tags", true,
 		"Leave cloudctl.io/released-from and cloudctl.io/released-at tags on a retained resource when the "+
 			"operator lets go of it, saying which CR it came from. They are never used as ownership.")
+	flag.StringVar(&c.defaultTags, "default-tags", "",
+		"Comma-separated key=value tags, such as env=prod,cost-center=1234, written on every AWS resource the "+
+			"operator creates, adopts or claims. A value already on a resource is kept.")
 	flag.IntVar(&c.maxConcurrentReconciles, "max-concurrent-reconciles", 5,
 		"Maximum number of AppDependencies CRs reconciled in parallel. AWS-side "+
 			"call volume is independently bounded by the per-service rate-limit "+
@@ -257,6 +261,11 @@ func main() {
 	if c.eksClusterName != "" && !eksClusterNamePattern.MatchString(c.eksClusterName) {
 		fatal(fmt.Errorf("%q is not an EKS cluster name", c.eksClusterName), "Invalid --eks-cluster-name")
 	}
+	defaultTags, err := parseDefaultTags(c.defaultTags)
+	if err != nil {
+		fatal(err, "Invalid --default-tags")
+	}
+	cloudctlaws.SetDefaultTags(defaultTags)
 	cloudctlaws.SetDeployment(c.deployment)
 	setupLog.Info("Deployment", "name", c.deployment, "reconcileUnlabelled", c.reconcileUnlabelled)
 	if c.iamPermissionsBoundaryARN == "" {
@@ -552,6 +561,43 @@ func checkIAMRoleFlags(boundaryARN, path string) error {
 }
 
 var securityGroupIDPattern = regexp.MustCompile(`^sg-[0-9a-f]{8,17}$`)
+
+// maxDefaultTags leaves room on a resource for its own tags: AWS allows 50, and
+// the operator writes up to five of its own.
+const maxDefaultTags = 10
+
+// tagPattern is what every service the operator uses accepts in a tag key or
+// value.
+var tagPattern = regexp.MustCompile(`^[\p{L}\p{Z}\p{N}_.:/=+\-@]*$`)
+
+// parseDefaultTags reads --default-tags. The operator's own cloudctl.io/ keys
+// are refused, so a default tag can't make a resource look owned, and so are
+// aws: keys, which AWS reserves.
+func parseDefaultTags(value string) (map[string]string, error) {
+	if value == "" {
+		return nil, nil
+	}
+	tags := map[string]string{}
+	for pair := range strings.SplitSeq(value, ",") {
+		key, val, found := strings.Cut(strings.TrimSpace(pair), "=")
+		switch {
+		case !found || key == "":
+			return nil, fmt.Errorf("%q is not key=value", pair)
+		case strings.HasPrefix(key, "cloudctl.io/") || strings.HasPrefix(strings.ToLower(key), "aws:"):
+			return nil, fmt.Errorf("tag key %q is reserved", key)
+		case len(key) > 128 || len(val) > 256 || !tagPattern.MatchString(key) || !tagPattern.MatchString(val):
+			return nil, fmt.Errorf("%q is not a tag AWS accepts", pair)
+		}
+		if _, dup := tags[key]; dup {
+			return nil, fmt.Errorf("tag key %q is given twice", key)
+		}
+		tags[key] = val
+	}
+	if len(tags) > maxDefaultTags {
+		return nil, fmt.Errorf("%d default tags, at most %d", len(tags), maxDefaultTags)
+	}
+	return tags, nil
+}
 
 // parseSecurityGroupIDs splits a comma-separated list of security group IDs.
 // An empty string means none; anything that isn't a group ID is rejected at

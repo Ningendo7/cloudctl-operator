@@ -18,6 +18,7 @@ package dynamodb
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -387,6 +388,35 @@ func TestCleanup_RefusesDeletingUnverifiedOwnership(t *testing.T) {
 	}
 	if _, stillExists := client.tables[tableName]; !stillExists {
 		t.Error("expected the table to NOT be deleted when ownership can't be re-verified")
+	}
+}
+
+// DynamoDB tags asynchronously: a table deleted moments after it was created
+// can list no tags yet. That is retried, never deleted; an older table
+// without tags is someone else's business.
+func TestCleanup_ATableWhoseTagsAreNotVisibleYetIsRetried(t *testing.T) {
+	for name, tc := range map[string]struct {
+		age       time.Duration
+		retryable bool
+	}{"just created": {time.Minute, true}, "created long ago": {time.Hour, false}} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeDynamoDB()
+			ledger := setupTable(t, client, "default", "checkout-service", "sessions", depsv1alpha1.DeletionPolicyDelete, true)
+			tableName := cloudctlaws.ResourceName("default", "checkout-service", "dynamodb", "sessions", 255)
+			client.tables[tableName].tags = map[string]string{}
+			entry, _ := status.FindManagedResource(ledger, "dynamodb", "sessions")
+			entry.CreatedAt = metav1.NewTime(time.Now().Add(-tc.age))
+			status.UpsertManagedResource(&ledger, entry)
+
+			_, _, err := Cleanup(context.Background(), client, "default", "checkout-service", "uid-1", &depsv1alpha1.DynamoDBSpec{}, ledger, false, false, nil)
+			var reconcileErr *cloudctlaws.ReconcileError
+			if !errors.As(err, &reconcileErr) || reconcileErr.Retryable != tc.retryable {
+				t.Fatalf("Cleanup() error = %v, want retryable=%v", err, tc.retryable)
+			}
+			if _, stillExists := client.tables[tableName]; !stillExists {
+				t.Error("expected the table not to be deleted")
+			}
+		})
 	}
 }
 

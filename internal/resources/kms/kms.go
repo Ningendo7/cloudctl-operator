@@ -224,7 +224,7 @@ func createKey(
 ) ([]depsv1alpha1.ManagedResource, error) {
 	createOut, err := kmsClient.CreateKey(ctx, &kms.CreateKeyInput{
 		Description: aws.String(fmt.Sprintf("cloudctl: %s/%s %s", namespace, crName, resourceName)),
-		Tags:        mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
+		Tags:        mapToTags(cloudctlaws.CreationTags(namespace, crName, crUID)),
 	})
 	if err != nil {
 		return ledger, wrapAWSError(err, "creating KMS key")
@@ -374,7 +374,7 @@ func verifyOrTakeOverKey(ctx context.Context, kmsClient kmsAPI, namespace, crNam
 	}
 	if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
 		KeyId: &entry.ARN,
-		Tags:  mapToTags(cloudctlaws.MergeTags(tagMap, cloudctlaws.OwnerTags(namespace, crName, crUID))),
+		Tags:  mapToTags(cloudctlaws.ClaimTags(tagMap, namespace, crName, crUID)),
 	}); err != nil {
 		return wrapAWSError(err, fmt.Sprintf("taking over KMS key %q (tagging)", entry.Name))
 	}
@@ -452,7 +452,7 @@ func adoptKey(
 		meta.KeyState = types.KeyStateEnabled
 	}
 
-	merged := cloudctlaws.MergeTags(tagMap, cloudctlaws.OwnerTags(namespace, crName, crUID))
+	merged := cloudctlaws.ClaimTags(tagMap, namespace, crName, crUID)
 	if _, err := kmsClient.TagResource(ctx, &kms.TagResourceInput{
 		KeyId: &arn,
 		Tags:  mapToTags(merged),

@@ -208,8 +208,8 @@ func (f *fakeS3) PutBucketTagging(_ context.Context, in *s3sdk.PutBucketTaggingI
 	if !ok {
 		return nil, &types.NoSuchBucket{}
 	}
-	// A bucket allows ten tags.
-	if len(in.Tagging.TagSet) > 10 {
+	// A bucket holds at most 50 tags.
+	if len(in.Tagging.TagSet) > 50 {
 		return nil, &fakeAWSError{code: "BadRequest", fault: smithy.FaultClient}
 	}
 	b.tags = tagsToMap(in.Tagging.TagSet)

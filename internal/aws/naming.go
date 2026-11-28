@@ -180,6 +180,12 @@ func QueueName(namespace, crName string, fifo bool, keyParts ...string) string {
 	return QueueOrTopicName(namespace, crName, "sqs", fifo, queueNameMaxLen, keyParts...)
 }
 
+// DBInstanceIdentifier names the RDS instance for a key. The alarm on its
+// storage watches it by this name too.
+func DBInstanceIdentifier(namespace, crName, key string) string {
+	return ResourceNameFor(NameStyleRDS, namespace, crName, "rds", key, 63)
+}
+
 // TableName names the DynamoDB table for a key.
 func TableName(namespace, crName, key string) string {
 	return ResourceName(namespace, crName, "dynamodb", key, tableNameMaxLen)
@@ -321,7 +327,29 @@ func DedicatedKeyLedgerName(ownerType, resourceName string) string {
 // construct the expected ARN itself and check for it directly via
 // GetTopicAttributes, mirroring SQS's GetQueueUrl-first flow.
 func TopicARN(region, accountID, topicName string) string {
-	return fmt.Sprintf("arn:aws:sns:%s:%s:%s", region, accountID, topicName)
+	return ARN("sns", region, accountID, topicName)
+}
+
+// partition is the AWS partition the operator's credentials are in, read from
+// the caller ARN STS returns at startup. Set once, before anything is named.
+var partition string
+
+// SetPartition sets the partition every ARN is built in.
+func SetPartition(p string) { partition = p }
+
+// Partition is the partition every ARN is built in: aws unless STS said
+// otherwise.
+func Partition() string {
+	if partition == "" {
+		return "aws"
+	}
+	return partition
+}
+
+// ARN builds an ARN in the operator's partition. Region and account are empty
+// for a service, such as S3, whose ARNs carry neither.
+func ARN(service, region, accountID, resource string) string {
+	return fmt.Sprintf("arn:%s:%s:%s:%s:%s", Partition(), service, region, accountID, resource)
 }
 
 // Identity is where this operator works: the partition, region and account
@@ -332,10 +360,14 @@ type Identity struct {
 	AccountID string
 }
 
-// NewIdentity returns the identity for an account and region, taking the
-// partition from the region.
+// NewIdentity returns the identity for an account and region, in the
+// partition STS reported, or else the one the region belongs to.
 func NewIdentity(region, accountID string) Identity {
-	return Identity{Partition: PartitionOf(region), Region: region, AccountID: accountID}
+	p := partition
+	if p == "" {
+		p = PartitionOf(region)
+	}
+	return Identity{Partition: p, Region: region, AccountID: accountID}
 }
 
 // Known reports whether the identity is filled in. Without it no ARN can be

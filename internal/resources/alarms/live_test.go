@@ -195,7 +195,7 @@ func TestLive_AlarmReachesAnEncryptedTopic(t *testing.T) {
 	}
 
 	own := ownership{namespace: namespace, crName: crName, crUID: "uid-1", region: region, accountID: accountID}
-	desired := desiredAlarms(namespace, crName, &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}, nil, nil)
+	desired := desiredAlarms(namespace, crName, &depsv1alpha1.AppDependenciesSpec{SQS: &depsv1alpha1.SQSSpec{Resources: []depsv1alpha1.SQSQueueSpec{{Name: "orders"}}}})
 	if len(desired) == 0 {
 		t.Fatal("expected at least one desired alarm")
 	}

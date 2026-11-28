@@ -31,4 +31,5 @@ type CloudWatchClient interface {
 	PutMetricAlarm(ctx context.Context, in *cloudwatch.PutMetricAlarmInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.PutMetricAlarmOutput, error)
 	DeleteAlarms(ctx context.Context, in *cloudwatch.DeleteAlarmsInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.DeleteAlarmsOutput, error)
 	ListTagsForResource(ctx context.Context, in *cloudwatch.ListTagsForResourceInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.ListTagsForResourceOutput, error)
+	TagResource(ctx context.Context, in *cloudwatch.TagResourceInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.TagResourceOutput, error)
 }

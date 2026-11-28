@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -160,6 +162,11 @@ func NewClients(ctx context.Context) (*Clients, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving AWS account ID: %w", err)
 	}
+	caller, err := arn.Parse(aws.ToString(identity.Arn))
+	if err != nil {
+		return nil, fmt.Errorf("reading the partition from the caller ARN %q: %w", aws.ToString(identity.Arn), err)
+	}
+	SetPartition(caller.Partition)
 
 	return &Clients{
 		SQS: sqs.NewFromConfig(cfg, func(o *sqs.Options) {

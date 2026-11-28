@@ -311,7 +311,7 @@ func ensureFinalSnapshot(
 		_, createErr := awsClient.CreateDBSnapshot(ctx, &rds.CreateDBSnapshotInput{
 			DBInstanceIdentifier: &instanceID,
 			DBSnapshotIdentifier: &snapshotID,
-			Tags:                 mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID)),
+			Tags:                 mapToTags(cloudctlaws.CreationTags(namespace, crName, crUID)),
 		})
 		var alreadyExists *types.DBSnapshotAlreadyExistsFault
 		if createErr != nil && !errors.As(createErr, &alreadyExists) {

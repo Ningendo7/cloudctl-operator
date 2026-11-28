@@ -451,3 +451,30 @@ func TestDeployment_SeparatesNamesAndKeepsThemReadable(t *testing.T) {
 		t.Errorf("no deployment name gives %s, want the earlier %s", got, plain)
 	}
 }
+
+// Every ARN the operator builds is in the partition STS reported, so that what
+// it records passes its own ledger check outside the aws partition.
+func TestPartition_EveryARNUsesTheOneSTSReported(t *testing.T) {
+	before := partition
+	t.Cleanup(func() { partition = before })
+
+	if got := ARN("s3", "", "", "bucket"); got != "arn:aws:s3:::bucket" {
+		t.Errorf("ARN() without a partition = %q, want the aws partition", got)
+	}
+	if got := NewIdentity("cn-north-1", "123456789012").Partition; got != "aws-cn" {
+		t.Errorf("NewIdentity() without a partition = %q, want the region's", got)
+	}
+
+	SetPartition("aws-cn")
+	id := NewIdentity("cn-north-1", "123456789012")
+	for got, want := range map[string]string{
+		ARN("s3", "", "", "bucket"):                   id.S3BucketARN("bucket"),
+		TopicARN("cn-north-1", "123456789012", "t"):   id.RegionalARN("sns", "t"),
+		ARN("iam", "", "123456789012", "root"):        id.GlobalARN("iam", "root"),
+		ARN("cloudwatch", "cn-north-1", "1", "alarm"): "arn:aws-cn:cloudwatch:cn-north-1:1:alarm",
+	} {
+		if got != want {
+			t.Errorf("built %q, want %q", got, want)
+		}
+	}
+}

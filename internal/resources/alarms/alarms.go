@@ -75,7 +75,14 @@ const (
 	snsDeliveryFailedSuffix   = "delivery-failed"
 	dynamoReadThrottleSuffix  = "read-throttle"
 	dynamoWriteThrottleSuffix = "write-throttle"
+	rdsFreeStorageSuffix      = "free-storage"
 )
+
+// rdsFreeStorageFraction is how much of an instance's declared storage may be
+// left before its alarm fires. Writes stop when it is full. RDS autoscaling
+// starts at the same point, so with autoscaling on, the alarm fires only if
+// that did not help within the alarm's 15 minutes.
+const rdsFreeStorageFraction = 0.1
 
 // alarmDef is a fully-resolved, AWS-ready alarm definition — everything
 // PutMetricAlarm needs except the actions, which are the same for every
@@ -117,12 +124,10 @@ func Ensure(
 	cwClient cloudctlaws.CloudWatchClient,
 	k8sClient client.Client,
 	namespace, crName, crUID, region, accountID string,
-	alarmsSpec *depsv1alpha1.AlarmsSpec,
-	sqsSpec *depsv1alpha1.SQSSpec,
-	snsSpec *depsv1alpha1.SNSSpec,
-	dynamodbSpec *depsv1alpha1.DynamoDBSpec,
+	spec *depsv1alpha1.AppDependenciesSpec,
 	mayExist *bool,
 ) (bool, error) {
+	alarmsSpec := spec.Alarms
 	own := ownership{
 		namespace: namespace,
 		crName:    crName,
@@ -133,7 +138,7 @@ func Ensure(
 
 	var desired []alarmDef
 	if alarmsSpec != nil && alarmsSpec.Enabled {
-		desired = desiredAlarms(namespace, crName, sqsSpec, snsSpec, dynamodbSpec)
+		desired = desiredAlarms(namespace, crName, spec)
 	}
 
 	var alarmActions []string
@@ -188,15 +193,12 @@ func Cleanup(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, namespa
 // encrypted topic lists exactly these.
 func AlarmARNs(
 	region, accountID, namespace, crName string,
-	alarmsSpec *depsv1alpha1.AlarmsSpec,
-	sqsSpec *depsv1alpha1.SQSSpec,
-	snsSpec *depsv1alpha1.SNSSpec,
-	dynamodbSpec *depsv1alpha1.DynamoDBSpec,
+	spec *depsv1alpha1.AppDependenciesSpec,
 ) []string {
-	if alarmsSpec == nil || !alarmsSpec.Enabled {
+	if spec.Alarms == nil || !spec.Alarms.Enabled {
 		return nil
 	}
-	defs := desiredAlarms(namespace, crName, sqsSpec, snsSpec, dynamodbSpec)
+	defs := desiredAlarms(namespace, crName, spec)
 	arns := make([]string, 0, len(defs))
 	for _, d := range defs {
 		arns = append(arns, alarmARN(region, accountID, d.name))
@@ -209,13 +211,9 @@ func AlarmARNs(
 // dimension value (queue/topic/table name) is itself fully deterministic
 // from namespace+crName+resourceKey, the same scheme every other package
 // uses to create the resource in the first place.
-func desiredAlarms(
-	namespace, crName string,
-	sqsSpec *depsv1alpha1.SQSSpec,
-	snsSpec *depsv1alpha1.SNSSpec,
-	dynamodbSpec *depsv1alpha1.DynamoDBSpec,
-) []alarmDef {
+func desiredAlarms(namespace, crName string, spec *depsv1alpha1.AppDependenciesSpec) []alarmDef {
 	var defs []alarmDef
+	sqsSpec, snsSpec, dynamodbSpec := spec.SQS, spec.SNS, spec.DynamoDB
 
 	if sqsSpec != nil {
 		for _, q := range sqsSpec.Resources {
@@ -317,6 +315,30 @@ func desiredAlarms(
 		}
 	}
 
+	return append(defs, rdsAlarms(namespace, crName, spec.RDS)...)
+}
+
+func rdsAlarms(namespace, crName string, rdsSpec *depsv1alpha1.RDSSpec) []alarmDef {
+	if rdsSpec == nil {
+		return nil
+	}
+	defs := make([]alarmDef, 0, len(rdsSpec.Resources))
+	for _, db := range rdsSpec.Resources {
+		defs = append(defs, alarmDef{
+			name: cloudctlaws.ResourceName(namespace, crName, "rds", cloudctlaws.DerivedKey(db.Name, rdsFreeStorageSuffix), alarmNameMaxLen),
+			description: fmt.Sprintf("Instance %q has less than %.0f%% of its %d GiB storage free - writes stop when it is full.",
+				db.Name, rdsFreeStorageFraction*100, db.AllocatedStorage),
+			namespace:          "AWS/RDS",
+			metricName:         "FreeStorageSpace",
+			dimensionName:      "DBInstanceIdentifier",
+			dimensionValue:     cloudctlaws.DBInstanceIdentifier(namespace, crName, db.Name),
+			statistic:          types.StatisticMinimum,
+			comparisonOperator: types.ComparisonOperatorLessThanThreshold,
+			threshold:          float64(db.AllocatedStorage) * rdsFreeStorageFraction * (1 << 30),
+			evaluationPeriods:  3,
+			period:             300,
+		})
+	}
 	return defs
 }
 
@@ -330,7 +352,7 @@ const (
 // topic ARN, this is fully derivable from the account/region we already
 // know plus the name we chose ourselves.
 func alarmARN(region, accountID, alarmName string) string {
-	return fmt.Sprintf("arn:aws:cloudwatch:%s:%s:alarm:%s", region, accountID, alarmName)
+	return cloudctlaws.ARN("cloudwatch", region, accountID, "alarm:"+alarmName)
 }
 
 // reconcileAlarms is the single declarative diff both Ensure and Cleanup
@@ -398,21 +420,18 @@ func reconcileAlarm(
 		if err != nil {
 			return err
 		}
-		switch {
-		case owner.ours:
-			if matches {
-				return nil
-			}
-		case owner.transferable:
-			// CloudWatch tags an alarm only when it is created, so an
-			// alarm left by a previous incarnation of this CR is
-			// replaced: it holds no data.
-			if _, err := cwClient.DeleteAlarms(ctx, &cloudwatch.DeleteAlarmsInput{AlarmNames: []string{d.name}}); err != nil {
-				return wrapAWSError(err, fmt.Sprintf("replacing alarm %q from a previous incarnation of this CR", d.name))
-			}
-			exists = false
-		default:
+		if !owner.ours && !owner.transferable {
 			return &cloudctlaws.ReconcileError{Err: fmt.Errorf("alarm %q already exists but isn't tagged as owned by this CR — refusing to overwrite it", d.name), Reason: reasons.NameTaken}
+		}
+		// Taking an alarm over, or claiming it for this cluster, retags it
+		// in place, so its state and history stay.
+		if owner.transferable || owner.needsClaim {
+			if err := tagAlarm(ctx, cwClient, own, d.name, owner.tags); err != nil {
+				return err
+			}
+		}
+		if matches {
+			return nil
 		}
 	}
 
@@ -529,6 +548,10 @@ func listAlarmsByPrefix(ctx context.Context, cwClient cloudctlaws.CloudWatchClie
 type alarmOwner struct {
 	// ours: tagged with this CR's name and UID.
 	ours bool
+	// needsClaim: ours, without this cluster's current name.
+	needsClaim bool
+	// tags: the alarm's tags as read.
+	tags map[string]string
 	// transferable: tagged with this CR's name and exactly the previous
 	// owner the CR was told to take over from.
 	transferable bool
@@ -547,10 +570,10 @@ func alarmOwnership(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, 
 		}
 	}
 	if cloudctlaws.IsOwnedBy(tags, own.namespace, own.crName, own.crUID) {
-		return alarmOwner{ours: true}, nil
+		return alarmOwner{ours: true, needsClaim: cloudctlaws.NeedsClaim(tags), tags: tags}, nil
 	}
 	from, stale := cloudctlaws.PreviousOwner(tags, own.namespace, own.crName, own.crUID)
-	return alarmOwner{transferable: stale && cloudctlaws.MayTransferFrom(ctx, from)}, nil
+	return alarmOwner{transferable: stale && cloudctlaws.MayTransferFrom(ctx, from), tags: tags}, nil
 }
 
 func isAlarmOwnedByUs(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ownership, alarmName string) (bool, error) {
@@ -558,11 +581,20 @@ func isAlarmOwnedByUs(ctx context.Context, cwClient cloudctlaws.CloudWatchClient
 	return owner.ours, err
 }
 
-// putAlarm creates or updates one alarm. Tags are only ever sent on
-// create — PutMetricAlarm silently ignores the Tags field on an update
-// (confirmed via AWS's own API docs), and since ownership never changes
-// for an already-owned alarm, there's nothing to re-tag on the update
-// path anyway.
+// tagAlarm writes this CR's ownership tags onto an existing alarm.
+func tagAlarm(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ownership, alarmName string, current map[string]string) error {
+	arn := alarmARN(own.region, own.accountID, alarmName)
+	claimed := cloudctlaws.ClaimTags(current, own.namespace, own.crName, own.crUID)
+	tags := make([]types.Tag, 0, len(claimed))
+	for key, value := range claimed {
+		tags = append(tags, types.Tag{Key: aws.String(key), Value: aws.String(value)})
+	}
+	_, err := cwClient.TagResource(ctx, &cloudwatch.TagResourceInput{ResourceARN: &arn, Tags: tags})
+	return wrapAWSError(err, fmt.Sprintf("tagging alarm %q", alarmName))
+}
+
+// putAlarm creates or updates one alarm. Tags are sent on create only:
+// PutMetricAlarm ignores them on an update, so tagAlarm retags an existing one.
 func putAlarm(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ownership, d alarmDef, isCreate bool, alarmActions []string) error {
 	input := &cloudwatch.PutMetricAlarmInput{
 		AlarmName:          aws.String(d.name),
@@ -586,7 +618,7 @@ func putAlarm(ctx context.Context, cwClient cloudctlaws.CloudWatchClient, own ow
 		input.TreatMissingData = aws.String(d.treatMissingData)
 	}
 	if isCreate {
-		for key, value := range cloudctlaws.OwnerTags(own.namespace, own.crName, own.crUID) {
+		for key, value := range cloudctlaws.CreationTags(own.namespace, own.crName, own.crUID) {
 			input.Tags = append(input.Tags, types.Tag{Key: aws.String(key), Value: aws.String(value)})
 		}
 	}

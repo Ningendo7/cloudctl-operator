@@ -279,7 +279,7 @@ func ensureRole(ctx context.Context, iamClient iamAPI, namespace, crName, crUID 
 	getOut, err := iamClient.GetRole(ctx, &iam.GetRoleInput{RoleName: &name})
 
 	if _, ok := errors.AsType[*types.NoSuchEntityException](err); ok {
-		arn, err := createRole(ctx, iamClient, cloudctlaws.OwnerTags(namespace, crName, crUID), want)
+		arn, err := createRole(ctx, iamClient, cloudctlaws.CreationTags(namespace, crName, crUID), want)
 		return arn, err == nil, err
 	}
 	if err != nil {
@@ -358,7 +358,7 @@ func verifyRoleOwnership(ctx context.Context, iamClient iamAPI, namespace, crNam
 			return fmt.Errorf("IAM role %q already exists and is not owned by this CR — this looks like a naming collision", name)
 		}
 	}
-	if _, err := iamClient.TagRole(ctx, &iam.TagRoleInput{RoleName: &name, Tags: mapToTags(cloudctlaws.OwnerTags(namespace, crName, crUID))}); err != nil {
+	if _, err := iamClient.TagRole(ctx, &iam.TagRoleInput{RoleName: &name, Tags: mapToTags(cloudctlaws.ClaimTags(roleTags, namespace, crName, crUID))}); err != nil {
 		return wrapAWSError(err, "tagging IAM role")
 	}
 	return nil

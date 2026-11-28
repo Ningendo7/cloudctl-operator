@@ -195,6 +195,36 @@ var scenarios = []struct {
 	{"ClaimsItsOwnResourceForThisCluster", scenarioClaimsItsOwnResourceForThisCluster},
 	{"RefusesAnotherClustersResourceUntilHandedOver", scenarioRefusesAnotherClustersResourceUntilHandedOver},
 	{"CleanupLeavesAResourceAnotherClusterTookOver", scenarioCleanupLeavesAResourceAnotherClusterTookOver},
+	{"DefaultTagsFillWhatIsMissing", scenarioDefaultTagsFillWhatIsMissing},
+}
+
+// --default-tags go on what the operator creates, and on what it adopts
+// without replacing a value someone already set.
+func scenarioDefaultTagsFillWhatIsMissing(t *testing.T, newSubject func(t *testing.T) Subject) {
+	s := newSubject(t)
+	const env = "prod"
+	cloudctlaws.SetDefaultTags(map[string]string{"env": env, "team": "platform"})
+	t.Cleanup(func() { cloudctlaws.SetDefaultTags(nil) })
+
+	if _, err := s.EnsureOne(context.Background(), nil, "created", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain}); err != nil {
+		t.Fatalf("EnsureOne() error = %v", err)
+	}
+	if tags := s.Tags("created"); tags["env"] != env || tags["team"] != "platform" {
+		t.Errorf("a created resource has tags %v, want the default tags", tags)
+	}
+
+	if err := s.SeedForeign("adopted", nil); err != nil {
+		t.Fatalf("SeedForeign() error = %v", err)
+	}
+	if err := s.PutTag("adopted", "team", otherTool); err != nil {
+		t.Fatalf("PutTag() error = %v", err)
+	}
+	if _, err := s.EnsureOne(context.Background(), nil, "adopted", EnsureOpts{DeletionPolicy: depsv1alpha1.DeletionPolicyRetain, Adopt: true}); err != nil {
+		t.Fatalf("EnsureOne() with adopt error = %v", err)
+	}
+	if tags := s.Tags("adopted"); tags["env"] != env || tags["team"] != otherTool {
+		t.Errorf("an adopted resource has tags %v, want env added and its own team kept", tags)
+	}
 }
 
 // thisCluster is the cluster the cluster scenarios run in; otherTool's value is
