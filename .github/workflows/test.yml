@@ -79,6 +79,23 @@ jobs:
         run: |
           go test -tags=integration ./internal/resources/sqs/... ./internal/resources/s3/... ./internal/resources/sns/... ./internal/resources/dynamodb/... ./internal/resources/iam/... -v
 
+  # KMS and alarms, which LocalStack can't test, against AWS Emulator. Go
+  # runs in a container here, so the job needs no Go setup.
+  emulator:
+    permissions:
+      contents: read
+    name: AWS Emulator Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Running the tests against AWS Emulator
+        run: make test-emulator
+
   cli-release:
     permissions:
       contents: read

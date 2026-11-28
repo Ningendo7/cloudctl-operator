@@ -461,6 +461,7 @@ func TestLive_Ensure_TopicsRefuseHTTPAndTheStatementIsNotRewritten(t *testing.T)
 	if err := publish(client); err != nil {
 		t.Fatalf("real Publish over HTTPS error = %v: the statement must not refuse TLS", err)
 	}
+	livetest.SkipUnlessRealAWS(t, cfg)
 	plain := sns.NewFromConfig(cfg, func(o *sns.Options) {
 		o.BaseEndpoint = aws.String("http://sns." + region + ".amazonaws.com")
 		o.HTTPClient = livetest.FreshConnections()

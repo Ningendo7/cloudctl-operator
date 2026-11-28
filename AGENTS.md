@@ -72,6 +72,7 @@ markers. A new API kind is added with `kubebuilder create api`, not by hand.
 |---|---|---|
 | Unit | `make test` | Nothing external; envtest for the controller |
 | Integration | `make test-integration` | LocalStack in a container |
+| AWS Emulator | `make test-emulator` | Docker; runs with no network |
 | E2E | `make test-e2e` | A kind cluster; use a dedicated one, never a real cluster |
 | Live | `make test-live` | Real AWS credentials; creates and deletes real resources and costs money |
 

@@ -138,6 +138,48 @@ test-integration: setup-test-integration ## Run integration tests against a loca
 cleanup-test-integration: ## Tear down the LocalStack container used for integration tests
 	@$(CONTAINER_TOOL) rm -f $(LOCALSTACK_CONTAINER) >/dev/null 2>&1 || true
 
+# AWS Emulator runs the tests LocalStack can't: KMS and CloudWatch alarms, plus
+# the integration tests as a second opinion. It has no network, and the tests
+# share its network namespace, so nothing can reach AWS. Its package is pinned
+# by version and checksum (see hack/aws-emulator.Dockerfile). SNS stays on
+# LocalStack until https://github.com/aws/aws-emulator/issues/459 is fixed.
+EMULATOR_VERSION ?= 1.0.665
+EMULATOR_SHA256_x86_64 ?= 1ec6a814d7f6871089573a1133467d876061997f81f233a1ca44c088c026ac40
+EMULATOR_SHA256_aarch64 ?= 790a1e98c892da6e959aaf69c64221a656e1ae14bb2567427396594bf05a1934
+EMULATOR_ARCH ?= $(subst arm64,aarch64,$(shell uname -m))
+EMULATOR_IMAGE ?= cloudctl-aws-emulator:$(EMULATOR_VERSION)
+EMULATOR_CONTAINER ?= cloudctl-operator-test-emulator
+EMULATOR_GO_IMAGE ?= golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf
+EMULATOR_INTEGRATION_PACKAGES ?= ./internal/resources/sqs/... ./internal/resources/s3/... ./internal/resources/dynamodb/... ./internal/resources/iam/...
+EMULATOR_LIVE_PACKAGES ?= ./internal/resources/kms/... ./internal/resources/alarms/...
+EMULATOR_LIVE_SKIP ?= TestLive_AlarmReachesAnEncryptedTopic
+EMULATOR_GO = $(CONTAINER_TOOL) run --rm --cap-drop=ALL --security-opt no-new-privileges \
+	-v "$(CURDIR)":/src:ro -v cloudctl-test-gomod:/go/pkg/mod -v cloudctl-test-gocache:/root/.cache/go-build \
+	-w /src -e GOFLAGS=-buildvcs=false -e GOTOOLCHAIN=local
+
+# The emulator's CA certificate is copied out world-readable: it is public, and
+# the test containers run as root with no capabilities, which on Linux can't
+# read another user's 0600 file.
+.PHONY: test-emulator
+test-emulator: ## Run the integration tests, and the KMS and alarm live tests, against AWS Emulator with no network access
+	$(CONTAINER_TOOL) build -q -f hack/aws-emulator.Dockerfile -t $(EMULATOR_IMAGE) \
+		--build-arg PACKAGE=aws-emulator-$(EMULATOR_VERSION)-1-$(EMULATOR_ARCH).rpm \
+		--build-arg PACKAGE_SHA256=$(EMULATOR_SHA256_$(EMULATOR_ARCH)) hack
+	$(EMULATOR_GO) $(EMULATOR_GO_IMAGE) go mod download
+	@set -e; mkdir -p "$(LOCALBIN)"; \
+	$(CONTAINER_TOOL) run --rm -d --name $(EMULATOR_CONTAINER) --network none --memory=2g --memory-swap=2g \
+		--cap-drop=ALL --security-opt no-new-privileges $(EMULATOR_IMAGE) --telemetry off --auth off >/dev/null; \
+	trap '$(CONTAINER_TOOL) stop $(EMULATOR_CONTAINER) >/dev/null' EXIT; \
+	for i in $$(seq 60); do $(CONTAINER_TOOL) logs $(EMULATOR_CONTAINER) 2>&1 | grep -q endpoint_url && break; sleep 1; done; \
+	$(CONTAINER_TOOL) cp $(EMULATOR_CONTAINER):/home/emulator/.aws/emulator/9297/ca.pem "$(LOCALBIN)/emulator-ca.pem"; \
+	chmod 644 "$(LOCALBIN)/emulator-ca.pem"; \
+	run="$(EMULATOR_GO) --network container:$(EMULATOR_CONTAINER) -v $(LOCALBIN)/emulator-ca.pem:/ca.pem:ro -e GOPROXY=off"; \
+	$$run -e SSL_CERT_FILE=/ca.pem -e LOCALSTACK_ENDPOINT=https://127.0.0.1:9297 \
+		$(EMULATOR_GO_IMAGE) go test -tags=integration -count=1 $(EMULATOR_INTEGRATION_PACKAGES); \
+	$$run -e AWS_ENDPOINT_URL=https://127.0.0.1:9297 -e AWS_CA_BUNDLE=/ca.pem -e AWS_REGION=us-east-1 \
+		-e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_EC2_METADATA_DISABLED=true \
+		$(EMULATOR_GO_IMAGE) go test -tags=live -count=1 -run TestLive -skip '$(EMULATOR_LIVE_SKIP)' $(EMULATOR_LIVE_PACKAGES)
+
 # Live tests run the real AWS SDK against a real AWS account instead of
 # LocalStack - see docs/testing.md for why this tier exists on top of the
 # integration one above. Gated behind the "live" build tag; never runs in

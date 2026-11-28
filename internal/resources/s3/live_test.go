@@ -759,6 +759,7 @@ func TestLive_Ensure_TheTransportStatementIsAcceptedEnforcedAndNotRewritten(t *t
 		}
 	}
 
+	livetest.SkipUnlessRealAWS(t, cfg)
 	plain := plainHTTPClient(cfg)
 	listOver := func(c *s3sdk.Client) error {
 		_, err := c.ListObjectsV2(ctx, &s3sdk.ListObjectsV2Input{Bucket: &bucket})
