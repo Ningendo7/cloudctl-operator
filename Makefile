@@ -157,6 +157,9 @@ EMULATOR_GO = $(CONTAINER_TOOL) run --rm --cap-drop=ALL --security-opt no-new-pr
 	-v "$(CURDIR)":/src:ro -v cloudctl-test-gomod:/go/pkg/mod -v cloudctl-test-gocache:/root/.cache/go-build \
 	-w /src -e GOFLAGS=-buildvcs=false -e GOTOOLCHAIN=local
 
+# The emulator's CA certificate is copied out world-readable: it is public, and
+# the test containers run as root with no capabilities, which on Linux can't
+# read another user's 0600 file.
 .PHONY: test-emulator
 test-emulator: ## Run the integration tests, and the KMS and alarm live tests, against AWS Emulator with no network access
 	$(CONTAINER_TOOL) build -q -f hack/aws-emulator.Dockerfile -t $(EMULATOR_IMAGE) \
@@ -169,6 +172,7 @@ test-emulator: ## Run the integration tests, and the KMS and alarm live tests, a
 	trap '$(CONTAINER_TOOL) stop $(EMULATOR_CONTAINER) >/dev/null' EXIT; \
 	for i in $$(seq 60); do $(CONTAINER_TOOL) logs $(EMULATOR_CONTAINER) 2>&1 | grep -q endpoint_url && break; sleep 1; done; \
 	$(CONTAINER_TOOL) cp $(EMULATOR_CONTAINER):/home/emulator/.aws/emulator/9297/ca.pem "$(LOCALBIN)/emulator-ca.pem"; \
+	chmod 644 "$(LOCALBIN)/emulator-ca.pem"; \
 	run="$(EMULATOR_GO) --network container:$(EMULATOR_CONTAINER) -v $(LOCALBIN)/emulator-ca.pem:/ca.pem:ro -e GOPROXY=off"; \
 	$$run -e SSL_CERT_FILE=/ca.pem -e LOCALSTACK_ENDPOINT=https://127.0.0.1:9297 \
 		$(EMULATOR_GO_IMAGE) go test -tags=integration -count=1 $(EMULATOR_INTEGRATION_PACKAGES); \
